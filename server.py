@@ -7,10 +7,33 @@ PORT = 9555
 
 
 # -------------------------
-# SPROTO UNPACK
+# SPROTO PACK
 # -------------------------
 
 class SprotoPack:
+
+    def pack(self, data):
+        out = bytearray()
+
+        for i in range(0, len(data), 8):
+
+            chunk = data[i:i+8]
+
+            mask = 0
+            values = []
+
+            for j, b in enumerate(chunk):
+
+                if b != 0:
+                    mask |= (1 << j)
+                    values.append(b)
+
+            out.append(mask)
+            out.extend(values)
+
+        return bytes(out)
+
+
 
     def unpack(self, data):
 
@@ -22,240 +45,211 @@ class SprotoPack:
             mask = data[i]
             i += 1
 
-            if mask == 0xFF:
+            for bit in range(8):
+
+                if (mask >> bit) & 1:
+                    out.append(data[i])
+                    i += 1
+                else:
+                    out.append(0)
 
                 if i >= len(data):
                     break
-
-                count = (data[i] + 1) * 8
-                i += 1
-
-                out.extend(data[i:i+count])
-                i += count
-
-            else:
-
-                for bit in range(8):
-
-                    if (mask >> bit) & 1:
-
-                        if i < len(data):
-                            out.append(data[i])
-                            i += 1
-
-                    else:
-
-                        out.append(0)
 
         return bytes(out)
 
 
 
 # -------------------------
-# SPROTO HEADER DECODER
+# SIMPLE SPROTO ENCODER
 # -------------------------
 
-def read_word(data, pos):
+def write_integer(value, tag):
 
-    return data[pos] | (data[pos+1] << 8)
-
-
-
-def decode_package(data):
-
-    try:
-
-        fn = read_word(data,0)
-
-        cur = 2
-
-        type_id = None
-        session = None
+    # small integer encoding
+    return struct.pack("<H", ((value + 1) * 2))
 
 
-        for tag in range(fn):
 
-            word = read_word(data,cur)
-            cur += 2
+def write_string(value, tag):
 
+    data = value.encode()
 
-            if (word & 1) == 0:
+    header = struct.pack("<I", len(data))
 
-                value = (word // 2) - 1
-
-
-                if tag == 0:
-                    type_id = value
+    return header + data
 
 
-                if tag == 1:
-                    session = value
+
+def encode_struct(fields):
+
+    header = bytearray()
+
+    body = bytearray()
 
 
-        return type_id, session
+    count = len(fields)
+
+    header.extend(struct.pack("<H", count))
 
 
-    except Exception as e:
+    for tag, value in fields:
 
-        print("Decode error:", e)
-        return None,None
+        if isinstance(value, int):
+
+            header.extend(write_integer(value, tag))
+
+        elif isinstance(value, str):
+
+            header.extend(struct.pack("<H", 1))
+            body.extend(write_string(value, tag))
+
+
+    return bytes(header + header[2:] + body)
 
 
 
 # -------------------------
-# SEND TEST (placeholder)
+# LOGIN RESPONSE
 # -------------------------
 
-def send_test(conn):
+def create_login_response(session):
 
-    pass
+    # Package header
+    package = bytearray()
+
+    # only session, no type in response
+    package.extend(struct.pack("<H", 2))
+
+    # tag 1 session
+    package.extend(struct.pack("<H", 1))
+    package.extend(struct.pack("<H", (session + 1) * 2))
+
+
+    # login.response body
+
+    body = bytearray()
+
+    body.extend(struct.pack("<H", 4))
+
+
+    # type = 1
+    body.extend(struct.pack("<H", 0))
+    body.extend(struct.pack("<H", 4))
+
+
+    # versionCode
+    version = b"1.012.017"
+
+    body.extend(struct.pack("<H", 1))
+    body.extend(struct.pack("<I", len(version)))
+    body.extend(version)
+
+
+    # dataVersionCode
+    data_version = b"1"
+
+    body.extend(struct.pack("<H", 1))
+    body.extend(struct.pack("<I", len(data_version)))
+    body.extend(data_version)
+
+
+    # serverLevel
+    body.extend(struct.pack("<H", 6))
+    body.extend(struct.pack("<H", 4))
+
+
+    raw = package + body
+
+
+    packed = SprotoPack().pack(raw)
+
+
+    final = struct.pack(">H", len(packed)) + packed
+
+    return final
 
 
 
 # -------------------------
-# CLIENT HANDLER
+# CLIENT
 # -------------------------
 
 def handle_client(conn, addr):
 
-    print("[+] Client connected:", addr)
-
-
-    packer = SprotoPack()
+    print("[+] Client:", addr)
 
 
     try:
 
         while True:
 
-
             header = conn.recv(2)
-
 
             if not header:
                 break
 
 
-
             length = struct.unpack(">H", header)[0]
 
 
-            packet = b""
+            data = b""
+
+            while len(data) < length:
+
+                data += conn.recv(length-len(data))
 
 
-            while len(packet) < length:
-
-                part = conn.recv(length-len(packet))
-
-                if not part:
-                    break
-
-                packet += part
-
-
-
-            print("\nRAW:", packet.hex())
-
-
-            unpacked = packer.unpack(packet)
+            unpacked = SprotoPack().unpack(data)
 
 
             print("UNPACKED:", unpacked.hex())
 
 
-            protocol, session = decode_package(unpacked)
+            # login request detected
+            if b"\x04\x00" in unpacked:
 
+                print("LOGIN REQUEST")
 
-            print("Protocol ID:", protocol)
-            print("Session:", session)
+                response = create_login_response(1)
 
+                conn.send(response)
 
-
-            if protocol == 4:
-
-                print("LOGIN REQUEST RECEIVED")
-
-
-            elif protocol == 103:
-
-                print("CHARACTER LIST REQUEST RECEIVED")
-
-
-            elif protocol == 104:
-
-                print("CHARACTER CREATE REQUEST RECEIVED")
-
-
-            elif protocol == 105:
-
-                print("CHARACTER PICK REQUEST RECEIVED")
-
+                print("LOGIN RESPONSE SENT")
 
 
     except Exception as e:
 
-        print("Client error:", e)
-
+        print("ERROR:", e)
 
 
     finally:
 
         conn.close()
 
-        print("[-] Client disconnected")
-
-
 
 
 # -------------------------
-# SERVER START
+# SERVER
 # -------------------------
 
-def start():
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-    server = socket.socket(
-        socket.AF_INET,
-        socket.SOCK_STREAM
-    )
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
+server.bind(("0.0.0.0", PORT))
 
-    server.setsockopt(
-        socket.SOL_SOCKET,
-        socket.SO_REUSEADDR,
-        1
-    )
+server.listen(20)
 
 
-    server.bind(
-        ("0.0.0.0", PORT)
-    )
+print("9555 running")
 
 
-    server.listen(20)
+while True:
 
+    conn, addr = server.accept()
 
-    print("==============================")
-    print(" Auto Theft Gangsters Server ")
-    print(" Port 9555 running")
-    print("==============================")
-
-
-    while True:
-
-
-        conn, addr = server.accept()
-
-
-        thread = threading.Thread(
-            target=handle_client,
-            args=(conn,addr)
-        )
-
-
-        thread.start()
-
-
-
-if __name__ == "__main__":
-
-    start()
+    threading.Thread(
+        target=handle_client,
+        args=(conn,addr)
+    ).start()
