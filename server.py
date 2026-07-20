@@ -4,7 +4,7 @@ import threading
 import random
 
 PORT = 9555
-NAMES = ["Dragon", "Falcon", "Titan", "Shadow", "Ranger", "Slayer"]
+NAMES = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta", "Eta"]
 
 def sproto_pack(data):
     padding = (8 - (len(data) % 8)) % 8
@@ -38,32 +38,35 @@ def sproto_unpack(data):
     return bytes(out)
 
 def encode_sproto(fields):
+    if not fields: return struct.pack("<H", 0)
     fields.sort(key=lambda x: x[0])
     header = bytearray()
     body = bytearray()
     last_tag = -1
     for tag, value in fields:
         skip = tag - last_tag - 1
-        if skip > 0: header += struct.pack("<H", (skip - 1) * 2 + 1)
+        if skip > 0:
+            header += struct.pack("<H", (skip - 1) * 2 + 1)
         if value is None:
             header += struct.pack("<H", 0)
             body += struct.pack("<I", 0)
         elif isinstance(value, int):
-            if 0 <= value <= 32766: header += struct.pack("<H", (value + 1) * 2)
+            if 0 <= value <= 32766:
+                header += struct.pack("<H", (value + 1) * 2)
             else:
                 header += struct.pack("<H", 0)
-                body += struct.pack("<I", 4) + struct.pack("<I", value)
+                body += struct.pack("<I", 4) + struct.pack("<i", value)
         elif isinstance(value, (str, bytes, bytearray)):
             if isinstance(value, str): value = value.encode('utf-8')
             header += struct.pack("<H", 0)
             body += struct.pack("<I", len(value)) + value
         elif isinstance(value, list):
             header += struct.pack("<H", 0)
-            list_body = bytearray()
+            list_data = bytearray()
             for item in value:
                 if isinstance(item, (bytes, bytearray)):
-                    list_body += struct.pack("<I", len(item)) + item
-            body += struct.pack("<I", len(list_body)) + list_body
+                    list_data += struct.pack("<I", len(item)) + item
+            body += struct.pack("<I", len(list_data)) + list_data
         last_tag = tag
     return struct.pack("<H", len(header) // 2) + header + body
 
@@ -94,8 +97,10 @@ def client_handler(conn, addr):
             data = b""
             while len(data) < size:
                 data += conn.recv(size - len(data))
+
             raw = sproto_unpack(data)
             msg_type, session = decode_header(raw)
+            print(f"Game RX: {msg_type}")
 
             if msg_type == 4: # Login
                 resp = encode_sproto([(0, 1), (1, "1.012.017"), (2, "0"), (3, 1)])
@@ -113,11 +118,12 @@ def client_handler(conn, addr):
                 pkg_h = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h + resp))) + sproto_pack(pkg_h + resp))
 
-            elif msg_type == 105: # Character Pick
+            elif msg_type == 105: # Char Pick
+                # SUCCESS (No errno)
                 pkg_h = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h))) + sproto_pack(pkg_h))
 
-                # PUSH DATA: Enter Map & AOI
+                # Push: Map
                 map_p = sproto_pack(encode_sproto([(0, 503)]) + encode_sproto([(0, "3001")]))
                 conn.sendall(struct.pack(">H", len(map_p)) + map_p)
 
@@ -125,8 +131,10 @@ def client_handler(conn, addr):
                 pkg_h = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h))) + sproto_pack(pkg_h))
 
-    except: pass
-    finally: conn.close()
+    except Exception as e:
+        print(f"Game Error: {e}")
+    finally:
+        conn.close()
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
