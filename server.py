@@ -4,10 +4,11 @@ import threading
 import random
 
 PORT = 9555
-
-NAMES = ["Aragon", "Balthazar", "Cyrus", "Dante", "Ezio", "Falcon", "Geralt", "Hades"]
+NAMES = ["Dragon", "Viking", "Shadow", "Ghost", "Titan", "Hunter", "Rogue"]
 
 def sproto_pack(data):
+    padding = (8 - (len(data) % 8)) % 8
+    data += b'\x00' * padding
     out = bytearray()
     for i in range(0, len(data), 8):
         chunk = data[i:i+8]
@@ -41,14 +42,17 @@ def encode_object(fields):
     body = bytearray()
     last = -1
     for tag, value in fields:
+        if value is None:
+            header += struct.pack("<H", 0)
+            body += struct.pack("<I", 0)
+            last = tag
+            continue
+
         skip = tag - last - 1
         if skip > 0:
             header += struct.pack("<H", (skip - 1) * 2 + 1)
 
-        if value is None:
-            header += struct.pack("<H", 0)
-            body += struct.pack("<I", 0)
-        elif isinstance(value, int):
+        if isinstance(value, int):
             header += struct.pack("<H", (value + 1) * 2)
         elif isinstance(value, str):
             header += struct.pack("<H", 0)
@@ -90,7 +94,7 @@ def client_handler(conn, addr):
 
             raw = sproto_unpack(data)
             msg_type, session = decode_header(raw)
-            print(f"Game RX Type: {msg_type}")
+            print(f"Game RX: {msg_type}")
 
             if msg_type == 4: # Login
                 body = encode_object([(0, 1), (1, "1.012.017"), (2, "0"), (3, 1)])
@@ -103,17 +107,19 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(sproto_pack(header + body))) + sproto_pack(header + body))
 
             elif msg_type == 118: # Random Name
-                name = random.choice(NAMES) + str(random.randint(10, 99))
+                name = random.choice(NAMES) + str(random.randint(100, 999))
                 body = encode_object([(0, name)])
                 header = encode_object([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(header + body))) + sproto_pack(header + body))
-                print(f"Sent Random Name: {name}")
 
-            elif msg_type == 104: # Character Create
-                p_id = random.randint(1000, 9999)
-                gen = encode_object([(0, "Player"), (1, 0)])
-                char = encode_object([(0, p_id), (1, gen), (2, 1)])
-                body = encode_object([(0, char), (1, 0)])
+            elif msg_type == 105: # Character Pick
+                # RREGULLIMI: Mos dërgo errno! Kthe vetëm header-in me session.
+                header = encode_object([(1, session)])
+                conn.sendall(struct.pack(">H", len(sproto_pack(header))) + sproto_pack(header))
+                print("Pick Success Sent")
+
+            elif msg_type == 218: # Heartbeat
+                body = encode_object([(0, 0), (1, 0)])
                 header = encode_object([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(header + body))) + sproto_pack(header + body))
 
