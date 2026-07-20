@@ -4,7 +4,7 @@ import threading
 import random
 
 PORT = 9555
-NAMES = ["Eagle", "Shadow", "King", "Wolf", "Dragon", "Titan"]
+NAMES = ["Dragon", "Shadow", "King", "Wolf", "Falcon"]
 
 def sproto_pack(data):
     padding = (8 - (len(data) % 8)) % 8
@@ -60,11 +60,11 @@ def encode_sproto(fields):
             body += struct.pack("<I", len(value)) + value
         elif isinstance(value, list):
             header += struct.pack("<H", 0)
-            list_data = bytearray()
+            list_bin = bytearray()
             for item in value:
                 if isinstance(item, bytes):
-                    list_data += struct.pack("<I", len(item)) + item
-            body += struct.pack("<I", len(list_data)) + list_data
+                    list_bin += struct.pack("<I", len(item)) + item
+            body += struct.pack("<I", len(list_bin)) + list_bin
         last_tag = tag
     return struct.pack("<H", len(header) // 2) + header + body
 
@@ -99,44 +99,41 @@ def client_handler(conn, addr):
             msg_type, session = decode_header(raw)
 
             if msg_type == 4: # Login
+                # RREGULLIMI: Kthejme versionin sakt qe te mbyllet loading
                 resp = encode_sproto([(0, 1), (1, "1.012.017"), (2, "0"), (3, 1)])
-                header = encode_sproto([(1, session)])
-                conn.sendall(struct.pack(">H", len(sproto_pack(header + resp))) + sproto_pack(header + resp))
+                pkg_h = encode_sproto([(1, session)])
+                conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h + resp))) + sproto_pack(pkg_h + resp))
 
             elif msg_type == 103: # Char List
-                body = encode_sproto([(0, None)])
-                header = encode_sproto([(1, session)])
-                conn.sendall(struct.pack(">H", len(sproto_pack(header + body))) + sproto_pack(header + body))
+                resp = encode_sproto([(0, None)])
+                pkg_h = encode_sproto([(1, session)])
+                conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h + resp))) + sproto_pack(pkg_h + resp))
 
             elif msg_type == 118: # Random Name
                 name = random.choice(NAMES) + str(random.randint(100, 999))
-                print(f"Sending Name: {name}")
                 resp = encode_sproto([(0, name)])
-                header = encode_sproto([(1, session)])
-                conn.sendall(struct.pack(">H", len(sproto_pack(header + resp))) + sproto_pack(header + resp))
+                pkg_h = encode_sproto([(1, session)])
+                conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h + resp))) + sproto_pack(pkg_h + resp))
 
             elif msg_type == 105: # Character Pick
-                # SUCCESS: Close Loading
-                header = encode_sproto([(1, session)])
-                conn.sendall(struct.pack(">H", len(sproto_pack(header))) + sproto_pack(header))
-                # Ngarko Map (3001)
+                pkg_h = encode_sproto([(1, session)])
+                conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h))) + sproto_pack(pkg_h))
                 map_p = sproto_pack(encode_sproto([(0, 503)]) + encode_sproto([(0, "3001")]))
                 conn.sendall(struct.pack(">H", len(map_p)) + map_p)
 
             elif msg_type == 100: # Map Ready
-                # Trupi i lojtarit (Tag 504)
-                visual = encode_sproto([(1, "1001"), (2, "1001"), (3, "1001"), (4, "1001")])
-                attr = encode_sproto([(0, 1000), (2, 1)])
-                prop = encode_sproto([(13, 1000), (14, 1000)]) # Lekët
-                gen = encode_sproto([(0, "Hero"), (1, 0), (3, "3001")])
+                # PUSH TRUPIN E LOJTARIT (Tag 504)
+                visual = encode_sproto([(1,"1001"),(2,"1001"),(3,"1001"),(4,"1001")])
+                attr = encode_sproto([(0,1000),(2,1)])
+                prop = encode_sproto([(13,1000),(14,1000)]) # Leket (13-18)
+                gen = encode_sproto([(0,"Hero"),(1,0),(3,"3001")])
                 char_obj = encode_sproto([(0, random.randint(1,9999)), (1, gen), (2, attr), (5, prop), (6, visual)])
-
                 pkt = sproto_pack(encode_sproto([(0, 504)]) + encode_sproto([(0, char_obj)]))
                 conn.sendall(struct.pack(">H", len(pkt)) + pkt)
 
             elif msg_type == 218: # Heartbeat
-                header = encode_sproto([(1, session)])
-                conn.sendall(struct.pack(">H", len(sproto_pack(header))) + sproto_pack(header))
+                pkg_h = encode_sproto([(1, session)])
+                conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h))) + sproto_pack(pkg_h))
 
     except: pass
     finally: conn.close()
