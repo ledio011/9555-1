@@ -5,6 +5,8 @@ import random
 
 PORT = 9555
 
+NAMES = ["Aragon", "Balthazar", "Cyrus", "Dante", "Ezio", "Falcon", "Geralt", "Hades"]
+
 def sproto_pack(data):
     out = bytearray()
     for i in range(0, len(data), 8):
@@ -43,7 +45,7 @@ def encode_object(fields):
         if skip > 0:
             header += struct.pack("<H", (skip - 1) * 2 + 1)
 
-        if value is None: # Empty Array/Map
+        if value is None:
             header += struct.pack("<H", 0)
             body += struct.pack("<I", 0)
         elif isinstance(value, int):
@@ -77,7 +79,6 @@ def decode_header(data):
 
 def client_handler(conn, addr):
     print(f"[+] Game Client: {addr}")
-    player_id = random.randint(1000, 9999)
     try:
         while True:
             h = conn.recv(2)
@@ -89,36 +90,32 @@ def client_handler(conn, addr):
 
             raw = sproto_unpack(data)
             msg_type, session = decode_header(raw)
-            print(f"Game RX: {msg_type}")
+            print(f"Game RX Type: {msg_type}")
 
             if msg_type == 4: # Login
                 body = encode_object([(0, 1), (1, "1.012.017"), (2, "0"), (3, 1)])
                 header = encode_object([(1, session)])
-                packed = sproto_pack(header + body)
-                conn.sendall(struct.pack(">H", len(packed)) + packed)
+                conn.sendall(struct.pack(">H", len(sproto_pack(header + body))) + sproto_pack(header + body))
 
             elif msg_type == 103: # Character List
-                # SHUME E RENDESISHME: Tag 0 duhet te jete nje Array/Map bosh, jo null!
                 body = encode_object([(0, None)])
                 header = encode_object([(1, session)])
-                packed = sproto_pack(header + body)
-                conn.sendall(struct.pack(">H", len(packed)) + packed)
+                conn.sendall(struct.pack(">H", len(sproto_pack(header + body))) + sproto_pack(header + body))
+
+            elif msg_type == 118: # Random Name
+                name = random.choice(NAMES) + str(random.randint(10, 99))
+                body = encode_object([(0, name)])
+                header = encode_object([(1, session)])
+                conn.sendall(struct.pack(">H", len(sproto_pack(header + body))) + sproto_pack(header + body))
+                print(f"Sent Random Name: {name}")
 
             elif msg_type == 104: # Character Create
-                general = encode_object([(0, "Hero"), (1, 0)])
-                character = encode_object([(0, player_id), (1, general), (2, 1)])
-                body = encode_object([(0, character), (1, 0)])
+                p_id = random.randint(1000, 9999)
+                gen = encode_object([(0, "Player"), (1, 0)])
+                char = encode_object([(0, p_id), (1, gen), (2, 1)])
+                body = encode_object([(0, char), (1, 0)])
                 header = encode_object([(1, session)])
-                packed = sproto_pack(header + body)
-                conn.sendall(struct.pack(">H", len(packed)) + packed)
-
-            elif msg_type == 105: # Character Pick
-                header = encode_object([(1, session)])
-                conn.sendall(struct.pack(">H", len(sproto_pack(header))) + sproto_pack(header))
-
-                # Send Map & AOI
-                map_pkt = sproto_pack(encode_object([(0, 503)]) + encode_object([(0, "3001")]))
-                conn.sendall(struct.pack(">H", len(map_pkt)) + map_pkt)
+                conn.sendall(struct.pack(">H", len(sproto_pack(header + body))) + sproto_pack(header + body))
 
     except Exception as e:
         print(f"Game Error: {e}")
@@ -128,7 +125,7 @@ def client_handler(conn, addr):
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT))
-server.listen(5)
+server.listen(10)
 print(f"GAME SERVER {PORT} ON")
 while True:
     c, a = server.accept()
