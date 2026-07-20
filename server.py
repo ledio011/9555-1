@@ -33,19 +33,23 @@ def sproto_pack(data):
 
 
 def sproto_unpack(data):
+
     out = bytearray()
     i = 0
 
     while i < len(data):
+
         mask = data[i]
         i += 1
 
         for bit in range(8):
 
             if mask & (1 << bit):
+
                 if i < len(data):
                     out.append(data[i])
                     i += 1
+
             else:
                 out.append(0)
 
@@ -66,11 +70,7 @@ def write_string(value):
 
     b = value.encode("utf-8")
 
-    return (
-        struct.pack("<I", len(b))
-        +
-        b
-    )
+    return struct.pack("<I", len(b)) + b
 
 
 
@@ -88,9 +88,9 @@ def encode_object(fields):
 
 
         if skip > 0:
+
             record = (skip - 1) * 2 + 1
             header += struct.pack("<H", record)
-
 
 
         if isinstance(value,int):
@@ -115,51 +115,42 @@ def encode_object(fields):
 
 
 
-    result = struct.pack(
-        "<H",
-        len(header)//2
+    return (
+        struct.pack("<H",len(header)//2)
+        +
+        header
+        +
+        body
     )
-
-    result += header
-    result += body
-
-
-    return bytes(result)
 
 
 
 # ==========================
-# PACKAGE
+# SEND PACKET
 # ==========================
 
-def make_package(protocol,session=None):
+def make_package(tag,session=None):
 
-    fields=[]
-
-    fields.append(
-        (0,protocol)
-    )
-
+    fields=[
+        (0,tag)
+    ]
 
     if session is not None:
-
         fields.append(
             (1,session)
         )
-
 
     return encode_object(fields)
 
 
 
-def send_packet(sock,protocol,body=b"",session=None):
+def send_packet(sock,tag,body=b"",session=None):
 
     raw = (
-        make_package(protocol,session)
+        make_package(tag,session)
         +
         body
     )
-
 
     packed = sproto_pack(raw)
 
@@ -170,13 +161,12 @@ def send_packet(sock,protocol,body=b"",session=None):
         packed
     )
 
-
     sock.sendall(packet)
 
 
 
 # ==========================
-# LOGIN
+# LOGIN RESPONSE 4
 # ==========================
 
 def login_response():
@@ -193,82 +183,78 @@ def login_response():
 
 
 # ==========================
-# CHARACTER LIST
+# CHARACTER LIST 103
 # ==========================
 
 def character_list_response():
 
+    # EMPTY OBJECT
     return encode_object([])
+
+
+
 # ==========================
-# CHARACTER CREATE RESPONSE
-# TAG 104
+# CHARACTER CREATE 104
 # ==========================
 
-def character_create_response(player_id, name, profession):
-
-    attribute = encode_object([
-        (0,1)       # level
-    ])
+def character_create_response(player_id,name,profession):
 
 
     general = encode_object([
+
         (0,name),
         (1,profession)
+
     ])
 
 
     character = encode_object([
+
         (0,player_id),
-        (2,general),
-        (3,attribute)
+        (1,general),
+        (2,1)
+
     ])
 
 
     return encode_object([
+
         (0,character),
-        (1,0)       # errno success
+        (1,0)
+
     ])
 
 
 
 # ==========================
-# CHARACTER PICK RESPONSE
-# TAG 105
+# CHARACTER PICK 105
 # ==========================
 
 def character_pick_response():
-
-    # EMPTY RESPONSE
-    # IMPORTANT: no errno field
 
     return encode_object([])
 
 
 
 # ==========================
-# ENTER MAP
-# TAG 503
-# SERVER -> CLIENT
+# ENTER MAP 503
 # ==========================
 
 def enter_map_packet():
 
     return encode_object([
 
-        (0,"3001"),
-        (1,1),
-        (2,1)
+        (0,"3001")
 
     ])
 
 
 
 # ==========================
-# AOI ADD
-# TAG 505
+# AOI ADD 505
 # ==========================
 
-def aoi_add_packet(player_id,name,profession):
+def aoi_add_packet(player_id,name):
 
 
     position = encode_object([
@@ -288,26 +274,19 @@ def aoi_add_packet(player_id,name,profession):
     ])
 
 
-
     general = encode_object([
 
         (0,name),
-        (1,profession)
+        (1,0)
 
     ])
-
 
 
     visual = encode_object([
 
-        (1,"1001"),
-        (2,"0"),
-        (3,"0"),
-        (4,"0"),
-        (5,"0")
+        (1,"1001")
 
     ])
-
 
 
     character = encode_object([
@@ -329,9 +308,8 @@ def aoi_add_packet(player_id,name,profession):
 
 
 
-
 # ==========================
-# CLIENT HANDLER
+# CLIENT
 # ==========================
 
 def client(conn,addr):
@@ -339,11 +317,12 @@ def client(conn,addr):
     print("[+] CLIENT:",addr)
 
 
-    player_id = random.randint(100000,999999)
+    player_id=random.randint(100000,999999)
 
-    player_name = "Player"
+    player_name="Player"
 
-    profession = 0
+    profession=0
+
 
 
     try:
@@ -351,17 +330,13 @@ def client(conn,addr):
         while True:
 
 
-            header = conn.recv(2)
+            h=conn.recv(2)
 
-
-            if not header:
+            if not h:
                 break
 
 
-            size = struct.unpack(
-                ">H",
-                header
-            )[0]
+            size=struct.unpack(">H",h)[0]
 
 
             data=b""
@@ -374,21 +349,16 @@ def client(conn,addr):
                 )
 
 
-
             raw=sproto_unpack(data)
 
 
-
-            print(
-                "RX:",
-                raw.hex()
-            )
+            print("RX:",raw.hex())
 
 
 
-            # LOGIN REQUEST
+            # LOGIN 4
+
             if b"\x04\x00" in raw:
-
 
                 print("LOGIN REQUEST")
 
@@ -402,9 +372,9 @@ def client(conn,addr):
 
 
 
-            # CHARACTER LIST
-            elif b"\x67\x00" in raw:
+            # CHARACTER LIST 103
 
+            elif b"\x67\x00" in raw:
 
                 print("CHARACTER LIST")
 
@@ -418,9 +388,9 @@ def client(conn,addr):
 
 
 
-            # CHARACTER CREATE
-            elif b"\x68\x00" in raw:
+            # CHARACTER CREATE 104
 
+            elif b"\x68\x00" in raw:
 
                 print("CHARACTER CREATE")
 
@@ -438,9 +408,9 @@ def client(conn,addr):
 
 
 
-            # CHARACTER PICK
-            elif b"\x69\x00" in raw:
+            # CHARACTER PICK 105
 
+            elif b"\x69\x00" in raw:
 
                 print("CHARACTER PICK")
 
@@ -453,8 +423,6 @@ def client(conn,addr):
                 )
 
 
-                # LOAD MAP
-
                 send_packet(
                     conn,
                     503,
@@ -462,15 +430,12 @@ def client(conn,addr):
                 )
 
 
-                # SPAWN PLAYER
-
                 send_packet(
                     conn,
                     505,
                     aoi_add_packet(
                         player_id,
-                        player_name,
-                        profession
+                        player_name
                     )
                 )
 
@@ -478,10 +443,7 @@ def client(conn,addr):
 
     except Exception as e:
 
-        print(
-            "ERROR:",
-            e
-        )
+        print("ERROR:",e)
 
 
 
@@ -489,10 +451,7 @@ def client(conn,addr):
 
         conn.close()
 
-        print(
-            "Disconnected"
-        )
-
+        print("Disconnected")
 
 
 
@@ -501,7 +460,7 @@ def client(conn,addr):
 # SERVER START
 # ==========================
 
-server = socket.socket(
+server=socket.socket(
     socket.AF_INET,
     socket.SOCK_STREAM
 )
@@ -514,7 +473,6 @@ server.setsockopt(
 )
 
 
-
 server.bind(
     ("0.0.0.0",PORT)
 )
@@ -523,16 +481,14 @@ server.bind(
 server.listen(50)
 
 
-
 print("======================")
 print("GAME SERVER 9555 ON")
 print("======================")
 
 
-
 while True:
 
-    conn,addr = server.accept()
+    conn,addr=server.accept()
 
 
     threading.Thread(
