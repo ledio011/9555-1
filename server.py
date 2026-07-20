@@ -4,7 +4,7 @@ import threading
 import random
 
 PORT = 9555
-NAMES = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf"]
+NAMES = ["Eagle", "Warrior", "Legend", "Sniper", "Wolf", "King", "Rebel"]
 
 def sproto_pack(data):
     padding = (8 - (len(data) % 8)) % 8
@@ -44,20 +44,17 @@ def encode_sproto(fields):
     last_tag = -1
     for tag, value in fields:
         skip = tag - last_tag - 1
-        if skip > 0:
-            header += struct.pack("<H", (skip - 1) * 2 + 1)
+        if skip > 0: header += struct.pack("<H", (skip - 1) * 2 + 1)
         if value is None:
             header += struct.pack("<H", 0)
             body += struct.pack("<I", 0)
         elif isinstance(value, int):
-            if 0 <= value <= 32766:
-                header += struct.pack("<H", (value + 1) * 2)
+            if 0 <= value <= 32766: header += struct.pack("<H", (value + 1) * 2)
             else:
                 header += struct.pack("<H", 0)
                 body += struct.pack("<I", 4) + struct.pack("<I", value)
         elif isinstance(value, (str, bytes, bytearray)):
-            if isinstance(value, str):
-                value = value.encode('utf-8')
+            if isinstance(value, str): value = value.encode('utf-8')
             header += struct.pack("<H", 0)
             body += struct.pack("<I", len(value)) + value
         elif isinstance(value, list):
@@ -97,45 +94,39 @@ def client_handler(conn, addr):
             data = b""
             while len(data) < size:
                 data += conn.recv(size - len(data))
-
             raw = sproto_unpack(data)
             msg_type, session = decode_header(raw)
-            print(f"Game RX Type: {msg_type}")
 
             if msg_type == 4: # Login
-                body = encode_sproto([(0, 1), (1, "1.012.017"), (2, "0"), (3, 1)])
+                resp = encode_sproto([(0, 1), (1, "1.012.017"), (2, "0"), (3, 1)])
                 header = encode_sproto([(1, session)])
-                conn.sendall(struct.pack(">H", len(sproto_pack(header + body))) + sproto_pack(header + body))
+                conn.sendall(struct.pack(">H", len(sproto_pack(header + resp))) + sproto_pack(header + resp))
 
-            elif msg_type == 103: # Char List
-                body = encode_sproto([(0, None)])
+            elif msg_type == 103: # Character List
+                resp = encode_sproto([(0, None)])
                 header = encode_sproto([(1, session)])
-                conn.sendall(struct.pack(">H", len(sproto_pack(header + body))) + sproto_pack(header + body))
+                conn.sendall(struct.pack(">H", len(sproto_pack(header + resp))) + sproto_pack(header + resp))
 
             elif msg_type == 118: # Random Name
                 name = random.choice(NAMES) + str(random.randint(100, 999))
-                body = encode_sproto([(0, name)])
+                resp = encode_sproto([(0, name)])
                 header = encode_sproto([(1, session)])
-                conn.sendall(struct.pack(">H", len(sproto_pack(header + body))) + sproto_pack(header + body))
+                conn.sendall(struct.pack(">H", len(sproto_pack(header + resp))) + sproto_pack(header + resp))
 
             elif msg_type == 105: # Character Pick
-                # RREGULLIMI: Mos dergo errno! Vetem session.
                 header = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(header))) + sproto_pack(header))
 
-                # Push: Enter Map & AOI
-                map_pkt = sproto_pack(encode_sproto([(0, 503)]) + encode_sproto([(0, "3001")]))
-                conn.sendall(struct.pack(">H", len(map_pkt)) + map_pkt)
+                # Push: Enter Map
+                map_p = sproto_pack(encode_sproto([(0, 503)]) + encode_sproto([(0, "3001")]))
+                conn.sendall(struct.pack(">H", len(map_p)) + map_p)
 
             elif msg_type == 218: # Heartbeat
                 header = encode_sproto([(1, session)])
-                body = encode_sproto([])
-                conn.sendall(struct.pack(">H", len(sproto_pack(header + body))) + sproto_pack(header + body))
+                conn.sendall(struct.pack(">H", len(sproto_pack(header))) + sproto_pack(header))
 
-    except Exception as e:
-        print(f"Game Error: {e}")
-    finally:
-        conn.close()
+    except: pass
+    finally: conn.close()
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
