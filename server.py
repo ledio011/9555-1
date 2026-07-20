@@ -6,178 +6,214 @@ import threading
 PORT = 9555
 
 
-# -------------------------
+# ==========================
 # SPROTO PACK
-# -------------------------
+# ==========================
 
-class SprotoPack:
+def sproto_pack(data):
 
-    def pack(self, data):
-        out = bytearray()
+    out = bytearray()
 
-        for i in range(0, len(data), 8):
+    for i in range(0, len(data), 8):
 
-            chunk = data[i:i+8]
+        chunk = data[i:i+8]
 
-            mask = 0
-            values = []
+        mask = 0
+        values = bytearray()
 
-            for j, b in enumerate(chunk):
+        for j, b in enumerate(chunk):
 
-                if b != 0:
-                    mask |= (1 << j)
-                    values.append(b)
+            if b != 0:
+                mask |= (1 << j)
+                values.append(b)
 
-            out.append(mask)
-            out.extend(values)
+        out.append(mask)
+        out.extend(values)
 
-        return bytes(out)
-
+    return bytes(out)
 
 
-    def unpack(self, data):
 
-        out = bytearray()
-        i = 0
+def sproto_unpack(data):
 
-        while i < len(data):
+    out = bytearray()
+    i = 0
 
-            mask = data[i]
-            i += 1
+    while i < len(data):
 
-            for bit in range(8):
+        mask = data[i]
+        i += 1
 
-                if (mask >> bit) & 1:
+        for bit in range(8):
+
+            if mask & (1 << bit):
+
+                if i < len(data):
                     out.append(data[i])
                     i += 1
-                else:
-                    out.append(0)
 
-                if i >= len(data):
-                    break
+            else:
 
-        return bytes(out)
+                out.append(0)
 
-
-
-# -------------------------
-# SIMPLE SPROTO ENCODER
-# -------------------------
-
-def write_integer(value, tag):
-
-    # small integer encoding
-    return struct.pack("<H", ((value + 1) * 2))
+    return bytes(out)
 
 
 
-def write_string(value, tag):
+# ==========================
+# SPROTO HELPERS
+# ==========================
 
-    data = value.encode()
+def integer(value):
 
-    header = struct.pack("<I", len(data))
-
-    return header + data
-
-
-
-def encode_struct(fields):
-
-    header = bytearray()
-
-    body = bytearray()
-
-
-    count = len(fields)
-
-    header.extend(struct.pack("<H", count))
-
-
-    for tag, value in fields:
-
-        if isinstance(value, int):
-
-            header.extend(write_integer(value, tag))
-
-        elif isinstance(value, str):
-
-            header.extend(struct.pack("<H", 1))
-            body.extend(write_string(value, tag))
-
-
-    return bytes(header + header[2:] + body)
+    return struct.pack(
+        "<H",
+        (value + 1) * 2
+    )
 
 
 
-# -------------------------
+def string_value(text):
+
+    data = text.encode("utf-8")
+
+    return (
+        struct.pack("<I", len(data))
+        +
+        data
+    )
+
+
+
+# ==========================
+# PACKAGE
+# ==========================
+
+def package(session):
+
+    # Package response:
+    # only session tag
+
+    return (
+        struct.pack("<H",2)
+        +
+        struct.pack("<H",0)
+        +
+        integer(session)
+    )
+
+
+
+# ==========================
 # LOGIN RESPONSE
-# -------------------------
+# ==========================
 
-def create_login_response(session):
+def login_response(session):
 
-    # Package header
-    package = bytearray()
-
-    # only session, no type in response
-    package.extend(struct.pack("<H", 2))
-
-    # tag 1 session
-    package.extend(struct.pack("<H", 1))
-    package.extend(struct.pack("<H", (session + 1) * 2))
-
-
-    # login.response body
 
     body = bytearray()
 
-    body.extend(struct.pack("<H", 4))
+
+    # login.response
+    # fields:
+    # 0 type
+    # 1 versionCode
+    # 2 dataVersionCode
+    # 3 serverLevel
+
+    body += struct.pack("<H",4)
 
 
     # type = 1
-    body.extend(struct.pack("<H", 0))
-    body.extend(struct.pack("<H", 4))
+    body += integer(1)
 
 
     # versionCode
-    version = b"1.012.017"
-
-    body.extend(struct.pack("<H", 1))
-    body.extend(struct.pack("<I", len(version)))
-    body.extend(version)
+    body += struct.pack("<H",0)
 
 
     # dataVersionCode
-    data_version = b"1"
-
-    body.extend(struct.pack("<H", 1))
-    body.extend(struct.pack("<I", len(data_version)))
-    body.extend(data_version)
+    body += struct.pack("<H",0)
 
 
-    # serverLevel
-    body.extend(struct.pack("<H", 6))
-    body.extend(struct.pack("<H", 4))
-
-
-    raw = package + body
-
-
-    packed = SprotoPack().pack(raw)
-
-
-    final = struct.pack(">H", len(packed)) + packed
-
-    return final
+    # serverLevel = 1
+    body += integer(1)
 
 
 
-# -------------------------
+    body += string_value(
+        "1.012.017"
+    )
+
+    body += string_value(
+        "0"
+    )
+
+
+    raw = (
+        package(session)
+        +
+        body
+    )
+
+
+    packed = sproto_pack(raw)
+
+
+    return (
+        struct.pack(">H",len(packed))
+        +
+        packed
+    )
+
+
+
+# ==========================
+# CHARACTER LIST RESPONSE
+# ==========================
+
+def character_list_response(session):
+
+
+    # empty character map
+
+    body = bytearray()
+
+
+    # response has one field
+    # tag 0 map
+
+    body += struct.pack("<H",1)
+
+    # map is empty
+    body += struct.pack("<H",0)
+
+
+    raw = (
+        package(session)
+        +
+        body
+    )
+
+
+    packed = sproto_pack(raw)
+
+
+    return (
+        struct.pack(">H",len(packed))
+        +
+        packed
+    )
+
+
+
+# ==========================
 # CLIENT
-# -------------------------
+# ==========================
 
-def handle_client(conn, addr):
+def handle(conn,addr):
 
-    print("[+] Client:", addr)
+    print("[+] GAME CLIENT:",addr)
 
 
     try:
@@ -190,66 +226,114 @@ def handle_client(conn, addr):
                 break
 
 
-            length = struct.unpack(">H", header)[0]
+            size = struct.unpack(
+                ">H",
+                header
+            )[0]
 
 
-            data = b""
-
-            while len(data) < length:
-
-                data += conn.recv(length-len(data))
+            data=b""
 
 
-            unpacked = SprotoPack().unpack(data)
+            while len(data)<size:
+
+                data += conn.recv(
+                    size-len(data)
+                )
 
 
-            print("UNPACKED:", unpacked.hex())
+            unpacked = sproto_unpack(data)
 
 
-            # login request detected
+            print(
+                "RX:",
+                unpacked.hex()
+            )
+
+
+            # login protocol 4
+
             if b"\x04\x00" in unpacked:
 
-                print("LOGIN REQUEST")
+                print(
+                    "LOGIN REQUEST"
+                )
 
-                response = create_login_response(1)
+                conn.sendall(
+                    login_response(1)
+                )
 
-                conn.send(response)
 
-                print("LOGIN RESPONSE SENT")
+
+            # character_list protocol 103
+
+            elif b"\x67\x00" in unpacked:
+
+                print(
+                    "CHARACTER LIST REQUEST"
+                )
+
+
+                conn.sendall(
+                    character_list_response(2)
+                )
 
 
     except Exception as e:
 
-        print("ERROR:", e)
+        print(
+            "ERROR:",
+            e
+        )
 
 
     finally:
 
         conn.close()
 
+        print(
+            "Disconnected"
+        )
 
 
-# -------------------------
+
+# ==========================
 # SERVER
-# -------------------------
+# ==========================
 
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server = socket.socket(
+    socket.AF_INET,
+    socket.SOCK_STREAM
+)
 
-server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
-server.bind(("0.0.0.0", PORT))
+server.setsockopt(
+    socket.SOL_SOCKET,
+    socket.SO_REUSEADDR,
+    1
+)
+
+
+server.bind(
+    ("0.0.0.0",PORT)
+)
+
 
 server.listen(20)
 
 
-print("9555 running")
+print("================")
+print("GAME SERVER 9555 ON")
+print("================")
 
 
 while True:
 
-    conn, addr = server.accept()
+    c,a = server.accept()
+
 
     threading.Thread(
-        target=handle_client,
-        args=(conn,addr)
+        target=handle,
+        args=(c,a),
+        daemon=True
     ).start()
