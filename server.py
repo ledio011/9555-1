@@ -1,28 +1,26 @@
 import socket
 import struct
 import threading
+import random
 
 
 PORT = 9555
 
 
 # ==========================
-# SPROTO PACK
+# SPROTO PACK / UNPACK
 # ==========================
 
 def sproto_pack(data):
-
     out = bytearray()
 
     for i in range(0, len(data), 8):
-
         chunk = data[i:i+8]
 
         mask = 0
         values = bytearray()
 
         for j, b in enumerate(chunk):
-
             if b != 0:
                 mask |= (1 << j)
                 values.append(b)
@@ -35,25 +33,20 @@ def sproto_pack(data):
 
 
 def sproto_unpack(data):
-
     out = bytearray()
     i = 0
 
     while i < len(data):
-
         mask = data[i]
         i += 1
 
         for bit in range(8):
 
             if mask & (1 << bit):
-
                 if i < len(data):
                     out.append(data[i])
                     i += 1
-
             else:
-
                 out.append(0)
 
     return bytes(out)
@@ -61,27 +54,77 @@ def sproto_unpack(data):
 
 
 # ==========================
-# SPROTO HELPERS
+# SPROTO ENCODE
 # ==========================
 
-def integer(value):
-
-    return struct.pack(
-        "<H",
-        (value + 1) * 2
-    )
+def int_encode(v):
+    return struct.pack("<H", (v + 1) * 2)
 
 
 
-def string_value(text):
+def write_string(value):
 
-    data = text.encode("utf-8")
+    b = value.encode("utf-8")
 
     return (
-        struct.pack("<I", len(data))
+        struct.pack("<I", len(b))
         +
-        data
+        b
     )
+
+
+
+def encode_object(fields):
+
+    header = bytearray()
+    body = bytearray()
+
+    last = -1
+
+
+    for tag,value in fields:
+
+        skip = tag - last - 1
+
+
+        if skip > 0:
+            record = (skip - 1) * 2 + 1
+            header += struct.pack("<H", record)
+
+
+
+        if isinstance(value,int):
+
+            header += int_encode(value)
+
+
+        elif isinstance(value,str):
+
+            header += struct.pack("<H",0)
+            body += write_string(value)
+
+
+        elif isinstance(value,bytes):
+
+            header += struct.pack("<H",0)
+            body += struct.pack("<I",len(value))
+            body += value
+
+
+        last = tag
+
+
+
+    result = struct.pack(
+        "<H",
+        len(header)//2
+    )
+
+    result += header
+    result += body
+
+
+    return bytes(result)
 
 
 
@@ -89,69 +132,30 @@ def string_value(text):
 # PACKAGE
 # ==========================
 
-def package(session):
+def make_package(protocol,session=None):
 
-    # Package response:
-    # only session tag
+    fields=[]
 
-    return (
-        struct.pack("<H",2)
-        +
-        struct.pack("<H",0)
-        +
-        integer(session)
+    fields.append(
+        (0,protocol)
     )
 
 
+    if session is not None:
 
-# ==========================
-# LOGIN RESPONSE
-# ==========================
-
-def login_response(session):
-
-
-    body = bytearray()
+        fields.append(
+            (1,session)
+        )
 
 
-    # login.response
-    # fields:
-    # 0 type
-    # 1 versionCode
-    # 2 dataVersionCode
-    # 3 serverLevel
-
-    body += struct.pack("<H",4)
-
-
-    # type = 1
-    body += integer(1)
-
-
-    # versionCode
-    body += struct.pack("<H",0)
-
-
-    # dataVersionCode
-    body += struct.pack("<H",0)
-
-
-    # serverLevel = 1
-    body += integer(1)
+    return encode_object(fields)
 
 
 
-    body += string_value(
-        "1.012.017"
-    )
-
-    body += string_value(
-        "0"
-    )
-
+def send_packet(sock,protocol,body=b"",session=None):
 
     raw = (
-        package(session)
+        make_package(protocol,session)
         +
         body
     )
@@ -160,67 +164,195 @@ def login_response(session):
     packed = sproto_pack(raw)
 
 
-    return (
+    packet = (
         struct.pack(">H",len(packed))
         +
         packed
     )
 
 
-
-# ==========================
-# CHARACTER LIST RESPONSE
-# ==========================
-
-def character_list_response(session):
-
-
-    # empty character map
-
-    body = bytearray()
-
-
-    # response has one field
-    # tag 0 map
-
-    body += struct.pack("<H",1)
-
-    # map is empty
-    body += struct.pack("<H",0)
-
-
-    raw = (
-        package(session)
-        +
-        body
-    )
-
-
-    packed = sproto_pack(raw)
-
-
-    return (
-        struct.pack(">H",len(packed))
-        +
-        packed
-    )
+    sock.sendall(packet)
 
 
 
 # ==========================
-# CLIENT
+# LOGIN
 # ==========================
 
-def handle(conn,addr):
+def login_response():
 
-    print("[+] GAME CLIENT:",addr)
+    return encode_object([
+
+        (0,1),
+        (1,"1.012.017"),
+        (2,"0"),
+        (3,1)
+
+    ])
+
+
+
+# ==========================
+# CHARACTER LIST
+# ==========================
+
+def character_list_response():
+
+    return encode_object([])
+# ==========================
+# CHARACTER CREATE RESPONSE
+# TAG 104
+# ==========================
+
+def character_create_response(player_id, name, profession):
+
+    attribute = encode_object([
+        (0,1)       # level
+    ])
+
+
+    general = encode_object([
+        (0,name),
+        (1,profession)
+    ])
+
+
+    character = encode_object([
+        (0,player_id),
+        (2,general),
+        (3,attribute)
+    ])
+
+
+    return encode_object([
+        (0,character),
+        (1,0)       # errno success
+    ])
+
+
+
+# ==========================
+# CHARACTER PICK RESPONSE
+# TAG 105
+# ==========================
+
+def character_pick_response():
+
+    # EMPTY RESPONSE
+    # IMPORTANT: no errno field
+
+    return encode_object([])
+
+
+
+# ==========================
+# ENTER MAP
+# TAG 503
+# SERVER -> CLIENT
+# ==========================
+
+def enter_map_packet():
+
+    return encode_object([
+
+        (0,"3001"),
+        (1,1),
+        (2,1)
+
+    ])
+
+
+
+# ==========================
+# AOI ADD
+# TAG 505
+# ==========================
+
+def aoi_add_packet(player_id,name,profession):
+
+
+    position = encode_object([
+
+        (0,0),
+        (1,0),
+        (2,0),
+        (3,0)
+
+    ])
+
+
+    movement = encode_object([
+
+        (0,position)
+
+    ])
+
+
+
+    general = encode_object([
+
+        (0,name),
+        (1,profession)
+
+    ])
+
+
+
+    visual = encode_object([
+
+        (1,"1001"),
+        (2,"0"),
+        (3,"0"),
+        (4,"0"),
+        (5,"0")
+
+    ])
+
+
+
+    character = encode_object([
+
+        (0,player_id),
+        (1,visual),
+        (2,general),
+        (5,movement)
+
+    ])
+
+
+    return encode_object([
+
+        (0,character)
+
+    ])
+
+
+
+
+
+# ==========================
+# CLIENT HANDLER
+# ==========================
+
+def client(conn,addr):
+
+    print("[+] CLIENT:",addr)
+
+
+    player_id = random.randint(100000,999999)
+
+    player_name = "Player"
+
+    profession = 0
 
 
     try:
 
         while True:
 
+
             header = conn.recv(2)
+
 
             if not header:
                 break
@@ -242,41 +374,106 @@ def handle(conn,addr):
                 )
 
 
-            unpacked = sproto_unpack(data)
+
+            raw=sproto_unpack(data)
+
 
 
             print(
                 "RX:",
-                unpacked.hex()
+                raw.hex()
             )
 
 
-            # login protocol 4
 
-            if b"\x04\x00" in unpacked:
-
-                print(
-                    "LOGIN REQUEST"
-                )
-
-                conn.sendall(
-                    login_response(1)
-                )
+            # LOGIN REQUEST
+            if b"\x04\x00" in raw:
 
 
+                print("LOGIN REQUEST")
 
-            # character_list protocol 103
 
-            elif b"\x67\x00" in unpacked:
-
-                print(
-                    "CHARACTER LIST REQUEST"
+                send_packet(
+                    conn,
+                    4,
+                    login_response(),
+                    1
                 )
 
 
-                conn.sendall(
-                    character_list_response(2)
+
+            # CHARACTER LIST
+            elif b"\x67\x00" in raw:
+
+
+                print("CHARACTER LIST")
+
+
+                send_packet(
+                    conn,
+                    103,
+                    character_list_response(),
+                    2
                 )
+
+
+
+            # CHARACTER CREATE
+            elif b"\x68\x00" in raw:
+
+
+                print("CHARACTER CREATE")
+
+
+                send_packet(
+                    conn,
+                    104,
+                    character_create_response(
+                        player_id,
+                        player_name,
+                        profession
+                    ),
+                    3
+                )
+
+
+
+            # CHARACTER PICK
+            elif b"\x69\x00" in raw:
+
+
+                print("CHARACTER PICK")
+
+
+                send_packet(
+                    conn,
+                    105,
+                    character_pick_response(),
+                    4
+                )
+
+
+                # LOAD MAP
+
+                send_packet(
+                    conn,
+                    503,
+                    enter_map_packet()
+                )
+
+
+                # SPAWN PLAYER
+
+                send_packet(
+                    conn,
+                    505,
+                    aoi_add_packet(
+                        player_id,
+                        player_name,
+                        profession
+                    )
+                )
+
 
 
     except Exception as e:
@@ -285,6 +482,7 @@ def handle(conn,addr):
             "ERROR:",
             e
         )
+
 
 
     finally:
@@ -297,8 +495,10 @@ def handle(conn,addr):
 
 
 
+
+
 # ==========================
-# SERVER
+# SERVER START
 # ==========================
 
 server = socket.socket(
@@ -314,26 +514,29 @@ server.setsockopt(
 )
 
 
+
 server.bind(
     ("0.0.0.0",PORT)
 )
 
 
-server.listen(20)
+server.listen(50)
 
 
-print("================")
+
+print("======================")
 print("GAME SERVER 9555 ON")
-print("================")
+print("======================")
+
 
 
 while True:
 
-    c,a = server.accept()
+    conn,addr = server.accept()
 
 
     threading.Thread(
-        target=handle,
-        args=(c,a),
+        target=client,
+        args=(conn,addr),
         daemon=True
     ).start()
