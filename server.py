@@ -37,6 +37,7 @@ def sproto_unpack(data):
     return bytes(out)
 
 def encode_sproto(fields):
+    if not fields: return struct.pack("<H", 0)
     fields.sort(key=lambda x: x[0])
     header = bytearray()
     body = bytearray()
@@ -51,18 +52,11 @@ def encode_sproto(fields):
             if 0 <= value <= 32766: header += struct.pack("<H", (value + 1) * 2)
             else:
                 header += struct.pack("<H", 0)
-                body += struct.pack("<I", 8) + struct.pack("<q", value)
+                body += struct.pack("<I", 4) + struct.pack("<i", value)
         elif isinstance(value, (str, bytes, bytearray)):
             if isinstance(value, str): value = value.encode('utf-8')
             header += struct.pack("<H", 0)
             body += struct.pack("<I", len(value)) + value
-        elif isinstance(value, list):
-            header += struct.pack("<H", 0)
-            list_data = bytearray()
-            for item in value:
-                if isinstance(item, (bytes, bytearray)):
-                    list_data += struct.pack("<I", len(item)) + item
-            body += struct.pack("<I", len(list_data)) + list_data
         last_tag = tag
     return struct.pack("<H", len(header) // 2) + header + body
 
@@ -103,34 +97,28 @@ def client_handler(conn, addr):
                 pkg_h = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h + body))) + sproto_pack(pkg_h + body))
 
-            elif msg_type == 118: # Random Name
-                name = "Player" + str(random.randint(100, 999))
-                body = encode_sproto([(0, name)])
-                pkg_h = encode_sproto([(1, session)])
-                conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h + body))) + sproto_pack(pkg_h + body))
-
             elif msg_type == 105: # Character Pick
-                # 1. Suksesi (pa errno)
+                # 1. Success response (pa errno)
                 pkg_h = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h))) + sproto_pack(pkg_h))
-                # 2. Ngarko Map (3001)
-                map_p = sproto_pack(encode_sproto([(0, 503)]) + encode_sproto([(0, "3001")]))
-                conn.sendall(struct.pack(">H", len(map_p)) + map_p)
+                # 2. Push Enter Map (Tag 503)
+                map_pkt = sproto_pack(encode_sproto([(0, 503)]) + encode_sproto([(0, "3001")]))
+                conn.sendall(struct.pack(">H", len(map_pkt)) + map_pkt)
 
-            elif msg_type == 100: # Map Ready
-                # 3. Krijo Lojtarin (Tag 504)
+            elif msg_type == 100: # Map Ready (TAG KRITIK!)
+                # 3. Push Main Player Create (Tag 504)
                 # Visual (Tag 6 ne character)
-                visual = encode_sproto([(1, "1001"), (2, "1001"), (3, "1001"), (4, "1001")])
-                # Attribute (Tag 2 ne character)
-                attr = encode_sproto([(0, 1000), (1, 0), (2, 1), (3, 100)])
-                # Property (Tag 5 ne character) - Kujdes Tags 13-18 per parate!
-                prop = encode_sproto([(13, 1000), (14, 1000)])
+                visual = encode_sproto([(1,"1001"),(2,"1001"),(3,"1001"),(4,"1001")])
+                # Attr (Tag 2 ne character)
+                attr = encode_sproto([(0,1000),(2,1)])
+                # Property (Tag 5 ne character) - Tags 13-18 per parate!
+                prop = encode_sproto([(13,1000),(14,1000)])
                 # General (Tag 1 ne character)
-                gen = encode_sproto([(0, "OfficialPlayer"), (1, 0), (3, "3001")])
+                gen = encode_sproto([(0,"Player"),(1,0),(3,"3001")])
 
-                char_obj = encode_sproto([(0, random.randint(1000, 9999)), (1, gen), (2, attr), (5, prop), (6, visual)])
-                main_player_pkt = sproto_pack(encode_sproto([(0, 504)]) + encode_sproto([(0, char_obj)]))
-                conn.sendall(struct.pack(">H", len(main_player_pkt)) + main_player_pkt)
+                char_obj = encode_sproto([(0, random.randint(1000,9999)),(1,gen),(2,attr),(5,prop),(6,visual)])
+                main_pkt = sproto_pack(encode_sproto([(0, 504)]) + encode_sproto([(0, char_obj)]))
+                conn.sendall(struct.pack(">H", len(main_pkt)) + main_pkt)
 
             elif msg_type == 218: # Heartbeat
                 pkg_h = encode_sproto([(1, session)])
