@@ -2,10 +2,27 @@ import socket
 import struct
 import threading
 import random
+import json
 import os
+import time
 
+# Config
 PORT = int(os.environ.get("PORT", 9555))
-NAMES = ["Alex", "John", "Liam", "Lucas", "Elena", "Sofia", "Marcus", "Oliver", "Maya", "Victor", "Hiroshi", "Kaito"]
+CHAR_DB = "characters.json"
+
+def load_chars():
+    if os.path.exists(CHAR_DB):
+        try:
+            with open(CHAR_DB, "r") as f: return json.load(f)
+        except: return {}
+    return {}
+
+def save_chars(data):
+    try:
+        with open(CHAR_DB, "w") as f: json.dump(data, f, indent=4)
+    except: pass
+
+characters = load_chars()
 
 def sproto_pack(data):
     out = bytearray()
@@ -70,7 +87,7 @@ def encode_sproto(fields, fn=None):
     return bytes(res)
 
 def decode_header(data):
-    if len(data) < 2: return None, None
+    if len(data) < 2: return None, None, 0
     fn = struct.unpack("<H", data[:2])[0]
     header = data[2:2+fn*2]
     msg_type, session, idx, curr_tag = None, None, 0, 0
@@ -83,10 +100,27 @@ def decode_header(data):
             if curr_tag == 1: session = real_val
             curr_tag += 1
         idx += 2
-    return msg_type, session
+    return msg_type, session, 2 + fn*2
+
+def decode_body(data, offset):
+    if len(data) < offset + 2: return {}
+    fn = struct.unpack("<H", data[offset:offset+2])[0]
+    h_start, b_ptr, curr_tag = offset + 2, offset + 2 + fn*2, 0
+    fields = {}
+    for i in range(fn):
+        v = struct.unpack("<H", data[h_start + i*2:h_start + i*2+2])[0]
+        if v == 0:
+            if b_ptr + 4 <= len(data):
+                l = struct.unpack("<I", data[b_ptr:b_ptr+4])[0]
+                fields[curr_tag] = data[b_ptr+4:b_ptr+4+l]
+                b_ptr += 4 + l
+        elif v > 1: fields[curr_tag] = (v >> 1) - 1
+        curr_tag += 1
+    return fields
 
 def client_handler(conn, addr):
-    print(f"[+] Game Client: {addr}")
+    print(f"[+] Game Connect: {addr}")
+    acc_id = "0"
     try:
         while True:
             h = conn.recv(2)
@@ -95,34 +129,38 @@ def client_handler(conn, addr):
             data = b""
             while len(data) < size: data += conn.recv(size - len(data))
             raw = sproto_unpack(data)
-            msg_type, session = decode_header(raw)
+            msg_type, session, offset = decode_header(raw)
             if msg_type is None: continue
-            print(f"[GAME RX] Tag: {msg_type}")
 
             if msg_type == 4: # Login (Tag 4)
-                # Unity dergon llogarine qe mori nga Login Server
+                body = decode_body(raw, offset)
+                acc_id = body.get(1, b"").decode('utf-8', 'ignore')
+                print(f"[LOGIN] Account ID: {acc_id}")
                 resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "167"), (3, 1)], fn=4)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 103: # character_list (Tag 103)
-                # Nese dergojme liste boshe [], Unity kalon automatikisht te ekrani i krijimit
-                resp = encode_sproto([(0, [])], fn=1)
+                if acc_id not in characters:
+                    print(f"[AUTO CHAR] Generating role for {acc_id}")
+                    name = "Player_" + acc_id[-4:]
+                    gen = encode_sproto([(0, name), (1, 0), (3, "3001")], fn=4)
+                    char_ov = encode_sproto([(0, 1001), (1, gen), (4, int(time.time())), (5, 0)], fn=6)
+                    # Convert to hex for json storage if needed, or store as list of ints
+                    characters[acc_id] = list(char_ov)
+                    save_chars(characters)
+                
+                char_data = bytes(characters[acc_id])
+                resp = encode_sproto([(0, [char_data])], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
-            elif msg_type == 104: # Create
-                gen = encode_sproto([(0, "Hero"), (1, 0), (3, "3001")], fn=4)
-                char_ov = encode_sproto([(0, 1001), (1, gen), (5, 0)], fn=6)
-                resp = encode_sproto([(0, char_ov), (1, 0)], fn=2)
-                pkg_h = encode_sproto([(1, session)], fn=2)
-                full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
-
-            elif msg_type == 105: # Pick
+            elif msg_type == 105: # character_pick
                 resp = encode_sproto([(0, 1)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
-                # Dërgojmë Enter Map (Tag 503)
+                
+                # Urdhro Enter Map
                 map_req = encode_sproto([(0, "3001")], fn=1)
                 pkg_req = encode_sproto([(0, 503)], fn=2)
                 full_map = sproto_pack(pkg_req + map_req); conn.sendall(struct.pack(">H", len(full_map)) + full_map)
@@ -138,6 +176,6 @@ server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT))
 server.listen(10)
-print(f"GAME SERVER ON PORT {PORT}")
+print(f"GAME SERVER ACTIVE ON {PORT}")
 while True:
     c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
