@@ -5,6 +5,7 @@ import random
 import os
 
 PORT = int(os.environ.get("PORT", 9555))
+NAMES = ["Dragon", "Shadow", "King", "Wolf", "Viking", "Eagle", "Ghost", "Zero"]
 
 def sproto_pack(data):
     out = bytearray()
@@ -50,7 +51,7 @@ def sproto_unpack(data):
     return bytes(out)
 
 def encode_sproto(fields, is_root=False):
-    if not fields: return struct.pack("<H", 0) if is_root else b""
+    if not fields and not is_root: return b""
     fields.sort(key=lambda x: x[0])
     header = bytearray()
     body = bytearray()
@@ -111,9 +112,11 @@ def client_handler(conn, addr):
                 part = conn.recv(size - len(data))
                 if not part: break
                 data += part
+
             raw = sproto_unpack(data)
             msg_type, session = decode_header(raw)
             if msg_type is None: continue
+            print(f"[GAME RX] Tag: {msg_type}")
 
             if msg_type == 4: # Login
                 resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "0"), (3, 1)], is_root=True)
@@ -121,7 +124,15 @@ def client_handler(conn, addr):
                 full_pkt = sproto_pack(pkg_h + resp)
                 conn.sendall(struct.pack(">H", len(full_pkt)) + full_pkt)
 
-            elif msg_type == 103: # Char List (Bosh per t'u futur te Create)
+            elif msg_type == 118: # Random Name Request
+                random_name = random.choice(NAMES) + str(random.randint(100, 999))
+                print(f"[RANDOM NAME] Generated: {random_name}")
+                resp = encode_sproto([(0, random_name)], is_root=True)
+                pkg_h = encode_sproto([(1, session)], is_root=True)
+                full_pkt = sproto_pack(pkg_h + resp)
+                conn.sendall(struct.pack(">H", len(full_pkt)) + full_pkt)
+
+            elif msg_type == 103: # Char List
                 resp = encode_sproto([(0, [])], is_root=True)
                 pkg_h = encode_sproto([(1, session)], is_root=True)
                 full_pkt = sproto_pack(pkg_h + resp)
@@ -140,7 +151,8 @@ def client_handler(conn, addr):
                 pkg_h = encode_sproto([(1, session)], is_root=True)
                 full_pkt = sproto_pack(pkg_h + resp)
                 conn.sendall(struct.pack(">H", len(full_pkt)) + full_pkt)
-                # Dërgojmë Enter Map automatikisht
+
+                # Send Enter Map automatically
                 map_pkt = sproto_pack(encode_sproto([(0, 503)], is_root=True) + encode_sproto([(0, "3001")], is_root=True))
                 conn.sendall(struct.pack(">H", len(map_pkt)) + map_pkt)
 
@@ -156,7 +168,7 @@ server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT))
 server.listen(10)
-print(f"GAME SERVER ACTIVE ON PORT {PORT}")
+print(f"GAME SERVER ON PORT {PORT}")
 while True:
     c, a = server.accept()
     threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
