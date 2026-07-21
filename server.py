@@ -5,8 +5,8 @@ import random
 import os
 
 PORT = int(os.environ.get("PORT", 9555))
-# Emra nderkombetare sic u kerkua
-NAMES = ["Alex", "John", "Smith", "Lucas", "Elena", "Sofia", "Marcus", "Oliver", "Maya", "Victor"]
+# Emra nderkombetare
+NAMES = ["Alex", "John", "Smith", "Lucas", "Elena", "Sofia", "Marcus", "Oliver", "Maya", "Victor", "Zero", "Ghost"]
 
 def sproto_pack(data):
     out = bytearray()
@@ -67,19 +67,21 @@ def encode_sproto(fields, fn):
 
 def decode_header(data):
     if len(data) < 2: return None, None
-    fn = struct.unpack("<H", data[:2])[0]
-    header = data[2:2+fn*2]
-    msg_type, session, idx, curr_tag = None, None, 0, 0
-    while idx < len(header):
-        val = struct.unpack("<H", header[idx:idx+2])[0]
-        if val & 1: curr_tag += (val >> 1) + 1
-        else:
-            real_val = (val >> 1) - 1
-            if curr_tag == 0: msg_type = real_val
-            if curr_tag == 1: session = real_val
-            curr_tag += 1
-        idx += 2
-    return msg_type, session
+    try:
+        fn = struct.unpack("<H", data[:2])[0]
+        header = data[2:2+fn*2]
+        msg_type, session, idx, curr_tag = None, None, 0, 0
+        while idx < len(header):
+            val = struct.unpack("<H", header[idx:idx+2])[0]
+            if val & 1: curr_tag += (val >> 1) + 1
+            else:
+                real_val = (val >> 1) - 1
+                if curr_tag == 0: msg_type = real_val
+                if curr_tag == 1: session = real_val
+                curr_tag += 1
+            idx += 2
+        return msg_type, session
+    except: return None, None
 
 def client_handler(conn, addr):
     print(f"[+] Game Client: {addr}")
@@ -93,15 +95,16 @@ def client_handler(conn, addr):
             raw = sproto_unpack(data)
             msg_type, session = decode_header(raw)
             if msg_type is None: continue
+            print(f"[GAME RX] Tag: {msg_type}")
 
             if msg_type == 4: # Login
                 resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "0"), (3, 1)], fn=4)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
-            elif msg_type == 118: # Random Name Fix
-                name = random.choice(NAMES) + str(random.randint(100, 999))
-                resp = encode_sproto([(0, name)], fn=1)
+            elif msg_type == 118: # Random Name (Tag 118)
+                random_name = random.choice(NAMES) + str(random.randint(100, 999))
+                resp = encode_sproto([(0, random_name)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
@@ -110,21 +113,25 @@ def client_handler(conn, addr):
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
-            elif msg_type == 104: # Create
+            elif msg_type == 104: # Create Char
                 gen = encode_sproto([(0, "Hero"), (1, 0), (3, "3001")], fn=4)
                 char_ov = encode_sproto([(0, 1001), (1, gen), (5, 0)], fn=6)
                 resp = encode_sproto([(0, char_ov), (1, 0)], fn=2)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
-            elif msg_type == 105: # Pick & Enter Map
+            elif msg_type == 105: # Pick Char
                 resp = encode_sproto([(0, 1)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
-                # Paketa Enter Map (Tag 503)
-                map_req = encode_sproto([(0, "3001")], fn=1)
-                pkg_req = encode_sproto([(0, 503)], fn=2)
-                full_map = sproto_pack(pkg_req + map_req); conn.sendall(struct.pack(">H", len(full_map)) + full_map)
+
+            elif msg_type == 100: # Map Ready (Tag 100) -> Dërgon lojtarin ne skenë
+                visual = encode_sproto([(1,"1001"),(2,"1001"),(3,"1001"),(4,"1001")], fn=5)
+                attr = encode_sproto([(0,1000),(2,1)], fn=3)
+                gen = encode_sproto([(0,"Player"),(1,0),(3,"3001")], fn=4)
+                char_obj = encode_sproto([(0, 1001),(1,gen),(2,attr),(6,visual)], fn=8)
+                main_pkt = sproto_pack(encode_sproto([(0, 504)], fn=2) + encode_sproto([(0, char_obj)], fn=1))
+                conn.sendall(struct.pack(">H", len(main_pkt)) + main_pkt)
 
             elif msg_type == 218: # Heartbeat
                 pkg_h = encode_sproto([(1, session)], fn=2)
@@ -137,6 +144,7 @@ server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT))
 server.listen(10)
-print(f"GAME SERVER ON PORT {PORT}")
+print(f"GAME SERVER ACTIVE ON PORT {PORT}")
 while True:
     c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
+
