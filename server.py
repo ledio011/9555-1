@@ -99,18 +99,14 @@ def client_handler(conn, addr):
             if msg_type is None: continue
             print(f"[GAME RX] Tag: {msg_type}")
 
-            if msg_type == 4: # Login
-                resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "0"), (3, 1)], fn=4)
+            if msg_type == 4: # Login (Tag 4)
+                # Unity dergon llogarine qe mori nga Login Server
+                resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "167"), (3, 1)], fn=4)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
-            elif msg_type == 118: # Random Name Fix
-                name = random.choice(NAMES) + str(random.randint(100, 999))
-                resp = encode_sproto([(0, name)], fn=1)
-                pkg_h = encode_sproto([(1, session)], fn=2)
-                full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
-
-            elif msg_type == 103: # Char List
+            elif msg_type == 103: # character_list (Tag 103)
+                # Nese dergojme liste boshe [], Unity kalon automatikisht te ekrani i krijimit
                 resp = encode_sproto([(0, [])], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
