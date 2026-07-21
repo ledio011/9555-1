@@ -121,6 +121,7 @@ def client_handler(conn, addr):
                 ])
                 pkg_h = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h + resp))) + sproto_pack(pkg_h + resp))
+                print(f"[LOGIN] Player logged in successfully. Session={session}")
 
             elif msg_type == 103: # Char List Request
                 # For now, return empty list to trigger Create Role UI
@@ -130,7 +131,9 @@ def client_handler(conn, addr):
 
             elif msg_type == 104: # Char Create Request
                 # Assume request is valid and create a dummy character
-                char_ov = create_char_overview(random.randint(1000, 9999), "Hero", 1)
+                char_id = random.randint(1000, 9999)
+                char_ov = create_char_overview(char_id, "Hero", 1)
+                print(f"[GAME] New character created: ID={char_id}, Name=Hero")
                 resp = encode_sproto([(0, char_ov), (1, 0)])
                 pkg_h = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h + resp))) + sproto_pack(pkg_h + resp))
