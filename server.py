@@ -4,7 +4,7 @@ import threading
 import random
 
 PORT = 9555
-NAMES = ["Eagle", "Shadow", "King", "Wolf", "Dragon"]
+NAMES = ["Dragon", "Shadow", "King", "Wolf", "Dragon", "Viking", "Eagle"]
 
 def sproto_pack(data):
     padding = (8 - (len(data) % 8)) % 8
@@ -60,11 +60,11 @@ def encode_sproto(fields):
             body += struct.pack("<I", len(value)) + value
         elif isinstance(value, list):
             header += struct.pack("<H", 0)
-            list_bin = bytearray()
+            list_data = bytearray()
             for item in value:
-                if isinstance(item, bytes):
-                    list_bin += struct.pack("<I", len(item)) + item
-            body += struct.pack("<I", len(list_bin)) + list_bin
+                if isinstance(item, (bytes, bytearray)):
+                    list_data += struct.pack("<I", len(item)) + item
+            body += struct.pack("<I", len(list_data)) + list_data
         last_tag = tag
     return struct.pack("<H", len(header) // 2) + header + body
 
@@ -85,6 +85,19 @@ def decode_header(data):
         idx += 2
     return msg_type, session
 
+def create_char_overview(cid, name, job):
+    gen = encode_sproto([(0, name), (1, job), (3, "3001")])
+    attr = encode_sproto([(0, 1000), (2, 1)])
+    visual = encode_sproto([(1, "1001"), (2, "1001"), (3, "1001"), (4, "1001")])
+    return encode_sproto([
+        (0, cid),           # id
+        (1, gen),           # general
+        (2, attr),          # attribute_other
+        (3, visual),        # visual
+        (4, 1626880000),    # createtime
+        (5, 0)              # forbidden
+    ])
+
 def client_handler(conn, addr):
     print(f"[+] Game Client: {addr}")
     try:
@@ -97,40 +110,54 @@ def client_handler(conn, addr):
                 data += conn.recv(size - len(data))
             raw = sproto_unpack(data)
             msg_type, session = decode_header(raw)
-            print(f"Game RX: {msg_type}")
+            print(f"Game RX Tag: {msg_type}")
 
-            if msg_type == 4: # Login
-                resp = encode_sproto([(0, 1), (1, "1.012.017"), (2, "0"), (3, 1)])
+            if msg_type == 4: # Login Request
+                resp = encode_sproto([
+                    (0, 2),             # type (Success)
+                    (1, "1.012.017"),    # versionCode
+                    (2, "0"),           # dataVersionCode
+                    (3, 1)              # serverLevel
+                ])
                 pkg_h = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h + resp))) + sproto_pack(pkg_h + resp))
 
-            elif msg_type == 103: # Char List
-                resp = encode_sproto([(0, None)])
+            elif msg_type == 103: # Char List Request
+                # For now, return empty list to trigger Create Role UI
+                resp = encode_sproto([(0, [])])
                 pkg_h = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h + resp))) + sproto_pack(pkg_h + resp))
 
-            elif msg_type == 118: # Random Name
-                name = random.choice(NAMES) + str(random.randint(100, 999))
-                resp = encode_sproto([(0, name)])
+            elif msg_type == 104: # Char Create Request
+                # Assume request is valid and create a dummy character
+                char_ov = create_char_overview(random.randint(1000, 9999), "Hero", 1)
+                resp = encode_sproto([(0, char_ov), (1, 0)])
                 pkg_h = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h + resp))) + sproto_pack(pkg_h + resp))
 
-            elif msg_type == 105: # Character Pick
+            elif msg_type == 105: # Char Pick Request
+                resp = encode_sproto([(0, 1)]) # errno 1 = Success? Let's check character_pick.cs
+                # Actually character_pick.response 0 is errno.
+                # In CharPickHandler, errno 0 and 2 are errors. So maybe 1 is success.
+                # Let's check CharacterPickResponse in NetManager.cs
+                # If errno == 0 or 2, it shows error notice.
+                # So any other value is success.
+                resp = encode_sproto([(0, 1)])
                 pkg_h = encode_sproto([(1, session)])
-                conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h))) + sproto_pack(pkg_h))
-                map_p = sproto_pack(encode_sproto([(0, 503)]) + encode_sproto([(0, "3001")]))
-                conn.sendall(struct.pack(">H", len(map_p)) + map_p)
+                conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h + resp))) + sproto_pack(pkg_h + resp))
 
-            elif msg_type == 100: # Map Ready
-                # Visual (Tag 6)
+                # After pick, send Enter Map (503)
+                map_pkt = sproto_pack(encode_sproto([(0, 503)]) + encode_sproto([(0, "3001")]))
+                conn.sendall(struct.pack(">H", len(map_pkt)) + map_pkt)
+
+            elif msg_type == 100: # Map Ready (Triggered by client)
+                # Send Character Data (504)
+                # This logic was in previous version, keeping it.
                 visual = encode_sproto([(1,"1001"),(2,"1001"),(3,"1001"),(4,"1001")])
-                # Attr (Tag 2)
                 attr = encode_sproto([(0,1000),(2,1)])
-                # Prop (Tag 5) - Money tags 13-18
                 prop = encode_sproto([(13,1000),(14,1000)])
-                # General (Tag 1)
-                gen = encode_sproto([(0,"OfficialPlayer"),(1,0),(3,"3001")])
-                char_obj = encode_sproto([(0, random.randint(1,9999)), (1, gen), (2, attr), (5, prop), (6, visual)])
+                gen = encode_sproto([(0,"Player"),(1,0),(3,"3001")])
+                char_obj = encode_sproto([(0, random.randint(1,9999)),(1,gen),(2,attr),(5,prop),(6,visual)])
                 main_pkt = sproto_pack(encode_sproto([(0, 504)]) + encode_sproto([(0, char_obj)]))
                 conn.sendall(struct.pack(">H", len(main_pkt)) + main_pkt)
 
@@ -138,8 +165,10 @@ def client_handler(conn, addr):
                 pkg_h = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h))) + sproto_pack(pkg_h))
 
-    except: pass
-    finally: conn.close()
+    except Exception as e:
+        print(f"Game Error: {e}")
+    finally:
+        conn.close()
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
