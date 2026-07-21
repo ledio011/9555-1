@@ -114,36 +114,36 @@ def client_handler(conn, addr):
             while len(data) < size: data += conn.recv(size - len(data))
             raw = sproto_unpack(data)
             
-            pkg = decode_sproto(raw)
-            msg_type, session = pkg.get(0), pkg.get(1)
-            
+            header = decode_sproto(raw)
+            msg_type = header.get(0); session = header.get(1)
             body_off = 2 + (struct.unpack("<H", raw[:2])[0] * 2)
             body = decode_sproto(raw[body_off:])
 
             if msg_type == 4: # Login
-                acc_id = body.get(1, b"").decode('utf-8', 'ignore')
-                print(f"[LOGIN] Account: {acc_id}")
+                body_login = decode_sproto(raw[body_off:])
+                acc_id = body_login.get(1, b"").decode('utf-8', 'ignore')
+                print(f"[LOGIN] Account ID: {acc_id}")
                 resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "167"), (3, 1)], fn=4)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h+resp))) + sproto_pack(pkg_h+resp))
 
             elif msg_type == 103: # character_list
                 if acc_id not in characters:
-                    print(f"[LOG] Nuk ka karakter per {acc_id}. Shfaq butonin 'Create Role'.")
+                    print(f"[LOG] No character for {acc_id}. Unity shows 'Create Role'.")
                     resp = encode_sproto([(0, [])], fn=1)
                 else:
-                    print(f"[LOG] Karakteri ekzistues u ngarkua per {acc_id}")
+                    print(f"[LOG] Karakteri u ngarkua AUTOMATIKISHT nga databaza per {acc_id}")
                     char_data = bytes(characters[acc_id])
                     resp = encode_sproto([(0, [char_data])], fn=1)
                 
                 pkg_h = encode_sproto([(1, session)], fn=2)
-                conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h+resp))) + sproto_pack(pkg_h+resp))
+                full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
-            elif msg_type == 104: # character_create (MANUAL)
+            elif msg_type == 104: # character_create (Manual)
                 char_info = decode_sproto(body.get(0, b""))
                 name = char_info.get(0, b"").decode('utf-8', 'ignore')
                 prof = char_info.get(1, 0)
-                print(f"[LOG] Karakteri u krijua MANUALISHT: Emri={name}, Prof={prof}")
+                print(f"[LOG] Karakteri u krijua MANUALISHT nga perdoruesi: {name}")
                 
                 gen = encode_sproto([(0, name), (1, prof), (2, 1), (3, "3001")], fn=4)
                 attr_ov = encode_sproto([(0, 100), (1, 100), (4, 1), (5, 100)], fn=6)
@@ -158,17 +158,17 @@ def client_handler(conn, addr):
             elif msg_type == 105: # character_pick
                 resp = encode_sproto([(0, 1)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2)
-                conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h+resp))) + sproto_pack(pkg_h+resp))
+                full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
                 
-                # Enter Map
                 map_req = encode_sproto([(0, "3001")], fn=1)
                 pkg_req = encode_sproto([(0, 503)], fn=2)
                 full_map = sproto_pack(pkg_req + map_req); conn.sendall(struct.pack(">H", len(full_map)) + full_map)
 
             elif msg_type == 100: # map_ready
+                print(f"[MAP] Spawning into 3D world for {acc_id}")
                 prop = encode_sproto([(13, 1000), (14, 1000), (15, 1000), (16, 0), (17, 0), (18, 0)], fn=19)
                 attr = encode_sproto([(0, 1000), (1, 1000), (4, 1), (5, 100)], fn=6)
-                gen = encode_sproto([(0, "Player"), (1, 0)], fn=3)
+                gen = encode_sproto([(0, "Hero"), (1, 0)], fn=3)
                 pos = encode_sproto([(0, 1500), (1, 500), (2, 2000), (3, 0)], fn=4)
                 mov = encode_sproto([(0, pos), (1, pos)], fn=2)
                 char_data = encode_sproto([(0, 1001), (1, gen), (2, attr), (5, prop), (11, mov)], fn=12)
