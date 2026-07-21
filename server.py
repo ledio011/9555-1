@@ -5,23 +5,20 @@ import random
 import os
 
 PORT = int(os.environ.get("PORT", 9555))
-NAMES = ["Dragon", "Shadow", "King", "Wolf", "Viking", "Eagle", "Ghost", "Zero"]
+NAMES = ["Drini", "Arber", "Berti", "Genti", "Luan", "Shpend", "Ilir", "Agon"]
 
 def sproto_pack(data):
     out = bytearray()
-    n = len(data)
-    for i in range(0, n, 8):
+    for i in range(0, len(data), 8):
         chunk = data[i:i+8]
         if len(chunk) < 8: chunk += b'\x00' * (8 - len(chunk))
-        mask = 0
-        values = bytearray()
+        mask, values = 0, bytearray()
         for j in range(8):
             if chunk[j] != 0:
                 mask |= (1 << j)
                 values.append(chunk[j])
         if mask == 0xFF:
-            out.append(0xFF)
-            out.append(0)
+            out.extend([0xFF, 0])
             out.extend(chunk)
         else:
             out.append(mask)
@@ -35,7 +32,6 @@ def sproto_unpack(data):
         mask = data[i]
         i += 1
         if mask == 0xFF:
-            if i >= len(data): break
             n = (data[i] + 1) * 8
             i += 1
             out.extend(data[i:i+n])
@@ -43,18 +39,15 @@ def sproto_unpack(data):
         else:
             for bit in range(8):
                 if mask & (1 << bit):
-                    if i < len(data):
-                        out.append(data[i])
-                        i += 1
-                else:
-                    out.append(0)
+                    out.append(data[i]); i += 1
+                else: out.append(0)
     return bytes(out)
 
-def encode_sproto(fields, is_root=False):
-    if not fields and not is_root: return b""
+def encode_sproto(fields, fn=None):
+    if not fields: return struct.pack("<H", 0)
     fields.sort(key=lambda x: x[0])
-    header = bytearray()
-    body = bytearray()
+    if fn is None: fn = fields[-1][0] + 1
+    header, body = bytearray(), bytearray()
     last_tag = -1
     for tag, value in fields:
         skip = tag - last_tag - 1
@@ -75,30 +68,24 @@ def encode_sproto(fields, is_root=False):
             for item in value: list_bin += struct.pack("<I", len(item)) + item
             body += struct.pack("<I", len(list_bin)) + list_bin
         last_tag = tag
-    res = bytearray()
-    if is_root: res += struct.pack("<H", len(header) // 2)
-    res += header
-    res += body
-    return bytes(res)
+    while (len(header) // 2) < fn: header += struct.pack("<H", 0)
+    return struct.pack("<H", len(header) // 2) + header + body
 
 def decode_header(data):
     if len(data) < 2: return None, None
-    try:
-        fn = struct.unpack("<H", data[:2])[0]
-        header = data[2:2+fn*2]
-        msg_type, session = None, None
-        idx, curr_tag = 0, 0
-        while idx < len(header):
-            val = struct.unpack("<H", header[idx:idx+2])[0]
-            if val & 1: curr_tag += (val >> 1) + 1
-            else:
-                real_val = (val >> 1) - 1
-                if curr_tag == 0: msg_type = real_val
-                if curr_tag == 1: session = real_val
-                curr_tag += 1
-            idx += 2
-        return msg_type, session
-    except: return None, None
+    fn = struct.unpack("<H", data[:2])[0]
+    header = data[2:2+fn*2]
+    msg_type, session, idx, curr_tag = None, None, 0, 0
+    while idx < len(header):
+        val = struct.unpack("<H", header[idx:idx+2])[0]
+        if val & 1: curr_tag += (val >> 1) + 1
+        else:
+            real_val = (val >> 1) - 1
+            if curr_tag == 0: msg_type = real_val
+            if curr_tag == 1: session = real_val
+            curr_tag += 1
+        idx += 2
+    return msg_type, session
 
 def client_handler(conn, addr):
     print(f"[+] Game connection: {addr}")
@@ -108,58 +95,47 @@ def client_handler(conn, addr):
             if not h: break
             size = struct.unpack(">H", h)[0]
             data = b""
-            while len(data) < size:
-                part = conn.recv(size - len(data))
-                if not part: break
-                data += part
-
+            while len(data) < size: data += conn.recv(size - len(data))
             raw = sproto_unpack(data)
             msg_type, session = decode_header(raw)
             if msg_type is None: continue
-            print(f"[GAME RX] Tag: {msg_type}")
 
             if msg_type == 4: # Login
-                resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "0"), (3, 1)], is_root=True)
-                pkg_h = encode_sproto([(1, session)], is_root=True)
-                full_pkt = sproto_pack(pkg_h + resp)
-                conn.sendall(struct.pack(">H", len(full_pkt)) + full_pkt)
+                resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "0"), (3, 1)], fn=4)
+                pkg_h = encode_sproto([(1, session)], fn=2)
+                full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
-            elif msg_type == 118: # Random Name Request
-                random_name = random.choice(NAMES) + str(random.randint(100, 999))
-                print(f"[RANDOM NAME] Generated: {random_name}")
-                resp = encode_sproto([(0, random_name)], is_root=True)
-                pkg_h = encode_sproto([(1, session)], is_root=True)
-                full_pkt = sproto_pack(pkg_h + resp)
-                conn.sendall(struct.pack(">H", len(full_pkt)) + full_pkt)
+            elif msg_type == 118: # Random Name
+                name = random.choice(NAMES) + str(random.randint(100, 999))
+                resp = encode_sproto([(0, name)], fn=1)
+                pkg_h = encode_sproto([(1, session)], fn=2)
+                full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 103: # Char List
-                resp = encode_sproto([(0, [])], is_root=True)
-                pkg_h = encode_sproto([(1, session)], is_root=True)
-                full_pkt = sproto_pack(pkg_h + resp)
-                conn.sendall(struct.pack(">H", len(full_pkt)) + full_pkt)
+                resp = encode_sproto([(0, [])], fn=1)
+                pkg_h = encode_sproto([(1, session)], fn=2)
+                full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
-            elif msg_type == 104: # Create Char
-                gen = encode_sproto([(0, "Player"), (1, 0), (3, "3001")], is_root=True)
-                char_ov = encode_sproto([(0, 1001), (1, gen), (5, 0)], is_root=True)
-                resp = encode_sproto([(0, char_ov), (1, 0)], is_root=True)
-                pkg_h = encode_sproto([(1, session)], is_root=True)
-                full_pkt = sproto_pack(pkg_h + resp)
-                conn.sendall(struct.pack(">H", len(full_pkt)) + full_pkt)
+            elif msg_type == 104: # Create
+                gen = encode_sproto([(0, "Hero"), (1, 0), (3, "3001")], fn=4)
+                # character_overview fn=6: id(0), general(1), attr(2), visual(3), time(4), forbidden(5)
+                char_ov = encode_sproto([(0, 1001), (1, gen), (5, 0)], fn=6)
+                resp = encode_sproto([(0, char_ov), (1, 0)], fn=2)
+                pkg_h = encode_sproto([(1, session)], fn=2)
+                full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
-            elif msg_type == 105: # Pick Char
-                resp = encode_sproto([(0, 1)], is_root=True)
-                pkg_h = encode_sproto([(1, session)], is_root=True)
-                full_pkt = sproto_pack(pkg_h + resp)
-                conn.sendall(struct.pack(">H", len(full_pkt)) + full_pkt)
-
-                # Send Enter Map automatically
-                map_pkt = sproto_pack(encode_sproto([(0, 503)], is_root=True) + encode_sproto([(0, "3001")], is_root=True))
-                conn.sendall(struct.pack(">H", len(map_pkt)) + map_pkt)
+            elif msg_type == 105: # Pick
+                resp = encode_sproto([(0, 1)], fn=1)
+                pkg_h = encode_sproto([(1, session)], fn=2)
+                full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
+                # Server-initiate Enter Map (Tag 503)
+                map_req = encode_sproto([(0, "3001")], fn=1)
+                pkg_req = encode_sproto([(0, 503)], fn=2)
+                full_map = sproto_pack(pkg_req + map_req); conn.sendall(struct.pack(">H", len(full_map)) + full_map)
 
             elif msg_type == 218: # Heartbeat
-                pkg_h = encode_sproto([(1, session)], is_root=True)
-                full_pkt = sproto_pack(pkg_h)
-                conn.sendall(struct.pack(">H", len(full_pkt)) + full_pkt)
+                pkg_h = encode_sproto([(1, session)], fn=2)
+                full = sproto_pack(pkg_h); conn.sendall(struct.pack(">H", len(full)) + full)
 
     except Exception as e: print(f"Game Error: {e}")
     finally: conn.close()
@@ -170,5 +146,4 @@ server.bind(("0.0.0.0", PORT))
 server.listen(10)
 print(f"GAME SERVER ON PORT {PORT}")
 while True:
-    c, a = server.accept()
-    threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
+    c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
