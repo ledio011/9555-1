@@ -4,7 +4,7 @@ import threading
 import random
 
 PORT = 9555
-NAMES = ["Dragon", "Shadow", "King", "Wolf", "Falcon"]
+NAMES = ["Eagle", "Shadow", "King", "Wolf", "Dragon"]
 
 def sproto_pack(data):
     padding = (8 - (len(data) % 8)) % 8
@@ -97,9 +97,9 @@ def client_handler(conn, addr):
                 data += conn.recv(size - len(data))
             raw = sproto_unpack(data)
             msg_type, session = decode_header(raw)
+            print(f"Game RX: {msg_type}")
 
             if msg_type == 4: # Login
-                # RREGULLIMI: Kthejme versionin sakt qe te mbyllet loading
                 resp = encode_sproto([(0, 1), (1, "1.012.017"), (2, "0"), (3, 1)])
                 pkg_h = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h + resp))) + sproto_pack(pkg_h + resp))
@@ -122,14 +122,17 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(map_p)) + map_p)
 
             elif msg_type == 100: # Map Ready
-                # PUSH TRUPIN E LOJTARIT (Tag 504)
+                # Visual (Tag 6)
                 visual = encode_sproto([(1,"1001"),(2,"1001"),(3,"1001"),(4,"1001")])
+                # Attr (Tag 2)
                 attr = encode_sproto([(0,1000),(2,1)])
-                prop = encode_sproto([(13,1000),(14,1000)]) # Leket (13-18)
-                gen = encode_sproto([(0,"Hero"),(1,0),(3,"3001")])
+                # Prop (Tag 5) - Money tags 13-18
+                prop = encode_sproto([(13,1000),(14,1000)])
+                # General (Tag 1)
+                gen = encode_sproto([(0,"OfficialPlayer"),(1,0),(3,"3001")])
                 char_obj = encode_sproto([(0, random.randint(1,9999)), (1, gen), (2, attr), (5, prop), (6, visual)])
-                pkt = sproto_pack(encode_sproto([(0, 504)]) + encode_sproto([(0, char_obj)]))
-                conn.sendall(struct.pack(">H", len(pkt)) + pkt)
+                main_pkt = sproto_pack(encode_sproto([(0, 504)]) + encode_sproto([(0, char_obj)]))
+                conn.sendall(struct.pack(">H", len(main_pkt)) + main_pkt)
 
             elif msg_type == 218: # Heartbeat
                 pkg_h = encode_sproto([(1, session)])
@@ -142,7 +145,7 @@ server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT))
 server.listen(10)
-print(f"GAME SERVER {PORT} READY")
+print(f"GAME SERVER 9555 ON")
 while True:
     c, a = server.accept()
     threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
