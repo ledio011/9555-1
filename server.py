@@ -138,7 +138,7 @@ def client_handler(conn, addr):
             if msg_type == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8', 'ignore')
                 print(f"[LOGIN] Player {acc_id}")
-                resp = encode_sproto([(0, 2), (1, 12345)], fn=2)
+                resp = encode_sproto([(0, 2), (1, int(time.time()))], fn=2)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h+resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
@@ -177,37 +177,40 @@ def client_handler(conn, addr):
             elif msg_type == 105: # pick
                 char_info = characters.get(acc_id)
                 map_id = char_info.get('map', '101')
-                print(f"[PICK] Syncing {acc_id} -> {map_id}")
+                print(f"[PICK] Syncing {acc_id} -> Liberty City")
+                
+                # SINKRONIZIMI FINAL I RENDITJES
+                # 1. character_pick response (errno=3)
                 resp = encode_sproto([(0, 3)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
+                
+                # 2. Sync Packets
                 time.sleep(0.1)
-                send_push(conn, 614, encode_sproto([(0, int(time.time()))], fn=1))
-                send_push(conn, 519, encode_sproto([(0, []), (1, ""), (2, [])], fn=3))
-                send_push(conn, 611, encode_sproto([(0, [])], fn=1))
-                send_push(conn, 540, encode_sproto([(0, [])], fn=1))
-                send_push(conn, 555, encode_sproto([(0, [])], fn=1))
+                send_push(conn, 614, encode_sproto([(0, int(time.time()))], fn=1)) # common
+                send_push(conn, 519, encode_sproto([(0, []), (1, ""), (2, [])], fn=3)) # missions
+                send_push(conn, 611, encode_sproto([(0, [])], fn=1)) # items
+                send_push(conn, 540, encode_sproto([(0, [])], fn=1)) # skills
+                
+                # 3. Enter Map
                 send_push(conn, 503, encode_sproto([(0, map_id), (1, 1), (2, 1)], fn=3))
 
             elif msg_type == 100: # map_ready
+                print(f"[MAP_READY] Spawning player.")
                 char_info = characters.get(acc_id)
                 if char_info:
                     char_id, name, prof = char_info['id'], char_info['name'], char_info['prof']
                     
                     # Fix runtime structure: attribute(6), attribute_all(7)
+                    # attribute tags: max_hp:0, mov:13
                     attr_data = encode_sproto([(0, 1000), (13, 500)], fn=14)
                     runtime = encode_sproto([(6, attr_data), (7, attr_data)], fn=8)
                     
                     prop = encode_sproto([(13, 5000), (14, 5000), (15, 5000)], fn=19)
-                    
-                    # Fix attribute_other: hp(0), exp(1), level(2), combValue(3)
                     attr_aoi = encode_sproto([(0, 1000), (1, 1000), (2, 1), (3, 100)], fn=4)
-                    
                     gen = encode_sproto([(0, name), (1, prof), (4, 1)], fn=5)
                     pos = encode_sproto([(0, 1500), (1, 500), (2, 2000), (3, 0)], fn=4)
                     mov = encode_sproto([(0, pos), (1, pos)], fn=2)
-                    
-                    # Fix characterVisual: name(0), ModeId(1)
                     vis = encode_sproto([(0, name), (1, "100")], fn=2)
                     
                     # Character tags: id(0), general(1), attribute_other(2), property(5), visual(6), movement(7), runtime(13)
@@ -218,6 +221,7 @@ def client_handler(conn, addr):
 
             elif msg_type == 218: # heartbeat
                 req_time = body.get(0, 0)
+                # Correct response with body (Tag 0 and 1)
                 resp_body = encode_sproto([(0, req_time), (1, int(time.time()))], fn=2)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp_body); conn.sendall(struct.pack(">H", len(full)) + full)
@@ -231,6 +235,6 @@ server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT))
 server.listen(10)
-print(f"GAME SERVER READY ON {PORT} (FIXED TAGS)")
+print(f"GAME SERVER READY ON {PORT} (X-FIX MODE)")
 while True:
     c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
