@@ -2,26 +2,10 @@ import socket
 import struct
 import threading
 import random
-import json
 import os
 import time
 
 PORT = int(os.environ.get("PORT", 9555))
-CHAR_DB = "characters.json"
-
-def load_chars():
-    if os.path.exists(CHAR_DB):
-        try:
-            with open(CHAR_DB, "r") as f: return json.load(f)
-        except: return {}
-    return {}
-
-def save_chars(data):
-    try:
-        with open(CHAR_DB, "w") as f: json.dump(data, f, indent=4)
-    except: pass
-
-characters = load_chars()
 
 def sproto_pack(data):
     out = bytearray()
@@ -85,21 +69,22 @@ def encode_sproto(fields, fn=None):
     res += body
     return bytes(res)
 
-def decode_sproto(data):
-    if len(data) < 2: return {}
-    fn = struct.unpack("<H", data[:2])[0]
-    h_ptr, b_ptr, curr_tag = 2, 2 + fn*2, 0
-    fields = {}
+def decode_sproto(data, offset=0):
+    if len(data) < offset + 2: return {}
+    fn = struct.unpack("<H", data[offset:offset+2])[0]
+    h_ptr, b_ptr = offset + 2, offset + 2 + fn*2
+    fields, curr_tag = {}, -1
     for i in range(fn):
-        v = struct.unpack("<H", data[h_ptr + i*2:h_ptr + i*2+2])[0]
+        curr_tag += 1
+        v = struct.unpack("<H", data[h_ptr + i*2 : h_ptr + i*2 + 2])[0]
         if v == 0:
             if b_ptr + 4 <= len(data):
                 l = struct.unpack("<I", data[b_ptr:b_ptr+4])[0]
-                fields[curr_tag] = data[b_ptr+4:b_ptr+4+l]; b_ptr += 4 + l
+                fields[curr_tag] = data[b_ptr+4:b_ptr+4+l]
+                b_ptr += 4 + l
         elif v == 1: pass
         elif v & 1: curr_tag += (v >> 1)
         else: fields[curr_tag] = (v >> 1) - 1
-        curr_tag += 1
     return fields
 
 def client_handler(conn, addr):
@@ -114,64 +99,59 @@ def client_handler(conn, addr):
             while len(data) < size: data += conn.recv(size - len(data))
             raw = sproto_unpack(data)
             
-            header = decode_sproto(raw)
-            msg_type = header.get(0); session = header.get(1)
+            pkg = decode_sproto(raw, 0)
+            msg_type, session = pkg.get(0), pkg.get(1)
+            
             body_off = 2 + (struct.unpack("<H", raw[:2])[0] * 2)
-            body = decode_sproto(raw[body_off:])
+            body = decode_sproto(raw, body_off)
 
             if msg_type == 4: # Login
-                body_login = decode_sproto(raw[body_off:])
-                acc_id = body_login.get(1, b"").decode('utf-8', 'ignore')
-                print(f"[LOGIN] Account ID: {acc_id}")
+                acc_id = body.get(1, b"").decode('utf-8', 'ignore')
+                print(f"[LOGIN] Karakteri me Account ID: {acc_id} u lidh.")
                 resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "167"), (3, 1)], fn=4)
                 pkg_h = encode_sproto([(1, session)], fn=2)
-                conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h+resp))) + sproto_pack(pkg_h+resp))
+                full = sproto_pack(pkg_h+resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 103: # character_list
-                if acc_id not in characters:
-                    print(f"[LOG] No character for {acc_id}. Unity shows 'Create Role'.")
-                    resp = encode_sproto([(0, [])], fn=1)
-                else:
-                    print(f"[LOG] Karakteri u ngarkua AUTOMATIKISHT nga databaza per {acc_id}")
-                    char_data = bytes(characters[acc_id])
-                    resp = encode_sproto([(0, [char_data])], fn=1)
+                print(f"[LOG] Po krijoj nje karakter automatik per ID: {acc_id}")
                 
-                pkg_h = encode_sproto([(1, session)], fn=2)
-                full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
-
-            elif msg_type == 104: # character_create (Manual)
-                char_info = decode_sproto(body.get(0, b""))
-                name = char_info.get(0, b"").decode('utf-8', 'ignore')
-                prof = char_info.get(1, 0)
-                print(f"[LOG] Karakteri u krijua MANUALISHT nga perdoruesi: {name}")
+                # Konvertimi i acc_id ne integer per ServerId
+                try: char_id = int(acc_id)
+                except: char_id = 1001
                 
-                gen = encode_sproto([(0, name), (1, prof), (2, 1), (3, "3001")], fn=4)
+                # Ndertimi i nje karakteri "on-the-fly"
+                name = f"Player_{acc_id[-4:]}"
+                gen = encode_sproto([(0, name), (1, 0), (2, 1), (3, "3001")], fn=4)
                 attr_ov = encode_sproto([(0, 100), (1, 100), (4, 1), (5, 100)], fn=6)
                 vis = encode_sproto([(0, name), (1, "100")], fn=2)
-                char_ov = encode_sproto([(0, 1001), (1, gen), (2, attr_ov), (3, vis), (4, int(time.time()))], fn=6)
+                char_ov = encode_sproto([(0, char_id), (1, gen), (2, attr_ov), (3, vis), (4, int(time.time()))], fn=6)
                 
-                characters[acc_id] = list(char_ov); save_chars(characters)
-                resp = encode_sproto([(0, char_ov), (1, 0)], fn=2)
+                # Kthejme karakterin direkt te Unity
+                resp = encode_sproto([(0, [char_ov])], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2)
-                conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h+resp))) + sproto_pack(pkg_h+resp))
+                full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 105: # character_pick
                 resp = encode_sproto([(0, 1)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
                 
+                # Dergojme kerkese per enter_map direkt
                 map_req = encode_sproto([(0, "3001")], fn=1)
                 pkg_req = encode_sproto([(0, 503)], fn=2)
                 full_map = sproto_pack(pkg_req + map_req); conn.sendall(struct.pack(">H", len(full_map)) + full_map)
 
             elif msg_type == 100: # map_ready
-                print(f"[MAP] Spawning into 3D world for {acc_id}")
+                print(f"[MAP] Spawning automatic character for {acc_id}")
+                try: char_id = int(acc_id)
+                except: char_id = 1001
+                
                 prop = encode_sproto([(13, 1000), (14, 1000), (15, 1000), (16, 0), (17, 0), (18, 0)], fn=19)
                 attr = encode_sproto([(0, 1000), (1, 1000), (4, 1), (5, 100)], fn=6)
-                gen = encode_sproto([(0, "Hero"), (1, 0)], fn=3)
+                gen = encode_sproto([(0, f"P_{acc_id[-4:]}"), (1, 0)], fn=3)
                 pos = encode_sproto([(0, 1500), (1, 500), (2, 2000), (3, 0)], fn=4)
                 mov = encode_sproto([(0, pos), (1, pos)], fn=2)
-                char_data = encode_sproto([(0, 1001), (1, gen), (2, attr), (5, prop), (11, mov)], fn=12)
+                char_data = encode_sproto([(0, char_id), (1, gen), (2, attr), (5, prop), (11, mov)], fn=12)
                 main_req = encode_sproto([(0, char_data)], fn=1)
                 pkg_req = encode_sproto([(0, 504)], fn=2)
                 full_player = sproto_pack(pkg_req + main_req); conn.sendall(struct.pack(">H", len(full_player)) + full_player)
@@ -187,6 +167,6 @@ server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT))
 server.listen(10)
-print(f"GAME SERVER ACTIVE ON {PORT}")
+print(f"GAME SERVER READY ON {PORT} (NO-SAVE AUTO-SPAWN MODE)")
 while True:
     c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
