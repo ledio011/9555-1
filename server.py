@@ -173,34 +173,29 @@ def client_handler(conn, addr):
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 105: # character_pick
-                print(f"[PICK] Preparing game world for {acc_id}")
-                # Kthejme errno = 1 qe Unity te mos LeaveGame
-                resp = encode_sproto([(0, 3)], fn=1) 
+                print(f"[PICK] Forcing map entry for {acc_id}")
+                
+                # 1. Përgjigjja e kërkesës (errno=1 kthehet herë pas herë si sukses)
+                resp = encode_sproto([(0, 1)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
                 
-                # SINKRONIZIMI I DHUEMSHEM
-                # 1. Sync Common Data (614)
+                # 2. Sync Common Data (614)
                 common = encode_sproto([(0, int(time.time()))], fn=1)
                 send_push(conn, 614, common)
                 
-                # 2. Sync Missions (519) - Bosh per te mos bllokuar UI
-                missions = encode_sproto([(0, [])], fn=1)
-                send_push(conn, 519, missions)
-                
-                # 3. Enter Map (503)
+                # 3. Enter Map (Tag 503) - Duhet dërguar si kërkesë nga serveri
                 map_req = encode_sproto([(0, "3001"), (1, 1), (2, 1)], fn=3)
                 send_push(conn, 503, map_req)
 
             elif msg_type == 100: # map_ready
-                print(f"[MAP_READY] Spawning player {acc_id}")
+                print(f"[MAP_READY] Client ready. Spawning player.")
                 char_info = characters.get(acc_id)
                 if char_info:
                     char_id = char_info['id']
                     name = char_info['name']
                     prof = char_info['prof']
                     
-                    # Ndertimi i objekteve te detajuara
                     prop = encode_sproto([
                         (0, 5000), (1, 5000), (2, 5000), (3, 5000), (4, 5000), (5, 5000),
                         (13, 1000), (14, 1000), (15, 1000)
@@ -211,7 +206,6 @@ def client_handler(conn, addr):
                     mov = encode_sproto([(0, pos), (1, pos)], fn=2)
                     vis = encode_sproto([(0, name), (1, "100")], fn=2)
                     
-                    # main_player_create (Tag 504)
                     char_data = encode_sproto([
                         (0, char_id), (1, gen), (2, attr_aoi), (5, prop), (6, vis), (7, mov), (13, 0), (15, 2), (16, 0)
                     ], fn=17)
@@ -230,6 +224,6 @@ server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT))
 server.listen(10)
-print(f"GAME SERVER READY ON {PORT} (FIXED MAP ENTRY)")
+print(f"GAME SERVER READY ON {PORT} (FORCED MAP ENTRY)")
 while True:
     c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
