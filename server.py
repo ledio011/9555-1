@@ -135,11 +135,11 @@ def client_handler(conn, addr):
 
             elif msg_type == 103: # character_list
                 if acc_id in characters:
-                    print(f"[LOG] Character found for {acc_id}.")
-                    char_data = bytes(characters[acc_id]['data'])
-                    resp = encode_sproto([(0, [char_data])], fn=1)
+                    print(f"[LOG] Character found for {acc_id}. Sending character_overview list.")
+                    char_ov = bytes(characters[acc_id]['ov'])
+                    resp = encode_sproto([(0, [char_ov])], fn=1)
                 else:
-                    print(f"[LOG] New user {acc_id}. Sending empty list to trigger creation.")
+                    print(f"[LOG] New user {acc_id}. Triggering creation.")
                     resp = encode_sproto([(0, [])], fn=1)
                 
                 pkg_h = encode_sproto([(1, session)], fn=2)
@@ -155,35 +155,40 @@ def client_handler(conn, addr):
 
             elif msg_type == 104: # character_create
                 gen_raw = body.get(0, b"")
-                gen = decode_sproto(gen_raw)
-                name = gen.get(0, b"").decode('utf-8')
-                prof = gen.get(1, 0)
+                gen_data = decode_sproto(gen_raw)
+                name = gen_data.get(0, b"").decode('utf-8')
+                prof = gen_data.get(1, 0)
                 print(f"[CREATE] Name: {name}, Prof: {prof}")
                 
-                # Build character
                 try: char_id = int(acc_id[-9:])
                 except: char_id = random.randint(1000000, 9999999)
                 
-                char_gen = encode_sproto([(0, name), (1, prof), (2, 1), (3, "3001")], fn=4)
+                # character_overview tags: id(0), general(1), attribute_other(2), visual(3), createtime(4)
+                gen_ov = encode_sproto([(0, name), (1, prof), (2, 1), (3, "3001")], fn=4)
                 attr_ov = encode_sproto([(0, 100), (1, 100), (4, 1), (5, 100)], fn=6)
-                vis = encode_sproto([(0, name), (1, "100")], fn=2)
-                char_ov = encode_sproto([(0, char_id), (1, char_gen), (2, attr_ov), (3, vis), (4, int(time.time()))], fn=6)
+                vis_ov = encode_sproto([(0, name), (1, "100")], fn=2)
+                char_ov = encode_sproto([
+                    (0, char_id), 
+                    (1, gen_ov), 
+                    (2, attr_ov), 
+                    (3, vis_ov), 
+                    (4, int(time.time()))
+                ], fn=6)
                 
-                characters[acc_id] = {'id': char_id, 'data': list(char_ov), 'name': name, 'prof': prof}
+                characters[acc_id] = {'id': char_id, 'ov': list(char_ov), 'name': name, 'prof': prof}
                 save_chars(characters)
                 
-                # Sproto response: character(0), errno(1)
                 resp = encode_sproto([(0, char_ov), (1, 0)], fn=2)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 105: # character_pick
                 print(f"[PICK] Player picked character. Preparing map.")
-                resp = encode_sproto([(0, 1)], fn=1)
+                resp = encode_sproto([(0, 1)], fn=1) # errno 1 = avoid LeaveGame in NetManager.PickResponse
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
                 
-                # Sync basic data before map
+                # Sync basic data
                 common = encode_sproto([(0, int(time.time()))], fn=1)
                 pkg_c = encode_sproto([(0, 614)], fn=2)
                 full_c = sproto_pack(pkg_c + common); conn.sendall(struct.pack(">H", len(full_c)) + full_c)
@@ -205,7 +210,7 @@ def client_handler(conn, addr):
                     name = char_info['name']
                     prof = char_info['prof']
                     
-                    # ObjMainPlayer attributes
+                    # character tags: id(0), general(1), attribute_other(2), property(5), visual(6), movement(7)
                     prop = encode_sproto([
                         (0, 1000), (1, 1000), (2, 1000), # money
                         (13, 1000), (14, 1000), (15, 1000), (16, 0), (17, 0), (18, 0)
@@ -214,13 +219,15 @@ def client_handler(conn, addr):
                     gen = encode_sproto([(0, name), (1, prof)], fn=3)
                     pos = encode_sproto([(0, 1500), (1, 500), (2, 2000), (3, 0)], fn=4)
                     mov = encode_sproto([(0, pos), (1, pos)], fn=2)
+                    vis = encode_sproto([(0, name), (1, "100")], fn=2)
                     
                     char_spawn = encode_sproto([
                         (0, char_id), 
                         (1, gen), 
                         (2, attr), 
                         (5, prop), 
-                        (11, mov)
+                        (6, vis),
+                        (7, mov)
                     ], fn=12)
                     
                     # main_player_create (Tag 504)
@@ -239,6 +246,6 @@ server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT))
 server.listen(10)
-print(f"GAME SERVER READY ON {PORT} (PERSISTENT CREATION MODE)")
+print(f"GAME SERVER READY ON {PORT} (FIXED TAGS MODE)")
 while True:
     c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
