@@ -5,6 +5,7 @@ import random
 import json
 import os
 import time
+import traceback
 
 PORT = int(os.environ.get("PORT", 9555))
 CHAR_DB = "characters.json"
@@ -13,13 +14,16 @@ def load_chars():
     if os.path.exists(CHAR_DB):
         try:
             with open(CHAR_DB, "r") as f: return json.load(f)
-        except: return {}
+        except: 
+            print("[ERROR] Karrueshmëria e characters.json dështoi.")
+            return {}
     return {}
 
 def save_chars(data):
     try:
         with open(CHAR_DB, "w") as f: json.dump(data, f, indent=4)
-    except: pass
+    except Exception as e:
+        print(f"[ERROR] Ruajtja e characters.json dështoi: {e}")
 
 characters = load_chars()
 
@@ -109,12 +113,13 @@ def decode_sproto(data, offset=0):
     return fields
 
 def send_push(conn, tag, data):
+    print(f"[PUSH] Po dërgoj kërkesën: Tag {tag}")
     pkg_h = encode_sproto([(0, tag)], fn=2)
     full = sproto_pack(pkg_h + data)
     conn.sendall(struct.pack(">H", len(full)) + full)
 
 def client_handler(conn, addr):
-    print(f"[+] Game Connect: {addr}")
+    print(f"[+] Lidhje e re: {addr}")
     acc_id = "0"
     try:
         while True:
@@ -131,119 +136,137 @@ def client_handler(conn, addr):
             body_off = 2 + (struct.unpack("<H", raw[:2])[0] * 2)
             body = decode_sproto(raw, body_off)
 
+            print(f"[RECV] Tag {msg_type} (Session: {session}) | Madhësia: {size} bytes")
+
             if msg_type == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8', 'ignore')
-                print(f"[LOGIN] Player {acc_id}")
+                print(f"[LOGIN] Player {acc_id} tentoi login.")
                 resp = encode_sproto([(0, 2), (1, 12345)], fn=2)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h+resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 103: # character_list
                 if acc_id in characters:
+                    print(f"[CHAR] Po ngarkoj karakterin ekzistues per {acc_id}.")
                     char_ov = bytes(characters[acc_id]['ov'])
                     resp = encode_sproto([(0, [char_ov])], fn=1)
                 else:
+                    print(f"[CHAR] Nuk u gjet karakter per {acc_id}. Triggeroj krijimin.")
                     resp = encode_sproto([(0, [])], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 118: # request_random_name
-                resp = encode_sproto([(0, generate_random_name(0))], fn=1)
+                r_name = generate_random_name(0)
+                print(f"[RANDOM] Emri i gjeneruar: {r_name}")
+                resp = encode_sproto([(0, r_name)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 104: # character_create
-                gen_data = decode_sproto(body.get(0, b""))
-                name = gen_data.get(0, b"").decode('utf-8')
-                prof = gen_data.get(1, 0)
-                
-                try: char_id = int(acc_id[-9:])
-                except: char_id = random.randint(1000000, 9999999)
-                
-                map_id = "101" # Liberty City
-                
-                gen_ov = encode_sproto([(0, name), (1, prof), (3, map_id)], fn=4)
-                attr_ov = encode_sproto([(0, 1), (1, 100)], fn=2) 
-                vis_ov = encode_sproto([(0, "100"), (1, name)], fn=2)
-                char_ov = encode_sproto([
-                    (0, char_id), (1, gen_ov), (2, attr_ov), (3, vis_ov), (4, int(time.time()))
-                ], fn=5)
-                
-                characters[acc_id] = {'id': char_id, 'ov': list(char_ov), 'name': name, 'prof': prof, 'map': map_id}
-                save_chars(characters)
-                
-                resp = encode_sproto([(0, char_ov), (1, 0)], fn=2)
-                pkg_h = encode_sproto([(1, session)], fn=2)
-                full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
+                try:
+                    gen_data = decode_sproto(body.get(0, b""))
+                    name = gen_data.get(0, b"").decode('utf-8')
+                    prof = gen_data.get(1, 0)
+                    print(f"[CREATE] Duke krijuar karakter: {name} (Prof: {prof})")
+                    
+                    try: char_id = int(acc_id[-9:])
+                    except: char_id = random.randint(1000000, 9999999)
+                    
+                    map_id = "101" # Liberty City
+                    
+                    gen_ov = encode_sproto([(0, name), (1, prof), (3, map_id)], fn=4)
+                    attr_ov = encode_sproto([(0, 1), (1, 100)], fn=2) 
+                    vis_ov = encode_sproto([(0, "100"), (1, name)], fn=2)
+                    char_ov = encode_sproto([
+                        (0, char_id), (1, gen_ov), (2, attr_ov), (3, vis_ov), (4, int(time.time()))
+                    ], fn=5)
+                    
+                    characters[acc_id] = {'id': char_id, 'ov': list(char_ov), 'name': name, 'prof': prof, 'map': map_id}
+                    save_chars(characters)
+                    
+                    resp = encode_sproto([(0, char_ov), (1, 0)], fn=2)
+                    pkg_h = encode_sproto([(1, session)], fn=2)
+                    full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
+                except Exception as e:
+                    print(f"[CRITICAL ERROR] Krijimi i karakterit deshtoi: {e}")
+                    traceback.print_exc()
 
             elif msg_type == 105: # character_pick
-                char_info = characters.get(acc_id)
-                map_id = char_info.get('map', '101')
-                print(f"[PICK] Syncing for {acc_id} -> Liberty City")
+                print(f"[PICK] Filloi sinkronizimi per {acc_id} drejt Liberty City.")
                 
-                # SINKRONIZIMI I DHUEMSHEM
-                # 1. character_pick response (errno = 3 for bypass)
+                # Përgjigjja e character_pick
                 resp = encode_sproto([(0, 3)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
                 
-                # 2. Sync Common Data (614)
+                time.sleep(0.1)
+                # 1. Sync Common Data (614)
                 common = encode_sproto([(0, int(time.time()))], fn=1)
                 send_push(conn, 614, common)
 
-                # 3. Sync Missions (519) - UNITY E KERKON KETE QE TE MOS NGECE
+                # 2. Sync Missions (519)
                 missions = encode_sproto([(0, []), (1, ""), (2, [])], fn=3)
                 send_push(conn, 519, missions)
+
+                # 3. Sync Item Pack (611)
+                items = encode_sproto([(0, [])], fn=1)
+                send_push(conn, 611, items)
                 
-                # 4. Enter Map (Tag 503)
-                map_req = encode_sproto([(0, map_id), (1, 1), (2, 1)], fn=3)
+                # 4. Enter Map (503) - Liberty City
+                map_req = encode_sproto([(0, "101"), (1, 1), (2, 1)], fn=3)
                 send_push(conn, 503, map_req)
 
             elif msg_type == 100: # map_ready
-                print(f"[MAP_READY] Client ready. Spawning player.")
+                print(f"[MAP_READY] Harta u ngarkua ne Unity. Po krijoj lojtarin.")
                 char_info = characters.get(acc_id)
                 if char_info:
                     char_id = char_info['id']
                     name = char_info['name']
                     prof = char_info['prof']
                     
-                    # runtime_agent fix tags: attribute(6), attribute_all(7)
-                    # attribute tags: hp:0, mov:13
+                    # runtime_agent data
                     attr_data = encode_sproto([(0, 1000), (13, 500)], fn=14)
                     runtime = encode_sproto([(6, attr_data), (7, attr_data)], fn=8)
                     
-                    # property tags: money: 13, 14, 15
+                    # property data
                     prop = encode_sproto([(13, 5000), (14, 5000), (15, 5000)], fn=19)
                     
-                    # attribute_other tags: hp:0, exp:1, level:2, combValue:3
-                    attr_aoi = encode_sproto([(0, 1000), (1, 0), (2, 1), (3, 100)], fn=4)
+                    # attribute_other data
+                    attr_aoi = encode_sproto([(0, 1000), (1, 1000), (2, 1), (3, 100)], fn=4)
                     
-                    # general tags: name:0, profession:1, tutorial:4
+                    # general data
                     gen = encode_sproto([(0, name), (1, prof), (4, 1)], fn=5)
                     
+                    # position data
                     pos = encode_sproto([(0, 1500), (1, 500), (2, 2000), (3, 0)], fn=4)
                     mov = encode_sproto([(0, pos), (1, pos)], fn=2)
                     vis = encode_sproto([(0, "100"), (1, name)], fn=2)
                     
-                    # character tags: id(0), general(1), attribute_other(2), property(5), visual(6), movement(7), runtime(13), download(15)
-                    char_data = encode_sproto([
+                    # main_player_create (Tag 504)
+                    char_spawn = encode_sproto([
                         (0, char_id), (1, gen), (2, attr_aoi), (5, prop), (6, vis), (7, mov), (13, runtime), (15, 2)
                     ], fn=17)
                     
-                    main_push = encode_sproto([(0, char_data)], fn=1)
+                    main_push = encode_sproto([(0, char_spawn)], fn=1)
                     send_push(conn, 504, main_push)
+                else:
+                    print(f"[ERROR] Karakteri nuk u gjet per {acc_id} ne momentin e spawn.")
 
             elif msg_type == 218: # heartbeat
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h); conn.sendall(struct.pack(">H", len(full)) + full)
 
-    except Exception as e: print(f"Game Error: {e}")
+    except Exception as e: 
+        print(f"[CRITICAL ERROR] Error ne handler: {e}")
+        traceback.print_exc()
     finally: conn.close()
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT))
 server.listen(10)
-print(f"GAME SERVER READY ON {PORT} (RESTORED)")
+print(f"GAME SERVER READY ON {PORT} (VERBOSE LOG MODE)")
 while True:
     c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
+
