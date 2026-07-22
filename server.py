@@ -153,7 +153,8 @@ def client_handler(conn, addr):
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 104: # character_create
-                gen_data = decode_sproto(body.get(0, b""))
+                gen_raw = body.get(0, b"")
+                gen_data = decode_sproto(gen_raw)
                 name = gen_data.get(0, b"").decode('utf-8')
                 prof = gen_data.get(1, 0)
                 
@@ -163,11 +164,11 @@ def client_handler(conn, addr):
                 map_id = "101" # Liberty City
                 
                 gen_ov = encode_sproto([(0, name), (1, prof), (3, map_id)], fn=4)
-                attr_ov = encode_sproto([(0, 1), (1, 100)], fn=2)
+                attr_ov = encode_sproto([(0, 1), (1, 100)], fn=2) 
                 vis_ov = encode_sproto([(0, "100"), (1, name)], fn=2)
                 char_ov = encode_sproto([
                     (0, char_id), (1, gen_ov), (2, attr_ov), (3, vis_ov), (4, int(time.time()))
-                ], fn=6)
+                ], fn=5)
                 
                 characters[acc_id] = {'id': char_id, 'ov': list(char_ov), 'name': name, 'prof': prof, 'map': map_id}
                 save_chars(characters)
@@ -179,33 +180,43 @@ def client_handler(conn, addr):
             elif msg_type == 105: # character_pick
                 char_info = characters.get(acc_id)
                 map_id = char_info.get('map', '101')
-                print(f"[PICK] Syncing for {acc_id} -> Liberty City")
+                print(f"[PICK] CRITICAL SYNC for {acc_id} -> Liberty City")
                 
+                # SINKRONIZIMI I DHUEMSHEM (Renditja eshte celësi)
+                # 1. Sync Common Data (614)
+                common = encode_sproto([(0, int(time.time()))], fn=1)
+                send_push(conn, 614, common)
+                time.sleep(0.05)
+
+                # 2. Sync Missions (519) - UNITY E KERKON KETE QE TE MOS NGECE
+                missions = encode_sproto([(0, []), (1, ""), (2, [])], fn=3)
+                send_push(conn, 519, missions)
+                time.sleep(0.05)
+                
+                # 3. character_pick response
                 resp = encode_sproto([(0, 3)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
+                time.sleep(0.05)
                 
-                common = encode_sproto([(0, int(time.time()))], fn=1)
-                send_push(conn, 614, common)
-
-                missions = encode_sproto([(0, []), (1, ""), (2, [])], fn=3)
-                send_push(conn, 519, missions)
-                
+                # 4. Enter Map (503)
                 map_req = encode_sproto([(0, map_id), (1, 1), (2, 1)], fn=3)
                 send_push(conn, 503, map_req)
 
             elif msg_type == 100: # map_ready
-                print(f"[MAP_READY] Spawning player.")
+                print(f"[MAP_READY] Client ready. Spawning player.")
                 char_info = characters.get(acc_id)
                 if char_info:
                     char_id = char_info['id']
                     name = char_info['name']
                     prof = char_info['prof']
                     
+                    # runtime_agent fix tags: attribute(6), attribute_all(7)
                     attr_data = encode_sproto([(0, 1000), (13, 500)], fn=14)
                     runtime = encode_sproto([(6, attr_data), (7, attr_data)], fn=8)
+                    
                     prop = encode_sproto([(13, 5000), (14, 5000), (15, 5000)], fn=19)
-                    attr_aoi = encode_sproto([(0, 1000), (1, 1000), (2, 1), (3, 100)], fn=4)
+                    attr_aoi = encode_sproto([(0, 1000), (1, 0), (2, 1), (3, 100)], fn=19)
                     gen = encode_sproto([(0, name), (1, prof), (4, 1)], fn=5)
                     pos = encode_sproto([(0, 1500), (1, 500), (2, 2000), (3, 0)], fn=4)
                     mov = encode_sproto([(0, pos), (1, pos)], fn=2)
@@ -213,7 +224,7 @@ def client_handler(conn, addr):
                     
                     char_data = encode_sproto([
                         (0, char_id), (1, gen), (2, attr_aoi), (5, prop), (6, vis), (7, mov), (13, runtime), (15, 2)
-                    ], fn=16)
+                    ], fn=17)
                     
                     main_push = encode_sproto([(0, char_data)], fn=1)
                     send_push(conn, 504, main_push)
@@ -229,6 +240,6 @@ server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT))
 server.listen(10)
-print(f"GAME SERVER READY ON {PORT} (RESTORED)")
+print(f"GAME SERVER READY ON {PORT} (LIBERTY CITY SYNC)")
 while True:
     c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
