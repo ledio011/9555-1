@@ -164,9 +164,11 @@ def client_handler(conn, addr):
                 map_id = "101"
                 
                 gen_ov = encode_sproto([(0, name), (1, prof), (3, map_id)], fn=4)
-                attr_ov = encode_sproto([(2, 1), (3, 100)], fn=4) 
+                attr_ov = encode_sproto([(0, 1), (1, 100)], fn=2) # level:0, combValue:1
                 vis_ov = encode_sproto([(0, name), (1, "100")], fn=2)
-                char_ov = encode_sproto([(0, char_id), (1, gen_ov), (2, attr_ov), (3, vis_ov), (4, int(time.time()))], fn=6)
+                char_ov = encode_sproto([
+                    (0, char_id), (1, gen_ov), (2, attr_ov), (3, vis_ov), (4, int(time.time()))
+                ], fn=6)
                 
                 characters[acc_id] = {'id': char_id, 'ov': list(char_ov), 'name': name, 'prof': prof, 'map': map_id}
                 save_chars(characters)
@@ -178,27 +180,27 @@ def client_handler(conn, addr):
             elif msg_type == 105: # character_pick
                 char_info = characters.get(acc_id)
                 map_id = char_info.get('map', '101')
-                print(f"[PICK] Entering Liberty City ({map_id}) for {acc_id}")
+                print(f"[PICK] Syncing for {acc_id} -> Liberty City")
                 
-                # 1. Sync Common Data (Must be first)
+                # 1. Sync Common Data (614)
                 common = encode_sproto([(0, int(time.time()))], fn=1)
                 send_push(conn, 614, common)
 
-                # 2. Sync Missions (Empty)
+                # 2. Sync Missions (519) - Critical for unblocking UI
                 missions = encode_sproto([(0, [])], fn=1)
                 send_push(conn, 519, missions)
                 
-                # 3. character_pick response (errno = 3 for bypass)
+                # 3. character_pick response
                 resp = encode_sproto([(0, 3)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
                 
-                # 4. Enter Map (Tag 503)
+                # 4. Enter Map (Tag 503) - Liberty City (101)
                 map_req = encode_sproto([(0, map_id), (1, 1), (2, 1)], fn=3)
                 send_push(conn, 503, map_req)
 
             elif msg_type == 100: # map_ready
-                print(f"[SPAWN] Spawning for {acc_id}")
+                print(f"[MAP_READY] Client ready. Spawning player.")
                 char_info = characters.get(acc_id)
                 if char_info:
                     char_id = char_info['id']
@@ -210,8 +212,8 @@ def client_handler(conn, addr):
                     attr_data = encode_sproto([(0, 1000), (13, 500)], fn=14)
                     runtime = encode_sproto([(6, attr_data), (7, attr_data)], fn=8)
                     
-                    # property tags: money1..6 are 0..5
-                    prop = encode_sproto([(0, 5000), (1, 5000), (2, 5000)], fn=6)
+                    # property tags: money1..6 are 13..18
+                    prop = encode_sproto([(13, 5000), (14, 5000), (15, 5000)], fn=19)
                     
                     # attribute_other tags: hp:0, exp:1, level:2, combValue:3
                     attr_aoi = encode_sproto([(0, 1000), (1, 1000), (2, 1), (3, 100)], fn=4)
@@ -224,7 +226,7 @@ def client_handler(conn, addr):
                     vis = encode_sproto([(0, name), (1, "100")], fn=2)
                     
                     # character tags: id(0), general(1), attribute_other(2), property(5), visual(6), movement(7), runtime(13), download(15)
-                    char_data = encode_sproto([
+                    char_spawn = encode_sproto([
                         (0, char_id), (1, gen), (2, attr_aoi), (5, prop), (6, vis), (7, mov), (13, runtime), (15, 2)
                     ], fn=16)
                     
@@ -242,6 +244,6 @@ server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT))
 server.listen(10)
-print(f"GAME SERVER READY ON {PORT} (LIBERTY CITY SYNC)")
+print(f"GAME SERVER READY ON {PORT} (LIBERTY CITY FIX)")
 while True:
     c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
