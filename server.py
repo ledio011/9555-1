@@ -118,7 +118,7 @@ def send_push(conn, tag, data):
     conn.sendall(struct.pack(">H", len(full)) + full)
 
 def client_handler(conn, addr):
-    print(f"[+] Game Connect: {addr}")
+    print(f"[+] Lidhje: {addr}")
     acc_id = "0"
     try:
         while True:
@@ -146,7 +146,6 @@ def client_handler(conn, addr):
                 if acc_id in characters:
                     char_ov = bytes(characters[acc_id]['ov'])
                     char_id = characters[acc_id]['id']
-                    # Sproto Map format: [ (key, value_bytes) ]
                     resp = encode_sproto([(0, [(char_id, char_ov)])], fn=1)
                 else:
                     resp = encode_sproto([(0, [])], fn=1)
@@ -158,7 +157,7 @@ def client_handler(conn, addr):
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
-            elif msg_type == 104: # character_create
+            elif msg_type == 104: # create
                 gen_data = decode_sproto(body.get(0, b""))
                 name = gen_data.get(0, b"").decode('utf-8')
                 prof = gen_data.get(1, 0)
@@ -167,7 +166,7 @@ def client_handler(conn, addr):
                 map_id = "101"
                 gen_ov = encode_sproto([(0, name), (1, prof), (3, map_id)], fn=4)
                 attr_ov = encode_sproto([(0, 1), (1, 100)], fn=2) 
-                vis_ov = encode_sproto([(0, "100"), (1, name)], fn=2)
+                vis_ov = encode_sproto([(0, name), (1, "100")], fn=2)
                 char_ov = encode_sproto([(0, char_id), (1, gen_ov), (2, attr_ov), (3, vis_ov), (4, int(time.time()))], fn=5)
                 characters[acc_id] = {'id': char_id, 'ov': list(char_ov), 'name': name, 'prof': prof, 'map': map_id}
                 save_chars(characters)
@@ -175,53 +174,46 @@ def client_handler(conn, addr):
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
-            elif msg_type == 105: # character_pick
+            elif msg_type == 105: # pick
                 char_info = characters.get(acc_id)
                 map_id = char_info.get('map', '101')
-                print(f"[PICK] Syncing for {acc_id} -> Liberty City")
-                
-                # Step 1: Pick Response (errno=3 for safety)
+                print(f"[PICK] Syncing {acc_id} -> {map_id}")
                 resp = encode_sproto([(0, 3)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
-                
-                # Step 2: MANDATORY SYNC PACKETS
                 time.sleep(0.1)
-                send_push(conn, 614, encode_sproto([(0, int(time.time()))], fn=1)) # common_data
-                send_push(conn, 519, encode_sproto([(0, []), (1, ""), (2, [])], fn=3)) # missions
-                send_push(conn, 611, encode_sproto([(0, [])], fn=1)) # item_pack
-                send_push(conn, 540, encode_sproto([(0, [])], fn=1)) # skill_info
-                send_push(conn, 592, encode_sproto([(0, [])], fn=1)) # backpack
-                send_push(conn, 604, encode_sproto([(0, [])], fn=1)) # badgepack
-                send_push(conn, 555, encode_sproto([(0, [])], fn=1)) # copyscenes
-
-                # Step 3: Enter Map (101)
-                map_req = encode_sproto([(0, map_id), (1, 1), (2, 1)], fn=3)
-                send_push(conn, 503, map_req)
+                send_push(conn, 614, encode_sproto([(0, int(time.time()))], fn=1))
+                send_push(conn, 519, encode_sproto([(0, []), (1, ""), (2, [])], fn=3))
+                send_push(conn, 611, encode_sproto([(0, [])], fn=1))
+                send_push(conn, 540, encode_sproto([(0, [])], fn=1))
+                send_push(conn, 555, encode_sproto([(0, [])], fn=1))
+                send_push(conn, 503, encode_sproto([(0, map_id), (1, 1), (2, 1)], fn=3))
 
             elif msg_type == 100: # map_ready
-                print(f"[MAP_READY] Spawning player.")
                 char_info = characters.get(acc_id)
                 if char_info:
                     char_id, name, prof = char_info['id'], char_info['name'], char_info['prof']
                     
-                    # attribute tags: max_hp:0, mov:13
+                    # Fix runtime structure: attribute(6), attribute_all(7)
                     attr_data = encode_sproto([(0, 1000), (13, 500)], fn=14)
-                    # runtime_agent tags: attribute:6, attribute_all:7
                     runtime = encode_sproto([(6, attr_data), (7, attr_data)], fn=8)
                     
                     prop = encode_sproto([(13, 5000), (14, 5000), (15, 5000)], fn=19)
+                    
+                    # Fix attribute_other: hp(0), exp(1), level(2), combValue(3)
                     attr_aoi = encode_sproto([(0, 1000), (1, 1000), (2, 1), (3, 100)], fn=4)
+                    
                     gen = encode_sproto([(0, name), (1, prof), (4, 1)], fn=5)
                     pos = encode_sproto([(0, 1500), (1, 500), (2, 2000), (3, 0)], fn=4)
                     mov = encode_sproto([(0, pos), (1, pos)], fn=2)
-                    vis = encode_sproto([(0, "100"), (1, name)], fn=2)
                     
-                    # character tags: id(0), general(1), attribute_other(2), property(5), visual(6), movement(7), runtime(13), download(15)
+                    # Fix characterVisual: name(0), ModeId(1)
+                    vis = encode_sproto([(0, name), (1, "100")], fn=2)
+                    
+                    # Character tags: id(0), general(1), attribute_other(2), property(5), visual(6), movement(7), runtime(13)
                     char_data = encode_sproto([
                         (0, char_id), (1, gen), (2, attr_aoi), (5, prop), (6, vis), (7, mov), (13, runtime), (15, 2)
-                    ], fn=17)
-                    
+                    ], fn=16)
                     send_push(conn, 504, encode_sproto([(0, char_data)], fn=1))
 
             elif msg_type == 218: # heartbeat
@@ -239,6 +231,6 @@ server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT))
 server.listen(10)
-print(f"GAME SERVER READY ON {PORT} (DEEP SYNC MODE)")
+print(f"GAME SERVER READY ON {PORT} (FIXED TAGS)")
 while True:
     c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
