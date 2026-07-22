@@ -18,7 +18,6 @@ MAPS = {
     "105": "Metropolis",
     "11":  "Gotham City",
     "108": "Villa Area",
-    "103": "Tutorial",
 }
 
 def load_chars():
@@ -175,7 +174,6 @@ def client_handler(conn, addr):
                 # New player start in Liberty City (101)
                 map_id = "101"
                 
-                # character_overview tags: id(0), general(1), attribute_other(2), visual(3), createtime(4)
                 gen_ov = encode_sproto([(0, name), (1, prof), (2, 1), (3, map_id)], fn=4)
                 attr_ov = encode_sproto([(2, 1)], fn=3) # Level 1
                 vis_ov = encode_sproto([(0, name), (1, "100")], fn=2)
@@ -195,17 +193,16 @@ def client_handler(conn, addr):
                 map_id = char_info.get('map', '101')
                 print(f"[PICK] Entering {MAPS.get(map_id, 'Unknown')} ({map_id})")
                 
+                # 1. character_pick response (errno = 3 for safety)
                 resp = encode_sproto([(0, 3)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
                 
-                # Sync logic
+                # 2. Sync Common Data
                 common = encode_sproto([(0, int(time.time()))], fn=1)
                 send_push(conn, 614, common)
                 
-                missions = encode_sproto([(0, [])], fn=1)
-                send_push(conn, 519, missions)
-                
+                # 3. Enter Map (Tag 503)
                 map_req = encode_sproto([(0, map_id), (1, 1), (2, 1)], fn=3)
                 send_push(conn, 503, map_req)
 
@@ -217,20 +214,25 @@ def client_handler(conn, addr):
                     name = char_info['name']
                     prof = char_info['prof']
                     
-                    # Full character spawn data (Tag 504)
-                    prop = encode_sproto([(0, 1000), (1, 1000), (2, 1000)], fn=20)
-                    attr_aoi = encode_sproto([(0, 1000), (1, 1000), (2, 1)], fn=6)
-                    gen = encode_sproto([(0, name), (1, prof)], fn=3)
-                    pos = encode_sproto([(0, 0), (1, 0), (2, 0), (3, 0)], fn=4) # Spawn at (0,0,0) or BirthPos
+                    # runtime_agent tags: attribute: 6, attribute_all: 7
+                    # attribute tags: max_hp: 0, mov (speed): 13
+                    attr_data = encode_sproto([(0, 1000), (13, 500)], fn=14)
+                    runtime = encode_sproto([(6, attr_data), (7, attr_data)], fn=8)
+                    
+                    # property tags: money1..6 are 0..5
+                    prop = encode_sproto([(0, 5000), (1, 5000), (2, 5000)], fn=6)
+                    
+                    # attribute_other tags: hp:0, exp:1, level:2, combValue:3
+                    attr_aoi = encode_sproto([(0, 1000), (1, 1000), (2, 1), (3, 100)], fn=4)
+                    
+                    # general tags: name:0, profession:1, tutorial:4
+                    gen = encode_sproto([(0, name), (1, prof), (4, 1)], fn=5)
+                    
+                    pos = encode_sproto([(0, 1500), (1, 500), (2, 2000), (3, 0)], fn=4)
                     mov = encode_sproto([(0, pos), (1, pos)], fn=2)
                     vis = encode_sproto([(0, name), (1, "100")], fn=2)
                     
-                    # runtime tags: 6: attribute, 7: attribute_all
-                    attr_data = encode_sproto([(0, 1000), (13, 500)], fn=18)
-                    runtime = encode_sproto([(0, attr_data), (1, attr_data)], fn=2) # Using fn=2 for tags 0,1 inside runtime? No, tags 6,7
-                    runtime = struct.pack("<H", 2) + struct.pack("<HH", 0, 0) # Manual object list? No.
-                    
-                    # Let's try simpler character data
+                    # character tags: id(0), general(1), attribute_other(2), property(5), visual(6), movement(7), runtime(13), download(15)
                     char_spawn = encode_sproto([
                         (0, char_id), (1, gen), (2, attr_aoi), (5, prop), (6, vis), (7, mov), (13, runtime), (15, 2)
                     ], fn=16)
@@ -249,6 +251,6 @@ server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT))
 server.listen(10)
-print(f"GAME SERVER READY ON {PORT} (LIBERTY CITY MODE)")
+print(f"GAME SERVER READY ON {PORT} (FINAL SYNC MODE)")
 while True:
     c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
