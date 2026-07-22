@@ -9,17 +9,6 @@ import time
 PORT = int(os.environ.get("PORT", 9555))
 CHAR_DB = "characters.json"
 
-# Map ID Mapping
-MAPS = {
-    "101": "Liberty City",
-    "107": "Chinatown",
-    "102": "Slum District",
-    "104": "Vegas",
-    "105": "Metropolis",
-    "11":  "Gotham City",
-    "108": "Villa Area",
-}
-
 def load_chars():
     if os.path.exists(CHAR_DB):
         try:
@@ -171,17 +160,16 @@ def client_handler(conn, addr):
                 try: char_id = int(acc_id[-9:])
                 except: char_id = random.randint(1000000, 9999999)
                 
-                # New player start in Liberty City (101)
-                map_id = "101"
-                
-                gen_ov = encode_sproto([(0, name), (1, prof), (2, 1), (3, map_id)], fn=4)
-                attr_ov = encode_sproto([(2, 1)], fn=3) # Level 1
+                # character_overview tags: id(0), general(1), attribute_other(2), visual(3), createtime(4)
+                gen_ov = encode_sproto([(0, name), (1, prof), (3, "101")], fn=4)
+                # attribute_overview tags: level: 2, combValue: 3
+                attr_ov = encode_sproto([(2, 1), (3, 100)], fn=4) 
                 vis_ov = encode_sproto([(0, name), (1, "100")], fn=2)
                 char_ov = encode_sproto([
                     (0, char_id), (1, gen_ov), (2, attr_ov), (3, vis_ov), (4, int(time.time()))
                 ], fn=6)
                 
-                characters[acc_id] = {'id': char_id, 'ov': list(char_ov), 'name': name, 'prof': prof, 'map': map_id}
+                characters[acc_id] = {'id': char_id, 'ov': list(char_ov), 'name': name, 'prof': prof}
                 save_chars(characters)
                 
                 resp = encode_sproto([(0, char_ov), (1, 0)], fn=2)
@@ -189,25 +177,27 @@ def client_handler(conn, addr):
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 105: # character_pick
-                char_info = characters.get(acc_id)
-                map_id = char_info.get('map', '101')
-                print(f"[PICK] Entering {MAPS.get(map_id, 'Unknown')} ({map_id})")
+                print(f"[PICK] Syncing for {acc_id}")
                 
-                # 1. character_pick response (errno = 3 for safety)
+                # 1. Sync Common Data (614)
+                common = encode_sproto([(0, int(time.time()))], fn=1)
+                send_push(conn, 614, common)
+
+                # 2. Sync Missions (519) - Critical for unblocking UI
+                missions = encode_sproto([(0, [])], fn=1)
+                send_push(conn, 519, missions)
+                
+                # 3. character_pick response
                 resp = encode_sproto([(0, 3)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
                 
-                # 2. Sync Common Data
-                common = encode_sproto([(0, int(time.time()))], fn=1)
-                send_push(conn, 614, common)
-                
-                # 3. Enter Map (Tag 503)
-                map_req = encode_sproto([(0, map_id), (1, 1), (2, 1)], fn=3)
+                # 4. Enter Map (Tag 503) - Liberty City (101)
+                map_req = encode_sproto([(0, "101"), (1, 1), (2, 1)], fn=3)
                 send_push(conn, 503, map_req)
 
             elif msg_type == 100: # map_ready
-                print(f"[MAP_READY] Spawning player.")
+                print(f"[MAP_READY] Client loaded map. Spawning player.")
                 char_info = characters.get(acc_id)
                 if char_info:
                     char_id = char_info['id']
@@ -232,12 +222,12 @@ def client_handler(conn, addr):
                     mov = encode_sproto([(0, pos), (1, pos)], fn=2)
                     vis = encode_sproto([(0, name), (1, "100")], fn=2)
                     
-                    # character tags: id(0), general(1), attribute_other(2), property(5), visual(6), movement(7), runtime(13), download(15)
-                    char_spawn = encode_sproto([
+                    # main_player_create (Tag 504)
+                    char_data = encode_sproto([
                         (0, char_id), (1, gen), (2, attr_aoi), (5, prop), (6, vis), (7, mov), (13, runtime), (15, 2)
                     ], fn=16)
                     
-                    main_push = encode_sproto([(0, char_spawn)], fn=1)
+                    main_push = encode_sproto([(0, char_data)], fn=1)
                     send_push(conn, 504, main_push)
 
             elif msg_type == 218: # heartbeat
@@ -251,6 +241,6 @@ server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT))
 server.listen(10)
-print(f"GAME SERVER READY ON {PORT} (FINAL SYNC MODE)")
+print(f"GAME SERVER READY ON {PORT} (LIBERTY CITY MODE)")
 while True:
     c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
