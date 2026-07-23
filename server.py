@@ -24,11 +24,6 @@ def save_chars(data):
 
 characters = load_chars()
 
-def generate_random_name(gender_type):
-    first_names = ["Shadow", "Storm", "Frost", "Iron", "Viper", "Ghost", "Blaze", "Neon", "Rogue", "Drake"]
-    last_names = ["Wolf", "Hunter", "King", "Ghost", "Ninja", "Warrior", "Legend", "X", "Ace", "Blade"]
-    return random.choice(first_names) + "_" + random.choice(last_names) + str(random.randint(100, 999))
-
 def sproto_pack(data):
     out = bytearray()
     for i in range(0, len(data), 8):
@@ -118,7 +113,7 @@ def send_push(conn, tag, data):
     conn.sendall(struct.pack(">H", len(full)) + full)
 
 def client_handler(conn, addr):
-    print(f"[+] Game Lidhje: {addr}")
+    print(f"[+] Game Connect: {addr}")
     acc_id = "0"
     try:
         while True:
@@ -149,17 +144,11 @@ def client_handler(conn, addr):
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
-            elif msg_type == 118: # random_name
-                resp = encode_sproto([(0, generate_random_name(0))], fn=1)
-                pkg_h = encode_sproto([(1, session)], fn=2)
-                full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
-
             elif msg_type == 104: # create
                 gen_data = decode_sproto(body.get(0, b""))
                 name = gen_data.get(0, b"").decode('utf-8')
                 prof = gen_data.get(1, 0)
-                try: char_id = int(acc_id[-9:])
-                except: char_id = 1001
+                char_id = random.randint(1000000, 9999999)
                 map_id = "101"
                 gen_ov = encode_sproto([(0, name), (1, prof), (3, map_id)], fn=4)
                 attr_ov = encode_sproto([(0, 1), (1, 100)], fn=2) 
@@ -174,24 +163,25 @@ def client_handler(conn, addr):
             elif msg_type == 105: # pick
                 char_info = characters.get(acc_id)
                 map_id = char_info.get('map', '101')
-                print(f"[PICK] CRITICAL Handshake for {acc_id}")
+                print(f"[PICK] Atomic Handshake for {acc_id}")
                 
-                # Step 1: Përgjigjja e kërkesës (errno=3)
+                # 1. character_pick response
                 resp = encode_sproto([(0, 3)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
                 
-                # Step 2: Dërgimi i të dhënave të lojtarit PËRPARA urdhrit të hartës
-                # Kjo bëhet sepse enter_map fik marrësin e rrjetit në Unity
+                # 2. Sequential Data Load (UNITY CONTROLS)
                 time.sleep(0.1)
-                send_push(conn, 614, encode_sproto([(0, int(time.time()))], fn=1)) # common
+                send_push(conn, 614, encode_sproto([(0, int(time.time()))], fn=1)) # time
                 send_push(conn, 519, encode_sproto([(0, []), (1, ""), (2, [])], fn=3)) # missions
                 send_push(conn, 611, encode_sproto([(0, [])], fn=1)) # items
                 send_push(conn, 540, encode_sproto([(0, [])], fn=1)) # skills
                 send_push(conn, 592, encode_sproto([(0, [])], fn=1)) # backpack
-                send_push(conn, 555, encode_sproto([(0, [])], fn=1)) # copyscenes
+                
+                # 3. Enter Map (503)
+                send_push(conn, 503, encode_sproto([(0, map_id), (1, 1), (2, 1)], fn=3))
 
-                # Karakteri (Tag 504)
+                # 4. Immediate Player Entity (504) - JETIKE PER INITIALIZATION
                 char_id, name, prof = char_info['id'], char_info['name'], char_info['prof']
                 attr_data = encode_sproto([(0, 1000), (13, 500)], fn=14)
                 runtime = encode_sproto([(6, attr_data), (7, attr_data)], fn=8)
@@ -204,18 +194,8 @@ def client_handler(conn, addr):
                 char_data = encode_sproto([(0, char_id), (1, gen), (2, attr_aoi), (5, prop), (6, vis), (7, mov), (13, runtime), (15, 2)], fn=16)
                 send_push(conn, 504, encode_sproto([(0, char_data)], fn=1))
 
-                # Step 3: Urdhri për të hyrë në hartë
-                time.sleep(0.1)
-                send_push(conn, 503, encode_sproto([(0, map_id), (1, 1), (2, 1)], fn=3))
-
-            elif msg_type == 100: # map_ready
-                print(f"[MAP_READY] Harta u ngarkua. Po dërgoj Start Enter Game.")
-                # Kjo paketë është çelësi final që heq Loading Screen
-                send_push(conn, 654, encode_sproto([(0, 1)], fn=1))
-
             elif msg_type == 218: # heartbeat
-                req_time = body.get(0, 0)
-                resp_body = encode_sproto([(0, req_time), (1, int(time.time()))], fn=2)
+                resp_body = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))], fn=2)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp_body); conn.sendall(struct.pack(">H", len(full)) + full)
 
@@ -233,6 +213,6 @@ server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT))
 server.listen(10)
-print(f"GAME SERVER READY ON {PORT} (FINAL HANDSHAKE)")
+print(f"GAME SERVER READY ON {PORT} (ATOMIC RESTORE)")
 while True:
     c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
