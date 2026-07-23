@@ -24,40 +24,10 @@ def save_chars(data):
 
 characters = load_chars()
 
-def get_visual_data(name, prof):
-    # Professional IDs from GameDefine.cs (XD, QJ, NQS)
-    defaults = {
-        0: {"mode": "100", "head": "XD_A_T", "body": "XD_A_S", "leg": "XD_A_X", "weapon": "XD_A_WQ"},
-        1: {"mode": "104", "head": "QJ_A_T", "body": "QJ_A_S", "leg": "QJ_A_X", "weapon": "QJ_A_WQ"},
-        2: {"mode": "105", "head": "NQS_A_T", "body": "NQS_A_S", "leg": "NQS_A_X", "weapon": "NQS_A_WQ"}
-    }
-    d = defaults.get(prof, defaults[0])
-    return encode_sproto([
-        (0, name), (1, d["mode"]), (2, d["head"]), (3, d["body"]), 
-        (4, d["leg"]), (5, d["weapon"]), (10, 0)
-    ], fn=17)
-
-def get_attribute_other(level=1, comb=55653, hp=10560):
-    # Tags: 0:hp, 1:exp, 2:level, 3:combValue, 15:camp, 16:pkMode
-    return encode_sproto([
-        (0, hp), (1, 0), (2, level), (3, comb), (6, -1), (15, 1), (16, 0)
-    ], fn=19)
-
-def get_full_attributes(hp=10560):
-    # SprotoType.attribute requires exactly 25 fields
-    # Tag 0:max_hp, 2:atk, 13:mov
-    return encode_sproto([
-        (0, hp), (1, 0), (2, 500), (3, 300), (4, 200), (5, 200), (13, 800)
-    ], fn=25)
-
-def generate_random_name():
-    first = ["Viper", "Blaze", "Frost", "Iron", "Neon", "Shadow", "Drake", "Rogue"]
-    last = ["Wolf", "Hunter", "King", "Blade", "Ace", "Warrior", "Ghost", "Ninja"]
-    return f"{random.choice(first)}_{random.choice(last)}{random.randint(10, 99)}"
-
 def sproto_pack(data):
     out = bytearray()
-    for i in range(0, len(data), 8):
+    i = 0
+    while i < len(data):
         chunk = data[i:i+8]
         mask = 0
         actual_chunk = bytearray(8)
@@ -67,11 +37,17 @@ def sproto_pack(data):
                 actual_chunk[j] = chunk[j]
         
         if mask == 0xFF:
-            out.append(0xFF); out.append(0); out.extend(actual_chunk)
+            # Sproto Spec: 0xFF indicates a sequence of unpacked blocks.
+            # Next byte is (n-1). We'll just do 1 block at a time for simplicity.
+            out.append(0xFF)
+            out.append(0) # 0 means 1 block
+            out.extend(actual_chunk)
         else:
             out.append(mask)
             for j in range(8):
-                if mask & (1 << j): out.append(actual_chunk[j])
+                if mask & (1 << j):
+                    out.append(actual_chunk[j])
+        i += 8
     return bytes(out)
 
 def sproto_unpack(data):
@@ -105,6 +81,8 @@ def encode_sproto(fields, fn=None):
                 if 0 <= val <= 32766: header[tag] = (val + 1) * 2
                 else:
                     header[tag] = 0
+                    # Large integers are stored in the body (4 or 8 bytes)
+                    # Sproto convention: use 8 bytes for anything large
                     body += struct.pack("<I", 8) + struct.pack("<q", val)
             elif isinstance(val, (str, bytes, bytearray)):
                 if isinstance(val, str): val = val.encode('utf-8')
@@ -115,8 +93,17 @@ def encode_sproto(fields, fn=None):
                 list_bin = bytearray()
                 for item in val:
                     if isinstance(item, (bytes, bytearray)): list_bin += struct.pack("<I", len(item)) + item
-                    else: list_bin += struct.pack("<I", len(str(item))) + str(item).encode('utf-8')
+                    else:
+                        s = str(item).encode('utf-8')
+                        list_bin += struct.pack("<I", len(s)) + s
                 body += struct.pack("<I", len(list_bin)) + list_bin
+            elif isinstance(val, dict):
+                header[tag] = 0
+                dict_bin = bytearray()
+                for k, v in val.items():
+                    obj = v if isinstance(v, (bytes, bytearray)) else str(v).encode('utf-8')
+                    dict_bin += struct.pack("<I", len(obj)) + obj
+                body += struct.pack("<I", len(dict_bin)) + dict_bin
         else: header[tag] = 1
     res = struct.pack("<H", fn)
     for h in header: res += struct.pack("<H", h)
@@ -135,7 +122,11 @@ def decode_sproto(data, offset=0):
             if v == 0:
                 if b_ptr + 4 <= len(data):
                     l = struct.unpack("<I", data[b_ptr:b_ptr+4])[0]
-                    fields[curr_tag] = data[b_ptr+4:b_ptr+4+l]
+                    raw_val = data[b_ptr+4:b_ptr+4+l]
+                    # Attempt to decode as integer if length is 4 or 8
+                    if l == 4: fields[curr_tag] = struct.unpack("<I", raw_val)[0]
+                    elif l == 8: fields[curr_tag] = struct.unpack("<q", raw_val)[0]
+                    else: fields[curr_tag] = raw_val
                     b_ptr += 4 + l
             elif v == 1: pass
             elif v & 1: curr_tag += (v >> 1)
@@ -148,11 +139,28 @@ def send_push(conn, tag, data):
         pkg_h = encode_sproto([(0, tag)], fn=2)
         full = sproto_pack(pkg_h + data)
         conn.sendall(struct.pack(">H", len(full)) + full)
-        print(f"[PUSH] Tag {tag} Sent")
+        # print(f"[PUSH] Tag {tag} Sent")
     except: pass
 
+def get_visual_data(name, prof):
+    defaults = {
+        0: {"mode": "100", "head": "XD_A_T", "body": "XD_A_S", "leg": "XD_A_X", "weapon": "XD_A_WQ"},
+        1: {"mode": "104", "head": "QJ_A_T", "body": "QJ_A_S", "leg": "QJ_A_X", "weapon": "QJ_A_WQ"},
+        2: {"mode": "105", "head": "NQS_A_T", "body": "NQS_A_S", "leg": "NQS_A_X", "weapon": "NQS_A_WQ"}
+    }
+    d = defaults.get(prof, defaults[0])
+    return encode_sproto([(0, name), (1, d["mode"]), (2, d["head"]), (3, d["body"]), (4, d["leg"]), (5, d["weapon"]), (10, 0)], fn=17)
+
+def get_full_attributes():
+    return encode_sproto([(0, 10560), (1, 0), (2, 1), (3, 55653), (4, 1), (5, 0), (13, 800)], fn=25)
+
+def generate_random_name():
+    first = ["Viper", "Blaze", "Frost", "Iron", "Neon", "Shadow", "Drake", "Rogue"]
+    last = ["Wolf", "Hunter", "King", "Blade", "Ace", "Warrior", "Ghost", "Ninja"]
+    return f"{random.choice(first)}_{random.choice(last)}{random.randint(10, 99)}"
+
 def client_handler(conn, addr):
-    print(f"[+] Connection: {addr}")
+    print(f"[+] New connection: {addr}")
     acc_id = "0"
     try:
         while True:
@@ -164,12 +172,18 @@ def client_handler(conn, addr):
                 chunk = conn.recv(size - len(data))
                 if not chunk: break
                 data += chunk
-            raw = sproto_unpack(data); pkg = decode_sproto(raw, 0)
+            raw = sproto_unpack(data)
+            pkg = decode_sproto(raw, 0)
             msg_type, session = pkg.get(0), pkg.get(1)
-            body_off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, body_off)
+            body_off = 2 + (struct.unpack("<H", raw[:2])[0] * 2)
+            body = decode_sproto(raw, body_off)
+
+            if msg_type is not None:
+                # print(f"REQ: {msg_type} (Session: {session})")
+                pass
 
             if msg_type == 4: # login
-                acc_id = body.get(1, b"").decode('utf-8', 'ignore')
+                acc_id = body.get(1, b"").decode('utf-8', 'ignore') if isinstance(body.get(1), bytes) else str(body.get(1))
                 print(f"[LOGIN] {acc_id}")
                 resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "1000"), (3, 1)], fn=4)
                 pkg_h = encode_sproto([(1, session)], fn=2); full = sproto_pack(pkg_h + resp)
@@ -177,7 +191,7 @@ def client_handler(conn, addr):
 
             elif msg_type == 118: # random_name
                 name = generate_random_name()
-                print(f"[NAME] {name}")
+                print(f"[NAME] {name} (Session: {session})")
                 resp = encode_sproto([(0, name)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2); full = sproto_pack(pkg_h + resp)
                 conn.sendall(struct.pack(">H", len(full)) + full)
@@ -195,8 +209,9 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 104: # create
-                gen_data = decode_sproto(body.get(0, b""))
-                name = gen_data.get(0, b"").decode('utf-8'); prof = gen_data.get(1, 0)
+                gen_data = decode_sproto(body.get(0, b"")) if isinstance(body.get(0), bytes) else {}
+                name = gen_data.get(0, b"").decode('utf-8') if isinstance(gen_data.get(0), bytes) else str(gen_data.get(0))
+                prof = gen_data.get(1, 0)
                 char_id = random.randint(1000000, 9999999)
                 characters[acc_id] = {'id': char_id, 'name': name, 'prof': prof, 'map': "101"}
                 save_chars(characters)
@@ -205,27 +220,24 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 105: # pick
-                char_info = characters.get(acc_id)
-                if not char_info: continue
-                # 1. Success
+                print(f"[PICK] {acc_id} (Session: {session})")
                 resp = encode_sproto([(0, 3)], fn=1); pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
-                # 2. Immediate PUSH sequence before Map Entry
+                # Immediate pushes
                 send_push(conn, 614, encode_sproto([(0, int(time.time())), (12, 12345), (13, 1)], fn=14))
                 send_push(conn, 538, encode_sproto([(0, [])], fn=1)) 
                 send_push(conn, 541, encode_sproto([(0, 55653), (2, 9999), (3, 9999)], fn=8))
                 send_push(conn, 519, encode_sproto([(0, []), (1, ""), (2, [])], fn=3))
-                # 3. Enter Map (Trigger Loading Screen)
-                time.sleep(0.1)
+                time.sleep(0.2)
                 send_push(conn, 503, encode_sproto([(0, "101"), (1, 1), (2, 1)], fn=3))
 
             elif msg_type == 100: # map_ready
-                print(f"[MAP READY] FINAL SYNC for {acc_id}")
+                print(f"[READY] {acc_id}")
                 char_info = characters.get(acc_id)
                 if char_info:
                     name, prof, char_id = char_info['name'], char_info['prof'], char_info['id']
-                    attr_other = get_attribute_other(1, 55653, 10560)
-                    attr_full = get_full_attributes(10560)
+                    attr_other = encode_sproto([(0, 10560), (2, 1), (3, 55653), (15, 1)], fn=19)
+                    attr_full = get_full_attributes()
                     runtime = encode_sproto([(6, attr_full), (7, attr_full)], fn=8)
                     prop = encode_sproto([(13, 1000), (14, 1000), (15, 1000)], fn=19)
                     gen = encode_sproto([(0, name), (1, prof), (3, "101"), (4, 1)], fn=5)
@@ -233,25 +245,24 @@ def client_handler(conn, addr):
                     mov = encode_sproto([(0, pos), (1, pos)], fn=2)
                     vis = get_visual_data(name, prof)
                     char_data = encode_sproto([(0, char_id), (1, gen), (2, attr_other), (5, prop), (6, vis), (7, mov), (13, runtime), (15, 2)], fn=17)
-                    # Push Character in new scene
                     send_push(conn, 504, encode_sproto([(0, char_data)], fn=1))
-                    time.sleep(0.3)
+                    time.sleep(0.5)
                     send_push(conn, 654, encode_sproto([(0, 1)], fn=1))
-
-            elif msg_type in [121, 139, 145, 191, 202, 210, 225, 242, 252, 253, 258, 261]:
-                pkg_h = encode_sproto([(1, session)], fn=2); full = sproto_pack(pkg_h)
-                conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 218: # heartbeat
                 resp_body = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))], fn=2)
                 pkg_h = encode_sproto([(1, session)], fn=2); full = sproto_pack(pkg_h + resp_body)
                 conn.sendall(struct.pack(">H", len(full)) + full)
 
-    except (BrokenPipeError, ConnectionResetError): print(f"[-] Offline: {addr}")
+            elif msg_type in [121, 139, 145, 191, 202, 210, 225, 242, 252, 253, 258, 261]:
+                # Generic Ack
+                pkg_h = encode_sproto([(1, session)], fn=2); full = sproto_pack(pkg_h)
+                conn.sendall(struct.pack(">H", len(full)) + full)
+
     except: traceback.print_exc()
     finally: conn.close()
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM); server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT)); server.listen(10)
-print(f"GAME SERVER READY ON {PORT} (X-RAY FIX)")
+print(f"GAME SERVER READY ON {PORT} (X-RAY FIX v2)")
 while True: c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
