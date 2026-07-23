@@ -37,7 +37,7 @@ def get_visual_data(name, prof):
     ], fn=17)
 
 def get_base_attributes():
-    # Full 25 fields for attribute.cs
+    # Full 25 fields for attribute.cs (HP 3000, ATK 150, DEF 100, SPEED 800)
     return encode_sproto([
         (0, 3000), (1, 0), (2, 150), (3, 100), (4, 100), (5, 50), (13, 800)
     ], fn=25)
@@ -139,11 +139,11 @@ def send_push(conn, tag, data):
         pkg_h = encode_sproto([(0, tag)], fn=2)
         full = sproto_pack(pkg_h + data)
         conn.sendall(struct.pack(">H", len(full)) + full)
-        print(f"[PUSH] Tag {tag} OK")
+        print(f"[PUSH] Tag {tag}")
     except: pass
 
 def client_handler(conn, addr):
-    print(f"[+] Lidhje: {addr}")
+    print(f"[+] Connection: {addr}")
     acc_id = "0"
     try:
         while True:
@@ -169,41 +169,9 @@ def client_handler(conn, addr):
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 100: # map_ready
-                print(f"[MAP READY] Full Spawning for {acc_id}")
-                char_info = characters.get(acc_id)
-                if char_info:
-                    # Sync State lumë!
-                    send_push(conn, 538, encode_sproto([(0, [])], fn=1)) # Friends
-                    send_push(conn, 541, encode_sproto([(0, 100)], fn=1)) # Rank
-                    send_push(conn, 519, encode_sproto([(0, []), (1, ""), (2, [])], fn=3)) # Missions
-                    send_push(conn, 611, encode_sproto([(0, [])], fn=1)) # Items
-                    send_push(conn, 540, encode_sproto([(0, [])], fn=1)) # Skills
-                    send_push(conn, 592, encode_sproto([(0, [])], fn=1)) # Backpack
-                    
-                    # Spawn Player
-                    name, prof, char_id = char_info['name'], char_info['prof'], char_info['id']
-                    attr = get_base_attributes()
-                    runtime = encode_sproto([(6, attr), (7, attr)], fn=8)
-                    prop = encode_sproto([(13, 1000), (14, 1000), (15, 1000)], fn=19)
-                    attr_aoi = encode_sproto([(0, 3000), (1, 1000), (2, 10), (3, 500)], fn=4)
-                    gen = encode_sproto([(0, name), (1, prof), (4, 1)], fn=5)
-                    pos = encode_sproto([(0, 1500), (1, 500), (2, 2000), (3, 0)], fn=4)
-                    mov = encode_sproto([(0, pos), (1, pos)], fn=2)
-                    vis = get_visual_data(name, prof)
-                    
-                    char_data = encode_sproto([
-                        (0, char_id), (1, gen), (2, attr_aoi), (5, prop), 
-                        (6, vis), (7, mov), (13, runtime), (15, 2)
-                    ], fn=17)
-                    send_push(conn, 504, encode_sproto([(0, char_data)], fn=1))
-                    print(f"[PUSH] Player {name} Created in World.")
-
-            elif msg_type == 118: # random_name
-                name = generate_random_name()
-                print(f"[NAME] Returning {name}")
-                resp = encode_sproto([(0, name)], fn=1)
-                pkg_h = encode_sproto([(1, session)], fn=2) # IMPORTANT: Session matching
-                full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
+                print(f"[MAP READY] FINALIZING for {acc_id}")
+                # Tell the client to enter the game world (This changes music and UI!)
+                send_push(conn, 654, encode_sproto([(0, 1)], fn=1))
 
             elif msg_type == 103: # character_list
                 if acc_id in characters:
@@ -218,6 +186,13 @@ def client_handler(conn, addr):
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
+            elif msg_type == 118: # random_name
+                name = generate_random_name()
+                print(f"[NAME] {name}")
+                resp = encode_sproto([(0, name)], fn=1)
+                pkg_h = encode_sproto([(1, session)], fn=2)
+                full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
+
             elif msg_type == 104: # create
                 gen_data = decode_sproto(body.get(0, b""))
                 name = gen_data.get(0, b"").decode('utf-8')
@@ -225,7 +200,7 @@ def client_handler(conn, addr):
                 char_id = random.randint(1000000, 9999999)
                 characters[acc_id] = {'id': char_id, 'name': name, 'prof': prof, 'map': "101"}
                 save_chars(characters)
-                # Success Response
+                # Response
                 gen_ov = encode_sproto([(0, name), (1, prof), (3, "101")], fn=4)
                 attr_ov = encode_sproto([(2, 1)], fn=3)
                 vis_ov = get_visual_data(name, prof)
@@ -237,18 +212,40 @@ def client_handler(conn, addr):
             elif msg_type == 105: # pick
                 char_info = characters.get(acc_id)
                 if not char_info: continue
-                # 1. Success
+                
+                # 1. Success (Errno 3)
                 resp = encode_sproto([(0, 3)], fn=1) 
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
-                # 2. Common Data
+                
+                # 2. Sync Common & States (Critical for loading)
                 common = encode_sproto([(0, int(time.time())), (2, 0), (3, 0), (4, 10000), (12, 12345), (13, 100)], fn=14)
                 send_push(conn, 614, common)
-                # 3. Enter Map ( Unity will now Clear and send map_ready )
+                send_push(conn, 538, encode_sproto([(0, [])], fn=1)) # Friends
+                send_push(conn, 541, encode_sproto([(0, 100)], fn=1)) # Rank
+                send_push(conn, 519, encode_sproto([(0, []), (1, ""), (2, [])], fn=3)) # Missions
+                send_push(conn, 611, encode_sproto([(0, [])], fn=1)) # Items
+                send_push(conn, 540, encode_sproto([(0, [])], fn=1)) # Skills
+                send_push(conn, 592, encode_sproto([(0, [])], fn=1)) # Backpack
+                
+                # 3. Create Player (504) - Must be sent so IsSceneReady becomes true
+                name, prof, char_id = char_info['name'], char_info['prof'], char_info['id']
+                attr = get_base_attributes()
+                runtime = encode_sproto([(6, attr), (7, attr)], fn=8)
+                prop = encode_sproto([(13, 1000), (14, 1000), (15, 1000)], fn=19)
+                attr_aoi = encode_sproto([(0, 3000), (1, 1000), (2, 10), (3, 500)], fn=4)
+                gen = encode_sproto([(0, name), (1, prof), (4, 1)], fn=5)
+                pos = encode_sproto([(0, 2100), (1, 0), (2, 2000), (3, 0)], fn=4)
+                mov = encode_sproto([(0, pos), (1, pos)], fn=2)
+                vis = get_visual_data(name, prof)
+                char_data = encode_sproto([(0, char_id), (1, gen), (2, attr_aoi), (5, prop), (6, vis), (7, mov), (13, runtime), (15, 2)], fn=17)
+                send_push(conn, 504, encode_sproto([(0, char_data)], fn=1))
+                
+                # 4. Final Trigger: Enter Map
+                time.sleep(0.2)
                 send_push(conn, 503, encode_sproto([(0, "101"), (1, 1), (2, 1)], fn=3))
 
             elif msg_type in [121, 139, 145, 191, 202, 210, 225, 242, 252, 253, 258, 261]:
-                # Startup Handlers
                 resp = encode_sproto([], fn=0)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
@@ -265,6 +262,6 @@ server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT))
 server.listen(10)
-print(f"GAME SERVER READY ON {PORT} (FINAL RECOVERY)")
+print(f"GAME SERVER READY ON {PORT} (ULTIMATE)")
 while True:
     c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
