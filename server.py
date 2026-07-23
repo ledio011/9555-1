@@ -36,18 +36,24 @@ def get_visual_data(name, prof):
         (4, d["leg"]), (5, d["weapon"]), (10, 0)
     ], fn=17)
 
-def get_attribute_other(level, comb=1000):
+def get_attribute_other(level=1, comb=55653, hp=10560):
     # Tag list for SprotoType.attribute_other
-    # 0:hp, 1:exp, 2:level, 3:combValue, 4:title_lv, 5:title_exp, 6:guildId, 7:guildJob, 8:guildName
+    # 0:hp, 1:exp, 2:level, 3:combValue
     return encode_sproto([
-        (0, 5000), (1, 0), (2, level), (3, comb), (6, -1), (15, 1), (16, 0)
+        (0, hp), (1, 0), (2, level), (3, comb), (6, -1), (15, 1), (16, 0)
     ], fn=19)
 
-def get_full_attributes():
+def get_full_attributes(hp=10560):
     # Tag list for SprotoType.attribute (25 fields)
+    # 0:max_hp, 2:atk, 13:mov
     return encode_sproto([
-        (0, 5000), (2, 300), (3, 200), (4, 150), (5, 150), (13, 800)
+        (0, hp), (1, 0), (2, 500), (3, 300), (4, 200), (5, 200), (13, 800)
     ], fn=25)
+
+def generate_random_name():
+    first = ["Viper", "Blaze", "Frost", "Iron", "Neon", "Shadow", "Drake", "Rogue"]
+    last = ["Wolf", "Hunter", "King", "Blade", "Ace", "Warrior", "Ghost", "Ninja"]
+    return f"{random.choice(first)}_{random.choice(last)}{random.randint(10, 99)}"
 
 def sproto_pack(data):
     out = bytearray()
@@ -166,7 +172,7 @@ def client_handler(conn, addr):
                 if acc_id in characters:
                     c = characters[acc_id]
                     gen_ov = encode_sproto([(0, c['name']), (1, c['prof']), (3, "101")], fn=4)
-                    attr_ov = encode_sproto([(0, 10), (1, 1000)], fn=2) # attribute_overview
+                    attr_ov = encode_sproto([(0, 1), (1, 55653)], fn=2) # Level 1, Power 55653
                     vis_ov = get_visual_data(c['name'], c['prof'])
                     char_ov = encode_sproto([(0, c['id']), (1, gen_ov), (2, attr_ov), (3, vis_ov), (4, int(time.time()))], fn=6)
                     resp = encode_sproto([(0, [char_ov])], fn=1)
@@ -175,7 +181,8 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 118: # random_name
-                name = f"Viper_{random.randint(100, 999)}"
+                name = generate_random_name()
+                print(f"[NAME] {name}")
                 resp = encode_sproto([(0, name)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2); full = sproto_pack(pkg_h + resp)
                 conn.sendall(struct.pack(">H", len(full)) + full)
@@ -186,14 +193,17 @@ def client_handler(conn, addr):
                 char_id = random.randint(1000000, 9999999)
                 characters[acc_id] = {'id': char_id, 'name': name, 'prof': prof, 'map': "101"}
                 save_chars(characters)
-                resp = encode_sproto([(0, char_id), (1, 0)], fn=2)
+                gen_ov = encode_sproto([(0, name), (1, prof), (3, "101")], fn=4)
+                vis_ov = get_visual_data(name, prof)
+                char_ov = encode_sproto([(0, char_id), (1, gen_ov), (2, encode_sproto([(0, 1), (1, 55653)], fn=2)), (3, vis_ov), (4, int(time.time()))], fn=6)
+                resp = encode_sproto([(0, char_ov), (1, 0)], fn=2)
                 pkg_h = encode_sproto([(1, session)], fn=2); full = sproto_pack(pkg_h + resp)
                 conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 105: # pick
                 char_info = characters.get(acc_id)
                 if not char_info: continue
-                # 1. Success (Errno 3)
+                # 1. Success
                 resp = encode_sproto([(0, 3)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2); full = sproto_pack(pkg_h + resp)
                 conn.sendall(struct.pack(">H", len(full)) + full)
@@ -202,28 +212,31 @@ def client_handler(conn, addr):
                 send_push(conn, 503, encode_sproto([(0, "101"), (1, 1), (2, 1)], fn=3))
 
             elif msg_type == 100: # map_ready
-                print(f"[READY] Pushing all data for {acc_id}")
+                print(f"[READY] Syncing starter data for {acc_id}")
                 char_info = characters.get(acc_id)
                 if char_info:
                     # Sync Common Data (614)
-                    send_push(conn, 614, encode_sproto([(0, int(time.time())), (12, 12345), (13, 100)], fn=14))
-                    # Sync States (Friends, Ranking, Missions, Inventory)
+                    send_push(conn, 614, encode_sproto([(0, int(time.time())), (12, 12345), (13, 1)], fn=14))
+                    # Sync States
                     send_push(conn, 538, encode_sproto([(0, [])], fn=1)) # Friends
-                    send_push(conn, 541, encode_sproto([(0, 1000), (2, 100), (3, 100)], fn=8)) # Rank
-                    send_push(conn, 555, encode_sproto([(0, [])], fn=1)) # CopyScenes
-                    send_push(conn, 519, encode_sproto([(0, []), (1, ""), (2, [])], fn=3)) # Missions
+                    send_push(conn, 541, encode_sproto([(0, 55653), (2, 9999), (3, 9999)], fn=8)) # Rank with Power
+                    
+                    # First Mission: [Main]It's my yard - Beat Hulk 0/2
+                    m1 = encode_sproto([(0, "10001"), (1, 1), (3, [0, 2])], fn=4) # ownmission
+                    send_push(conn, 519, encode_sproto([(0, [m1]), (1, "10001")], fn=3)) # sync_mission
+                    
                     send_push(conn, 611, encode_sproto([(0, [])], fn=1)) # Items
                     send_push(conn, 540, encode_sproto([(0, [])], fn=1)) # Skills
                     send_push(conn, 592, encode_sproto([(0, [])], fn=1)) # Backpack
                     
-                    # Spawn Player (Tag 504) - After state push
+                    # Spawn Player (Tag 504)
                     name, prof, char_id = char_info['name'], char_info['prof'], char_info['id']
-                    attr_other = get_attribute_other(10)
-                    attr_full = get_full_attributes()
+                    attr_other = get_attribute_other(1, 55653, 10560) # Level 1, Power 55653, HP 10560
+                    attr_full = get_full_attributes(10560)
                     runtime = encode_sproto([(6, attr_full), (7, attr_full)], fn=8)
-                    prop = encode_sproto([(13, 1000), (14, 1000), (15, 1000)], fn=19)
-                    attr_aoi = encode_sproto([(0, 5000), (1, 1000), (2, 10), (3, 500)], fn=4)
-                    gen = encode_sproto([(0, name), (1, prof), (4, 1)], fn=5)
+                    prop = encode_sproto([(13, 10000), (14, 10000), (15, 10000)], fn=19)
+                    attr_aoi = encode_sproto([(0, 10560), (1, 1000), (2, 10), (3, 500)], fn=4)
+                    gen = encode_sproto([(0, name), (1, prof), (3, "101"), (4, 1)], fn=5)
                     pos = encode_sproto([(0, 1500), (1, 500), (2, 2000), (3, 0)], fn=4)
                     mov = encode_sproto([(0, pos), (1, pos)], fn=2)
                     vis = get_visual_data(name, prof)
@@ -233,12 +246,10 @@ def client_handler(conn, addr):
                         (6, vis), (7, mov), (13, runtime), (15, 2)
                     ], fn=17)
                     send_push(conn, 504, encode_sproto([(0, char_data)], fn=1))
-                    # FINAL STEP: Change Music & Dismiss Loading
                     time.sleep(0.3)
                     send_push(conn, 654, encode_sproto([(0, 1)], fn=1))
 
             elif msg_type in [121, 139, 145, 191, 202, 210, 225, 242, 252, 253, 258, 261]:
-                # Generic Acks for all requirements
                 pkg_h = encode_sproto([(1, session)], fn=2); full = sproto_pack(pkg_h)
                 conn.sendall(struct.pack(">H", len(full)) + full)
 
@@ -252,5 +263,5 @@ def client_handler(conn, addr):
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM); server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT)); server.listen(10)
-print(f"GAME SERVER READY ON {PORT} (LEGENDARY SYNC)")
+print(f"GAME SERVER READY ON {PORT} (STARTING STATS FIXED)")
 while True: c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
