@@ -1,5 +1,5 @@
 # ==========================================================
-# AUTO THEFT GANGSTERS REVIVAL - MAP ENTRY PATCH v5
+# AUTO THEFT GANGSTERS REVIVAL - MAP ENTRY PATCH v6
 # GAME SERVER 9555
 # ==========================================================
 import socket, struct, threading, random, json, os, time, traceback
@@ -97,9 +97,7 @@ def decode_sproto(data, offset=0):
                     bp += 4 + l
             elif v == 1: pass
             elif v & 1: tag += (v >> 1)
-            else: 
-                val_decoded = (v >> 1) - 1
-                res[tag] = val_decoded
+            else: res[tag] = (v >> 1) - 1
         return res
     except: return {}
 
@@ -123,14 +121,13 @@ def client_handler(conn, addr):
         try:
             global server_session_counter
             server_session_counter += 1
-            print(f"[TX] {tag} (Session: {server_session_counter})")
             ph_p = encode_sproto([(0, tag), (1, server_session_counter)], 2)
             pf_p = sproto_pack(ph_p + data)
-            if tag == 503: print(f"DEBUG 503 BYTES: {pf_p.hex()}")
             conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+            print(f"[TX] {tag} (Session: {server_session_counter})")
             return pf_p
         except Exception:
-            print(f"FAILED TO SEND TAG {tag} TO CLIENT {addr}:")
+            print(f"FAILED TO SEND TAG {tag} TO {addr}")
             traceback.print_exc()
             return b""
 
@@ -171,21 +168,19 @@ def client_handler(conn, addr):
                 print(f"[TX] 105 RESPONSE")
                 resp = encode_sproto([(0, 1)], 1); ph = encode_sproto([(1, session)], 2)
                 conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
-                
-                time.sleep(0.1)
+                time.sleep(0.2)
+                print(f"[TX] 614")
                 sync = encode_sproto([(0, int(time.time())), (12, 12345), (13, 1)], 15)
                 send_rpc_push(614, sync)
-                
-                time.sleep(0.1)
+                time.sleep(0.2)
+                print(f"[TX] 503")
                 map_e = encode_sproto([(0, "101"), (1, 1), (2, 1)], 3)
                 p_bytes = send_rpc_push(503, map_e)
-                
-                # VERIFY 503 DECODE
                 d_test = decode_sproto(sproto_unpack(p_bytes), 6)
                 print(f"Decoded enter_map check: field 0={d_test.get(0)}, field 1={d_test.get(1)}, field 2={d_test.get(2)}")
-
+                
                 # THE DEADLOCK BREAKER: Push Player before MapReady signal
-                time.sleep(1.0) # Wait for scene Awake()
+                time.sleep(1.0)
                 c = characters.get(acc_id)
                 if c:
                     af = encode_sproto([(0, 10560), (2, 500), (3, 300), (13, 800)], 25)
