@@ -1,5 +1,5 @@
 # ==========================================================
-# AUTO THEFT GANGSTERS REVIVAL - MAP ENTRY PATCH v2
+# AUTO THEFT GANGSTERS REVIVAL - MAP ENTRY PATCH v3
 # GAME SERVER 9555
 # ==========================================================
 import socket, struct, threading, random, json, os, time, traceback
@@ -97,7 +97,9 @@ def decode_sproto(data, offset=0):
                     bp += 4 + l
             elif v == 1: pass
             elif v & 1: tag += (v >> 1)
-            else: res[tag] = (v >> 1) - 1
+            else: 
+                val_decoded = (v >> 1) - 1
+                res[tag] = val_decoded
         return res
     except: return {}
 
@@ -129,7 +131,6 @@ def client_handler(conn, addr):
 
             if msg == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8', 'ignore') if isinstance(body.get(1), bytes) else str(body.get(1))
-                print(f"[LOGIN] {acc_id}")
                 resp = encode_sproto([(0,2),(1,"1.012.017"),(2,"1000"),(3,1)], 4)
                 ph = encode_sproto([(1, session)], 2); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -144,7 +145,7 @@ def client_handler(conn, addr):
                 name = gd.get(0, b"").decode('utf-8') if isinstance(gd.get(0), bytes) else "Hero"
                 cid = random.randint(1000000, 9999999)
                 characters[acc_id] = {'id': cid, 'name': name, 'prof': gd.get(1, 0), 'map': "101"}
-                save_chars(characters); print(f"[CREATED] {name}")
+                save_chars(characters)
                 resp = encode_sproto([(0, get_char_ov(characters[acc_id])), (1, 0)], 2)
                 ph = encode_sproto([(1, session)], 2); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -154,25 +155,29 @@ def client_handler(conn, addr):
                 resp = encode_sproto([(0, 1)], 1); ph = encode_sproto([(1, session)], 2)
                 conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
                 
-                # Push with Session (Unity requirement for some handlers)
+                # Pre-Map Burst (Force transition)
                 def send_rpc_push(tag, data):
                     global server_session_counter
                     server_session_counter += 1
-                    print(f"[TX] {tag} (Session: {server_session_counter})")
                     ph_p = encode_sproto([(0, tag), (1, server_session_counter)], 2)
                     pf_p = sproto_pack(ph_p + data)
-                    if tag == 503: print(f"DEBUG 503 BYTES: {pf_p.hex()}")
                     conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+                    return pf_p
 
-                time.sleep(0.2)
+                time.sleep(0.1)
                 sync = encode_sproto([(0, int(time.time())), (12, 12345), (13, 1)], 15)
-                send_rpc_push(614, sync)
-                time.sleep(0.2)
+                send_rpc_push(614, sync); print(f"[TX] 614")
+                
+                time.sleep(0.1)
                 map_e = encode_sproto([(0, "101"), (1, 1), (2, 1)], 3)
-                send_rpc_push(503, map_e)
+                p_bytes = send_rpc_push(503, map_e); print(f"[TX] 503")
+                
+                # VERIFY 503 DECODE
+                d_test = decode_sproto(sproto_unpack(p_bytes), 6)
+                print(f"Decoded enter_map:\nfield 0 = {d_test.get(0)}\nfield 1 = {d_test.get(1)}\nfield 2 = {d_test.get(2)}")
 
-            elif msg == 100: # map_ready
-                print(f"[RX] 100 MAP_READY")
+                # THE DEADLOCK BREAKER: Push Player before MapReady signal
+                time.sleep(1.0) # Wait for scene Awake()
                 c = characters.get(acc_id)
                 if c:
                     af = encode_sproto([(0, 10560), (2, 500), (3, 300), (13, 800)], 25)
@@ -181,26 +186,23 @@ def client_handler(conn, addr):
                     ps = encode_sproto([(0, 1500), (1, 500), (2, 2000), (3, 0)], 4)
                     mv = encode_sproto([(0, ps), (1, ps)], 2)
                     char_obj = encode_sproto([(0, c['id']), (1, gn), (2, encode_sproto([(0, 10560), (2, 1), (3, 55653), (15, 1)], 19)), (5, encode_sproto([(13, 0)], 19)), (6, get_visual(c['name'], c['prof'])), (7, mv), (13, rt), (15, 2)], 17)
-                    
-                    server_session_counter += 1
-                    ph504 = encode_sproto([(0, 504), (1, server_session_counter)], 2)
-                    pf504 = sproto_pack(ph504 + encode_sproto([(0, char_obj), (1, mv)], 2))
-                    conn.sendall(struct.pack(">H", len(pf504)) + pf504)
-                    print(f"[TX] 504")
-                    
-                    time.sleep(0.5)
-                    server_session_counter += 1
-                    ph654 = encode_sproto([(0, 654), (1, server_session_counter)], 2)
-                    pf654 = sproto_pack(ph654 + encode_sproto([(0, 1)], 1))
-                    conn.sendall(struct.pack(">H", len(pf654)) + pf654)
-                    print(f"[TX] 654")
+                    send_rpc_push(504, encode_sproto([(0, char_obj), (1, mv)], 2)); print(f"[TX] 504")
+
+            elif msg == 100: # map_ready
+                print(f"[RX] 100 MAP_READY")
+                time.sleep(0.2)
+                server_session_counter += 1
+                ph654 = encode_sproto([(0, 654), (1, server_session_counter)], 2)
+                pf654 = sproto_pack(ph654 + encode_sproto([(0, 1)], 1))
+                conn.sendall(struct.pack(">H", len(pf654)) + pf654)
+                print(f"[TX] 654")
 
             elif msg == 218: # heartbeat
-                r = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))], 2)
-                ph = encode_sproto([(1, session)], 2); pf = sproto_pack(ph + r)
+                resp = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))], 2)
+                ph = encode_sproto([(1, session)], 2); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg in [118, 121, 139, 141, 145]:
+            elif msg in [118, 121, 139, 141, 145, 202, 210, 225]:
                 r = encode_sproto([(0, f"Hero_{random.randint(100,999)}")], 1) if msg == 118 else encode_sproto([], 0)
                 ph = encode_sproto([(1, session)], 2); pf = sproto_pack(ph + r)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -210,5 +212,5 @@ def client_handler(conn, addr):
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM); server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT)); server.listen(20)
-print(f"GAME SERVER 9555 READY (MAP ENTRY FIXED)");
+print(f"GAME SERVER 9555 READY (DEADLOCK BREAKER)");
 while True: cl, ad = server.accept(); threading.Thread(target=client_handler, args=(cl, ad), daemon=True).start()
