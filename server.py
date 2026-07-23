@@ -23,6 +23,7 @@ def save_chars(data):
     except: pass
 
 characters = load_chars()
+server_session = 1000 # Server initiated sessions start from 1000
 
 def sproto_pack(data):
     out = bytearray()
@@ -37,10 +38,8 @@ def sproto_pack(data):
                 actual_chunk[j] = chunk[j]
         
         if mask == 0xFF:
-            # Sproto Spec: 0xFF indicates a sequence of unpacked blocks.
-            # Next byte is (n-1). We'll just do 1 block at a time for simplicity.
             out.append(0xFF)
-            out.append(0) # 0 means 1 block
+            out.append(0)
             out.extend(actual_chunk)
         else:
             out.append(mask)
@@ -81,8 +80,6 @@ def encode_sproto(fields, fn=None):
                 if 0 <= val <= 32766: header[tag] = (val + 1) * 2
                 else:
                     header[tag] = 0
-                    # Large integers are stored in the body (4 or 8 bytes)
-                    # Sproto convention: use 8 bytes for anything large
                     body += struct.pack("<I", 8) + struct.pack("<q", val)
             elif isinstance(val, (str, bytes, bytearray)):
                 if isinstance(val, str): val = val.encode('utf-8')
@@ -118,12 +115,12 @@ def decode_sproto(data, offset=0):
         fields, curr_tag = {}, -1
         for i in range(fn):
             curr_tag += 1
+            if h_ptr + i*2 + 2 > len(data): break
             v = struct.unpack("<H", data[h_ptr + i*2 : h_ptr + i*2 + 2])[0]
             if v == 0:
                 if b_ptr + 4 <= len(data):
                     l = struct.unpack("<I", data[b_ptr:b_ptr+4])[0]
                     raw_val = data[b_ptr+4:b_ptr+4+l]
-                    # Attempt to decode as integer if length is 4 or 8
                     if l == 4: fields[curr_tag] = struct.unpack("<I", raw_val)[0]
                     elif l == 8: fields[curr_tag] = struct.unpack("<q", raw_val)[0]
                     else: fields[curr_tag] = raw_val
@@ -134,12 +131,14 @@ def decode_sproto(data, offset=0):
         return fields
     except: return {}
 
-def send_push(conn, tag, data):
+def send_push_rpc(conn, tag, data):
+    global server_session
     try:
-        pkg_h = encode_sproto([(0, tag)], fn=2)
+        server_session += 1
+        pkg_h = encode_sproto([(0, tag), (1, server_session)], fn=2)
         full = sproto_pack(pkg_h + data)
         conn.sendall(struct.pack(">H", len(full)) + full)
-        # print(f"[PUSH] Tag {tag} Sent")
+        print(f"[PUSH-RPC] Tag {tag} (Session: {server_session})")
     except: pass
 
 def get_visual_data(name, prof):
@@ -154,13 +153,8 @@ def get_visual_data(name, prof):
 def get_full_attributes():
     return encode_sproto([(0, 10560), (1, 0), (2, 1), (3, 55653), (4, 1), (5, 0), (13, 800)], fn=25)
 
-def generate_random_name():
-    first = ["Viper", "Blaze", "Frost", "Iron", "Neon", "Shadow", "Drake", "Rogue"]
-    last = ["Wolf", "Hunter", "King", "Blade", "Ace", "Warrior", "Ghost", "Ninja"]
-    return f"{random.choice(first)}_{random.choice(last)}{random.randint(10, 99)}"
-
 def client_handler(conn, addr):
-    print(f"[+] New connection: {addr}")
+    print(f"[+] Connection: {addr}")
     acc_id = "0"
     try:
         while True:
@@ -168,19 +162,12 @@ def client_handler(conn, addr):
             if not h: break
             size = struct.unpack(">H", h)[0]
             data = b""
-            while len(data) < size:
-                chunk = conn.recv(size - len(data))
-                if not chunk: break
-                data += chunk
+            while len(data) < size: data += conn.recv(size - len(data))
             raw = sproto_unpack(data)
             pkg = decode_sproto(raw, 0)
             msg_type, session = pkg.get(0), pkg.get(1)
             body_off = 2 + (struct.unpack("<H", raw[:2])[0] * 2)
             body = decode_sproto(raw, body_off)
-
-            if msg_type is not None:
-                # print(f"REQ: {msg_type} (Session: {session})")
-                pass
 
             if msg_type == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8', 'ignore') if isinstance(body.get(1), bytes) else str(body.get(1))
@@ -190,7 +177,7 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 118: # random_name
-                name = generate_random_name()
+                name = f"Viper_{random.randint(100, 999)}"
                 print(f"[NAME] {name} (Session: {session})")
                 resp = encode_sproto([(0, name)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2); full = sproto_pack(pkg_h + resp)
@@ -221,15 +208,17 @@ def client_handler(conn, addr):
 
             elif msg_type == 105: # pick
                 print(f"[PICK] {acc_id} (Session: {session})")
-                resp = encode_sproto([(0, 3)], fn=1); pkg_h = encode_sproto([(1, session)], fn=2)
-                full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
-                # Immediate pushes
-                send_push(conn, 614, encode_sproto([(0, int(time.time())), (12, 12345), (13, 1)], fn=14))
-                send_push(conn, 538, encode_sproto([(0, [])], fn=1)) 
-                send_push(conn, 541, encode_sproto([(0, 55653), (2, 9999), (3, 9999)], fn=8))
-                send_push(conn, 519, encode_sproto([(0, []), (1, ""), (2, [])], fn=3))
+                resp = encode_sproto([(0, 1)], fn=1) # errno 1 = Success?
+                pkg_h = encode_sproto([(1, session)], fn=2); full = sproto_pack(pkg_h + resp)
+                conn.sendall(struct.pack(">H", len(full)) + full)
+                
+                # Use RPC headers for Pushes that expect responses
+                send_push_rpc(conn, 614, encode_sproto([(0, int(time.time())), (12, 12345), (13, 1)], fn=14))
+                send_push_rpc(conn, 538, encode_sproto([(0, [])], fn=1)) 
+                send_push_rpc(conn, 541, encode_sproto([(0, 55653), (2, 9999), (3, 9999)], fn=8))
+                send_push_rpc(conn, 519, encode_sproto([(0, []), (1, ""), (2, [])], fn=3))
                 time.sleep(0.2)
-                send_push(conn, 503, encode_sproto([(0, "101"), (1, 1), (2, 1)], fn=3))
+                send_push_rpc(conn, 503, encode_sproto([(0, "101"), (1, 1), (2, 1)], fn=3))
 
             elif msg_type == 100: # map_ready
                 print(f"[READY] {acc_id}")
@@ -245,24 +234,24 @@ def client_handler(conn, addr):
                     mov = encode_sproto([(0, pos), (1, pos)], fn=2)
                     vis = get_visual_data(name, prof)
                     char_data = encode_sproto([(0, char_id), (1, gen), (2, attr_other), (5, prop), (6, vis), (7, mov), (13, runtime), (15, 2)], fn=17)
-                    send_push(conn, 504, encode_sproto([(0, char_data)], fn=1))
+                    send_push_rpc(conn, 504, encode_sproto([(0, char_data)], fn=1))
                     time.sleep(0.5)
-                    send_push(conn, 654, encode_sproto([(0, 1)], fn=1))
+                    send_push_rpc(conn, 654, encode_sproto([(0, 1)], fn=1))
 
             elif msg_type == 218: # heartbeat
                 resp_body = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))], fn=2)
                 pkg_h = encode_sproto([(1, session)], fn=2); full = sproto_pack(pkg_h + resp_body)
                 conn.sendall(struct.pack(">H", len(full)) + full)
 
-            elif msg_type in [121, 139, 145, 191, 202, 210, 225, 242, 252, 253, 258, 261]:
-                # Generic Ack
-                pkg_h = encode_sproto([(1, session)], fn=2); full = sproto_pack(pkg_h)
-                conn.sendall(struct.pack(">H", len(full)) + full)
+            elif msg_type is None and session is not None:
+                # This is a RESPONSE from the client to one of our PUSH-RPCs
+                # print(f"RES from client for session {session}")
+                pass
 
     except: traceback.print_exc()
     finally: conn.close()
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM); server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT)); server.listen(10)
-print(f"GAME SERVER READY ON {PORT} (X-RAY FIX v2)")
+print(f"GAME SERVER READY ON {PORT} (X-RAY FIX v3 - RPC HEADERS)")
 while True: c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
