@@ -230,3 +230,4 @@ server.listen(10)
 print(f"GAME SERVER READY ON {PORT}")
 while True:
     c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
+
