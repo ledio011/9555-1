@@ -25,7 +25,6 @@ def save_chars(data):
 characters = load_chars()
 
 def get_visual_data(name, prof):
-    # Professional IDs from CreateRoleRootLogic.cs
     defaults = {
         0: {"mode": "100", "head": "XD_A_T", "body": "XD_A_S", "leg": "XD_A_X", "weapon": "XD_A_WQ"},
         1: {"mode": "104", "head": "QJ_A_T", "body": "QJ_A_S", "leg": "QJ_A_X", "weapon": "QJ_A_WQ"},
@@ -37,13 +36,17 @@ def get_visual_data(name, prof):
         (4, d["leg"]), (5, d["weapon"]), (10, 0)
     ], fn=17)
 
-def get_full_attributes():
-    # Unity SprotoType.attribute requires exactly 25 fields
-    # Using Tag (0 to 24)
+def get_attribute_other(level, comb=1000):
+    # Tag list for SprotoType.attribute_other
+    # 0:hp, 1:exp, 2:level, 3:combValue, 4:title_lv, 5:title_exp, 6:guildId, 7:guildJob, 8:guildName
     return encode_sproto([
-        (0, 5000), (1, 0), (2, 250), (3, 200), (4, 150), (5, 100), (6, 100), (7, 100),
-        (8, 50), (9, 50), (10, 50), (11, 50), (12, 50), (13, 850), (14, 50),
-        (15, 0), (16, 0), (17, 0), (18, 0), (19, 0), (20, 0), (21, 0), (22, 0), (23, 0), (24, 0)
+        (0, 5000), (1, 0), (2, level), (3, comb), (6, -1), (15, 1), (16, 0)
+    ], fn=19)
+
+def get_full_attributes():
+    # Tag list for SprotoType.attribute (25 fields)
+    return encode_sproto([
+        (0, 5000), (2, 300), (3, 200), (4, 150), (5, 150), (13, 800)
     ], fn=25)
 
 def sproto_pack(data):
@@ -55,12 +58,9 @@ def sproto_pack(data):
         mask = 0
         for j in range(8):
             if chunk[j] != 0: mask |= (1 << j)
-        if mask == 0xFF:
-            out.append(0xFF); out.append(0); out.extend(chunk)
-        else:
-            out.append(mask)
-            for j in range(8):
-                if chunk[j] != 0: out.append(chunk[j])
+        out.append(mask)
+        for j in range(8):
+            if chunk[j] != 0: out.append(chunk[j])
         i += 8
     return bytes(out)
 
@@ -69,15 +69,10 @@ def sproto_unpack(data):
     i = 0
     while i < len(data):
         mask = data[i]; i += 1
-        if mask == 0xFF:
-            if i >= len(data): break
-            n = (data[i] + 1) * 8; i += 1
-            out.extend(data[i:i+n]); i += n
-        else:
-            for bit in range(8):
-                if mask & (1 << bit):
-                    if i < len(data): out.append(data[i]); i += 1
-                else: out.append(0)
+        for bit in range(8):
+            if mask & (1 << bit):
+                if i < len(data): out.append(data[i]); i += 1
+            else: out.append(0)
     return bytes(out)
 
 def encode_sproto(fields, fn=None):
@@ -171,7 +166,7 @@ def client_handler(conn, addr):
                 if acc_id in characters:
                     c = characters[acc_id]
                     gen_ov = encode_sproto([(0, c['name']), (1, c['prof']), (3, "101")], fn=4)
-                    attr_ov = encode_sproto([(2, 10)], fn=3)
+                    attr_ov = encode_sproto([(0, 10), (1, 1000)], fn=2) # attribute_overview
                     vis_ov = get_visual_data(c['name'], c['prof'])
                     char_ov = encode_sproto([(0, c['id']), (1, gen_ov), (2, attr_ov), (3, vis_ov), (4, int(time.time()))], fn=6)
                     resp = encode_sproto([(0, [char_ov])], fn=1)
@@ -191,57 +186,61 @@ def client_handler(conn, addr):
                 char_id = random.randint(1000000, 9999999)
                 characters[acc_id] = {'id': char_id, 'name': name, 'prof': prof, 'map': "101"}
                 save_chars(characters)
-                resp = encode_sproto([(0, characters[acc_id]['id']), (1, 0)], fn=2) # simplified response
+                resp = encode_sproto([(0, char_id), (1, 0)], fn=2)
                 pkg_h = encode_sproto([(1, session)], fn=2); full = sproto_pack(pkg_h + resp)
                 conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 105: # pick
                 char_info = characters.get(acc_id)
                 if not char_info: continue
-                # 1. Success response
+                # 1. Success (Errno 3)
                 resp = encode_sproto([(0, 3)], fn=1)
                 pkg_h = encode_sproto([(1, session)], fn=2); full = sproto_pack(pkg_h + resp)
                 conn.sendall(struct.pack(">H", len(full)) + full)
-                # 2. Sync Common (614)
-                common = encode_sproto([(0, int(time.time())), (2, 0), (3, 0), (4, 10000), (12, 12345), (13, 100)], fn=14)
-                send_push(conn, 614, common)
-                # 3. Enter Map trigger
+                # 2. Map Entry Trigger
+                time.sleep(0.1)
                 send_push(conn, 503, encode_sproto([(0, "101"), (1, 1), (2, 1)], fn=3))
 
             elif msg_type == 100: # map_ready
-                print(f"[MAP READY] Starting BURST SYNC for {acc_id}")
+                print(f"[READY] Pushing all data for {acc_id}")
                 char_info = characters.get(acc_id)
                 if char_info:
-                    # Sync all modules
+                    # Sync Common Data (614)
+                    send_push(conn, 614, encode_sproto([(0, int(time.time())), (12, 12345), (13, 100)], fn=14))
+                    # Sync States (Friends, Ranking, Missions, Inventory)
                     send_push(conn, 538, encode_sproto([(0, [])], fn=1)) # Friends
-                    send_push(conn, 541, encode_sproto([(0, 100)], fn=1)) # Rank
+                    send_push(conn, 541, encode_sproto([(0, 1000), (2, 100), (3, 100)], fn=8)) # Rank
                     send_push(conn, 555, encode_sproto([(0, [])], fn=1)) # CopyScenes
                     send_push(conn, 519, encode_sproto([(0, []), (1, ""), (2, [])], fn=3)) # Missions
                     send_push(conn, 611, encode_sproto([(0, [])], fn=1)) # Items
                     send_push(conn, 540, encode_sproto([(0, [])], fn=1)) # Skills
                     send_push(conn, 592, encode_sproto([(0, [])], fn=1)) # Backpack
                     
-                    # Spawn Player (Tag 504)
+                    # Spawn Player (Tag 504) - After state push
                     name, prof, char_id = char_info['name'], char_info['prof'], char_info['id']
-                    attr = get_full_attributes()
-                    runtime = encode_sproto([(6, attr), (7, attr)], fn=8)
+                    attr_other = get_attribute_other(10)
+                    attr_full = get_full_attributes()
+                    runtime = encode_sproto([(6, attr_full), (7, attr_full)], fn=8)
                     prop = encode_sproto([(13, 1000), (14, 1000), (15, 1000)], fn=19)
                     attr_aoi = encode_sproto([(0, 5000), (1, 1000), (2, 10), (3, 500)], fn=4)
                     gen = encode_sproto([(0, name), (1, prof), (4, 1)], fn=5)
-                    pos = encode_sproto([(0, 2100), (1, 0), (2, 2000), (3, 0)], fn=4)
+                    pos = encode_sproto([(0, 1500), (1, 500), (2, 2000), (3, 0)], fn=4)
                     mov = encode_sproto([(0, pos), (1, pos)], fn=2)
                     vis = get_visual_data(name, prof)
-                    char_data = encode_sproto([(0, char_id), (1, gen), (2, attr_aoi), (5, prop), (6, vis), (7, mov), (13, runtime), (15, 2)], fn=17)
-                    send_push(conn, 504, encode_sproto([(0, char_data)], fn=1))
                     
-                    # 654: Final game start
-                    time.sleep(0.2)
+                    char_data = encode_sproto([
+                        (0, char_id), (1, gen), (2, attr_other), (5, prop), 
+                        (6, vis), (7, mov), (13, runtime), (15, 2)
+                    ], fn=17)
+                    send_push(conn, 504, encode_sproto([(0, char_data)], fn=1))
+                    # FINAL STEP: Change Music & Dismiss Loading
+                    time.sleep(0.3)
                     send_push(conn, 654, encode_sproto([(0, 1)], fn=1))
 
             elif msg_type in [121, 139, 145, 191, 202, 210, 225, 242, 252, 253, 258, 261]:
-                # Generic responder to avoid blocking loading
-                pkg_h = encode_sproto([(1, session)], fn=2)
-                conn.sendall(struct.pack(">H", len(sproto_pack(pkg_h))) + sproto_pack(pkg_h))
+                # Generic Acks for all requirements
+                pkg_h = encode_sproto([(1, session)], fn=2); full = sproto_pack(pkg_h)
+                conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 218: # heartbeat
                 resp_body = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))], fn=2)
@@ -253,5 +252,5 @@ def client_handler(conn, addr):
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM); server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT)); server.listen(10)
-print(f"GAME SERVER READY ON {PORT} (TOTAL REBUILD)")
+print(f"GAME SERVER READY ON {PORT} (LEGENDARY SYNC)")
 while True: c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
