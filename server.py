@@ -1,5 +1,5 @@
 # ==========================================================
-# AUTO THEFT GANGSTERS REVIVAL - MAP ENTRY PATCH v3
+# AUTO THEFT GANGSTERS REVIVAL - MAP ENTRY PATCH v5
 # GAME SERVER 9555
 # ==========================================================
 import socket, struct, threading, random, json, os, time, traceback
@@ -118,6 +118,22 @@ def get_char_ov(c):
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"
     global server_session_counter
+    
+    def send_rpc_push(tag, data):
+        try:
+            global server_session_counter
+            server_session_counter += 1
+            print(f"[TX] {tag} (Session: {server_session_counter})")
+            ph_p = encode_sproto([(0, tag), (1, server_session_counter)], 2)
+            pf_p = sproto_pack(ph_p + data)
+            if tag == 503: print(f"DEBUG 503 BYTES: {pf_p.hex()}")
+            conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+            return pf_p
+        except Exception:
+            print(f"FAILED TO SEND TAG {tag} TO CLIENT {addr}:")
+            traceback.print_exc()
+            return b""
+
     try:
         while True:
             h = conn.recv(2)
@@ -131,6 +147,7 @@ def client_handler(conn, addr):
 
             if msg == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8', 'ignore') if isinstance(body.get(1), bytes) else str(body.get(1))
+                print(f"[LOGIN] {acc_id}")
                 resp = encode_sproto([(0,2),(1,"1.012.017"),(2,"1000"),(3,1)], 4)
                 ph = encode_sproto([(1, session)], 2); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -145,7 +162,7 @@ def client_handler(conn, addr):
                 name = gd.get(0, b"").decode('utf-8') if isinstance(gd.get(0), bytes) else "Hero"
                 cid = random.randint(1000000, 9999999)
                 characters[acc_id] = {'id': cid, 'name': name, 'prof': gd.get(1, 0), 'map': "101"}
-                save_chars(characters)
+                save_chars(characters); print(f"[CREATED] {name}")
                 resp = encode_sproto([(0, get_char_ov(characters[acc_id])), (1, 0)], 2)
                 ph = encode_sproto([(1, session)], 2); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -155,20 +172,6 @@ def client_handler(conn, addr):
                 resp = encode_sproto([(0, 1)], 1); ph = encode_sproto([(1, session)], 2)
                 conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
                 
-                # Pre-Map Burst (Force transition)
-                def send_rpc_push(tag, data):
-                    try:
-                        global server_session_counter
-                        server_session_counter += 1
-                        print(f"[TX] {tag} (Session: {server_session_counter})")
-                        ph_p = encode_sproto([(0, tag), (1, server_session_counter)], 2)
-                        pf_p = sproto_pack(ph_p + data)
-                        conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
-                        return pf_p
-                    except Exception:
-                        traceback.print_exc()
-                        return b""
-
                 time.sleep(0.1)
                 sync = encode_sproto([(0, int(time.time())), (12, 12345), (13, 1)], 15)
                 send_rpc_push(614, sync)
@@ -179,7 +182,7 @@ def client_handler(conn, addr):
                 
                 # VERIFY 503 DECODE
                 d_test = decode_sproto(sproto_unpack(p_bytes), 6)
-                print(f"Decoded enter_map:\nfield 0 = {d_test.get(0)}\nfield 1 = {d_test.get(1)}\nfield 2 = {d_test.get(2)}")
+                print(f"Decoded enter_map check: field 0={d_test.get(0)}, field 1={d_test.get(1)}, field 2={d_test.get(2)}")
 
                 # THE DEADLOCK BREAKER: Push Player before MapReady signal
                 time.sleep(1.0) # Wait for scene Awake()
