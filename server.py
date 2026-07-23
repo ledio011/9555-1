@@ -157,20 +157,25 @@ def client_handler(conn, addr):
                 
                 # Pre-Map Burst (Force transition)
                 def send_rpc_push(tag, data):
-                    global server_session_counter
-                    server_session_counter += 1
-                    ph_p = encode_sproto([(0, tag), (1, server_session_counter)], 2)
-                    pf_p = sproto_pack(ph_p + data)
-                    conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
-                    return pf_p
+                    try:
+                        global server_session_counter
+                        server_session_counter += 1
+                        print(f"[TX] {tag} (Session: {server_session_counter})")
+                        ph_p = encode_sproto([(0, tag), (1, server_session_counter)], 2)
+                        pf_p = sproto_pack(ph_p + data)
+                        conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+                        return pf_p
+                    except Exception:
+                        traceback.print_exc()
+                        return b""
 
                 time.sleep(0.1)
                 sync = encode_sproto([(0, int(time.time())), (12, 12345), (13, 1)], 15)
-                send_rpc_push(614, sync); print(f"[TX] 614")
+                send_rpc_push(614, sync)
                 
                 time.sleep(0.1)
                 map_e = encode_sproto([(0, "101"), (1, 1), (2, 1)], 3)
-                p_bytes = send_rpc_push(503, map_e); print(f"[TX] 503")
+                p_bytes = send_rpc_push(503, map_e)
                 
                 # VERIFY 503 DECODE
                 d_test = decode_sproto(sproto_unpack(p_bytes), 6)
@@ -186,16 +191,16 @@ def client_handler(conn, addr):
                     ps = encode_sproto([(0, 1500), (1, 500), (2, 2000), (3, 0)], 4)
                     mv = encode_sproto([(0, ps), (1, ps)], 2)
                     char_obj = encode_sproto([(0, c['id']), (1, gn), (2, encode_sproto([(0, 10560), (2, 1), (3, 55653), (15, 1)], 19)), (5, encode_sproto([(13, 0)], 19)), (6, get_visual(c['name'], c['prof'])), (7, mv), (13, rt), (15, 2)], 17)
-                    send_rpc_push(504, encode_sproto([(0, char_obj), (1, mv)], 2)); print(f"[TX] 504")
+                    print("before send 504")
+                    send_rpc_push(504, encode_sproto([(0, char_obj), (1, mv)], 2))
+                    print("after send 504")
 
             elif msg == 100: # map_ready
                 print(f"[RX] 100 MAP_READY")
                 time.sleep(0.2)
-                server_session_counter += 1
-                ph654 = encode_sproto([(0, 654), (1, server_session_counter)], 2)
-                pf654 = sproto_pack(ph654 + encode_sproto([(0, 1)], 1))
-                conn.sendall(struct.pack(">H", len(pf654)) + pf654)
-                print(f"[TX] 654")
+                print("before send 654")
+                send_rpc_push(654, encode_sproto([(0, 1)], 1))
+                print("after send 654")
 
             elif msg == 218: # heartbeat
                 resp = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))], 2)
