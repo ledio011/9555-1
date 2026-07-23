@@ -24,6 +24,19 @@ def save_chars(data):
 
 characters = load_chars()
 
+def get_visual_data(name, prof):
+    # XD=0, QJ=1, NQS=2
+    defaults = {
+        0: {"mode": "100", "head": "XD_A_T", "body": "XD_A_S", "leg": "XD_A_X", "weapon": "XD_A_WQ"},
+        1: {"mode": "104", "head": "QJ_A_T", "body": "QJ_A_S", "leg": "QJ_A_X", "weapon": "QJ_A_WQ"},
+        2: {"mode": "105", "head": "NQS_A_T", "body": "NQS_A_S", "leg": "NQS_A_X", "weapon": "NQS_A_WQ"}
+    }
+    d = defaults.get(prof, defaults[0])
+    return encode_sproto([
+        (0, name), (1, d["mode"]), (2, d["head"]), (3, d["body"]), 
+        (4, d["leg"]), (5, d["weapon"]), (10, 0) # showType 0
+    ], fn=17)
+
 def generate_random_name(gender_type):
     first_names = ["Shadow", "Storm", "Frost", "Iron", "Viper", "Ghost", "Blaze", "Neon", "Rogue", "Drake"]
     last_names = ["Wolf", "Hunter", "King", "Ghost", "Ninja", "Warrior", "Legend", "X", "Ace", "Blade"]
@@ -86,11 +99,9 @@ def encode_sproto(fields, fn=None):
             elif isinstance(val, list):
                 header[tag] = 0
                 list_bin = bytearray()
-                for item in val: 
+                for item in val:
                     if isinstance(item, (bytes, bytearray)): list_bin += struct.pack("<I", len(item)) + item
-                    else: # assuming string
-                        s = str(item).encode('utf-8')
-                        list_bin += struct.pack("<I", len(s)) + s
+                    else: list_bin += struct.pack("<I", len(str(item))) + str(item).encode('utf-8')
                 body += struct.pack("<I", len(list_bin)) + list_bin
         else: header[tag] = 1
     res = struct.pack("<H", fn)
@@ -123,7 +134,7 @@ def send_push(conn, tag, data):
         pkg_h = encode_sproto([(0, tag)], fn=2)
         full = sproto_pack(pkg_h + data)
         conn.sendall(struct.pack(">H", len(full)) + full)
-        print(f"[PUSH] Tag {tag} dërguar.")
+        print(f"[PUSH] Tag {tag} OK")
     except: pass
 
 def client_handler(conn, addr):
@@ -153,11 +164,42 @@ def client_handler(conn, addr):
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
             elif msg_type == 100: # map_ready
-                print(f"[MAP] Lojtari {acc_id} është gati në hartë.")
+                print(f"[MAP READY] Unlocking character for {acc_id}")
+                char_info = characters.get(acc_id)
+                if char_info:
+                    # Sync State
+                    send_push(conn, 519, encode_sproto([(0, []), (1, ""), (2, [])], fn=3)) # Missions
+                    send_push(conn, 611, encode_sproto([(0, [])], fn=1)) # Items
+                    send_push(conn, 540, encode_sproto([(0, [])], fn=1)) # Skills
+                    send_push(conn, 592, encode_sproto([(0, [])], fn=1)) # Backpack
+                    
+                    # Spawn Player (Tag 504) - Full Data
+                    char_id, name, prof = char_info['id'], char_info['name'], char_info['prof']
+                    # Attribute (Tag 0 max_hp, 2 atk, 3 def, 13 mov...)
+                    attr_data = encode_sproto([(0, 5000), (2, 200), (3, 200), (4, 100), (5, 100), (13, 800)], fn=25)
+                    runtime = encode_sproto([(6, attr_data), (7, attr_data)], fn=8)
+                    # Property (Tags 13-18 for money)
+                    prop = encode_sproto([(13, 100000), (14, 100000), (15, 100000)], fn=19)
+                    # Attribute AOI
+                    attr_aoi = encode_sproto([(0, 5000), (1, 1000), (2, 10), (3, 500)], fn=4)
+                    gen = encode_sproto([(0, name), (1, prof), (4, 1)], fn=5)
+                    pos = encode_sproto([(0, 1500), (1, 500), (2, 2000), (3, 0)], fn=4)
+                    mov = encode_sproto([(0, pos), (1, pos)], fn=2)
+                    visual = get_visual_data(name, prof)
+                    
+                    char_data = encode_sproto([
+                        (0, char_id), (1, gen), (2, attr_aoi), (5, prop), 
+                        (6, visual), (7, mov), (13, runtime), (15, 2)
+                    ], fn=17)
+                    send_push(conn, 504, encode_sproto([(0, char_data)], fn=1))
 
             elif msg_type == 103: # character_list
                 if acc_id in characters:
-                    char_ov = bytes(characters[acc_id]['ov'])
+                    c = characters[acc_id]
+                    gen_ov = encode_sproto([(0, c['name']), (1, c['prof']), (3, c['map'])], fn=4)
+                    attr_ov = encode_sproto([(2, 10)], fn=3) # level 10
+                    vis_ov = get_visual_data(c['name'], c['prof'])
+                    char_ov = encode_sproto([(0, c['id']), (1, gen_ov), (2, attr_ov), (3, vis_ov), (4, int(time.time()))], fn=6)
                     resp = encode_sproto([(0, [char_ov])], fn=1)
                 else:
                     resp = encode_sproto([(0, [])], fn=1)
@@ -176,12 +218,13 @@ def client_handler(conn, addr):
                 try: char_id = int(acc_id[-9:])
                 except: char_id = random.randint(1000000, 9999999)
                 map_id = "101"
-                gen_ov = encode_sproto([(0, name), (1, prof), (3, map_id)], fn=4)
-                attr_ov = encode_sproto([(0, 1), (1, 100)], fn=2) 
-                vis_ov = encode_sproto([(0, name), (1, "100")], fn=2)
-                char_ov = encode_sproto([(0, char_id), (1, gen_ov), (2, attr_ov), (3, vis_ov), (4, int(time.time()))], fn=5)
-                characters[acc_id] = {'id': char_id, 'ov': list(char_ov), 'name': name, 'prof': prof, 'map': map_id}
+                characters[acc_id] = {'id': char_id, 'name': name, 'prof': prof, 'map': map_id}
                 save_chars(characters)
+                # Re-encode overview for success response
+                gen_ov = encode_sproto([(0, name), (1, prof), (3, map_id)], fn=4)
+                attr_ov = encode_sproto([(2, 10)], fn=3)
+                vis_ov = get_visual_data(name, prof)
+                char_ov = encode_sproto([(0, char_id), (1, gen_ov), (2, attr_ov), (3, vis_ov), (4, int(time.time()))], fn=6)
                 resp = encode_sproto([(0, char_ov), (1, 0)], fn=2)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
@@ -190,51 +233,28 @@ def client_handler(conn, addr):
                 char_info = characters.get(acc_id)
                 if not char_info: continue
                 map_id = char_info.get('map', '101')
-                print(f"[PICK] Fillimi i sekuencës COMPLETE për {acc_id}")
+                print(f"[PICK] Success for {acc_id}, loading {map_id}")
                 
-                # 1. Përgjigjja Success
-                resp = encode_sproto([(0, 1)], fn=1) 
+                # Success response (Errno 3 is also valid success in some versions)
+                resp = encode_sproto([(0, 3)], fn=1) 
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
                 
-                # 2. Sync Common Data (614) - Kjo është kritike!
-                # Tag: 0:time, 2:offset, 3:refresh, 4:pvp, 9:func, 11:guild, 12:seed, 13:level
+                # Sync Common Data (614)
                 common_data = encode_sproto([
-                    (0, int(time.time())), 
-                    (2, 0), 
-                    (3, 0), 
-                    (4, 10000), 
-                    (12, random.randint(1, 999999)), 
-                    (13, 100) # Server Level
+                    (0, int(time.time())), (2, 0), (3, 0), (4, 10000), 
+                    (12, random.randint(1, 999999)), (13, 100)
                 ], fn=14)
                 send_push(conn, 614, common_data)
 
-                # 3. Sync State tjerë
-                send_push(conn, 519, encode_sproto([(0, []), (1, ""), (2, [])], fn=3)) # Missions
-                send_push(conn, 611, encode_sproto([(0, [])], fn=1)) # Items
-                send_push(conn, 540, encode_sproto([(0, [])], fn=1)) # Skills
-                send_push(conn, 592, encode_sproto([(0, [])], fn=1)) # Backpack
-                
-                # 4. Create Player (504)
-                char_id, name, prof = char_info['id'], char_info['name'], char_info['prof']
-                attr_data = encode_sproto([(0, 1000), (13, 500)], fn=14)
-                runtime = encode_sproto([(6, attr_data), (7, attr_data)], fn=8)
-                prop = encode_sproto([(13, 50000), (14, 50000), (15, 50000)], fn=19)
-                attr_aoi = encode_sproto([(0, 1000), (1, 1000), (2, 1), (3, 100)], fn=4)
-                gen = encode_sproto([(0, name), (1, prof), (4, 1)], fn=5)
-                pos = encode_sproto([(0, 1500), (1, 500), (2, 2000), (3, 0)], fn=4)
-                mov = encode_sproto([(0, pos), (1, pos)], fn=2)
-                vis = encode_sproto([(0, name), (1, "100")], fn=2)
-                char_data = encode_sproto([(0, char_id), (1, gen), (2, attr_aoi), (5, prop), (6, vis), (7, mov), (13, runtime), (15, 2)], fn=16)
-                send_push(conn, 504, encode_sproto([(0, char_data)], fn=1))
-
-                # 5. Enter Map (503)
-                time.sleep(0.3)
+                # Enter Map (503)
+                time.sleep(0.1)
                 send_push(conn, 503, encode_sproto([(0, map_id), (1, 1), (2, 1)], fn=3))
 
-            elif msg_type == 139: # request_update_storagepack (Inventari)
-                print(f"[REQ] Update Storage Pack kërkuar.")
-                resp = encode_sproto([(0, [])], fn=1)
+            # --- Startup Request Handlers ---
+            elif msg_type in [121, 139, 145, 191, 202, 210, 225, 242, 252, 253, 258, 261]:
+                print(f"[REQ] Acknowledging Tag {msg_type}")
+                resp = encode_sproto([], fn=0)
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp); conn.sendall(struct.pack(">H", len(full)) + full)
 
@@ -243,18 +263,13 @@ def client_handler(conn, addr):
                 pkg_h = encode_sproto([(1, session)], fn=2)
                 full = sproto_pack(pkg_h + resp_body); conn.sendall(struct.pack(">H", len(full)) + full)
 
-            elif msg_type == 268: # unlock_function_complete
-                pkg_h = encode_sproto([(1, session)], fn=2)
-                full = sproto_pack(pkg_h); conn.sendall(struct.pack(">H", len(full)) + full)
-
-    except Exception as e: 
-        print(f"[ERROR] {e}")
+    except: pass
     finally: conn.close()
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT))
 server.listen(10)
-print(f"GAME SERVER READY ON {PORT} (ULTRA SYNC)")
+print(f"GAME SERVER READY ON {PORT} (SOLID VERSION)")
 while True:
     c, a = server.accept(); threading.Thread(target=client_handler, args=(c, a), daemon=True).start()
