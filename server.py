@@ -167,9 +167,28 @@ def client_handler(conn, addr):
 
             elif msg == 105: # character_pick
                 char_id = body.get(0)
+                curr = next((c for c in all_accounts_chars.get(acc_id, []) if c['id'] == char_id), None)
                 resp = encode_sproto([(0, 1)], 1); ph = encode_sproto([(1, session)], 2)
                 conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
-                send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)], 3)) # enter_map
+                if curr:
+                    p = curr['prof']
+                    send_rpc_push(615, encode_sproto([(0, int(time.time())), (12, 12345), (13, 1)], 15))
+                    send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)], 3))
+                    hp, atk, def_v, hit, eva, cri, res = 3000, 300, 35, 480, 60, 220, 20
+                    if p == 1: hp, atk, def_v, hit, eva, cri, res = 3000, 300, 35, 300, 60, 140, 20
+                    elif p == 2: hp, atk, def_v, hit, eva, cri, res = 3000, 300, 35, 1000, 60, 360, 20
+                    att = encode_sproto([(0, hp), (2, atk), (3, def_v), (4, hit), (5, eva), (6, cri), (7, res), (13, 300)], 25)
+                    run = encode_sproto([(6, att), (7, att)], 8)
+                    vis = get_visual(curr['name'], p)
+                    gn = encode_sproto([(0, curr['name']), (1, p), (2, 1), (3, "11"), (4, 1)], 5)
+                    ps = encode_sproto([(0, 7007), (1, 100), (2, 5033), (3, 0)], 4)
+                    mv = encode_sproto([(0, ps), (1, ps)], 2)
+                    sid = "101" if p == 0 else ("201" if p == 1 else "301")
+                    skill_obj = encode_sproto([(0, sid), (1, 1), (2, 3), (3, 1), (5, False)], 6)
+                    a_oth = encode_sproto([(0, hp), (2, 1), (3, 55653), (15, 0)], 19)
+                    prop = encode_sproto([(13, 1000), (14, 1000)], 19)
+                    char_obj = encode_sproto([(0, curr['id']), (1, gn), (2, a_oth), (5, prop), (6, vis), (7, mv), (8, [skill_obj]), (13, run), (15, 2)], 17)
+                    send_rpc_push(504, encode_sproto([(0, char_obj), (1, mv)], 2))
 
             elif msg == 100: # map_ready
                 m1 = encode_sproto([(0, "11"), (1, 1), (2, 1), (3, [0])], 4)
