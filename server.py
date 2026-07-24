@@ -1,11 +1,11 @@
 # ==========================================================
-# AUTO THEFT GANGSTERS REVIVAL - BUG FIX v9
+# AUTO THEFT GANGSTERS REVIVAL - STABLE v10
 # GAME SERVER 9555
 # ==========================================================
 import socket, struct, threading, random, json, os, time, traceback
 
 PORT = int(os.environ.get("PORT", 9555))
-CHAR_DB = "characters_v9.json"
+CHAR_DB = "characters_v10.json"
 server_session_counter = 5000
 
 def load_chars():
@@ -102,19 +102,24 @@ def decode_sproto(data, offset=0):
     except: return {}
 
 def get_visual(name, prof):
+    # IDs duhet te jene stringje si ne ModelData.csv
     # XD (0), QJ (1), NQS (2)
-    # XD perdor QJ_A si fallback nese folderi XD_A mungon
-    m = {0:{"m":"104","h":"QJ_A_T","b":"QJ_A_S","l":"QJ_A_X","w":"QJ_A_WQ"},
-         1:{"m":"104","h":"QJ_A_T","b":"QJ_A_S","l":"QJ_A_X","w":"QJ_A_WQ"},
-         2:{"m":"105","h":"NQS_A_T","b":"NQS_A_S","l":"NQS_A_X","w":"NQS_A_WQ"}}
-    v = m.get(prof, m[1])
+    # ModeId duhet te jete Folder Name qe Unity te gjej bundle
+    if prof == 0: # XD fallback to QJ
+        v = {"m":"QJ_A","h":"QJ_A_T","b":"QJ_A_S","l":"QJ_A_X","w":"QJ_A_WQ"}
+    elif prof == 1: # QJ
+        v = {"m":"QJ_A","h":"QJ_A_T","b":"QJ_A_S","l":"QJ_A_X","w":"QJ_A_WQ"}
+    else: # NQS
+        v = {"m":"NQS_A","h":"NQS_A_T","b":"NQS_A_S","l":"NQS_A_X","w":"NQS_A_WQ"}
+        
     return encode_sproto([
         (0, name), (1, v["m"]), (2, v["h"]), (3, v["b"]), (4, v["l"]), (5, v["w"]), (10, 0)
     ], 17)
 
 def get_char_ov(c):
     gen = encode_sproto([(0, c['name']), (1, c['prof']), (2, 1), (3, "11"), (4, 1)], 5)
-    attr = encode_sproto([(0, 10000), (1, 0), (2, 1), (3, 5000)], 19)
+    # HP 500, DEF 50, MOV 300 (nga AttributeData)
+    attr = encode_sproto([(0, 500), (2, 1), (3, 5000)], 19)
     return encode_sproto([
         (0, c['id']), (1, gen), (2, attr), (3, get_visual(c['name'], c['prof'])), (4, int(time.time()))
     ], 6)
@@ -132,8 +137,7 @@ def client_handler(conn, addr):
             conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
             print(f"[TX] {tag} (Session: {server_session_counter})")
             return pf_p
-        except Exception:
-            return b""
+        except Exception: return b""
 
     try:
         while True:
@@ -171,10 +175,11 @@ def client_handler(conn, addr):
                 
                 if acc_id not in all_accounts_chars: all_accounts_chars[acc_id] = []
                 if len(all_accounts_chars[acc_id]) < 4:
-                    all_accounts_chars[acc_id].append({'id': cid, 'name': name, 'prof': prof, 'map': "11"})
+                    new_c = {'id': cid, 'name': name, 'prof': prof, 'map': "11"}
+                    all_accounts_chars[acc_id].append(new_c)
                     save_chars(all_accounts_chars)
-                    print(f"[CREATED] {name} (Slot {len(all_accounts_chars[acc_id])})")
-                    resp = encode_sproto([(0, get_char_ov(all_accounts_chars[acc_id][-1])), (1, 0)], 2)
+                    print(f"[CREATED] {name} for {acc_id}")
+                    resp = encode_sproto([(0, get_char_ov(new_c)), (1, 0)], 2)
                 else:
                     resp = encode_sproto([(0, get_char_ov(all_accounts_chars[acc_id][0])), (1, 1)], 2)
                 
@@ -189,31 +194,28 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
                 
                 if current_char:
-                    p = current_char['prof']
                     time.sleep(0.2)
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (12, 12345), (13, 1)], 15))
                     time.sleep(0.2)
                     send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)], 3))
                     
-                    # Skill & Character Setup
-                    s_ids = [("101", 3), ("105", 4)] if p == 0 else ([("201", 3), ("205", 4)] if p == 1 else [("301", 3), ("305", 4)])
+                    p = current_char['prof']
+                    s_ids = [("101", 3)] if p == 0 else ([("201", 3)] if p == 1 else [("301", 3)])
                     skill_list = {sid: encode_sproto([(0, sid), (1, 1), (2, pos), (3, 1), (5, False)], 6) for sid, pos in s_ids}
                     
-                    # MANDATORY: attribute and attribute_all inside runtime (Tag 13)
-                    att = encode_sproto([(0, 1000), (10, 500)], 15) # hp, mov
-                    run = encode_sproto([(0, att), (1, att)], 3) # Tag 6 and 7 in runtime_agent are attribute/attribute_all
+                    # FIXED RUNTIME TAGS (Must be 6 and 7 in runtime_agent.cs)
+                    att = encode_sproto([(0, 500), (10, 300)], 15) # hp, mov
+                    # encode_sproto([(6, att), (7, att)], 8) -> Kjo vendos Tag 6 dhe 7 saktësisht
+                    run = encode_sproto([(6, att), (7, att)], 8)
                     
                     vis = get_visual(current_char['name'], p)
                     gn = encode_sproto([(0, current_char['name']), (1, p), (2, 1), (3, "11"), (4, 1)], 5)
                     ps = encode_sproto([(0, 7007), (1, 100), (2, 5033), (3, 0)], 4)
                     mv = encode_sproto([(0, ps), (1, ps)], 2)
-                    # attribute_other (Tag 2)
-                    a_oth = encode_sproto([(0, 1000), (2, 1), (3, 5000), (15, 0), (16, 0)], 19)
+                    a_oth = encode_sproto([(0, 500), (2, 1), (3, 5000), (15, 0), (16, 0)], 19)
                     
-                    # Character object (Tag 13 runtime is CRITICAL)
                     char_obj = encode_sproto([
-                        (0, current_char['id']), (1, gn), (2, a_oth), (5, encode_sproto([], 7)), 
-                        (6, vis), (7, mv), (8, skill_list), (13, run), (15, 2)
+                        (0, current_char['id']), (1, gn), (2, a_oth), (6, vis), (7, mv), (8, skill_list), (13, run), (15, 2)
                     ], 17)
                     
                     time.sleep(0.5)
@@ -222,6 +224,7 @@ def client_handler(conn, addr):
             elif msg == 100: # map_ready
                 print(f"[RX] 100 MAP_READY")
                 time.sleep(0.5)
+                # Mission 46001 (Chinatown tutorial for Map 11)
                 m1 = encode_sproto([(0, "46001"), (1, 1), (2, 1), (3, [0])], 4)
                 send_rpc_push(654, encode_sproto([(0, {"46001": m1}), (1, "46001")], 3))
                 time.sleep(0.2)
@@ -231,10 +234,14 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)], 2); pf = sproto_pack(ph + encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))], 2))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            else:
+                ph = encode_sproto([(1, session)], 2); pf = sproto_pack(ph + encode_sproto([], 0))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
     except: traceback.print_exc()
     finally: conn.close()
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM); server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT)); server.listen(20)
-print(f"GAME SERVER 9555 READY (STABLE v9)");
+print(f"GAME SERVER 9555 READY (STABLE v10)");
 while True: cl, ad = server.accept(); threading.Thread(target=client_handler, args=(cl, ad), daemon=True).start()
