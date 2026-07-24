@@ -104,7 +104,7 @@ def decode_sproto(data, offset=0):
 
 def get_visual(name, prof):
     # Mapping bazuar ne folderat _A origjinale
-    m = {0:{"m":"QJ_A","h":"QJ_A_T","b":"QJ_A_S","l":"QJ_A_X","w":"QJ_A_WQ"},
+    m = {0:{"m":"XD_A","h":"XD_A_T","b":"XD_A_S","l":"XD_A_X","w":"XD_A_WQ"},
          1:{"m":"QJ_A","h":"QJ_A_T","b":"QJ_A_S","l":"QJ_A_X","w":"QJ_A_WQ"},
          2:{"m":"NQS_A","h":"NQS_A_T","b":"NQS_A_S","l":"NQS_A_X","w":"NQS_A_WQ"}}
     v = m.get(prof, m[1])
@@ -112,7 +112,7 @@ def get_visual(name, prof):
 
 def get_char_ov(c):
     gen = encode_sproto([(0, c['name']), (1, c['prof']), (2, 1), (3, "11"), (4, 1)], 5)
-    attr = encode_sproto([(0, 500), (2, 1), (3, 5000)], 19)
+    attr = encode_sproto([(0, 3000), (2, 1), (3, 5000)], 19)
     return encode_sproto([(0, c['id']), (1, gen), (2, attr), (3, get_visual(c['name'], c['prof'])), (4, int(time.time()))], 6)
 
 def client_handler(conn, addr):
@@ -171,16 +171,24 @@ def client_handler(conn, addr):
                     p = curr['prof']
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (12, 12345), (13, 1)], 15))
                     send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)], 3))
-                    # MANDATORY RUNTIME RECONSTRUCTION (v11 FINAL)
-                    att = encode_sproto([(0, 500), (2, 100), (3, 50), (13, 300)], 25)
-                    run = encode_sproto([(6, att), (7, att)], 8) # runtime tags 6 and 7
+                    
+                    # Original Level 1 Stats for XD (Profession 0)
+                    # HP: 3000, ATK: 300, DEF: 35, HIT: 480, EVA: 60, CRI: 220, RES: 20
+                    hp, atk, def_v, hit, eva, cri, res = 3000, 300, 35, 480, 60, 220, 20
+                    if p == 1: # QJ
+                        hp, atk, def_v, hit, eva, cri, res = 3000, 300, 35, 300, 60, 140, 20
+                    elif p == 2: # NQ
+                        hp, atk, def_v, hit, eva, cri, res = 3000, 300, 35, 1000, 60, 360, 20
+                        
+                    att = encode_sproto([(0, hp), (2, atk), (3, def_v), (4, hit), (5, eva), (6, cri), (7, res), (13, 300)], 25)
+                    run = encode_sproto([(6, att), (7, att)], 8)
                     vis = get_visual(curr['name'], p)
                     gn = encode_sproto([(0, curr['name']), (1, p), (2, 1), (3, "11"), (4, 1)], 5)
                     ps = encode_sproto([(0, 7007), (1, 100), (2, 5033), (3, 0)], 4)
                     mv = encode_sproto([(0, ps), (1, ps)], 2)
                     sid = "101" if p == 0 else ("201" if p == 1 else "301")
                     skill_dict = {sid: encode_sproto([(0, sid), (1, 1), (2, 3), (3, 1), (5, False)], 6)}
-                    a_oth = encode_sproto([(0, 500), (2, 1), (3, 55653), (15, 0)], 19)
+                    a_oth = encode_sproto([(0, hp), (2, 1), (3, 55653), (15, 0)], 19)
                     prop = encode_sproto([(13, 1000), (14, 1000)], 19)
                     char_obj = encode_sproto([(0, curr['id']), (1, gn), (2, a_oth), (5, prop), (6, vis), (7, mv), (8, skill_dict), (13, run), (15, 2)], 17)
                     send_rpc_push(504, encode_sproto([(0, char_obj), (1, mv)], 2))
