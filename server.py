@@ -39,11 +39,11 @@ def encode_sproto(fields, fn=None):
             header.append(0)
             if isinstance(val, str): v = val.encode('utf-8')
             elif isinstance(val, list):
-                v = bytearray()
-                for item in val: v += struct.pack("<I", len(item)) + item
+                # Sproto object lists are just concatenated encoded objects
+                v = b"".join(val)
             elif isinstance(val, dict):
-                v = bytearray()
-                for item in val.values(): v += struct.pack("<I", len(item)) + item
+                # Sproto maps are lists of objects
+                v = b"".join(val.values())
             else: v = val
             body += struct.pack("<I", len(v)) + v
         last_tag = tag
@@ -187,10 +187,11 @@ def client_handler(conn, addr):
                     ps = encode_sproto([(0, 7007), (1, 100), (2, 5033), (3, 0)], 4)
                     mv = encode_sproto([(0, ps), (1, ps)], 2)
                     sid = "101" if p == 0 else ("201" if p == 1 else "301")
-                    skill_dict = {sid: encode_sproto([(0, sid), (1, 1), (2, 3), (3, 1), (5, False)], 6)}
+                    skill_obj = encode_sproto([(0, sid), (1, 1), (2, 3), (3, 1), (5, False)], 6)
+                    skill_list = [skill_obj]
                     a_oth = encode_sproto([(0, hp), (2, 1), (3, 55653), (15, 0)], 19)
                     prop = encode_sproto([(13, 1000), (14, 1000)], 19)
-                    char_obj = encode_sproto([(0, curr['id']), (1, gn), (2, a_oth), (5, prop), (6, vis), (7, mv), (8, skill_dict), (13, run), (15, 2)], 17)
+                    char_obj = encode_sproto([(0, curr['id']), (1, gn), (2, a_oth), (5, prop), (6, vis), (7, mv), (8, skill_list), (13, run), (15, 2)], 17)
                     send_rpc_push(504, encode_sproto([(0, char_obj), (1, mv)], 2))
 
             elif msg == 100: # map_ready
