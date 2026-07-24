@@ -168,28 +168,30 @@ def client_handler(conn, addr):
                 print(f"[TX] 105 RESPONSE")
                 resp = encode_sproto([(0, 1)], 1); ph = encode_sproto([(1, session)], 2)
                 conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
+                
                 time.sleep(0.2)
                 print(f"[TX] 614")
                 sync = encode_sproto([(0, int(time.time())), (12, 12345), (13, 1)], 15)
                 send_rpc_push(614, sync)
-                time.sleep(0.2)
-                print(f"[TX] 503")
-                map_e = encode_sproto([(0, "101"), (1, 1), (2, 1)], 3)
-                p_bytes = send_rpc_push(503, map_e)
-                d_test = decode_sproto(sproto_unpack(p_bytes), 6)
-                print(f"Decoded enter_map check: field 0={d_test.get(0)}, field 1={d_test.get(1)}, field 2={d_test.get(2)}")
                 
-                # THE DEADLOCK BREAKER: Push Player before MapReady signal
+                time.sleep(0.2)
+                print(f"[TX] 503 -> MAP 11 (BUILT-IN)")
+                # Ndryshuar nga 101 në 11 pasi Map 11 ka DirectLoad = 1
+                map_e = encode_sproto([(0, "11"), (1, 1), (2, 1)], 3)
+                p_bytes = send_rpc_push(503, map_e)
+                
+                # THE DEADLOCK BREAKER: Push Player for Map 11
                 time.sleep(1.0)
                 c = characters.get(acc_id)
                 if c:
+                    # Koordinatat e sakta nga MapInfoData: 7007#100#5033#0
                     af = encode_sproto([(0, 10560), (2, 500), (3, 300), (13, 800)], 25)
                     rt = encode_sproto([(6, af), (7, af)], 8)
-                    gn = encode_sproto([(0, c['name']), (1, c['prof']), (2, 1), (3, "101"), (4, 1)], 5)
-                    ps = encode_sproto([(0, 1500), (1, 500), (2, 2000), (3, 0)], 4)
+                    gn = encode_sproto([(0, c['name']), (1, c['prof']), (2, 1), (3, "11"), (4, 1)], 5)
+                    ps = encode_sproto([(0, 7007), (1, 100), (2, 5033), (3, 0)], 4)
                     mv = encode_sproto([(0, ps), (1, ps)], 2)
                     char_obj = encode_sproto([(0, c['id']), (1, gn), (2, encode_sproto([(0, 10560), (2, 1), (3, 55653), (15, 1)], 19)), (5, encode_sproto([(13, 0)], 19)), (6, get_visual(c['name'], c['prof'])), (7, mv), (13, rt), (15, 2)], 17)
-                    print("before send 504")
+                    print("before send 504 (Map 11)")
                     send_rpc_push(504, encode_sproto([(0, char_obj), (1, mv)], 2))
                     print("after send 504")
 
