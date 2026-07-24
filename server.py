@@ -184,16 +184,38 @@ def client_handler(conn, addr):
                 time.sleep(1.0)
                 c = characters.get(acc_id)
                 if c:
-                    # Koordinatat e sakta nga MapInfoData: 7007#100#5033#0
+                    # Skill IDs bazuar ne SkillData.csv
+                    # XD: 101, 102, 103 | QJ: 201, 202, 203 | NQS: 301, 302, 303
+                    p = c['prof']
+                    s_ids = ["101", "102", "103"] if p == 1 else (["201", "202", "203"] if p == 2 else ["301", "302", "303"])
+                    
+                    # Ndertimi i Skill Map (Tag 8 ne character)
+                    skill_list = []
+                    for sid in s_ids:
+                        si = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)], 6)
+                        skill_list.append(si)
+                    
                     af = encode_sproto([(0, 10560), (2, 500), (3, 300), (13, 800)], 25)
                     rt = encode_sproto([(6, af), (7, af)], 8)
                     gn = encode_sproto([(0, c['name']), (1, c['prof']), (2, 1), (3, "11"), (4, 1)], 5)
                     ps = encode_sproto([(0, 7007), (1, 100), (2, 5033), (3, 0)], 4)
                     mv = encode_sproto([(0, ps), (1, ps)], 2)
-                    char_obj = encode_sproto([(0, c['id']), (1, gn), (2, encode_sproto([(0, 10560), (2, 1), (3, 55653), (15, 1)], 19)), (5, encode_sproto([(13, 0)], 19)), (6, get_visual(c['name'], c['prof'])), (7, mv), (13, rt), (15, 2)], 17)
-                    print("before send 504 (Map 11)")
+                    
+                    # Shto Tag 8 (skills) ne char_obj
+                    char_obj = encode_sproto([
+                        (0, c['id']), 
+                        (1, gn), 
+                        (2, encode_sproto([(0, 10560), (2, 1), (3, 55653), (15, 1)], 19)), 
+                        (5, encode_sproto([(13, 0)], 19)), 
+                        (6, get_visual(c['name'], c['prof'])), 
+                        (7, mv), 
+                        (8, skill_list), # Tag 8 eshte MAP ne Sproto, ketu dërgohet si listë objektesh
+                        (13, rt), 
+                        (15, 2)
+                    ], 17)
+                    
+                    print(f"Sending 504 with Skills for Profession {p}")
                     send_rpc_push(504, encode_sproto([(0, char_obj), (1, mv)], 2))
-                    print("after send 504")
 
             elif msg == 100: # map_ready
                 print(f"[RX] 100 MAP_READY")
