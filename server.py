@@ -1,5 +1,5 @@
 # ==========================================================
-# AUTO THEFT GANGSTERS REVIVAL - MAP ENTRY PATCH v6
+# AUTO THEFT GANGSTERS REVIVAL - MISSION & SKILL PATCH v7
 # GAME SERVER 9555
 # ==========================================================
 import socket, struct, threading, random, json, os, time, traceback
@@ -102,14 +102,24 @@ def decode_sproto(data, offset=0):
     except: return {}
 
 def get_visual(name, prof):
-    m = {0:{"m":"100","h":"XD_A_T","b":"XD_A_S","l":"XD_A_X","w":"XD_A_WQ"},
-         1:{"m":"104","h":"QJ_A_T","b":"QJ_A_S","l":"QJ_A_X","w":"QJ_A_WQ"},
-         2:{"m":"105","h":"NQS_A_T","b":"NQS_A_S","l":"NQS_A_X","w":"NQS_A_WQ"}}
+    # Mapping bazuar ne CharacterModelData.csv
+    # XD (0), QJ (1), NQS (2)
+    m = {0:{"m":"100","h":"XD_0_T","b":"XD_0_S","l":"XD_0_X","w":"XD_0_WQ"},
+         1:{"m":"104","h":"QJ_0_T","b":"QJ_0_S","l":"QJ_0_X","w":"QJ_0_WQ"},
+         2:{"m":"105","h":"NQS_0_T","b":"NQS_0_S","l":"NQS_0_X","w":"NQS_0_WQ"}}
     v = m.get(prof, m[0])
-    return encode_sproto([(0,name),(1,v["m"]),(2,v["h"]),(3,v["b"]),(4,v["l"]),(5,v["w"]),(10,0)], 17)
+    return encode_sproto([
+        (0, name), 
+        (1, v["m"]), 
+        (2, v["h"]), 
+        (3, v["b"]), 
+        (4, v["l"]), 
+        (5, v["w"]), 
+        (10, 0)
+    ], 17)
 
 def get_char_ov(c):
-    gen = encode_sproto([(0,c['name']),(1,c['prof']),(2,1),(3,"101")], 5)
+    gen = encode_sproto([(0,c['name']),(1,c['prof']),(2,1),(3,"11")], 5)
     attr = encode_sproto([(0,1),(1,55653)], 2)
     return encode_sproto([(0,c['id']),(1,gen),(2,attr),(3,get_visual(c['name'],c['prof'])),(4,int(time.time()))], 6)
 
@@ -127,7 +137,6 @@ def client_handler(conn, addr):
             print(f"[TX] {tag} (Session: {server_session_counter})")
             return pf_p
         except Exception:
-            print(f"FAILED TO SEND TAG {tag} TO {addr}")
             traceback.print_exc()
             return b""
 
@@ -158,7 +167,7 @@ def client_handler(conn, addr):
                 gd = decode_sproto(body.get(0, b"")) if isinstance(body.get(0), bytes) else {}
                 name = gd.get(0, b"").decode('utf-8') if isinstance(gd.get(0), bytes) else "Hero"
                 cid = random.randint(1000000, 9999999)
-                characters[acc_id] = {'id': cid, 'name': name, 'prof': gd.get(1, 0), 'map': "101"}
+                characters[acc_id] = {'id': cid, 'name': name, 'prof': gd.get(1, 0), 'map': "11"}
                 save_chars(characters); print(f"[CREATED] {name}")
                 resp = encode_sproto([(0, get_char_ov(characters[acc_id])), (1, 0)], 2)
                 ph = encode_sproto([(1, session)], 2); pf = sproto_pack(ph + resp)
@@ -170,29 +179,26 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
                 
                 time.sleep(0.2)
-                print(f"[TX] 614")
                 sync = encode_sproto([(0, int(time.time())), (12, 12345), (13, 1)], 15)
                 send_rpc_push(614, sync)
                 
                 time.sleep(0.2)
-                print(f"[TX] 503 -> MAP 11 (BUILT-IN)")
-                # Ndryshuar nga 101 në 11 pasi Map 11 ka DirectLoad = 1
+                print(f"[TX] 503 -> MAP 11")
                 map_e = encode_sproto([(0, "11"), (1, 1), (2, 1)], 3)
-                p_bytes = send_rpc_push(503, map_e)
+                send_rpc_push(503, map_e)
                 
-                # THE DEADLOCK BREAKER: Push Player for Map 11
-                time.sleep(1.0)
+                time.sleep(0.5)
                 c = characters.get(acc_id)
                 if c:
-                    # Skill IDs bazuar ne SkillData.csv
-                    # XD: 101, 102, 103 | QJ: 201, 202, 203 | NQS: 301, 302, 303
                     p = c['prof']
-                    s_ids = ["101", "102", "103"] if p == 1 else (["201", "202", "203"] if p == 2 else ["301", "302", "303"])
+                    # Skill Mapping: Main attack (indexPos 3), Sub skills (indexPos 4, 5, 6)
+                    if p == 0: s_ids = [("101", 3), ("105", 4), ("106", 5)] # XD
+                    elif p == 1: s_ids = [("201", 3), ("205", 4), ("206", 5)] # QJ
+                    else: s_ids = [("301", 3), ("305", 4), ("306", 5)] # NQS
                     
-                    # Ndertimi i Skill Map (Tag 8 ne character)
                     skill_list = []
-                    for sid in s_ids:
-                        si = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)], 6)
+                    for sid, pos in s_ids:
+                        si = encode_sproto([(0, sid), (1, 1), (2, pos), (3, 1), (4, 0), (5, False)], 6)
                         skill_list.append(si)
                     
                     af = encode_sproto([(0, 10560), (2, 500), (3, 300), (13, 800)], 25)
@@ -201,28 +207,30 @@ def client_handler(conn, addr):
                     ps = encode_sproto([(0, 7007), (1, 100), (2, 5033), (3, 0)], 4)
                     mv = encode_sproto([(0, ps), (1, ps)], 2)
                     
-                    # Shto Tag 8 (skills) ne char_obj
                     char_obj = encode_sproto([
-                        (0, c['id']), 
-                        (1, gn), 
+                        (0, c['id']), (1, gn), 
                         (2, encode_sproto([(0, 10560), (2, 1), (3, 55653), (15, 1)], 19)), 
                         (5, encode_sproto([(13, 0)], 19)), 
                         (6, get_visual(c['name'], c['prof'])), 
                         (7, mv), 
-                        (8, skill_list), # Tag 8 eshte MAP ne Sproto, ketu dërgohet si listë objektesh
-                        (13, rt), 
-                        (15, 2)
+                        (8, skill_list),
+                        (13, rt), (15, 2)
                     ], 17)
                     
-                    print(f"Sending 504 with Skills for Profession {p}")
+                    print(f"Sending 504 (Map 11, Skills, Visuals)")
                     send_rpc_push(504, encode_sproto([(0, char_obj), (1, mv)], 2))
 
             elif msg == 100: # map_ready
                 print(f"[RX] 100 MAP_READY")
+                time.sleep(0.5)
+                # PUSH MISSIONS
+                m1 = encode_sproto([(0, "10001"), (1, 1), (2, 1), (3, [0])], 4)
+                m_sync = encode_sproto([(0, [m1]), (1, "10001")], 3)
+                send_rpc_push(654, m_sync)
+                
                 time.sleep(0.2)
-                print("before send 654")
-                send_rpc_push(654, encode_sproto([(0, 1)], 1))
-                print("after send 654")
+                # RESPOND START_ENTER_GAME
+                send_rpc_push(505, encode_sproto([(0, 0)], 1))
 
             elif msg == 218: # heartbeat
                 resp = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))], 2)
@@ -239,5 +247,5 @@ def client_handler(conn, addr):
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM); server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT)); server.listen(20)
-print(f"GAME SERVER 9555 READY (DEADLOCK BREAKER)");
+print(f"GAME SERVER 9555 READY (STABLE v7)");
 while True: cl, ad = server.accept(); threading.Thread(target=client_handler, args=(cl, ad), daemon=True).start()
