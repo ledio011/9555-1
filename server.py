@@ -142,64 +142,40 @@ def client_handler(conn, addr):
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
 
             if msg == 4: # login
-                acc_id = body.get(1, b"").decode('utf-8', 'ignore') if isinstance(body.get(1), bytes) else str(body.get(1))
-                resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "1000"), (3, 1)], 4)
-                ph = encode_sproto([(1, session)], 2); pf = sproto_pack(ph + resp); conn.sendall(struct.pack(">H", len(pf)) + pf)
+                acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
+                resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "167"), (3, 1)], 4)
+                ph = encode_sproto([(1, session)], 2); pf = sproto_pack(ph + resp)
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 103: # char_list
+            elif msg == 103: # character_list (Kjo hap ekranin e zgjedhjes)
                 chars = all_accounts_chars.get(acc_id, [])
                 resp = encode_sproto([(0, [get_char_ov(c) for c in chars])], 1)
-                ph = encode_sproto([(1, session)], 2); pf = sproto_pack(ph + resp); conn.sendall(struct.pack(">H", len(pf)) + pf)
+                ph = encode_sproto([(1, session)], 2); pf = sproto_pack(ph + resp)
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 104: # create
+            elif msg == 104: # character_create
                 c_data = decode_sproto(body.get(0, b""))
                 name = c_data.get(0, b"").decode('utf-8') if isinstance(c_data.get(0), bytes) else "Hero"
                 prof = c_data.get(1, 0)
                 cid = random.randint(1000000, 9999999)
                 if acc_id not in all_accounts_chars: all_accounts_chars[acc_id] = []
-                nc = {'id': cid, 'name': name, 'prof': prof, 'map': "11"}
+                nc = {'id': cid, 'name': name, 'prof': prof}
                 all_accounts_chars[acc_id].append(nc); save_chars(all_accounts_chars)
                 resp = encode_sproto([(0, get_char_ov(nc)), (1, 0)], 2)
-                ph = encode_sproto([(1, session)], 2); pf = sproto_pack(ph + resp); conn.sendall(struct.pack(">H", len(pf)) + pf)
+                ph = encode_sproto([(1, session)], 2); pf = sproto_pack(ph + resp)
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 105: # pick
+            elif msg == 105: # character_pick
                 char_id = body.get(0)
-                curr = next((c for c in all_accounts_chars.get(acc_id, []) if c['id'] == char_id), None)
                 resp = encode_sproto([(0, 1)], 1); ph = encode_sproto([(1, session)], 2)
                 conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
-                if curr:
-                    p = curr['prof']
-                    send_rpc_push(614, encode_sproto([(0, int(time.time())), (12, 12345), (13, 1)], 15))
-                    send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)], 3))
-                    
-                    # Original Level 1 Stats for XD (Profession 0)
-                    # HP: 3000, ATK: 300, DEF: 35, HIT: 480, EVA: 60, CRI: 220, RES: 20
-                    hp, atk, def_v, hit, eva, cri, res = 3000, 300, 35, 480, 60, 220, 20
-                    if p == 1: # QJ
-                        hp, atk, def_v, hit, eva, cri, res = 3000, 300, 35, 300, 60, 140, 20
-                    elif p == 2: # NQ
-                        hp, atk, def_v, hit, eva, cri, res = 3000, 300, 35, 1000, 60, 360, 20
-                        
-                    att = encode_sproto([(0, hp), (2, atk), (3, def_v), (4, hit), (5, eva), (6, cri), (7, res), (13, 300)], 25)
-                    run = encode_sproto([(6, att), (7, att)], 8)
-                    vis = get_visual(curr['name'], p)
-                    gn = encode_sproto([(0, curr['name']), (1, p), (2, 1), (3, "11"), (4, 1)], 5)
-                    ps = encode_sproto([(0, 7007), (1, 100), (2, 5033), (3, 0)], 4)
-                    mv = encode_sproto([(0, ps), (1, ps)], 2)
-                    sid = "101" if p == 0 else ("201" if p == 1 else "301")
-                    skill_obj = encode_sproto([(0, sid), (1, 1), (2, 3), (3, 1), (5, False)], 6)
-                    skill_list = [skill_obj]
-                    a_oth = encode_sproto([(0, hp), (2, 1), (3, 55653), (15, 0)], 19)
-                    prop = encode_sproto([(13, 1000), (14, 1000)], 19)
-                    char_obj = encode_sproto([(0, curr['id']), (1, gn), (2, a_oth), (5, prop), (6, vis), (7, mv), (8, skill_list), (13, run), (15, 2)], 17)
-                    send_rpc_push(504, encode_sproto([(0, char_obj), (1, mv)], 2))
+                send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)], 3)) # enter_map
 
             elif msg == 100: # map_ready
-                time.sleep(0.5)
-                # Perdorim MapID "11" qe eshte harta fillestare ne data.bundle
                 m1 = encode_sproto([(0, "11"), (1, 1), (2, 1), (3, [0])], 4)
                 send_rpc_push(654, encode_sproto([(0, {"11": m1}), (1, "11")], 3))
-                time.sleep(0.2); send_rpc_push(505, encode_sproto([(0, 0)], 1))
+                send_rpc_push(505, encode_sproto([(0, 0)], 1)) # aoi_add
+
 
             elif msg == 118: # random name
                 names = ["John", "Mary", "William", "Smith", "Michael", "James", "Lisa", "Robert"]
