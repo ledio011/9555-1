@@ -196,8 +196,9 @@ def client_handler(conn, addr):
 
             elif msg == 100: # map_ready
                 time.sleep(0.5)
-                m1 = encode_sproto([(0, "46001"), (1, 1), (2, 1), (3, [0])], 4)
-                send_rpc_push(654, encode_sproto([(0, {"46001": m1}), (1, "46001")], 3))
+                # Perdorim MapID "11" qe eshte harta fillestare ne data.bundle
+                m1 = encode_sproto([(0, "11"), (1, 1), (2, 1), (3, [0])], 4)
+                send_rpc_push(654, encode_sproto([(0, {"11": m1}), (1, "11")], 3))
                 time.sleep(0.2); send_rpc_push(505, encode_sproto([(0, 0)], 1))
 
             elif msg == 118: # random name
