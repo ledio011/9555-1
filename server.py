@@ -137,6 +137,7 @@ def get_general(c):
     ])
 
 def get_movement(x, y, z):
+    # Matches SprotoType.position (Tags 0-3: x, y, z, o) and MapInfoData BirthPos
     pos = encode_sproto([(0, x), (1, y), (2, z), (3, 0)])
     return encode_sproto([(0, pos), (1, pos)])
 
@@ -155,11 +156,14 @@ def get_char_ov(c):
 def get_full_char(c):
     gen = get_general(c)
     # attribute_other: hp(0), exp(1), level(2), combValue(3), camp(15)
+    # Matches BaseLvData for Level 1: HP 3000
     attr_oth = encode_sproto([(0, 3000), (1, 0), (2, 1), (3, 5000), (15, 1)])
     # property: money tags 13-18
     prop = encode_sproto([(13, 1000), (14, 1000), (15, 1000), (16, 1000), (17, 1000), (18, 1000)])
+    # BirthPos from MapInfoData Map ID 11: 7007, 100, 5033
     mv = get_movement(7007, 100, 5033)
     # runtime_agent: attribute(6) -> max_hp(0), atk(2), def(3)
+    # Matches BaseLvData Level 1 Warrior: HP 3000, ATK 300, DEF 35
     attr_run = encode_sproto([(0, 3000), (2, 300), (3, 35)])
     run = encode_sproto([(6, attr_run)])
 
@@ -178,6 +182,7 @@ def get_full_char(c):
 def get_char_aoi(c):
     # character_aoi: id(0), visual(1), general(2), attribute_other(3), movement(5), runtime(6)
     attr_oth = encode_sproto([(0, 3000), (2, 1)])
+    # BirthPos from MapInfoData Map ID 11: 7007, 100, 5033
     mv = get_movement(7007, 100, 5033)
     run = encode_sproto([(6, encode_sproto([(0, 3000)]))])
     return encode_sproto([
@@ -227,7 +232,7 @@ def client_handler(conn, addr):
                     (0, 2),
                     (1, "1.012.017"),
                     (2, "200"),
-                    (3, 0)
+                    (3, 1)
                 ])
                 ph = encode_sproto([(1, session)])
                 pf = sproto_pack(ph + resp)
