@@ -39,7 +39,7 @@ def encode_sproto(fields, fn=None):
     header = []; body = bytearray(); last_tag = -1
     for tag, val in fields:
         skip = tag - last_tag - 1
-        if skip > 0: header.append(2 * (skip - 1) + 3)
+        if skip > 0: header.append(2 * (skip - 1) + 1)
 
         if val is None:
             header.append(1)
@@ -109,15 +109,19 @@ def decode_sproto(data, offset=0):
     fields, curr_tag = {}, -1
     for i in range(fn):
         v = struct.unpack("<H", data[h_ptr + i*2 : h_ptr + i*2 + 2])[0]
-        curr_tag += 1
         if v == 0:
+            curr_tag += 1
             if b_ptr + 4 <= len(data):
                 l = struct.unpack("<I", data[b_ptr:b_ptr+4])[0]
                 fields[curr_tag] = data[b_ptr+4:b_ptr+4+l]
                 b_ptr += 4 + l
-        elif v == 1: pass
-        elif v & 1: curr_tag += (v >> 1)
-        else: fields[curr_tag] = (v >> 1) - 1
+        elif v == 1:
+            curr_tag += 1
+        elif v & 1:
+            curr_tag += (v >> 1) + 1
+        else:
+            curr_tag += 1
+            fields[curr_tag] = (v >> 1) - 1
     return fields
 
 def get_visual(name, prof):
