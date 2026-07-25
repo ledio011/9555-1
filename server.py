@@ -1,5 +1,5 @@
 # ==========================================================
-# AUTO THEFT GANGSTERS REVIVAL - STABLE v12 GAMEPLAY
+# AUTO THEFT GANGSTERS REVIVAL - STABLE v13 FINAL GAMEPLAY
 # GAME SERVER 9555
 # ==========================================================
 import socket, struct, threading, random, json, os, time, traceback
@@ -22,30 +22,52 @@ def save_chars(data):
 
 all_accounts_chars = load_chars()
 
-def encode_sproto(fields):
+def generate_unique_char_id():
+    global all_accounts_chars
+    existing_ids = set()
+    for acc in all_accounts_chars.values():
+        for c in acc:
+            existing_ids.add(c['id'])
+    while True:
+        new_id = random.randint(1000000, 9999999)
+        if new_id not in existing_ids:
+            return new_id
+
+def encode_sproto(fields, fn=None):
     if not fields: return struct.pack("<H", 0)
     fields.sort(key=lambda x: x[0])
     header = []; body = bytearray(); last_tag = -1
     for tag, val in fields:
         skip = tag - last_tag - 1
         if skip > 0: header.append(2 * (skip - 1) + 3)
-        if val is None: header.append(1)
+
+        if val is None:
+            header.append(1)
         elif isinstance(val, bool):
             header.append((1 if val else 0) * 2 + 2)
         elif isinstance(val, int):
-            if 0 <= val <= 32766: header.append((val + 1) * 2)
+            if 0 <= val <= 32766:
+                header.append((val + 1) * 2)
             else:
                 header.append(0)
                 body += struct.pack("<I", 8) + struct.pack("<q", val)
         elif isinstance(val, (str, bytes, bytearray, list, dict)):
             header.append(0)
-            if isinstance(val, str): v = val.encode('utf-8')
-            elif isinstance(val, list): v = b"".join(val)
-            elif isinstance(val, dict): v = b"".join(val.values())
-            else: v = val
+            if isinstance(val, str):
+                v = val.encode('utf-8')
+            elif isinstance(val, list):
+                # Sproto array of structs/strings: each item must have its own 4-byte length prefix
+                v = b"".join([struct.pack("<I", len(item)) + item if isinstance(item, (bytes, bytearray)) else item for item in val])
+            elif isinstance(val, dict):
+                # Sproto maps are encoded as arrays of objects (structs)
+                v = b"".join([struct.pack("<I", len(item)) + item if isinstance(item, (bytes, bytearray)) else item for item in val.values()])
+            else:
+                v = val
             body += struct.pack("<I", len(v)) + v
         last_tag = tag
-    res = struct.pack("<H", len(header))
+
+    fn_val = fn if fn is not None else len(header)
+    res = struct.pack("<H", fn_val)
     for h in header: res += struct.pack("<H", h)
     return res + body
 
@@ -126,18 +148,18 @@ def get_char_ov(c):
         (1, gen),
         (2, attr),
         (3, get_visual(c['name'], c.get('prof', 0))),
-        (4, int(time.time()))
+        (4, int(time.time())),
+        (5, 0) # forbidden
     ])
 
 def get_full_char(c):
     gen = get_general(c)
     # attribute_other: hp(0), exp(1), level(2), combValue(3), camp(15)
     attr_oth = encode_sproto([(0, 3000), (1, 0), (2, 1), (3, 5000), (15, 1)])
-    # property: money 13-18
+    # property: money tags 13-18
     prop = encode_sproto([(13, 1000), (14, 1000), (15, 1000), (16, 1000), (17, 1000), (18, 1000)])
-    # movement
     mv = get_movement(7007, 100, 5033)
-    # runtime: attribute(6) -> max_hp(0), atk(2), def(3)
+    # runtime_agent: attribute(6) -> max_hp(0), atk(2), def(3)
     attr_run = encode_sproto([(0, 3000), (2, 300), (3, 35)])
     run = encode_sproto([(6, attr_run)])
 
@@ -170,7 +192,7 @@ def get_char_aoi(c):
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None
     global server_session_counter
-    
+
     def send_rpc_push(tag, data):
         try:
             global server_session_counter
@@ -195,46 +217,76 @@ def client_handler(conn, addr):
 
             raw = sproto_unpack(data); pkg = decode_sproto(raw, 0)
             msg, session = pkg.get(0), pkg.get(1)
+            print(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
+            print("BODY =", body)
 
             if msg == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
-                # Bypass CDN with dataVersionCode 200 and downloadFlag 0
-                resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "200"), (3, 0)])
-                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                resp = encode_sproto([
+                    (0, 2),
+                    (1, "1.012.017"),
+                    (2, "200"),
+                    (3, 0)
+                ])
+                ph = encode_sproto([(1, session)])
+                pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 103: # character_list
                 chars = all_accounts_chars.get(acc_id, [])
+
                 if not chars:
-                    cid = random.randint(1000000, 9999999)
-                    nc = {'id': cid, 'name': "Survivor", 'prof': 1}
-                    if acc_id not in all_accounts_chars: all_accounts_chars[acc_id] = []
-                    all_accounts_chars[acc_id].append(nc); save_chars(all_accounts_chars)
+                    cid = generate_unique_char_id()
+                    nc = {
+                        "id": cid,
+                        "name": "Survivor",
+                        "prof": 1
+                    }
+                    all_accounts_chars[acc_id] = [nc]
+                    save_chars(all_accounts_chars)
                     chars = [nc]
 
-                char_map = {c['id']: get_char_ov(c) for c in chars}
-                resp = encode_sproto([(0, char_map)])
-                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                resp = encode_sproto([
+                    (0, [get_char_ov(c) for c in chars])
+                ])
+                ph = encode_sproto([(1, session)])
+                pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 104: # character_create
                 c_data = decode_sproto(body.get(0, b""))
                 name = c_data.get(0, b"").decode('utf-8') if isinstance(c_data.get(0), bytes) else "Hero"
                 prof = c_data.get(1, 0)
-                cid = random.randint(1000000, 9999999)
+                cid = generate_unique_char_id()
                 if acc_id not in all_accounts_chars: all_accounts_chars[acc_id] = []
                 nc = {'id': cid, 'name': name, 'prof': prof}
                 all_accounts_chars[acc_id].append(nc); save_chars(all_accounts_chars)
                 resp = encode_sproto([(0, get_char_ov(nc)), (1, 0)])
-                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                ph = encode_sproto([(1, session)])
+                pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 105: # character_pick
                 char_id = body.get(0)
-                picked_char = next((c for c in all_accounts_chars.get(acc_id, []) if c['id'] == char_id), None)
-                # errno 1 = Success. 0 and 2 are handled as errors in NetManager.cs
-                resp = encode_sproto([(0, 1)])
+                print("CHAR PICK REQUEST ID =", char_id)
+
+                if isinstance(char_id, bytes):
+                    char_id = int.from_bytes(char_id, "little")
+
+                picked_char = next(
+                    (c for c in all_accounts_chars.get(acc_id, [])
+                     if c['id'] == char_id),
+                    None
+                )
+
+                if picked_char:
+                    print("CHARACTER PICK SUCCESS:", picked_char)
+                    resp = encode_sproto([(0, 1)]) # Success
+                else:
+                    print("CHARACTER NOT FOUND")
+                    resp = encode_sproto([(0, 0)]) # Error
+
                 ph = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
                 if picked_char:
@@ -243,48 +295,34 @@ def client_handler(conn, addr):
 
             elif msg == 100: # map_ready
                 if picked_char:
-                    print("[MAP READY] Sending player initialization")
-
-                    # Create main player
-                    send_rpc_push(
-                        504,
-                        encode_sproto([
-                            (0, get_full_char(picked_char))
-                        ])
-                    )
-
-                    # Sync common server data
-                    send_rpc_push(
-                        614,
-                        encode_sproto([
-                            (0, int(time.time())),
-                            (13, 1)
-                        ])
-                    )
-
-                    # Finish entering game
-                    send_rpc_push(
-                        654,
-                        encode_sproto([
-                            (0, 1)
-                        ])
-                    )
-
-                    print("[GAME START SENT]")
+                    print("[*] Map Ready. Sending spawn sequence...")
+                    # 1. main_player_create
+                    send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char))]))
+                    # 2. aoi_add
+                    send_rpc_push(505, encode_sproto([(0, get_char_aoi(picked_char))]))
+                    # 3. sync_common_data
+                    send_rpc_push(614, encode_sproto([(0, int(time.time())), (13, 1)]))
+                    # 4. start_enter_game
+                    send_rpc_push(654, encode_sproto([(0, 1)]))
+                    print("[*] World Entry Complete.")
 
             elif msg == 118: # random name
                 names = ["John", "Mary", "William", "Smith", "Michael", "James", "Lisa", "Robert"]
                 name = f"{random.choice(names)}_{random.randint(100,999)}"
-                resp = encode_sproto([(0, name)]); ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                resp = encode_sproto([(0, name)])
+                ph = encode_sproto([(1, session)])
+                pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 218: # heart_beat
                 resp = encode_sproto([(0, body.get(0, 0)), (1, int(time.time() * 1000))])
-                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                ph = encode_sproto([(1, session)])
+                pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             else:
-                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                ph = encode_sproto([(1, session)])
+                pf = sproto_pack(ph + encode_sproto([]))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
     except: traceback.print_exc()
@@ -292,5 +330,5 @@ def client_handler(conn, addr):
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM); server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT)); server.listen(20)
-print(f"GAME SERVER 9555 READY (STABLE v12 GAMEPLAY)");
+print(f"GAME SERVER 9555 READY (STABLE v13 FINAL GAMEPLAY)");
 while True: cl, ad = server.accept(); threading.Thread(target=client_handler, args=(cl, ad), daemon=True).start()
