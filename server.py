@@ -23,15 +23,7 @@ def save_chars(data):
 all_accounts_chars = load_chars()
 
 def generate_unique_char_id():
-    global all_accounts_chars
-    existing_ids = set()
-    for acc in all_accounts_chars.values():
-        for c in acc:
-            existing_ids.add(c['id'])
-    while True:
-        new_id = random.randint(1000000, 9999999)
-        if new_id not in existing_ids:
-            return new_id
+    return int(time.time() * 1000) % 1000000000
 
 def encode_sproto(fields, fn=None):
     if not fields: return struct.pack("<H", 0)
@@ -169,7 +161,9 @@ def get_full_char(c):
     # runtime_agent: attribute(6) -> max_hp(0), atk(2), def(3)
     # Matches BaseLvData Level 1 Warrior: HP 3000, ATK 300, DEF 35
     attr_run = encode_sproto([(0, 3000), (2, 300), (3, 35)])
-    run = encode_sproto([(6, attr_run)])
+    # attribute_all: mov(13) is required for speed calculation
+    attr_all = encode_sproto([(0, 3000), (2, 300), (3, 35), (13, 500)])
+    run = encode_sproto([(6, attr_run), (7, attr_all)])
 
     return encode_sproto([
         (0, c['id']),
@@ -188,7 +182,9 @@ def get_char_aoi(c):
     attr_oth = encode_sproto([(0, 3000), (2, 1)])
     # BirthPos from MapInfoData Map ID 11: 7007, 100, 5033
     mv = get_movement(7007, 100, 5033)
-    run = encode_sproto([(6, encode_sproto([(0, 3000)]))])
+    attr_run = encode_sproto([(0, 3000)])
+    attr_all = encode_sproto([(0, 3000), (13, 500)])
+    run = encode_sproto([(6, attr_run), (7, attr_all)])
     return encode_sproto([
         (0, c['id']),
         (1, get_visual(c['name'], c.get('prof', 0))),
@@ -244,18 +240,6 @@ def client_handler(conn, addr):
 
             elif msg == 103: # character_list
                 chars = all_accounts_chars.get(acc_id, [])
-
-                if not chars:
-                    cid = generate_unique_char_id()
-                    nc = {
-                        "id": cid,
-                        "name": "Survivor",
-                        "prof": 1
-                    }
-                    all_accounts_chars[acc_id] = [nc]
-                    save_chars(all_accounts_chars)
-                    chars = [nc]
-
                 resp = encode_sproto([
                     (0, [get_char_ov(c) for c in chars])
                 ])
@@ -299,21 +283,20 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
                 if picked_char:
-                    # Client pauses network handling after this until scene is loaded
+                    # 1. enter_map
                     send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)]))
+                    # 2. main_player_create (Must happen here to unblock loading bar)
+                    send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char))]))
+                    # 3. aoi_add
+                    send_rpc_push(505, encode_sproto([(0, get_char_aoi(picked_char))]))
 
             elif msg == 100: # map_ready
                 if picked_char:
-                    print("[*] Map Ready. Sending spawn sequence...")
-                    # 1. main_player_create
-                    send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char))]))
-                    # 2. aoi_add
-                    send_rpc_push(505, encode_sproto([(0, get_char_aoi(picked_char))]))
-                    # 3. sync_common_data
+                    print("[*] Map Ready received. Finalizing world entry...")
+                    # 4. sync_common_data
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (13, 1)]))
-                    # 4. start_enter_game
+                    # 5. start_enter_game
                     send_rpc_push(654, encode_sproto([(0, 1)]))
-                    print("[*] World Entry Complete.")
 
             elif msg == 118: # random name
                 names = ["John", "Mary", "William", "Smith", "Michael", "James", "Lisa", "Robert"]
