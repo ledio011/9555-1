@@ -69,8 +69,10 @@ def encode_sproto(fields, fn=None):
             if isinstance(val, str):
                 v = val.encode('utf-8')
             elif isinstance(val, list):
-                # Sproto array of structs/strings: each item must have its own 4-byte length prefix
-                v = b"".join([struct.pack("<I", len(item)) + item if isinstance(item, (bytes, bytearray)) else item for item in val])
+                if val and isinstance(val[0], int):
+                    v = b"\x08" + b"".join([struct.pack("<q", item) for item in val])
+                else:
+                    v = b"".join([struct.pack("<I", len(item)) + item if isinstance(item, (bytes, bytearray)) else item for item in val])
             elif isinstance(val, dict):
                 # Sproto maps are encoded as arrays of objects (structs)
                 v = b"".join([struct.pack("<I", len(item)) + item if isinstance(item, (bytes, bytearray)) else item for item in val.values()])
@@ -165,7 +167,7 @@ def get_char_ov(c):
         (0, c['id']),
         (1, gen),
         (2, attr),
-        (3, get_visual(c['name'], c.get('prof', 0))),
+        (3, get_visual(c.get('name', 'Hero'), c.get('prof', 0))),
         (4, int(time.time())),
         (5, 0) # forbidden
     ])
@@ -188,7 +190,7 @@ def get_full_char(c):
 
     prof = c.get('prof', 0)
     sid = "101" if prof == 0 else "201" if prof == 1 else "301"
-    # Tag 8: skills (map string->skill_info). indexPos=0 restores main Attack button.
+    # Tag 8: skills (map string->skill_info). indexPos=0 restores main Attack button. indexPos2=0 for sorting.
     s1 = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)])
     skills_map = {sid: s1}
 
@@ -216,7 +218,7 @@ def get_char_aoi(c):
     run = encode_sproto([(6, attr_run), (7, attr_all)])
     return encode_sproto([
         (0, c['id']),
-        (1, get_visual(c['name'], c.get('prof', 0))),
+        (1, get_visual(c.get('name', 'Hero'), c.get('prof', 0))),
         (2, get_general(c)),
         (3, attr_oth),
         (5, mv),
@@ -338,10 +340,11 @@ def client_handler(conn, addr):
                     send_rpc_push(654, encode_sproto([(0, 1)]))
 
             elif msg == 101: # move
-                # move.response: Tag 0: pos
-                resp = encode_sproto([(0, body.get(0))])
-                ph = encode_sproto([(1, session)])
-                conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
+                if session is not None:
+                    # move.response: Tag 0: pos
+                    resp = encode_sproto([(0, body.get(0))])
+                    ph = encode_sproto([(1, session)])
+                    conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
 
             elif msg == 7: # update_game_server
                 # Return original server states and regions
