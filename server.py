@@ -289,7 +289,10 @@ def client_handler(conn, addr):
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))]))
                     send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)]))
-                    send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char))]))
+                    send_rpc_push(504, encode_sproto([
+                        (0, get_full_char(picked_char)),
+                        (1, get_movement(7007, 100, 5033))
+                    ]))
                     send_rpc_push(505, encode_sproto([(0, get_char_aoi(picked_char))]))
 
             elif msg == 100: # map_ready
