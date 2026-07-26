@@ -314,6 +314,16 @@ def client_handler(conn, addr):
                 # Push 684: ret_domin_info (empty)
                 send_rpc_push(684, encode_sproto([]))
 
+            elif msg == 145: # ask_copyscenes_info
+                send_rpc_push(555, encode_sproto([(0, [])]))
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 225: # request_activity_info
+                send_rpc_push(619, encode_sproto([]))
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
             elif msg == 118: # random name
                 names = ["John", "Mary", "William", "Smith", "Michael", "James", "Lisa", "Robert"]
                 name = f"{random.choice(names)}_{random.randint(100,999)}"
