@@ -134,11 +134,11 @@ def get_visual(name, prof):
 
 def get_general(c):
     return encode_sproto([
-        (0, c['name']),
+        (0, c.get('name', 'Hero')),
         (1, c.get('prof', 0)),
         (2, 1), # lineIndex
         (3, "11"), # mapInfoId
-        (4, 1) # tutorial finish
+        (4, 0) # tutorial state (0 = start)
     ])
 
 def get_movement(x, y, z):
@@ -163,12 +163,12 @@ def get_full_char(c):
     # attribute_other: hp(0), exp(1), level(2), combValue(3), camp(15)
     # Matches BaseLvData for Level 1: HP 3000
     attr_oth = encode_sproto([(0, 3000), (1, 0), (2, 1), (3, 5000), (15, 1)])
-    # property: money tags 13-18
-    prop = encode_sproto([(13, 1000), (14, 1000), (15, 1000), (16, 1000), (17, 1000), (18, 1000)])
+    # property: Tag 13-15 are money fields. Cash: 1000, Gold: 100, Diamond: 10
+    prop = encode_sproto([(13, 1000), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
     # BirthPos from MapInfoData Map ID 11: 7007, 100, 5033
     mv = get_movement(7007, 100, 5033)
     # runtime_agent: attribute(6) -> max_hp(0), atk(2), def(3)
-    # Matches BaseLvData Level 1 Warrior: HP 3000, ATK 300, DEF 35
+    # Matches BaseLvData Level 1: HP 3000, ATK 300, DEF 35
     attr_run = encode_sproto([(0, 3000), (2, 300), (3, 35)])
     # attribute_all: mov(13) is required for speed calculation
     attr_all = encode_sproto([(0, 3000), (2, 300), (3, 35), (13, 500)])
@@ -176,8 +176,8 @@ def get_full_char(c):
 
     prof = c.get('prof', 0)
     sid = "101" if prof == 0 else "201" if prof == 1 else "301"
-    # Tag 8: skills (map string->skill_info). skill_info: id(0), lv(1), pos(2), unlk(3), pos2(4), dis(5)
-    s1 = encode_sproto([(0, sid), (1, 1), (2, 1), (3, 1), (4, 1), (5, False)])
+    # Tag 8: skills (map string->skill_info). indexPos=0 restores main Attack button.
+    s1 = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)])
     skills_map = {sid: s1}
 
     return encode_sproto([
@@ -185,7 +185,7 @@ def get_full_char(c):
         (1, gen),
         (2, attr_oth),
         (5, prop),
-        (6, get_visual(c['name'], prof)),
+        (6, get_visual(c.get('name', 'Hero'), prof)),
         (7, mv),
         (8, skills_map),
         (12, 0), # potionIndex
@@ -212,7 +212,7 @@ def get_char_aoi(c):
     ])
 
 def client_handler(conn, addr):
-    print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None
+    print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_serverId = "1"
     global server_session_counter
 
     def send_rpc_push(tag, data):
@@ -244,6 +244,15 @@ def client_handler(conn, addr):
 
             if msg == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
+                cur_serverId = str(body.get(5, "1"))
+
+                # Migration logic for server-region separation
+                if acc_id in all_accounts_chars and not isinstance(all_accounts_chars[acc_id], dict):
+                    old_list = all_accounts_chars.pop(acc_id)
+                    if cur_serverId not in all_accounts_chars: all_accounts_chars[cur_serverId] = {}
+                    all_accounts_chars[cur_serverId][acc_id] = old_list
+                    save_chars(all_accounts_chars)
+
                 resp = encode_sproto([
                     (0, 2),
                     (1, "1.012.017"),
@@ -255,7 +264,7 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 103: # character_list
-                chars = all_accounts_chars.get(acc_id, [])
+                chars = all_accounts_chars.get(cur_serverId, {}).get(acc_id, [])
                 resp = encode_sproto([
                     (0, [get_char_ov(c) for c in chars])
                 ])
@@ -265,12 +274,13 @@ def client_handler(conn, addr):
 
             elif msg == 104: # character_create
                 c_data = decode_sproto(body.get(0, b""))
-                name = c_data.get(0, b"").decode('utf-8') if isinstance(c_data.get(0), bytes) else "Hero"
+                name = c_data.get(0, b"").decode('utf-8') if isinstance(c_data.get(0), bytes) else str(c_data.get(0, "Hero"))
                 prof = c_data.get(1, 0)
                 cid = generate_unique_char_id()
-                if acc_id not in all_accounts_chars: all_accounts_chars[acc_id] = []
+                if cur_serverId not in all_accounts_chars: all_accounts_chars[cur_serverId] = {}
+                if acc_id not in all_accounts_chars[cur_serverId]: all_accounts_chars[cur_serverId][acc_id] = []
                 nc = {'id': cid, 'name': name, 'prof': prof}
-                all_accounts_chars[acc_id].append(nc); save_chars(all_accounts_chars)
+                all_accounts_chars[cur_serverId][acc_id].append(nc); save_chars(all_accounts_chars)
                 resp = encode_sproto([(0, get_char_ov(nc)), (1, 0)])
                 ph = encode_sproto([(1, session)])
                 pf = sproto_pack(ph + resp)
@@ -281,7 +291,7 @@ def client_handler(conn, addr):
                 print("CHAR PICK REQUEST ID =", char_id)
                 if isinstance(char_id, bytes): char_id = int.from_bytes(char_id, "little")
 
-                picked_char = next((c for c in all_accounts_chars.get(acc_id, []) if c['id'] == char_id), None)
+                picked_char = next((c for c in all_accounts_chars.get(cur_serverId, {}).get(acc_id, []) if c['id'] == char_id), None)
                 if picked_char:
                     print("CHARACTER PICK SUCCESS:", picked_char)
                     resp = encode_sproto([(0, 1)]) # Success
@@ -308,9 +318,10 @@ def client_handler(conn, addr):
                     # Phase 4: Delayed State Sync (Managers now initialized in GameScene)
                     send_rpc_push(611, encode_sproto([(0, [])]))
                     send_rpc_push(540, encode_sproto([(0, []), (1, False)]))
-                    # sync_mission (519): Tag 0=missions, Tag 1=last_missionId
-                    m1001 = encode_sproto([(0, "1001"), (1, 1), (2, 0)])
-                    send_rpc_push(519, encode_sproto([(0, [m1001]), (1, "1001")]))
+                    # sync_mission (519): Tag 0=missions, Tag 1=last_missionId.
+                    # Mission 1001: state=2(ACCEPTED), parm=[]
+                    m1001 = encode_sproto([(0, "1001"), (1, 2), (2, 0), (3, [0])])
+                    send_rpc_push(519, encode_sproto([(0, {"1001": m1001}), (1, "1001")]))
                     # Final trigger to enable user input
                     send_rpc_push(654, encode_sproto([(0, 1)]))
 
