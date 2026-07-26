@@ -25,6 +25,24 @@ all_accounts_chars = load_chars()
 def generate_unique_char_id():
     return int(time.time() * 1000) % 1000000000
 
+def get_area_id(serverId):
+    try:
+        sid = int(serverId)
+        if sid == 1 or (300 <= sid < 400): return 1 # Europe
+        if sid == 2 or (600 <= sid < 700): return 2 # Asia
+        if sid == 3 or (10 <= sid < 100): return 0 # America
+    except: pass
+    return 0
+
+def get_val_int(fields, tag, default=0):
+    val = fields.get(tag)
+    if val is None: return default
+    if isinstance(val, int): return val
+    if isinstance(val, (bytes, bytearray)):
+        if len(val) == 4: return struct.unpack("<i", val)[0]
+        if len(val) == 8: return struct.unpack("<q", val)[0]
+    return default
+
 def encode_sproto(fields, fn=None):
     if not fields: return struct.pack("<H", 0)
     fields.sort(key=lambda x: x[0])
@@ -108,13 +126,7 @@ def decode_sproto(data, offset=0):
             curr_tag += 1
             if b_ptr + 4 <= len(data):
                 l = struct.unpack("<I", data[b_ptr:b_ptr+4])[0]
-                body_val = data[b_ptr+4:b_ptr+4+l]
-                if l == 4:
-                    fields[curr_tag] = struct.unpack("<i", body_val)[0]
-                elif l == 8:
-                    fields[curr_tag] = struct.unpack("<q", body_val)[0]
-                else:
-                    fields[curr_tag] = body_val
+                fields[curr_tag] = data[b_ptr+4:b_ptr+4+l]
                 b_ptr += 4 + l
         elif v == 1:
             curr_tag += 1
@@ -212,7 +224,7 @@ def get_char_aoi(c):
     ])
 
 def client_handler(conn, addr):
-    print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_serverId = "1"
+    print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
     global server_session_counter
 
     def send_rpc_push(tag, data):
@@ -237,20 +249,21 @@ def client_handler(conn, addr):
             if len(data) < size: break
 
             raw = sproto_unpack(data); pkg = decode_sproto(raw, 0)
-            msg, session = pkg.get(0), pkg.get(1)
+            msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
             print(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
             print("BODY =", body)
 
             if msg == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
-                cur_serverId = str(body.get(5, "1"))
+                sid = get_val_int(body, 5, 1)
+                cur_areaId = get_area_id(sid)
 
-                # Migration logic for server-region separation
+                # Migration logic for region-based grouping
                 if acc_id in all_accounts_chars and not isinstance(all_accounts_chars[acc_id], dict):
                     old_list = all_accounts_chars.pop(acc_id)
-                    if cur_serverId not in all_accounts_chars: all_accounts_chars[cur_serverId] = {}
-                    all_accounts_chars[cur_serverId][acc_id] = old_list
+                    if cur_areaId not in all_accounts_chars: all_accounts_chars[cur_areaId] = {}
+                    all_accounts_chars[cur_areaId][acc_id] = old_list
                     save_chars(all_accounts_chars)
 
                 resp = encode_sproto([
@@ -264,7 +277,7 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 103: # character_list
-                chars = all_accounts_chars.get(cur_serverId, {}).get(acc_id, [])
+                chars = all_accounts_chars.get(cur_areaId, {}).get(acc_id, [])
                 resp = encode_sproto([
                     (0, [get_char_ov(c) for c in chars])
                 ])
@@ -275,23 +288,22 @@ def client_handler(conn, addr):
             elif msg == 104: # character_create
                 c_data = decode_sproto(body.get(0, b""))
                 name = c_data.get(0, b"").decode('utf-8') if isinstance(c_data.get(0), bytes) else str(c_data.get(0, "Hero"))
-                prof = c_data.get(1, 0)
+                prof = get_val_int(c_data, 1, 0)
                 cid = generate_unique_char_id()
-                if cur_serverId not in all_accounts_chars: all_accounts_chars[cur_serverId] = {}
-                if acc_id not in all_accounts_chars[cur_serverId]: all_accounts_chars[cur_serverId][acc_id] = []
+                if cur_areaId not in all_accounts_chars: all_accounts_chars[cur_areaId] = {}
+                if acc_id not in all_accounts_chars[cur_areaId]: all_accounts_chars[cur_areaId][acc_id] = []
                 nc = {'id': cid, 'name': name, 'prof': prof}
-                all_accounts_chars[cur_serverId][acc_id].append(nc); save_chars(all_accounts_chars)
+                all_accounts_chars[cur_areaId][acc_id].append(nc); save_chars(all_accounts_chars)
                 resp = encode_sproto([(0, get_char_ov(nc)), (1, 0)])
                 ph = encode_sproto([(1, session)])
                 pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 105: # character_pick
-                char_id = body.get(0)
+                char_id = get_val_int(body, 0)
                 print("CHAR PICK REQUEST ID =", char_id)
-                if isinstance(char_id, bytes): char_id = int.from_bytes(char_id, "little")
 
-                picked_char = next((c for c in all_accounts_chars.get(cur_serverId, {}).get(acc_id, []) if c['id'] == char_id), None)
+                picked_char = next((c for c in all_accounts_chars.get(cur_areaId, {}).get(acc_id, []) if c['id'] == char_id), None)
                 if picked_char:
                     print("CHARACTER PICK SUCCESS:", picked_char)
                     resp = encode_sproto([(0, 1)]) # Success
@@ -310,7 +322,7 @@ def client_handler(conn, addr):
                         (0, get_full_char(picked_char)),
                         (1, get_movement(7007, 100, 5033))
                     ]))
-                    send_rpc_push(505, encode_sproto([(0, get_char_aoi(picked_char))]))
+                    # REMOVED 505 PUSH FOR LOCAL PLAYER TO FIX DUPLICATION
 
             elif msg == 100: # map_ready
                 if picked_char:
@@ -324,6 +336,27 @@ def client_handler(conn, addr):
                     send_rpc_push(519, encode_sproto([(0, {"1001": m1001}), (1, "1001")]))
                     # Final trigger to enable user input
                     send_rpc_push(654, encode_sproto([(0, 1)]))
+
+            elif msg == 101: # move
+                # move.response: Tag 0: pos
+                resp = encode_sproto([(0, body.get(0))])
+                ph = encode_sproto([(1, session)])
+                conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
+
+            elif msg == 7: # update_game_server
+                # Return original server states and regions
+                servers = [
+                    # Europe
+                    encode_sproto([(0, 302), (1, "EU-001"), (2, "tokaido.proxy.rlwy.net"), (3, 48282), (4, 1), (5, 1), (6, 1), (7, 0), (8, 1), (9, 1)]),
+                    encode_sproto([(0, 303), (1, "EU-002"), (2, "tokaido.proxy.rlwy.net"), (3, 48282), (4, 1), (5, 2), (6, 1), (7, 0), (8, 1), (9, 1)]),
+                    # Asia
+                    encode_sproto([(0, 602), (1, "AS-001"), (2, "tokaido.proxy.rlwy.net"), (3, 48282), (4, 1), (5, 1), (6, 1), (7, 0), (8, 6), (9, 2)]),
+                    # America
+                    encode_sproto([(0, 11), (1, "AM-001"), (2, "tokaido.proxy.rlwy.net"), (3, 48282), (4, 1), (5, 1), (6, 1), (7, 0), (8, -4), (9, 0)])
+                ]
+                resp = encode_sproto([(0, servers)])
+                ph = encode_sproto([(1, session)])
+                conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
 
             elif msg in [145, 225, 313, 319, 210, 202, 200, 195, 242, 235, 252, 257, 261, 296, 278, 258, 253, 299, 310]:
                 # Generic Scene Init Response Handler (Ensures NetSender callbacks resolve)
