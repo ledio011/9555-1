@@ -285,34 +285,32 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
                 if picked_char:
-                    # Phase I: Preparation Pushes (MUST be before 503)
-                    # 1. sync_common_data (614): Tag 9=funcs, Tag 13=server_level, Tag 14=start_time
+                    # Phase 1: Prep (Before map blocks network)
                     fids = ["3001", "3014", "4081", "3010", "3013", "3015", "4084"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     send_rpc_push(614, encode_sproto([
                         (0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))
                     ]))
-                    # 2. sync_item_pack (611): Initializes backpack singleton
-                    send_rpc_push(611, encode_sproto([(0, [])]))
-                    # 3. sync_skill_info (540): Required for skill bar HUD
-                    send_rpc_push(540, encode_sproto([(0, []), (1, False)]))
-                    # 4. sync_mission (519): Required for mission tracking in Tutorial scene
-                    m1001 = encode_sproto([(0, "1001"), (1, 1), (2, 0)])
-                    send_rpc_push(519, encode_sproto([(0, [m1001])]))
 
-                    # Phase II: Map Entry (Blocks network processing)
+                    # Phase 2: Map Entry (Blocks network processing)
                     send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)]))
 
-                    # Phase III: World Population (Buffered by client until scene load)
+                    # Phase 3: Population (Buffered until scene load)
                     send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char))]))
                     send_rpc_push(505, encode_sproto([(0, get_char_aoi(picked_char))]))
 
             elif msg == 100: # map_ready
                 if picked_char:
                     print("[*] Map Ready received. Finalizing world entry...")
-                    # 4. sync_common_data update
+                    # Phase 4: Delayed State Sync (Managers now initialized)
+                    send_rpc_push(611, encode_sproto([(0, [])]))
+                    send_rpc_push(540, encode_sproto([(0, []), (1, False)]))
+                    m1001 = encode_sproto([(0, "1001"), (1, 1), (2, 0)])
+                    send_rpc_push(519, encode_sproto([(0, [m1001])]))
+
+                    # Update heartbeat clock
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (13, 1)]))
-                    # 5. start_enter_game
+                    # Final trigger to enable user input
                     send_rpc_push(654, encode_sproto([(0, 1)]))
 
             elif msg == 310: # request_domin_info (Critical for Tutorial scene)
