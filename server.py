@@ -179,7 +179,8 @@ def get_full_char(c):
 
 def get_char_aoi(c):
     # character_aoi: id(0), visual(1), general(2), attribute_other(3), movement(5), runtime(6)
-    attr_oth = encode_sproto([(0, 3000), (2, 1)])
+    # attribute_other: camp(15) is used for faction logic
+    attr_oth = encode_sproto([(0, 3000), (2, 1), (15, 1)])
     # BirthPos from MapInfoData Map ID 11: 7007, 100, 5033
     mv = get_movement(7007, 100, 5033)
     attr_run = encode_sproto([(0, 3000)])
@@ -200,9 +201,8 @@ def client_handler(conn, addr):
 
     def send_rpc_push(tag, data):
         try:
-            global server_session_counter
-            server_session_counter += 1
-            ph_p = encode_sproto([(0, tag), (1, server_session_counter)])
+            # True Sproto Push: Type (Tag 0), No Session (Tag 1)
+            ph_p = encode_sproto([(0, tag)])
             pf_p = sproto_pack(ph_p + data)
             conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
             print(f"[TX] PUSH TAG={tag} SIZE={len(data)}")
@@ -283,20 +283,36 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
                 if picked_char:
-                    # 1. enter_map
+                    # Phase I: Preparation Pushes (MUST be before 503)
+                    # 614: serverTime(0), time_offset(2), start_time(14)
+                    send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (14, int(time.time()))]))
+                    # 611: gameitems map (0)
+                    send_rpc_push(611, encode_sproto([(0, [])]))
+                    # 540: skill_dict map (0), isLevelUp (1)
+                    send_rpc_push(540, encode_sproto([(0, []), (1, False)]))
+                    # 519: missions map (0)
+                    send_rpc_push(519, encode_sproto([(0, [])]))
+
+                    # Phase II: Map Entry (Blocks network processing)
                     send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)]))
-                    # 2. main_player_create (Must happen here to unblock loading bar)
+
+                    # Phase III: World Population (Buffered by client until scene load)
                     send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char))]))
-                    # 3. aoi_add
                     send_rpc_push(505, encode_sproto([(0, get_char_aoi(picked_char))]))
 
             elif msg == 100: # map_ready
                 if picked_char:
                     print("[*] Map Ready received. Finalizing world entry...")
-                    # 4. sync_common_data
-                    send_rpc_push(614, encode_sproto([(0, int(time.time())), (13, 1)]))
+                    # 4. sync_common_data update
+                    send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (13, 1)]))
                     # 5. start_enter_game
                     send_rpc_push(654, encode_sproto([(0, 1)]))
+
+            elif msg == 310: # request_domin_info (Critical for Tutorial scene)
+                ph = encode_sproto([(1, session)])
+                conn.sendall(struct.pack(">H", len(sproto_pack(ph + encode_sproto([])))) + sproto_pack(ph + encode_sproto([])))
+                # Push 684: ret_domin_info (empty)
+                send_rpc_push(684, encode_sproto([]))
 
             elif msg == 118: # random name
                 names = ["John", "Mary", "William", "Smith", "Michael", "James", "Lisa", "Robert"]
