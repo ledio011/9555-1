@@ -105,7 +105,13 @@ def decode_sproto(data, offset=0):
             curr_tag += 1
             if b_ptr + 4 <= len(data):
                 l = struct.unpack("<I", data[b_ptr:b_ptr+4])[0]
-                fields[curr_tag] = data[b_ptr+4:b_ptr+4+l]
+                body_val = data[b_ptr+4:b_ptr+4+l]
+                if l == 4:
+                    fields[curr_tag] = struct.unpack("<i", body_val)[0]
+                elif l == 8:
+                    fields[curr_tag] = struct.unpack("<q", body_val)[0]
+                else:
+                    fields[curr_tag] = body_val
                 b_ptr += 4 + l
         elif v == 1:
             curr_tag += 1
@@ -222,8 +228,6 @@ def client_handler(conn, addr):
 
             raw = sproto_unpack(data); pkg = decode_sproto(raw, 0)
             msg, session = pkg.get(0), pkg.get(1)
-            if isinstance(msg, bytes): msg = int.from_bytes(msg, "little")
-            if isinstance(session, bytes): session = int.from_bytes(session, "little")
             print(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
             print("BODY =", body)
@@ -286,7 +290,7 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
                 if picked_char:
                     # Phase 1: Prep (Before map blocks network)
-                    fids = ["3001", "3014", "4081", "3010", "3013", "3015", "4084"]
+                    fids = ["107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     send_rpc_push(614, encode_sproto([
                         (0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))
