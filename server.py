@@ -272,92 +272,70 @@ def client_handler(conn, addr):
             elif msg == 105: # character_pick
                 char_id = body.get(0)
                 print("CHAR PICK REQUEST ID =", char_id)
+                if isinstance(char_id, bytes): char_id = int.from_bytes(char_id, "little")
 
-                if isinstance(char_id, bytes):
-                    char_id = int.from_bytes(char_id, "little")
-
-                picked_char = next(
-                    (c for c in all_accounts_chars.get(acc_id, [])
-                     if c['id'] == char_id),
-                    None
-                )
-
+                picked_char = next((c for c in all_accounts_chars.get(acc_id, []) if c['id'] == char_id), None)
                 if picked_char:
                     print("CHARACTER PICK SUCCESS:", picked_char)
                     resp = encode_sproto([(0, 1)]) # Success
                 else:
-                    print("CHARACTER NOT FOUND")
-                    resp = encode_sproto([(0, 0)]) # Error
+                    print("CHARACTER NOT FOUND"); resp = encode_sproto([(0, 0)]) # Error
 
                 ph = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
                 if picked_char:
-                    # MANDATORY INITIALIZATION SEQUENCE (Assembly-CSharp Evidence)
                     # Phase 1: Prep (Before map blocks network)
-                    # 614: Tag 9=funcs, Tag 13=server_level, Tag 14=start_time
                     fids = ["107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
-                    send_rpc_push(614, encode_sproto([
-                        (0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))
-                    ]))
-
-                    # Phase 2: Map Entry (Blocks network processing)
+                    send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))]))
                     send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)]))
-
-                    # Phase 3: Population (Buffered until scene load)
                     send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char))]))
                     send_rpc_push(505, encode_sproto([(0, get_char_aoi(picked_char))]))
 
             elif msg == 100: # map_ready
                 if picked_char:
                     print("[*] Map Ready received. Finalizing world entry...")
-                    # Phase 4: Delayed State Sync (Managers now initialized)
+                    # Phase 4: Delayed State Sync (Managers now initialized in GameScene)
                     send_rpc_push(611, encode_sproto([(0, [])]))
                     send_rpc_push(540, encode_sproto([(0, []), (1, False)]))
                     # sync_mission (519): Tag 0=missions, Tag 1=last_missionId
-                    m1001 = encode_sproto([(0, "1001"), (1, 1), (2, 0)]) # ownmission: Tag 3 (parm) must be List<long>
+                    m1001 = encode_sproto([(0, "1001"), (1, 1), (2, 0)])
                     send_rpc_push(519, encode_sproto([(0, [m1001]), (1, "1001")]))
-
-                    # Update heartbeat clock
-                    send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (13, 1)]))
                     # Final trigger to enable user input
                     send_rpc_push(654, encode_sproto([(0, 1)]))
 
-            elif msg == 310: # request_domin_info (Critical for Tutorial scene)
+            elif msg in [145, 225, 313, 319, 210, 202, 200, 195, 242, 235, 252, 257, 261, 296, 278, 258, 253, 299, 310]:
+                # Generic Scene Init Response Handler (Ensures NetSender callbacks resolve)
                 ph = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(ph + encode_sproto([])))) + sproto_pack(ph + encode_sproto([])))
-                # Push 684: ret_domin_info (empty)
-                send_rpc_push(684, encode_sproto([]))
-
-            elif msg == 145: # ask_copyscenes_info
-                send_rpc_push(555, encode_sproto([(0, [])]))
-                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-            elif msg == 225: # request_activity_info
-                send_rpc_push(619, encode_sproto([]))
-                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                conn.sendall(struct.pack(">H", len(pf)) + pf)
+                if msg == 310: send_rpc_push(684, encode_sproto([]))
+                elif msg == 145: send_rpc_push(555, encode_sproto([(0, [])]))
+                elif msg == 225: send_rpc_push(619, encode_sproto([]))
 
             elif msg == 118: # random name
-                names = ["John", "Mary", "William", "Smith", "Michael", "James", "Lisa", "Robert"]
+                names = ["John", "Mary", "Michael", "James", "Lisa", "Robert"]
                 name = f"{random.choice(names)}_{random.randint(100,999)}"
                 resp = encode_sproto([(0, name)])
-                ph = encode_sproto([(1, session)])
-                pf = sproto_pack(ph + resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 218: # heart_beat
-                # heart_beat.response: time(0), serverTime(1)
-                # serverTime must be in seconds for GetResetDiffTime
                 resp = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))])
-                ph = encode_sproto([(1, session)])
-                pf = sproto_pack(ph + resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 268: # unlock_function_complete
-                # Notify only, no response required.
                 print(f"[*] Function Unlocked: {body.get(0)}")
+
+            elif session is not None:
+                ph = encode_sproto([(1, session)])
+                pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif session is not None:
+                ph = encode_sproto([(1, session)])
+                pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
 
     except: traceback.print_exc()
     finally: conn.close()
