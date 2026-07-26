@@ -285,15 +285,18 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
                 if picked_char:
-                    # 1. sync_common_data (614): Sets serverTime and default unlocked functions
+                    # Phase I: Preparation Pushes (MUST be before 503)
+                    # 1. sync_common_data (614): Tag 9=funcs, Tag 13=server_level, Tag 14=start_time
                     fids = ["3001", "3014", "4081", "3010", "3013", "3015", "4084"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
-                    send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (8, funcs), (14, int(time.time()))]))
+                    send_rpc_push(614, encode_sproto([
+                        (0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))
+                    ]))
                     # 2. sync_item_pack (611): Initializes backpack singleton
                     send_rpc_push(611, encode_sproto([(0, [])]))
                     # 3. sync_skill_info (540): Required for skill bar HUD
                     send_rpc_push(540, encode_sproto([(0, []), (1, False)]))
-                    # 519: missions map (0) - mission 1001 Accepted for Tutorial
+                    # 4. sync_mission (519): Required for mission tracking in Tutorial scene
                     m1001 = encode_sproto([(0, "1001"), (1, 1), (2, 0)])
                     send_rpc_push(519, encode_sproto([(0, [m1001])]))
 
