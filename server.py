@@ -222,8 +222,8 @@ def client_handler(conn, addr):
 
             raw = sproto_unpack(data); pkg = decode_sproto(raw, 0)
             msg, session = pkg.get(0), pkg.get(1)
-            if isinstance(session, bytes):
-                session = int.from_bytes(session, "little")
+            if isinstance(msg, bytes): msg = int.from_bytes(msg, "little")
+            if isinstance(session, bytes): session = int.from_bytes(session, "little")
             print(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
             print("BODY =", body)
