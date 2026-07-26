@@ -126,9 +126,9 @@ def decode_sproto(data, offset=0):
     return fields
 
 def get_visual(name, prof):
-    m = {0:{"m":"XD_A","h":"XD_A_T","b":"XD_A_S","l":"XD_A_X","w":"XD_A_WQ"},
-         1:{"m":"QJ_A","h":"QJ_A_T","b":"QJ_A_S","l":"QJ_A_X","w":"QJ_A_WQ"},
-         2:{"m":"NQS_A","h":"NQS_A_T","b":"NQS_A_S","l":"NQS_A_X","w":"NQS_A_WQ"}}
+    m = {0:{"m":"100","h":"XD_A_T","b":"XD_A_S","l":"XD_A_X","w":"XD_A_WQ"},
+         1:{"m":"104","h":"QJ_A_T","b":"QJ_A_S","l":"QJ_A_X","w":"QJ_A_WQ"},
+         2:{"m":"105","h":"NQS_A_T","b":"NQS_A_S","l":"NQS_A_X","w":"NQS_A_WQ"}}
     v = m.get(prof, m[1])
     return encode_sproto([(0, name), (1, v["m"]), (2, v["h"]), (3, v["b"]), (4, v["l"]), (5, v["w"]), (10, 0)])
 
@@ -174,13 +174,20 @@ def get_full_char(c):
     attr_all = encode_sproto([(0, 3000), (2, 300), (3, 35), (13, 500)])
     run = encode_sproto([(6, attr_run), (7, attr_all)])
 
+    prof = c.get('prof', 0)
+    sid = "101" if prof == 0 else "201" if prof == 1 else "301"
+    # Tag 8: skills (map string->skill_info). skill_info: id(0), lv(1), pos(2), unlk(3), pos2(4), dis(5)
+    s1 = encode_sproto([(0, sid), (1, 1), (2, 1), (3, 1), (4, 1), (5, False)])
+    skills_map = {sid: s1}
+
     return encode_sproto([
         (0, c['id']),
         (1, gen),
         (2, attr_oth),
         (5, prop),
-        (6, get_visual(c['name'], c.get('prof', 0))),
+        (6, get_visual(c['name'], prof)),
         (7, mv),
+        (8, skills_map),
         (12, 0), # potionIndex
         (13, run),
         (15, 2)  # download finish
