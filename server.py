@@ -105,13 +105,7 @@ def decode_sproto(data, offset=0):
             curr_tag += 1
             if b_ptr + 4 <= len(data):
                 l = struct.unpack("<I", data[b_ptr:b_ptr+4])[0]
-                body_val = data[b_ptr+4:b_ptr+4+l]
-                if l == 4:
-                    fields[curr_tag] = struct.unpack("<i", body_val)[0]
-                elif l == 8:
-                    fields[curr_tag] = struct.unpack("<q", body_val)[0]
-                else:
-                    fields[curr_tag] = body_val
+                fields[curr_tag] = data[b_ptr+4:b_ptr+4+l]
                 b_ptr += 4 + l
         elif v == 1:
             curr_tag += 1
@@ -228,6 +222,8 @@ def client_handler(conn, addr):
 
             raw = sproto_unpack(data); pkg = decode_sproto(raw, 0)
             msg, session = pkg.get(0), pkg.get(1)
+            if isinstance(session, bytes):
+                session = int.from_bytes(session, "little")
             print(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
             print("BODY =", body)
@@ -289,17 +285,16 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
                 if picked_char:
-                    # Phase I: Preparation Pushes (MUST be before 503)
-                    # 614: serverTime(0), time_offset(2), start_time(14)
-                    send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (14, int(time.time()))]))
-                    # 611: gameitems map (0)
+                    # 1. sync_common_data (614): Sets serverTime and default unlocked functions
+                    fids = ["3001", "3014", "4081", "3010", "3013", "3015", "4084"]
+                    funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
+                    send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (8, funcs), (14, int(time.time()))]))
+                    # 2. sync_item_pack (611): Initializes backpack singleton
                     send_rpc_push(611, encode_sproto([(0, [])]))
-                    # 540: skill_dict map (0), isLevelUp (1)
+                    # 3. sync_skill_info (540): Required for skill bar HUD
                     send_rpc_push(540, encode_sproto([(0, []), (1, False)]))
                     # 519: missions map (0) - mission 1001 Accepted for Tutorial
-                    m1001 = encode_sproto([
-                        (0, "1001"), (1, 1), (2, 0), (3, int(time.time()))
-                    ])
+                    m1001 = encode_sproto([(0, "1001"), (1, 1), (2, 0)])
                     send_rpc_push(519, encode_sproto([(0, [m1001])]))
 
                     # Phase II: Map Entry (Blocks network processing)
