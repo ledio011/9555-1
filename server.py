@@ -190,9 +190,16 @@ def get_full_char(c):
 
     prof = c.get('prof', 0)
     sid = "101" if prof == 0 else "201" if prof == 1 else "301"
+    wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
+
     # Tag 8: skills (map string->skill_info). indexPos=0 restores main Attack button. indexPos2=0 for sorting.
+    # skill_info: id(0), lv(1), pos(2), unlk(3), pos2(4), dis(5)
     s1 = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)])
     skills_map = {sid: s1}
+
+    # Tag 9: equip (map long->gameitem). gameitem: idxId(0), itemId(1), bind(2), lv(3), flags(4), stack(5), qual(6), parm(7), appr(8)
+    w1 = encode_sproto([(0, 1), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0])])
+    equip_map = {1: w1}
 
     return encode_sproto([
         (0, c['id']),
@@ -202,6 +209,7 @@ def get_full_char(c):
         (6, get_visual(c.get('name', 'Hero'), prof)),
         (7, mv),
         (8, skills_map),
+        (9, equip_map),
         (12, 0), # potionIndex
         (13, run),
         (15, 2)  # download finish
@@ -333,8 +341,8 @@ def client_handler(conn, addr):
                     send_rpc_push(611, encode_sproto([(0, [])]))
                     send_rpc_push(540, encode_sproto([(0, []), (1, False)]))
                     # sync_mission (519): Tag 0=missions, Tag 1=last_missionId.
-                    # Mission 1001: state=2(ACCEPTED), parm=[]
-                    m1001 = encode_sproto([(0, "1001"), (1, 2), (2, 0), (3, [0])])
+                    # Mission 1001: state=1(ACCEPTED), parm=[0]
+                    m1001 = encode_sproto([(0, "1001"), (1, 1), (2, 0), (3, [0])])
                     send_rpc_push(519, encode_sproto([(0, {"1001": m1001}), (1, "1001")]))
                     # Final trigger to enable user input
                     send_rpc_push(654, encode_sproto([(0, 1)]))
