@@ -42,7 +42,10 @@ def encode_sproto(fields, fn=None):
                 header.append((val + 1) * 2)
             else:
                 header.append(0)
-                body += struct.pack("<I", 8) + struct.pack("<q", val)
+                if -2147483648 <= val <= 2147483647:
+                    body += struct.pack("<I", 4) + struct.pack("<i", val)
+                else:
+                    body += struct.pack("<I", 8) + struct.pack("<q", val)
         elif isinstance(val, (str, bytes, bytearray, list, dict)):
             header.append(0)
             if isinstance(val, str):
@@ -345,15 +348,16 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 218: # heart_beat
-                resp = encode_sproto([(0, body.get(0, 0)), (1, int(time.time() * 1000))])
+                # heart_beat.response: time(0), serverTime(1)
+                # serverTime must be in seconds for GetResetDiffTime
+                resp = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))])
                 ph = encode_sproto([(1, session)])
                 pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            else:
-                ph = encode_sproto([(1, session)])
-                pf = sproto_pack(ph + encode_sproto([]))
-                conn.sendall(struct.pack(">H", len(pf)) + pf)
+            elif msg == 268: # unlock_function_complete
+                # Notify only, no response required.
+                print(f"[*] Function Unlocked: {body.get(0)}")
 
     except: traceback.print_exc()
     finally: conn.close()
