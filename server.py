@@ -105,7 +105,13 @@ def decode_sproto(data, offset=0):
             curr_tag += 1
             if b_ptr + 4 <= len(data):
                 l = struct.unpack("<I", data[b_ptr:b_ptr+4])[0]
-                fields[curr_tag] = data[b_ptr+4:b_ptr+4+l]
+                body_val = data[b_ptr+4:b_ptr+4+l]
+                if l == 4:
+                    fields[curr_tag] = struct.unpack("<i", body_val)[0]
+                elif l == 8:
+                    fields[curr_tag] = struct.unpack("<q", body_val)[0]
+                else:
+                    fields[curr_tag] = body_val
                 b_ptr += 4 + l
         elif v == 1:
             curr_tag += 1
@@ -290,8 +296,11 @@ def client_handler(conn, addr):
                     send_rpc_push(611, encode_sproto([(0, [])]))
                     # 540: skill_dict map (0), isLevelUp (1)
                     send_rpc_push(540, encode_sproto([(0, []), (1, False)]))
-                    # 519: missions map (0)
-                    send_rpc_push(519, encode_sproto([(0, [])]))
+                    # 519: missions map (0) - mission 1001 Accepted for Tutorial
+                    m1001 = encode_sproto([
+                        (0, "1001"), (1, 1), (2, 0), (3, int(time.time()))
+                    ])
+                    send_rpc_push(519, encode_sproto([(0, [m1001])]))
 
                     # Phase II: Map Entry (Blocks network processing)
                     send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)]))
