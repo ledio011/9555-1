@@ -289,7 +289,9 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
                 if picked_char:
+                    # MANDATORY INITIALIZATION SEQUENCE (Assembly-CSharp Evidence)
                     # Phase 1: Prep (Before map blocks network)
+                    # 614: Tag 9=funcs, Tag 13=server_level, Tag 14=start_time
                     fids = ["107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     send_rpc_push(614, encode_sproto([
@@ -309,8 +311,9 @@ def client_handler(conn, addr):
                     # Phase 4: Delayed State Sync (Managers now initialized)
                     send_rpc_push(611, encode_sproto([(0, [])]))
                     send_rpc_push(540, encode_sproto([(0, []), (1, False)]))
-                    m1001 = encode_sproto([(0, "1001"), (1, 1), (2, 0)])
-                    send_rpc_push(519, encode_sproto([(0, [m1001])]))
+                    # sync_mission (519): Tag 0=missions, Tag 1=last_missionId
+                    m1001 = encode_sproto([(0, "1001"), (1, 1), (2, 0)]) # ownmission: Tag 3 (parm) must be List<long>
+                    send_rpc_push(519, encode_sproto([(0, [m1001]), (1, "1001")]))
 
                     # Update heartbeat clock
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (13, 1)]))
