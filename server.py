@@ -165,7 +165,7 @@ def get_general(c):
         (1, c.get('prof', 0)),
         (2, 1), # lineIndex
         (3, "11"), # mapInfoId
-        (4, 0) # tutorial state (0 = start)
+        (4, 1) # tutorial state (1 = FINISHED, unblocks HUD/LocalManagers)
     ])
 
 def get_movement(x, y, z):
