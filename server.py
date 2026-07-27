@@ -1,5 +1,5 @@
 # ==========================================================
-# AUTO THEFT GANGSTERS REVIVAL - STABLE v14 FINAL GAMEPLAY
+# AUTO THEFT GANGSTERS REVIVAL - STABLE v15 FINAL GAMEPLAY
 # GAME SERVER 9555
 # ==========================================================
 import socket, struct, threading, random, json, os, time, traceback
@@ -157,13 +157,13 @@ def get_visual(name, prof):
     return encode_sproto([(0, name), (1, v["m"]), (2, v["h"]), (3, v["b"]), (4, v["l"]), (5, v["w"]), (10, 0)])
 
 def get_general(c):
-    # Tag 4: tutorial (0=start). Client forces move to Waypoint 0 (near thugs) if 0.
+    # Tag 4: tutorial (1=finished). Unblocks HUD and NPCManagers immediately.
     return encode_sproto([
         (0, c.get('name', 'Hero')),
         (1, c.get('prof', 0)),
         (2, 1), # lineIndex
         (3, "11"), # mapInfoId
-        (4, 0) # tutorial state
+        (4, 1) # tutorial state
     ])
 
 def get_movement(x, y, z):
@@ -189,8 +189,8 @@ def get_full_char(c):
     attr_oth = encode_sproto([(0, 3000), (1, 0), (2, 1), (3, 5000), (15, 1)])
     # property: Tag 13-15 are money fields. Cash: 1000, Gold: 100, Diamond: 10
     prop = encode_sproto([(13, 1000), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
-    # BirthPos: 7007 is raw cm. get_movement takes units.
-    mv = get_movement(70, 1, 50)
+    # BirthPos: Move player directly to Mission 1001 thugs (298, -170)
+    mv = get_movement(29860, 100, -17005)
     # runtime_agent: max_hp(0), atk(2), def(3).
     attr_run = encode_sproto([(0, 3000), (2, 300), (3, 35)])
     # attribute_all: mov(13)=500 (Speed 5.0)
@@ -287,19 +287,22 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
+                    # Sync common data and missions BEFORE map entry to ensure HUD and Spawner initialization
                     fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))]))
+
+                    p = [0, 0, 0, 0, 0, 0, 0, int(time.time())]
+                    m1001 = encode_sproto([(0, "1001"), (1, 1), (2, 0), (3, p)])
+                    send_rpc_push(519, encode_sproto([(0, {"1001": m1001}), (1, "1001")]))
+
                     send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)]))
-                    send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(70, 1, 50))]))
+                    send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(29860, 100, -17005))]))
 
             elif msg == 100: # map_ready
                 if picked_char:
                     send_rpc_push(611, encode_sproto([(0, [])]))
                     send_rpc_push(540, encode_sproto([(0, []), (1, False)]))
-                    p = [0, 0, 0, 0, 0, 0, 0, int(time.time())]
-                    m1001 = encode_sproto([(0, "1001"), (1, 1), (2, 0), (3, p)])
-                    send_rpc_push(519, encode_sproto([(0, {"1001": m1001}), (1, "1001")]))
                     send_rpc_push(654, encode_sproto([(0, 1)]))
 
             elif msg == 101: # move
@@ -326,15 +329,18 @@ def client_handler(conn, addr):
                     m_new = encode_sproto([(0, mid), (1, 1), (2, 0), (3, [0]*8)])
                     send_rpc_push(519, encode_sproto([(0, {mid: m_new}), (1, mid)]))
 
-            elif msg == 118: # random name
-                name = f"User_{random.randint(100,999)}"
-                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, name)]))
+            elif msg in [118, 218, 145, 225, 258, 261, 278, 296, 299, 310, 313, 319]:
+                # Generic Responder for Scene Info and UI Requests
+                resp_data = encode_sproto([])
+                if msg == 118: resp_data = encode_sproto([(0, f"User_{random.randint(100,999)}")])
+                elif msg == 218: resp_data = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))])
+
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp_data)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 218: # heart_beat
-                resp = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))])
-                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
-                conn.sendall(struct.pack(">H", len(pf)) + pf)
+                # Side effect pushes for scene completion
+                if msg == 310: send_rpc_push(684, encode_sproto([]))
+                elif msg == 145: send_rpc_push(555, encode_sproto([(0, [])]))
 
             elif session is not None:
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -345,5 +351,5 @@ def client_handler(conn, addr):
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM); server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT)); server.listen(20)
-print(f"GAME SERVER 9555 READY (STABLE v14)");
+print(f"GAME SERVER 9555 READY (STABLE v15)");
 while True: cl, ad = server.accept(); threading.Thread(target=client_handler, args=(cl, ad), daemon=True).start()
