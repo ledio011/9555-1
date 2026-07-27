@@ -206,13 +206,13 @@ def get_full_char(c):
     did = "104" if prof == 0 else "204" if prof == 1 else "304"
     wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
 
-    # Tag 8: skills (map string->skill_info). Attack(Slot 0), Dodge(Slot 3)
+    # Tag 8: skills (map string->skill_info). indexPos 0=Attack, 3=Dodge
     s1 = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)])
-    s2 = encode_sproto([(0, did), (1, 1), (2, 3), (3, 1), (4, 0), (5, False)])
+    s2 = encode_sproto([(0, did), (1, 1), (2, 3), (3, 1), (4, 1), (5, False)])
     skills_map = {sid: s1, did: s2}
 
-    # Tag 9: equip (map long->gameitem). Key 0 = Weapon slot.
-    # parm must have 8 elements for timestamp index 7
+    # Tag 9: equip (map long->gameitem). Key 0 = Head slot, will contain weapon SubType=0.
+    # Client IsHaveWeapon checks all 6 slots for SubType=0.
     w1 = encode_sproto([(0, 0), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {0: w1}
 
@@ -383,6 +383,20 @@ def client_handler(conn, addr):
                 resp = encode_sproto([(0, servers)])
                 ph = encode_sproto([(1, session)])
                 conn.sendall(struct.pack(">H", len(sproto_pack(ph + resp))) + sproto_pack(ph + resp))
+
+            elif msg == 113: # complete_mission
+                if session is not None:
+                    ph = encode_sproto([(1, session)])
+                    conn.sendall(struct.pack(">H", len(sproto_pack(ph + encode_sproto([])))) + sproto_pack(ph + encode_sproto([])))
+
+            elif msg == 112: # accept_mission
+                if session is not None:
+                    ph = encode_sproto([(1, session)])
+                    conn.sendall(struct.pack(">H", len(sproto_pack(ph + encode_sproto([])))) + sproto_pack(ph + encode_sproto([])))
+                    # Assign accepted mission back to client
+                    mid = body.get(0, b"").decode('utf-8')
+                    m_new = encode_sproto([(0, mid), (1, 1), (2, 0), (3, [0]*8)])
+                    send_rpc_push(519, encode_sproto([(0, {mid: m_new}), (1, mid)]))
 
             elif msg in [145, 225, 313, 319, 210, 202, 200, 195, 242, 235, 252, 257, 261, 296, 278, 258, 253, 299, 310]:
                 # Generic Scene Init Response Handler (Ensures NetSender callbacks resolve)
