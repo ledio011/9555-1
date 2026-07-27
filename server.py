@@ -72,10 +72,23 @@ def encode_sproto(fields, fn=None):
                 if val and isinstance(val[0], int):
                     v = b"\x08" + b"".join([struct.pack("<q", item) for item in val])
                 else:
-                    v = b"".join([struct.pack("<I", len(item)) + item if isinstance(item, (bytes, bytearray)) else item for item in val])
+                    items = []
+                    for item in val:
+                        if isinstance(item, str): item = item.encode('utf-8')
+                        elif isinstance(item, (bytes, bytearray)): pass
+                        else: item = str(item).encode('utf-8')
+                        items.append(struct.pack("<I", len(item)) + item)
+                    v = b"".join(items)
             elif isinstance(val, dict):
                 # Sproto maps are encoded as arrays of objects (structs)
-                v = b"".join([struct.pack("<I", len(item)) + item if isinstance(item, (bytes, bytearray)) else item for item in val.values()])
+                items = []
+                for item in val.values():
+                    if isinstance(item, str): item = item.encode('utf-8')
+                    if isinstance(item, (bytes, bytearray)):
+                        items.append(struct.pack("<I", len(item)) + item)
+                    else: # Fallback for primitive types if ever passed in dict values
+                        items.append(struct.pack("<I", 1) + (b'\x01' if item else b'\x00'))
+                v = b"".join(items)
             else:
                 v = val
             body += struct.pack("<I", len(v)) + v
@@ -190,16 +203,18 @@ def get_full_char(c):
 
     prof = c.get('prof', 0)
     sid = "101" if prof == 0 else "201" if prof == 1 else "301"
+    did = "104" if prof == 0 else "204" if prof == 1 else "304"
     wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
 
-    # Tag 8: skills (map string->skill_info). indexPos=0 restores main Attack button. indexPos2=0 for sorting.
-    # skill_info: id(0), lv(1), pos(2), unlk(3), pos2(4), dis(5)
+    # Tag 8: skills (map string->skill_info). Attack(Slot 0), Dodge(Slot 3)
     s1 = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)])
-    skills_map = {sid: s1}
+    s2 = encode_sproto([(0, did), (1, 1), (2, 3), (3, 1), (4, 0), (5, False)])
+    skills_map = {sid: s1, did: s2}
 
-    # Tag 9: equip (map long->gameitem). gameitem: idxId(0), itemId(1), bind(2), lv(3), flags(4), stack(5), qual(6), parm(7), appr(8)
-    w1 = encode_sproto([(0, 1), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0])])
-    equip_map = {1: w1}
+    # Tag 9: equip (map long->gameitem). Key 0 = Weapon slot.
+    # parm must have 8 elements for timestamp index 7
+    w1 = encode_sproto([(0, 0), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
+    equip_map = {0: w1}
 
     return encode_sproto([
         (0, c['id']),
@@ -340,9 +355,9 @@ def client_handler(conn, addr):
                     # Phase 4: Delayed State Sync (Managers now initialized in GameScene)
                     send_rpc_push(611, encode_sproto([(0, [])]))
                     send_rpc_push(540, encode_sproto([(0, []), (1, False)]))
-                    # sync_mission (519): Tag 0=missions, Tag 1=last_missionId.
-                    # Mission 1001: state=1(ACCEPTED), parm=[0]
-                    m1001 = encode_sproto([(0, "1001"), (1, 1), (2, 0), (3, [0])])
+                    # sync_mission (519): Mission 1001. state 1(ACCEPTED), parm[7]=time
+                    p = [0, 0, 0, 0, 0, 0, 0, int(time.time())]
+                    m1001 = encode_sproto([(0, "1001"), (1, 1), (2, 0), (3, p)])
                     send_rpc_push(519, encode_sproto([(0, {"1001": m1001}), (1, "1001")]))
                     # Final trigger to enable user input
                     send_rpc_push(654, encode_sproto([(0, 1)]))
