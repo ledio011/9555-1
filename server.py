@@ -2,11 +2,54 @@
 # AUTO THEFT GANGSTERS REVIVAL - STABLE v15 FINAL GAMEPLAY
 # GAME SERVER 9555
 # ==========================================================
-import socket, struct, threading, random, json, os, time, traceback
+import socket, struct, threading, random, json, os, time, traceback, sqlite3
 
 PORT = int(os.environ.get("PORT", 9555))
 CHAR_DB = "characters_final.json"
 server_session_counter = 8000
+
+class RevivalDB:
+    def __init__(self, db_name="game_world.db"):
+        self.db_name = db_name
+        self.lock = threading.Lock()
+        self._init_db()
+
+    def _init_db(self):
+        with self.lock:
+            conn = sqlite3.connect(self.db_name)
+            c = conn.cursor()
+            c.execute("CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, key TEXT)")
+            c.execute("CREATE TABLE IF NOT EXISTS characters (id INTEGER PRIMARY KEY, account_id TEXT, area_id INTEGER, name TEXT, prof INTEGER, level INTEGER, exp INTEGER, map_id TEXT, x INTEGER, y INTEGER, z INTEGER, o INTEGER, hp INTEGER)")
+            conn.commit()
+            conn.close()
+
+    def execute(self, query, params=()):
+        with self.lock:
+            conn = sqlite3.connect(self.db_name)
+            c = conn.cursor()
+            c.execute(query, params)
+            conn.commit()
+            conn.close()
+
+    def fetchone(self, query, params=()):
+        with self.lock:
+            conn = sqlite3.connect(self.db_name)
+            c = conn.cursor()
+            c.execute(query, params)
+            row = c.fetchone()
+            conn.close()
+            return row
+
+    def fetchall(self, query, params=()):
+        with self.lock:
+            conn = sqlite3.connect(self.db_name)
+            c = conn.cursor()
+            c.execute(query, params)
+            rows = c.fetchall()
+            conn.close()
+            return rows
+
+db = RevivalDB()
 
 def load_chars():
     if os.path.exists(CHAR_DB):
@@ -152,6 +195,64 @@ def decode_sproto(data, offset=0):
             fields[curr_tag] = (v >> 1) - 1
     return fields
 
+class DataLoader:
+    def __init__(self):
+        self.data = {}
+
+    def load_table(self, table_name):
+        path = f"assets/Bundle/TextAsset/{table_name}"
+        if not os.path.exists(path):
+            print(f"[DataLoader] File not found: {path}")
+            return
+        
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            
+            if len(lines) < 3: return
+            keys = lines[2].strip().split(",")
+            if keys[0] == "*": keys = keys[1:]
+            
+            table_entries = []
+            for line in lines[3:]:
+                line = line.strip()
+                if not line: continue
+                values = line.split(",")
+                if values[0] == "*": values = values[1:]
+                
+                entry = {}
+                for i in range(min(len(keys), len(values))):
+                    k = keys[i].strip()
+                    v = values[i].strip()
+                    if not k: continue
+                    try:
+                        if "." in v: entry[k] = float(v)
+                        else: entry[k] = int(v)
+                    except ValueError:
+                        entry[k] = v
+                table_entries.append(entry)
+            
+            self.data[table_name] = table_entries
+            print(f"[DataLoader] Loaded {len(table_entries)} rows from {table_name}")
+        except Exception as e:
+            print(f"[DataLoader] Error loading {table_name}: {e}")
+
+    def find_entry(self, table_name, field, value):
+        if table_name not in self.data:
+            self.load_table(table_name)
+        
+        for entry in self.data.get(table_name, []):
+            if entry.get(field) == value:
+                return entry
+        return None
+
+loader = DataLoader()
+loader.load_table("AttributeData")
+loader.load_table("MapInfoData")
+loader.load_table("MonsterData")
+loader.load_table("NpcData")
+loader.load_table("MapInfoData")
+
 def get_visual(name, prof):
     m = {0:{"m":"100","h":"XD_A_T","b":"XD_A_S","l":"XD_A_X","w":"XD_A_WQ"},
          1:{"m":"104","h":"QJ_A_T","b":"QJ_A_S","l":"QJ_A_X","w":"QJ_A_WQ"},
@@ -278,10 +379,36 @@ def client_handler(conn, addr):
                 c_data = decode_sproto(body.get(0, b""))
                 name = c_data.get(0, b"").decode('utf-8') if isinstance(c_data.get(0), bytes) else str(c_data.get(0, "Hero"))
                 prof = get_val_int(c_data, 1, 0); cid = generate_unique_char_id()
+
+                # Default starting values from reverse engineering
+                map_id = "11"
+                x, y, z, o = 29860, 100, -17005, 0
+                hp = 500
+
+                # Use authoritative data from loader
+                attr_entry = loader.find_entry("AttributeData", "ID", 1)
+                if attr_entry:
+                    hp = int(attr_entry.get("HpStd", hp))
+
+                map_entry = loader.find_entry("MapInfoData", "ID", map_id)
+                if map_entry and map_entry.get("BirthPos"):
+                    try:
+                        parts = str(map_entry["BirthPos"]).split("#")
+                        if len(parts) >= 3:
+                            x, y, z = int(parts[0]), int(parts[1]), int(parts[2])
+                        if len(parts) >= 4:
+                            o = int(parts[3])
+                    except: pass
+
                 if cur_areaId not in all_accounts_chars: all_accounts_chars[cur_areaId] = {}
                 if acc_id not in all_accounts_chars[cur_areaId]: all_accounts_chars[cur_areaId][acc_id] = []
-                nc = {'id': cid, 'name': name, 'prof': prof}
+                nc = {'id': cid, 'name': name, 'prof': prof, 'pos': [x, y, z, o], 'hp': hp, 'level': 1, 'exp': 0, 'map_id': map_id}
                 all_accounts_chars[cur_areaId][acc_id].append(nc); save_chars(all_accounts_chars)
+
+                # SQLite Persistence (Mirror)
+                db.execute("INSERT INTO characters (id, account_id, area_id, name, prof, level, exp, map_id, x, y, z, o, hp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           (cid, acc_id, cur_areaId, name, prof, 1, 0, map_id, x, y, z, o, hp))
+
                 resp = encode_sproto([(0, get_char_ov(nc)), (1, 0)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -316,8 +443,10 @@ def client_handler(conn, addr):
                     p_raw = body.get(0)
                     if p_raw and picked_char:
                         pd = decode_sproto(p_raw)
-                        picked_char['pos'] = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
+                        x, y, z, o = get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)
+                        picked_char['pos'] = [x, y, z, o]
                         save_chars(all_accounts_chars)
+                        db.execute("UPDATE characters SET x=?, y=?, z=?, o=? WHERE id=?", (x, y, z, o, picked_char['id']))
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, p_raw)]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
