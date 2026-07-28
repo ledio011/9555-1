@@ -189,11 +189,20 @@ def get_char_ov(c):
 
 def get_full_char(c):
     gen = get_general(c)
-    attr_oth = encode_sproto([(0, 3000), (1, 0), (2, 1), (3, 5000), (15, 1)])
-    prop = encode_sproto([(13, 1000), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
 
-    # Position Persistence: Default to Mission 1001 area for new chars
-    # Raw int coords in cm.
+    # attribute_other: 0:hp, 1:exp, 2:level, 3:combValue, 4:title_level, ...
+    lvl = c.get('level', 1)
+    attr_oth = encode_sproto([(0, 3000), (1, c.get('exp', 0)), (2, lvl), (3, 5000), (15, 1)])
+
+    # property: 13: money1 (Cash), 14: money2 (Gold), 15: money3 (Diamond), ...
+    prop = encode_sproto([
+        (13, c.get('cash', 1000)),
+        (14, c.get('gold', 100)),
+        (15, c.get('diamond', 10)),
+        (16, 0), (17, 0), (18, 0)
+    ])
+
+    # Position Persistence: cm units
     pos = c.get('pos', [29860, 100, -17005, 0])
     mv = get_movement(pos[0], pos[1], pos[2], pos[3])
 
@@ -206,12 +215,12 @@ def get_full_char(c):
     did = "104" if prof == 0 else "204" if prof == 1 else "304"
     wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
 
-    # Tag 8: skills map string->skill_info: Attack(Slot 0), Dodge(Slot 3)
+    # Tag 8: skills map string->skill_info
     s1 = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)])
     s2 = encode_sproto([(0, did), (1, 1), (2, 3), (3, 1), (4, 1), (5, False)])
     skills_map = {sid: s1, did: s2}
 
-    # Tag 9: equip map long->gameitem. Fill all 6 slots to ensure weapon is in Slot 5.
+    # Tag 9: equip map long->gameitem
     equip_map = {}
     for i in range(6):
         item_id = wid if i == 5 else ""
