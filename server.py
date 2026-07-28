@@ -310,8 +310,8 @@ def get_full_char(c):
     wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
 
     # Tag 8: skills (map string->skill_info). Attack(0), Dodge(3)
-    s1 = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)])
-    s2 = encode_sproto([(0, did), (1, 1), (2, 3), (3, 1), (4, 1), (5, False)])
+    s1 = encode_sproto([(0, sid), (1, 1), (2, 1), (3, 1), (4, 0), (5, False)])
+    s2 = encode_sproto([(0, did), (1, 1), (2, 4), (3, 1), (4, 1), (5, False)])
     skills_map = {sid: s1, did: s2}
 
     # Tag 9: equip (map long->gameitem). Key 5 = WEAPON slot.
@@ -421,7 +421,7 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
                     # Sync common data and missions BEFORE map entry to ensure HUD and Spawner initialization
-                    fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
+                    fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084", "3020", "4086", "4087"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))]))
 
@@ -457,9 +457,33 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 113: # complete_mission
-                if session is not None:
+                if session is not None and picked_char:
+                    mid = body.get(0, b"").decode('utf-8')
+                    m_data = loader.find_entry("MissionData", "ID", mid)
+                    next_id = str(m_data.get("NextID", "")) if m_data else ""
+                    
+                    if next_id:
+                        picked_char['mission_id'] = next_id
+                        p = [0, 0, 0, 0, 0, 0, 0, int(time.time())]
+                        m_new = encode_sproto([(0, next_id), (1, 1), (2, 0), (3, p)])
+                        send_rpc_push(519, encode_sproto([(0, {next_id: m_new}), (1, next_id)]))
+                        
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 307: # local_npc_die
+                if picked_char:
+                    # Very basic kill tracking for Tutorial Mission 1001
+                    # In a real Entity Manager, we would verify runtime_id -> npc_id
+                    mid = picked_char.get('mission_id', "1001")
+                    if mid == "1001":
+                        kills = picked_char.get('kill_count', 0) + 1
+                        picked_char['kill_count'] = kills
+                        # Sync progress: Tag 3 in ownmission is parm list.
+                        # Mission 1001 needs 1 kill (Target 9901 / LogicID 1).
+                        p = [kills, 0, 0, 0, 0, 0, 0, int(time.time())]
+                        m_sync = encode_sproto([(0, mid), (1, 1), (2, 0), (3, p)])
+                        send_rpc_push(519, encode_sproto([(0, {mid: m_sync}), (1, mid)]))
 
             elif msg == 112: # accept_mission
                 if session is not None:
