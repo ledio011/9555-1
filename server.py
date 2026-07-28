@@ -15,39 +15,53 @@ class RevivalDB:
         self._init_db()
 
     def _init_db(self):
-        with self.lock:
-            conn = sqlite3.connect(self.db_name)
-            c = conn.cursor()
-            c.execute("CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, key TEXT)")
-            c.execute("CREATE TABLE IF NOT EXISTS characters (id INTEGER PRIMARY KEY, account_id TEXT, area_id INTEGER, name TEXT, prof INTEGER, level INTEGER, exp INTEGER, map_id TEXT, x INTEGER, y INTEGER, z INTEGER, o INTEGER, hp INTEGER)")
-            conn.commit()
-            conn.close()
+        try:
+            with self.lock:
+                conn = sqlite3.connect(self.db_name)
+                c = conn.cursor()
+                c.execute("CREATE TABLE IF NOT EXISTS accounts (id TEXT PRIMARY KEY, key TEXT)")
+                c.execute("CREATE TABLE IF NOT EXISTS characters (id INTEGER PRIMARY KEY, account_id TEXT, area_id INTEGER, name TEXT, prof INTEGER, level INTEGER, exp INTEGER, map_id TEXT, x INTEGER, y INTEGER, z INTEGER, o INTEGER, hp INTEGER, tutorial INTEGER, mission_id TEXT, kill_count INTEGER)")
+                conn.commit()
+                conn.close()
+        except Exception:
+            traceback.print_exc()
 
     def execute(self, query, params=()):
-        with self.lock:
-            conn = sqlite3.connect(self.db_name)
-            c = conn.cursor()
-            c.execute(query, params)
-            conn.commit()
-            conn.close()
+        try:
+            with self.lock:
+                conn = sqlite3.connect(self.db_name)
+                c = conn.cursor()
+                c.execute(query, params)
+                conn.commit()
+                conn.close()
+        except Exception:
+            traceback.print_exc()
 
     def fetchone(self, query, params=()):
-        with self.lock:
-            conn = sqlite3.connect(self.db_name)
-            c = conn.cursor()
-            c.execute(query, params)
-            row = c.fetchone()
-            conn.close()
-            return row
+        try:
+            with self.lock:
+                conn = sqlite3.connect(self.db_name)
+                c = conn.cursor()
+                c.execute(query, params)
+                row = c.fetchone()
+                conn.close()
+                return row
+        except Exception:
+            traceback.print_exc()
+            return None
 
     def fetchall(self, query, params=()):
-        with self.lock:
-            conn = sqlite3.connect(self.db_name)
-            c = conn.cursor()
-            c.execute(query, params)
-            rows = c.fetchall()
-            conn.close()
-            return rows
+        try:
+            with self.lock:
+                conn = sqlite3.connect(self.db_name)
+                c = conn.cursor()
+                c.execute(query, params)
+                rows = c.fetchall()
+                conn.close()
+                return rows
+        except Exception:
+            traceback.print_exc()
+            return []
 
 db = RevivalDB()
 
@@ -123,13 +137,12 @@ def encode_sproto(fields, fn=None):
                         items.append(struct.pack("<I", len(item)) + item)
                     v = b"".join(items)
             elif isinstance(val, dict):
-                # Sproto maps are encoded as arrays of objects (structs)
                 items = []
                 for item in val.values():
                     if isinstance(item, str): item = item.encode('utf-8')
                     if isinstance(item, (bytes, bytearray)):
                         items.append(struct.pack("<I", len(item)) + item)
-                    else: # Fallback for primitive types if ever passed in dict values
+                    else:
                         items.append(struct.pack("<I", 1) + (b'\x01' if item else b'\x00'))
                 v = b"".join(items)
             else:
@@ -251,7 +264,6 @@ loader.load_table("AttributeData")
 loader.load_table("MapInfoData")
 loader.load_table("MonsterData")
 loader.load_table("NpcData")
-loader.load_table("MapInfoData")
 
 def get_visual(name, prof):
     m = {0:{"m":"100","h":"XD_A_T","b":"XD_A_S","l":"XD_A_X","w":"XD_A_WQ"},
@@ -261,13 +273,13 @@ def get_visual(name, prof):
     return encode_sproto([(0, name), (1, v["m"]), (2, v["h"]), (3, v["b"]), (4, v["l"]), (5, v["w"]), (10, 0)])
 
 def get_general(c):
-    # Tag 4: tutorial (1=finished). Unblocks HUD and NPCManagers immediately.
+    # Tag 4: tutorial (0=start). Client will play cinematic/dialog.
     return encode_sproto([
         (0, c.get('name', 'Hero')),
         (1, c.get('prof', 0)),
         (2, 1), # lineIndex
         (3, "11"), # mapInfoId
-        (4, 1) # tutorial state
+        (4, c.get('tutorial', 0)) # tutorial state
     ])
 
 def get_movement(x, y, z, o=0):
@@ -290,18 +302,17 @@ def get_char_ov(c):
 def get_full_char(c):
     gen = get_general(c)
     # attribute_other: hp(0), exp(1), level(2), combValue(3), camp(15)
-    attr_oth = encode_sproto([(0, 3000), (1, 0), (2, 1), (3, 5000), (15, 1)])
+    attr_oth = encode_sproto([(0, c.get('hp', 3000)), (1, c.get('exp', 0)), (2, c.get('level', 1)), (3, 5000), (15, 1)])
     # property: Tag 13-15 are money fields. Cash: 1000, Gold: 100, Diamond: 10
     prop = encode_sproto([(13, 1000), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
 
-    # Position Persistence: Default to Mission 1001 area for new chars
-    # Raw int coords in cm.
+    # Position Persistence
     pos = c.get('pos', [29860, 100, -17005, 0])
     mv = get_movement(pos[0], pos[1], pos[2], pos[3])
     # runtime_agent: max_hp(0), atk(2), def(3).
-    attr_run = encode_sproto([(0, 3000), (2, 300), (3, 35)])
+    attr_run = encode_sproto([(0, c.get('hp', 3000)), (2, 300), (3, 35)])
     # attribute_all: mov(13)=500 (Speed 5.0)
-    attr_all = encode_sproto([(0, 3000), (2, 300), (3, 35), (13, 500)])
+    attr_all = encode_sproto([(0, c.get('hp', 3000)), (2, 300), (3, 35), (13, 500)])
     run = encode_sproto([(6, attr_run), (7, attr_all)])
 
     prof = c.get('prof', 0)
@@ -309,9 +320,9 @@ def get_full_char(c):
     did = "104" if prof == 0 else "204" if prof == 1 else "304"
     wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
 
-    # Tag 8: skills (map string->skill_info). Attack(0), Dodge(3)
-    s1 = encode_sproto([(0, sid), (1, 1), (2, 1), (3, 1), (4, 0), (5, False)])
-    s2 = encode_sproto([(0, did), (1, 1), (2, 4), (3, 1), (4, 1), (5, False)])
+    # Tag 8: skills (map string->skill_info). Reverted indexPos to original values
+    s1 = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)])
+    s2 = encode_sproto([(0, did), (1, 1), (2, 3), (3, 1), (4, 1), (5, False)])
     skills_map = {sid: s1, did: s2}
 
     # Tag 9: equip (map long->gameitem). Key 5 = WEAPON slot.
@@ -380,12 +391,11 @@ def client_handler(conn, addr):
                 name = c_data.get(0, b"").decode('utf-8') if isinstance(c_data.get(0), bytes) else str(c_data.get(0, "Hero"))
                 prof = get_val_int(c_data, 1, 0); cid = generate_unique_char_id()
 
-                # Default starting values from reverse engineering
+                # Default starting values
                 map_id = "11"
                 x, y, z, o = 29860, 100, -17005, 0
                 hp = 500
 
-                # Use authoritative data from loader
                 attr_entry = loader.find_entry("AttributeData", "ID", 1)
                 if attr_entry:
                     hp = int(attr_entry.get("HpStd", hp))
@@ -402,12 +412,11 @@ def client_handler(conn, addr):
 
                 if cur_areaId not in all_accounts_chars: all_accounts_chars[cur_areaId] = {}
                 if acc_id not in all_accounts_chars[cur_areaId]: all_accounts_chars[cur_areaId][acc_id] = []
-                nc = {'id': cid, 'name': name, 'prof': prof, 'pos': [x, y, z, o], 'hp': hp, 'level': 1, 'exp': 0, 'map_id': map_id}
+                nc = {'id': cid, 'name': name, 'prof': prof, 'pos': [x, y, z, o], 'hp': hp, 'level': 1, 'exp': 0, 'map_id': map_id, 'tutorial': 0, 'mission_id': "1001", 'kill_count': 0}
                 all_accounts_chars[cur_areaId][acc_id].append(nc); save_chars(all_accounts_chars)
 
-                # SQLite Persistence (Mirror)
-                db.execute("INSERT INTO characters (id, account_id, area_id, name, prof, level, exp, map_id, x, y, z, o, hp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                           (cid, acc_id, cur_areaId, name, prof, 1, 0, map_id, x, y, z, o, hp))
+                db.execute("INSERT INTO characters (id, account_id, area_id, name, prof, level, exp, map_id, x, y, z, o, hp, tutorial, mission_id, kill_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                           (cid, acc_id, cur_areaId, name, prof, 1, 0, map_id, x, y, z, o, hp, 0, "1001", 0))
 
                 resp = encode_sproto([(0, get_char_ov(nc)), (1, 0)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
@@ -416,21 +425,37 @@ def client_handler(conn, addr):
             elif msg == 105: # character_pick
                 char_id = get_val_int(body, 0)
                 picked_char = next((c for c in all_accounts_chars.get(cur_areaId, {}).get(acc_id, []) if c['id'] == char_id), None)
+                
+                # Fetch from SQLite for better state
+                row = db.fetchone("SELECT tutorial, mission_id, kill_count, hp, level, exp, map_id, x, y, z, o FROM characters WHERE id = ?", (char_id,))
+                if row and picked_char:
+                    picked_char['tutorial'] = row[0]
+                    picked_char['mission_id'] = row[1]
+                    picked_char['kill_count'] = row[2]
+                    picked_char['hp'] = row[3]
+                    picked_char['level'] = row[4]
+                    picked_char['exp'] = row[5]
+                    picked_char['map_id'] = row[6]
+                    picked_char['pos'] = [row[7], row[8], row[9], row[10]]
+
                 resp = encode_sproto([(0, 1 if picked_char else 0)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
-                    # Sync common data and missions BEFORE map entry to ensure HUD and Spawner initialization
-                    fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084", "3020", "4086", "4087"]
+                    # Removed 3020 (Auto Button) as it requires Level 5
+                    fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084", "4086", "4087"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))]))
 
-                    p = [0, 0, 0, 0, 0, 0, 0, int(time.time())]
-                    m1001 = encode_sproto([(0, "1001"), (1, 1), (2, 0), (3, p)])
-                    send_rpc_push(519, encode_sproto([(0, {"1001": m1001}), (1, "1001")]))
+                    mid = picked_char.get('mission_id', "1001")
+                    kills = picked_char.get('kill_count', 0)
+                    mstate = 2 if (mid == "1001" and kills >= 3) else 1
+                    p = [kills, 0, 0, 0, 0, 0, 0, int(time.time())]
+                    m_data = encode_sproto([(0, mid), (1, mstate), (2, 0), (3, p)])
+                    send_rpc_push(519, encode_sproto([(0, {mid: m_data}), (1, mid)]))
 
-                    send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)]))
-                    send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(29860, 100, -17005))]))
+                    send_rpc_push(503, encode_sproto([(0, picked_char.get('map_id', "11")), (1, 1), (2, 1)]))
+                    send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2]))]))
 
             elif msg == 100: # map_ready
                 if picked_char:
@@ -464,26 +489,33 @@ def client_handler(conn, addr):
                     
                     if next_id:
                         picked_char['mission_id'] = next_id
+                        picked_char['kill_count'] = 0
                         p = [0, 0, 0, 0, 0, 0, 0, int(time.time())]
                         m_new = encode_sproto([(0, next_id), (1, 1), (2, 0), (3, p)])
                         send_rpc_push(519, encode_sproto([(0, {next_id: m_new}), (1, next_id)]))
+                        db.execute("UPDATE characters SET mission_id=?, kill_count=0 WHERE id=?", (next_id, picked_char['id']))
                         
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 307: # local_npc_die
                 if picked_char:
-                    # Very basic kill tracking for Tutorial Mission 1001
-                    # In a real Entity Manager, we would verify runtime_id -> npc_id
                     mid = picked_char.get('mission_id', "1001")
                     if mid == "1001":
                         kills = picked_char.get('kill_count', 0) + 1
                         picked_char['kill_count'] = kills
-                        # Sync progress: Tag 3 in ownmission is parm list.
-                        # Mission 1001 needs 1 kill (Target 9901 / LogicID 1).
+                        mstate = 2 if kills >= 3 else 1
                         p = [kills, 0, 0, 0, 0, 0, 0, int(time.time())]
-                        m_sync = encode_sproto([(0, mid), (1, 1), (2, 0), (3, p)])
+                        m_sync = encode_sproto([(0, mid), (1, mstate), (2, 0), (3, p)])
                         send_rpc_push(519, encode_sproto([(0, {mid: m_sync}), (1, mid)]))
+                        db.execute("UPDATE characters SET kill_count=? WHERE id=?", (kills, picked_char['id']))
+
+            elif msg == 306: # tutorial_finish
+                if picked_char:
+                    picked_char['tutorial'] = 1
+                    db.execute("UPDATE characters SET tutorial=1 WHERE id=?", (picked_char['id']))
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 112: # accept_mission
                 if session is not None:
@@ -494,15 +526,11 @@ def client_handler(conn, addr):
                     send_rpc_push(519, encode_sproto([(0, {mid: m_new}), (1, mid)]))
 
             elif msg in [118, 218, 145, 225, 258, 261, 278, 296, 299, 310, 313, 319]:
-                # Generic Responder for Scene Info and UI Requests
                 resp_data = encode_sproto([])
                 if msg == 118: resp_data = encode_sproto([(0, f"User_{random.randint(100,999)}")])
                 elif msg == 218: resp_data = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))])
-
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp_data)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-                # Side effect pushes for scene completion
                 if msg == 310: send_rpc_push(684, encode_sproto([]))
                 elif msg == 145: send_rpc_push(555, encode_sproto([(0, [])]))
 
