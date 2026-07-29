@@ -431,33 +431,46 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
-                    # Backward compatibility and state recovery
-                    if 'skills' not in picked_char or len(picked_char['skills']) > 4: 
-                        picked_char['skills'] = get_default_skills(picked_char.get('prof', 0))
+                    # DEBUG: Always grant all profession skills for now
+                    picked_char['skills'] = get_default_skills(picked_char.get('prof', 0))
+                    
                     if 'active_missions' not in picked_char: 
                         picked_char['active_missions'] = {"1001": [1, 0, [0]*8]}
+                    
                     if 'mission_state' not in picked_char:
                         picked_char['mission_state'] = {}
                         for mid in picked_char['active_missions']:
                             picked_char['mission_state'][mid] = init_mission_state(mid)
                     else:
-                        # Ensure dead_sids field exists in old states
                         for mid, ms in picked_char['mission_state'].items():
                             if 'dead_sids' not in ms: ms['dead_sids'] = []
+                            
                     save_chars(all_accounts_chars)
                     map_id, line_idx = "11", 1; online_clients[char_id] = (conn, map_id, line_idx, picked_char)
                     fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
+                    
+                    # Exact Order for Map Entry Stability
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))]))
                     send_rpc_push(519, get_mission_sync(picked_char))
+                    print("[MAP] Sending 503 enter_map")
                     send_rpc_push(503, encode_sproto([(0, map_id), (1, line_idx), (2, 1)]))
+                    print("[MAP] Sending 504 main_player_create")
                     send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(29860, 100, -17005))]))
 
             elif msg == 100: # map_ready
+                print("[MAP] Received map_ready 100")
                 if picked_char:
+                    print("[MAP] Sending 611")
                     send_rpc_push(611, encode_sproto([(0, [])]))
+                    print("[MAP] Sending 540")
                     send_rpc_push(540, get_skill_sync(picked_char))
-                    sync_mission_world_objects(picked_char, send_rpc_push)
+                    print("[MAP] Mission objects sync started")
+                    try:
+                        sync_mission_world_objects(picked_char, send_rpc_push)
+                    except Exception as e:
+                        print(f"[MISSION WARNING] Missing data for mission object: {e}")
+                    print("[MAP] Mission objects sync finished")
                     send_rpc_push(654, encode_sproto([(0, 1)]))
 
             elif msg == 101: # move
