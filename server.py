@@ -110,13 +110,12 @@ online_clients = {}
 npc_hps = {}
 
 def get_default_skills(prof):
-    prefix = str(prof + 1)
-    ids = [sid for sid in skill_db if sid.startswith(prefix)]
-    ids.sort()
-    res = {}
-    for i, sid in enumerate(ids):
-        res[sid] = {"id": sid, "lv": 1, "pos": i, "unlock": 1, "pos2": i, "dis": False}
-    return res
+    sid = "101" if prof == 0 else "201" if prof == 1 else "301"
+    did = "104" if prof == 0 else "204" if prof == 1 else "304"
+    return {
+        sid: {"id": sid, "lv": 1, "pos": 0, "unlock": 1, "pos2": 0, "dis": False},
+        did: {"id": did, "lv": 1, "pos": 3, "unlock": 1, "pos2": 1, "dis": False}
+    }
 
 def init_mission_state(mid):
     logic = mission_logic_db.get(mid)
@@ -289,10 +288,12 @@ def get_full_char(c):
         attr_run = encode_sproto([(0, 3000), (2, 300), (3, 35)])
         attr_all = encode_sproto([(0, 3000), (2, 300), (3, 35), (13, 500)])
         run = encode_sproto([(6, attr_run), (7, attr_all)])
-        skills_data = c.get('skills', get_default_skills(c.get('prof', 0)))
-        skills_map = {}
-        for sid, sd in skills_data.items():
-            skills_map[sid] = encode_sproto([(0, sd['id']), (1, sd['lv']), (2, sd['pos']), (3, sd['unlock']), (4, sd['pos2']), (5, sd['dis'])])
+        prof = c.get('prof', 0)
+        sid = "101" if prof == 0 else "201" if prof == 1 else "301"
+        did = "104" if prof == 0 else "204" if prof == 1 else "304"
+        s1 = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)])
+        s2 = encode_sproto([(0, did), (1, 1), (2, 3), (3, 1), (4, 1), (5, False)])
+        skills_map = {sid: s1, did: s2}
         prof = c.get('prof', 0)
         wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
         w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
@@ -305,10 +306,12 @@ def get_full_char(c):
 
 def get_skill_sync(c):
     try:
-        skills_data = c.get('skills', get_default_skills(c.get('prof', 0)))
-        skills_map = {}
-        for sid, sd in skills_data.items():
-            skills_map[sid] = encode_sproto([(0, sd['id']), (1, sd['lv']), (2, sd['pos']), (3, sd['unlock']), (4, sd['pos2']), (5, sd['dis'])])
+        prof = c.get('prof', 0)
+        sid = "101" if prof == 0 else "201" if prof == 1 else "301"
+        did = "104" if prof == 0 else "204" if prof == 1 else "304"
+        s1 = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)])
+        s2 = encode_sproto([(0, did), (1, 1), (2, 3), (3, 1), (4, 1), (5, False)])
+        skills_map = {sid: s1, did: s2}
         return encode_sproto([(0, skills_map), (1, False)])
     except Exception:
         print("[SCENE ERROR] get_skill_sync failed:")
@@ -440,11 +443,6 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
-                    # DEBUG: Always grant all profession skills for now
-                    try:
-                        picked_char['skills'] = get_default_skills(picked_char.get('prof', 0))
-                    except Exception as e: print(f"[SCENE ERROR] get_default_skills failed: {e}")
-                    
                     if 'active_missions' not in picked_char: picked_char['active_missions'] = {"1001": [1, 0, [0]*8]}
                     if 'mission_state' not in picked_char:
                         try:
@@ -479,7 +477,7 @@ def client_handler(conn, addr):
                     send_rpc_push(611, encode_sproto([(0, [])]))
                     
                     print("[MAP FLOW] Sending 540 sync_skill_info")
-                    send_rpc_push(540, get_skill_sync(picked_char))
+                    send_rpc_push(540, encode_sproto([(0, []), (1, False)]))
                     
                     print("[MAP FLOW] Sending 505 (World Objects)")
                     try:
