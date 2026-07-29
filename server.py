@@ -24,6 +24,7 @@ mission_logic_db = {}
 kill_target_db = {}
 car_target_db = {}
 mission_require_db = {}
+skill_db = {}
 
 def load_game_data():
     mf = find_data_file("MissionData")
@@ -80,6 +81,15 @@ def load_game_data():
                         "npcId": p[4].strip(), 
                         "require": int(p[5]) if p[5].isdigit() else 1
                     }
+    sf = find_data_file("SkillData")
+    if sf:
+        with open(sf, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.startswith("*"): continue
+                p = line.split(",")
+                if len(p) > 1:
+                    sid = p[1].strip()
+                    skill_db[sid] = {"id": sid, "name": p[2].strip()}
 
 load_game_data()
 
@@ -100,17 +110,14 @@ online_clients = {}
 npc_hps = {}
 
 def get_default_skills(prof):
-    # Original starter skills: Basic combo (3 stages) and Dodge
-    m = {
-        0: ["101", "102", "103", "104"], # Melee
-        1: ["201", "202", "203", "204"], # Boxer
-        2: ["301", "302", "303", "304"]  # Gunner
-    }
-    ids = m.get(prof, m[0])
-    slots = {ids[0]:0, ids[1]:1, ids[2]:2, ids[3]:3}
+    # DEBUG: Enable ALL profession skills from SkillData
+    prefix = str(prof + 1)
+    ids = [sid for sid in skill_db if sid.startswith(prefix)]
+    ids.sort()
+    
     res = {}
-    for sid in ids:
-        res[sid] = {"id": sid, "lv": 1, "pos": slots[sid], "unlock": 1, "pos2": slots[sid], "dis": False}
+    for i, sid in enumerate(ids):
+        res[sid] = {"id": sid, "lv": 1, "pos": i, "unlock": 1, "pos2": i, "dis": False}
     return res
 
 def init_mission_state(mid):
@@ -347,10 +354,14 @@ def sync_mission_world_objects(char, send_push_func):
             if target:
                 npc_id = target['npcId']
                 for sid in alive_sids:
-                    npc_hps[sid] = 1000
-                    x = target.get('x', 29860) + random.randint(-100, 100)
-                    z = target.get('z', -17005) + random.randint(-100, 100)
-                    send_push_func(505, get_aoi_npc(npc_id, sid, x, z, "Target"))
+                    if npc_hps.get(sid, 1000) > 0: # Double check server-side state
+                        npc_hps[sid] = 1000
+                        x = target.get('x', 29860) + random.randint(-100, 100)
+                        z = target.get('z', -17005) + random.randint(-100, 100)
+                        print(f"[MISSION] Spawning Target SID: {sid} NPC: {npc_id} Mission: {mid}")
+                        send_push_func(505, get_aoi_npc(npc_id, sid, x, z, "Target"))
+                    else:
+                        print(f"[MISSION] Skip spawning dead SID: {sid} for Mission: {mid}")
         elif ltype == 24 and state.get('progress', 0) == 0:
             target = car_target_db.get(lid)
             if target:
@@ -455,6 +466,13 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, p_raw)]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif msg == 102: # skill_use
+                if session is not None and picked_char:
+                    sk_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
+                    print(f"[SKILL USED] ID: {sk_id} Profession: {picked_char.get('prof')} Map: 11 Player: {picked_char.get('id')}")
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
             elif msg == 111: # accept_damge
                 if session is not None and picked_char:
                     dmgs = body.get(0, [])
@@ -471,6 +489,7 @@ def client_handler(conn, addr):
                         npc_hps[tid] = new_hp
                         send_rpc_push(510, encode_sproto([(0, tid), (1, encode_sproto([(0, new_hp)]))]))
                         if new_hp == 0:
+                            print(f"[DEATH] TID: {tid} Died. Checking mission requirements...")
                             send_rpc_push(506, encode_sproto([(0, tid)]))
                             for mid, ms in picked_char.get('mission_state', {}).items():
                                     if tid in ms.get('alive_sids', []):
@@ -481,17 +500,18 @@ def client_handler(conn, addr):
                                             logic = mission_logic_db.get(mid, {})
                                             lid = logic.get('logicId')
                                             ltype = logic.get('logicType')
-                                            if ltype == 23:
-                                                req = kill_target_db.get(lid, {}).get('require', 1)
-                                            else:
-                                                req = mission_require_db.get(lid, {}).get('require', 1)
-                                            
+                                            req = kill_target_db.get(lid, {}).get('require', 1) if ltype == 23 else mission_require_db.get(lid, {}).get('require', 1)
+                                            print(f"[MISSION] Match Found! Mission: {mid} New Progress: {ms['progress']}/{req}")
                                             if ms['progress'] >= req:
                                                 picked_char['active_missions'][mid][0] = 2 # COMPLETE
                                                 send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
                                         send_rpc_push(519, get_mission_sync(picked_char))
                                         save_chars(all_accounts_chars)
                                         break
+                                    else:
+                                        # Only log if tid looks like a mission SID
+                                        if tid >= 7000000:
+                                            print(f"[DEATH] TID: {tid} is not in alive_sids for Mission: {mid}")
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
