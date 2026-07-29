@@ -21,6 +21,7 @@ def save_chars(data):
     except: pass
 
 all_accounts_chars = load_chars()
+online_clients = {} # char_id -> (conn, map_id, line_index, picked_char_data)
 
 def generate_unique_char_id():
     return int(time.time() * 1000) % 1000000000
@@ -240,16 +241,37 @@ def get_full_char(c):
         (15, 2)  # download finish
     ])
 
+def get_aoi_char(c):
+    # character_aoi structure (Tag 0: id, Tag 1: visual, Tag 2: general, Tag 3: attr_oth, Tag 5: movement, Tag 6: runtime)
+    # Tag mapping from character_aoi.cs and character_aoi_attribute.cs
+    tut_state = c.get('tutorial', 1)
+    map_id = c.get('map', "101" if tut_state == 1 else "11")
+    birth_pos = [6600, 44, -2371, 0] if map_id == "101" else [7007, 100, 5033, 0]
+    pos = c.get('pos', birth_pos)
+    
+    stats = [(0, 1000), (2, 40), (3, 100), (4, 2844), (5, 129), (6, 351), (13, 500)]
+    attr_run = encode_sproto([(6, encode_sproto(stats)), (7, encode_sproto(stats))]) # runtime_agent (Tags 6, 7)
+    
+    return encode_sproto([
+        (0, c['id']),
+        (1, get_visual(c.get('name', 'Hero'), c.get('prof', 0))),
+        (2, get_general(c)),
+        (3, encode_sproto([(0, 1000), (1, 0), (2, 1), (3, 5000), (15, 1)])),
+        (5, get_movement(pos[0], pos[1], pos[2], pos[3])),
+        (6, attr_run)
+    ])
+
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
-    global server_session_counter
+    global server_session_counter, online_clients
 
-    def send_rpc_push(tag, data):
+    def send_rpc_push(tag, data, target_conn=None):
         try:
             ph_p = encode_sproto([(0, tag)])
             pf_p = sproto_pack(ph_p + data)
-            conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
-            print(f"[TX] PUSH TAG={tag} SIZE={len(data)}")
+            c = target_conn if target_conn else conn
+            c.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+            if not target_conn: print(f"[TX] PUSH TAG={tag} SIZE={len(data)}")
         except Exception: pass
 
     try:
@@ -305,22 +327,41 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
-                    # Sync common data and missions BEFORE map entry to ensure HUD and Spawner initialization
+                    # 0. Set Map/Line context
+                    tut_state = picked_char.get('tutorial', 1)
+                    map_id = picked_char.get('map', "101" if tut_state == 1 else "11")
+                    line_idx = 1
+                    online_clients[char_id] = (conn, map_id, line_idx, picked_char)
+
+                    # 1. Sync Common Data (Tag 614)
                     fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
-                    send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))]))
+                    sync_fields = [(0, int(time.time())), (2, 0), (3, 1), (9, funcs), (10, -1), (12, random.randint(1000, 9999)), (13, 1), (14, int(time.time()))]
+                    send_rpc_push(614, encode_sproto(sync_fields))
 
+                    # 2. Sync Missions (Tag 519)
                     p = [0, 0, 0, 0, 0, 0, 0, int(time.time())]
                     m1001 = encode_sproto([(0, "1001"), (1, 1), (2, 0), (3, p)])
                     send_rpc_push(519, encode_sproto([(0, {"1001": m1001}), (1, "1001")]))
 
-                    tut_state = picked_char.get('tutorial', 1)
-                    map_id = picked_char.get('map', "101" if tut_state == 1 else "11")
+                    # 3. Enter Map (Tag 503)
+                    send_rpc_push(503, encode_sproto([(0, map_id), (1, line_idx), (2, 1)]))
+
+                    # 4. Create Main Player (Tag 504)
                     birth_pos = [6600, 44, -2371, 0] if map_id == "101" else [7007, 100, 5033, 0]
                     saved_pos = picked_char.get('pos', birth_pos)
-
-                    send_rpc_push(503, encode_sproto([(0, map_id), (1, 1), (2, 1)]))
                     send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(saved_pos[0], saved_pos[1], saved_pos[2], saved_pos[3]))]))
+
+                    # 5. AOI Broadcasting (Faithful Replication)
+                    # Evidence: aoi_add_handler.cs expects character_aoi objects.
+                    my_aoi_data = get_aoi_char(picked_char)
+                    for oid, (oconn, omap, oline, ochar) in online_clients.items():
+                        if oid == char_id: continue
+                        if omap == map_id and oline == line_idx:
+                            # Add self to other
+                            send_rpc_push(505, my_aoi_data, target_conn=oconn)
+                            # Add other to self
+                            send_rpc_push(505, get_aoi_char(ochar))
 
             elif msg == 100: # map_ready
                 if picked_char:
@@ -333,8 +374,28 @@ def client_handler(conn, addr):
                     p_raw = body.get(0)
                     if p_raw and picked_char:
                         pd = decode_sproto(p_raw)
+                        cid = picked_char['id']
                         picked_char['pos'] = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
                         save_chars(all_accounts_chars)
+                        
+                        # Movement Broadcast (Faithful Replication)
+                        # Evidence: aoi_update_move handler expects character_aoi_move (Tag 0: id, Tag 1: movement, Tag 2: walk)
+                        if cid in online_clients:
+                            _, map_id, line_idx, _ = online_clients[cid]
+                            # Update orientation in movement object
+                            mv_data = encode_sproto([(0, p_raw), (1, p_raw)]) # movement (Tags 0, 1 are position)
+                            # is_moving = body.get(1, False) # Evidence from ObjMainPlayer.cs line 563
+                            aoi_move = encode_sproto([(0, cid), (1, mv_data), (2, body.get(1, False))])
+                            
+                            for oid, (oconn, omap, oline, ochar) in online_clients.items():
+                                if oid != cid and omap == map_id and oline == line_idx:
+                                    # Send aoi_update_move (Tag 507)
+                                    try:
+                                        ph_m = encode_sproto([(0, 507)])
+                                        pf_m = sproto_pack(ph_m + aoi_move)
+                                        oconn.sendall(struct.pack(">H", len(pf_m)) + pf_m)
+                                    except: pass
+
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, p_raw)]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
@@ -392,7 +453,21 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
     except: traceback.print_exc()
-    finally: conn.close()
+    finally:
+        if picked_char and picked_char['id'] in online_clients:
+            char_id = picked_char['id']
+            _, map_id, line_idx, _ = online_clients[char_id]
+            # Remove self from neighbors
+            del online_clients[char_id]
+            for oid, (oconn, omap, oline, ochar) in online_clients.items():
+                if omap == map_id and oline == line_idx:
+                    # Send aoi_remove (Tag 506) - Evidence: aoi_remove.request Tag 0 is character ID
+                    try:
+                        ph_r = encode_sproto([(0, 506)])
+                        pf_r = sproto_pack(ph_r + encode_sproto([(0, char_id)]))
+                        oconn.sendall(struct.pack(">H", len(pf_r)) + pf_r)
+                    except: pass
+        conn.close()
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM); server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT)); server.listen(20)
