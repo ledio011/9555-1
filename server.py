@@ -122,7 +122,7 @@ def get_default_skills(prof):
 
 def init_mission_state(mid):
     logic = mission_logic_db.get(mid)
-    if not logic: return {"alive_sids": [], "progress": 0}
+    if not logic: return {"alive_sids": [], "dead_sids": [], "progress": 0}
     lid = logic['logicId']
     ltype = logic['logicType']
     
@@ -134,7 +134,7 @@ def init_mission_state(mid):
         for i in range(count):
             alive_sids.append(base_sid * 10 + i)
             
-    return {"alive_sids": alive_sids, "progress": 0}
+    return {"alive_sids": alive_sids, "dead_sids": [], "progress": 0}
 
 def generate_unique_char_id():
     return int(time.time() * 1000) % 1000000000
@@ -348,24 +348,24 @@ def sync_mission_world_objects(char, send_push_func):
         
         state = mstate.get(mid, {})
         alive_sids = state.get('alive_sids', [])
+        dead_sids = state.get('dead_sids', [])
         
         if ltype in [23, 1]:
             target = kill_target_db.get(lid) if ltype == 23 else mission_require_db.get(lid)
             if target:
                 npc_id = target['npcId']
                 for sid in alive_sids:
-                    if npc_hps.get(sid, 1000) > 0: # Double check server-side state
-                        npc_hps[sid] = 1000
-                        x = target.get('x', 29860) + random.randint(-100, 100)
-                        z = target.get('z', -17005) + random.randint(-100, 100)
-                        print(f"[MISSION] Spawning Target SID: {sid} NPC: {npc_id} Mission: {mid}")
-                        send_push_func(505, get_aoi_npc(npc_id, sid, x, z, "Target"))
-                    else:
-                        print(f"[MISSION] Skip spawning dead SID: {sid} for Mission: {mid}")
+                    if sid in dead_sids: continue
+                    npc_hps[sid] = 1000
+                    x = target.get('x', 29860) + random.randint(-100, 100)
+                    z = target.get('z', -17005) + random.randint(-100, 100)
+                    print(f"[MISSION SPAWN]\nMission: {mid}\nSID: {sid}\nNPC: {npc_id}\nPosition: {x}, {z}")
+                    send_push_func(505, get_aoi_npc(npc_id, sid, x, z, "Target"))
         elif ltype == 24 and state.get('progress', 0) == 0:
             target = car_target_db.get(lid)
             if target:
                 sid = 800000 + int(lid)
+                print(f"[MISSION SPAWN]\nMission: {mid}\nSID: {sid}\nCar: {target['carId']}\nPosition: {target['x']}, {target['z']}")
                 send_push_func(505, get_aoi_car(target['carId'], sid, target['x'], target['z'], "Car"))
 
 def client_handler(conn, addr):
@@ -440,6 +440,10 @@ def client_handler(conn, addr):
                         picked_char['mission_state'] = {}
                         for mid in picked_char['active_missions']:
                             picked_char['mission_state'][mid] = init_mission_state(mid)
+                    else:
+                        # Ensure dead_sids field exists in old states
+                        for mid, ms in picked_char['mission_state'].items():
+                            if 'dead_sids' not in ms: ms['dead_sids'] = []
                     save_chars(all_accounts_chars)
                     map_id, line_idx = "11", 1; online_clients[char_id] = (conn, map_id, line_idx, picked_char)
                     fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
@@ -469,7 +473,13 @@ def client_handler(conn, addr):
             elif msg == 102: # skill_use
                 if session is not None and picked_char:
                     sk_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
-                    print(f"[SKILL USED] ID: {sk_id} Profession: {picked_char.get('prof')} Map: 11 Player: {picked_char.get('id')}")
+                    sk_name = skill_db.get(sk_id, {}).get('name', 'Unknown')
+                    # Find slot index from the player's current skill map
+                    slot = "Unknown"
+                    if sk_id in picked_char.get('skills', {}):
+                        slot = picked_char['skills'][sk_id].get('pos', 'Unknown')
+                    
+                    print(f"[SKILL USED]\nID: {sk_id}\nName: {sk_name}\nProfession: {picked_char.get('prof')}\nSlot: {slot}\nPlayer: {picked_char.get('id')}")
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
@@ -489,29 +499,30 @@ def client_handler(conn, addr):
                         npc_hps[tid] = new_hp
                         send_rpc_push(510, encode_sproto([(0, tid), (1, encode_sproto([(0, new_hp)]))]))
                         if new_hp == 0:
-                            print(f"[DEATH] TID: {tid} Died. Checking mission requirements...")
                             send_rpc_push(506, encode_sproto([(0, tid)]))
                             for mid, ms in picked_char.get('mission_state', {}).items():
                                     if tid in ms.get('alive_sids', []):
                                         ms['alive_sids'].remove(tid)
+                                        if 'dead_sids' not in ms: ms['dead_sids'] = []
+                                        ms['dead_sids'].append(tid)
                                         ms['progress'] += 1
+                                        
                                         if mid in picked_char['active_missions']:
                                             picked_char['active_missions'][mid][2][0] = ms['progress']
                                             logic = mission_logic_db.get(mid, {})
                                             lid = logic.get('logicId')
                                             ltype = logic.get('logicType')
                                             req = kill_target_db.get(lid, {}).get('require', 1) if ltype == 23 else mission_require_db.get(lid, {}).get('require', 1)
-                                            print(f"[MISSION] Match Found! Mission: {mid} New Progress: {ms['progress']}/{req}")
+                                            
+                                            print(f"[MISSION DEAD]\nMission: {mid}\nSID: {tid}\nProgress: {ms['progress']}/{req}")
+                                            
                                             if ms['progress'] >= req:
                                                 picked_char['active_missions'][mid][0] = 2 # COMPLETE
                                                 send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                                        
                                         send_rpc_push(519, get_mission_sync(picked_char))
                                         save_chars(all_accounts_chars)
                                         break
-                                    else:
-                                        # Only log if tid looks like a mission SID
-                                        if tid >= 7000000:
-                                            print(f"[DEATH] TID: {tid} is not in alive_sids for Mission: {mid}")
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
