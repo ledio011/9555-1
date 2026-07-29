@@ -1,5 +1,5 @@
 # ==========================================================
-# AUTO THEFT GANGSTERS REVIVAL - STABLE v16 DATA-DRIVEN
+# AUTO THEFT GANGSTERS REVIVAL - STABLE v17 LOADING FIX
 # GAME SERVER 9555
 # ==========================================================
 import socket, struct, threading, random, json, os, time, traceback
@@ -110,11 +110,9 @@ online_clients = {}
 npc_hps = {}
 
 def get_default_skills(prof):
-    # DEBUG: Enable ALL profession skills from SkillData
     prefix = str(prof + 1)
     ids = [sid for sid in skill_db if sid.startswith(prefix)]
     ids.sort()
-    
     res = {}
     for i, sid in enumerate(ids):
         res[sid] = {"id": sid, "lv": 1, "pos": i, "unlock": 1, "pos2": i, "dis": False}
@@ -125,7 +123,6 @@ def init_mission_state(mid):
     if not logic: return {"alive_sids": [], "dead_sids": [], "progress": 0}
     lid = logic['logicId']
     ltype = logic['logicType']
-    
     alive_sids = []
     if ltype in [23, 1]:
         target = kill_target_db.get(lid) if ltype == 23 else mission_require_db.get(lid)
@@ -133,7 +130,6 @@ def init_mission_state(mid):
         base_sid = 900000 + int(lid) if ltype == 23 else 700000 + int(lid)
         for i in range(count):
             alive_sids.append(base_sid * 10 + i)
-            
     return {"alive_sids": alive_sids, "dead_sids": [], "progress": 0}
 
 def generate_unique_char_id():
@@ -341,32 +337,33 @@ def sync_mission_world_objects(char, send_push_func):
     active = char.get('active_missions', {})
     mstate = char.get('mission_state', {})
     for mid, mdata in active.items():
-        logic = mission_logic_db.get(mid)
-        if not logic: continue
-        lid = logic['logicId']
-        ltype = logic['logicType']
-        
-        state = mstate.get(mid, {})
-        alive_sids = state.get('alive_sids', [])
-        dead_sids = state.get('dead_sids', [])
-        
-        if ltype in [23, 1]:
-            target = kill_target_db.get(lid) if ltype == 23 else mission_require_db.get(lid)
-            if target:
-                npc_id = target['npcId']
-                for sid in alive_sids:
-                    if sid in dead_sids: continue
-                    npc_hps[sid] = 1000
-                    x = target.get('x', 29860) + random.randint(-100, 100)
-                    z = target.get('z', -17005) + random.randint(-100, 100)
-                    print(f"[MISSION SPAWN]\nMission: {mid}\nSID: {sid}\nNPC: {npc_id}\nPosition: {x}, {z}")
-                    send_push_func(505, get_aoi_npc(npc_id, sid, x, z, "Target"))
-        elif ltype == 24 and state.get('progress', 0) == 0:
-            target = car_target_db.get(lid)
-            if target:
-                sid = 800000 + int(lid)
-                print(f"[MISSION SPAWN]\nMission: {mid}\nSID: {sid}\nCar: {target['carId']}\nPosition: {target['x']}, {target['z']}")
-                send_push_func(505, get_aoi_car(target['carId'], sid, target['x'], target['z'], "Car"))
+        try:
+            logic = mission_logic_db.get(mid)
+            if not logic: continue
+            lid = logic['logicId']
+            ltype = logic['logicType']
+            state = mstate.get(mid, {})
+            alive_sids = state.get('alive_sids', [])
+            dead_sids = state.get('dead_sids', [])
+            if ltype in [23, 1]:
+                target = kill_target_db.get(lid) if ltype == 23 else mission_require_db.get(lid)
+                if target:
+                    npc_id = target['npcId']
+                    for sid in alive_sids:
+                        if sid in dead_sids: continue
+                        npc_hps[sid] = 1000
+                        x = target.get('x', 29860) + random.randint(-100, 100)
+                        z = target.get('z', -17005) + random.randint(-100, 100)
+                        print(f"[MISSION SPAWN] Mission: {mid} SID: {sid} NPC: {npc_id} Pos: {x}, {z}")
+                        send_push_func(505, get_aoi_npc(npc_id, sid, x, z, "Target"))
+            elif ltype == 24 and state.get('progress', 0) == 0:
+                target = car_target_db.get(lid)
+                if target:
+                    sid = 800000 + int(lid)
+                    print(f"[MISSION SPAWN] Mission: {mid} SID: {sid} Car: {target['carId']}")
+                    send_push_func(505, get_aoi_car(target['carId'], sid, target['x'], target['z'], "Car"))
+        except Exception as e:
+            print(f"[MISSION WARNING] Error syncing mission {mid}: {e}")
 
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
@@ -378,6 +375,7 @@ def client_handler(conn, addr):
             ph_p = encode_sproto([(0, tag)])
             pf_p = sproto_pack(ph_p + data)
             target.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+            # print(f"[TX PUSH] Tag: {tag} Size: {len(data)}")
         except Exception: pass
 
     try:
@@ -414,11 +412,7 @@ def client_handler(conn, addr):
                 prof = get_val_int(c_data, 1, 0); cid = generate_unique_char_id()
                 if cur_areaId not in all_accounts_chars: all_accounts_chars[cur_areaId] = {}
                 if acc_id not in all_accounts_chars[cur_areaId]: all_accounts_chars[cur_areaId][acc_id] = []
-                nc = {'id': cid, 'name': name, 'prof': prof, 'hp': 3000, 
-                      'skills': get_default_skills(prof), 
-                      'active_missions': {"1001": [1, 0, [0]*8]}, 
-                      'mission_state': {"1001": init_mission_state("1001")},
-                      'last_main_mission': ""}
+                nc = {'id': cid, 'name': name, 'prof': prof, 'hp': 3000, 'skills': get_default_skills(prof), 'active_missions': {"1001": [1, 0, [0]*8]}, 'mission_state': {"1001": init_mission_state("1001")}, 'last_main_mission': ""}
                 all_accounts_chars[cur_areaId][acc_id].append(nc); save_chars(all_accounts_chars)
                 resp = encode_sproto([(0, get_char_ov(nc)), (1, 0)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
@@ -433,44 +427,44 @@ def client_handler(conn, addr):
                 if picked_char:
                     # DEBUG: Always grant all profession skills for now
                     picked_char['skills'] = get_default_skills(picked_char.get('prof', 0))
-                    
-                    if 'active_missions' not in picked_char: 
-                        picked_char['active_missions'] = {"1001": [1, 0, [0]*8]}
-                    
+                    if 'active_missions' not in picked_char: picked_char['active_missions'] = {"1001": [1, 0, [0]*8]}
                     if 'mission_state' not in picked_char:
                         picked_char['mission_state'] = {}
-                        for mid in picked_char['active_missions']:
-                            picked_char['mission_state'][mid] = init_mission_state(mid)
+                        for mid in picked_char['active_missions']: picked_char['mission_state'][mid] = init_mission_state(mid)
                     else:
                         for mid, ms in picked_char['mission_state'].items():
                             if 'dead_sids' not in ms: ms['dead_sids'] = []
-                            
                     save_chars(all_accounts_chars)
                     map_id, line_idx = "11", 1; online_clients[char_id] = (conn, map_id, line_idx, picked_char)
                     fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     
-                    # Exact Order for Map Entry Stability
+                    # [MAP FLOW] Correct Order for Map Entry
+                    print("[MAP FLOW] Sending 614")
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))]))
+                    print("[MAP FLOW] Sending 519")
                     send_rpc_push(519, get_mission_sync(picked_char))
-                    print("[MAP] Sending 503 enter_map")
+                    print("[MAP FLOW] Sending 503")
                     send_rpc_push(503, encode_sproto([(0, map_id), (1, line_idx), (2, 1)]))
-                    print("[MAP] Sending 504 main_player_create")
+                    print("[MAP FLOW] Sending 504")
                     send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(29860, 100, -17005))]))
 
             elif msg == 100: # map_ready
-                print("[MAP] Received map_ready 100")
+                print("[MAP FLOW] Received map_ready")
                 if picked_char:
-                    print("[MAP] Sending 611")
+                    print("[MAP FLOW] Sending 611")
                     send_rpc_push(611, encode_sproto([(0, [])]))
-                    print("[MAP] Sending 540")
+                    print("[MAP FLOW] Sending 540")
                     send_rpc_push(540, get_skill_sync(picked_char))
-                    print("[MAP] Mission objects sync started")
-                    try:
-                        sync_mission_world_objects(picked_char, send_rpc_push)
-                    except Exception as e:
-                        print(f"[MISSION WARNING] Missing data for mission object: {e}")
-                    print("[MAP] Mission objects sync finished")
+                    print("[MAP FLOW] Sending 505 (World Objects)")
+                    sync_mission_world_objects(picked_char, send_rpc_push)
+                    print("[MAP FLOW] Sending 310")
+                    send_rpc_push(310, encode_sproto([]))
+                    print("[MAP FLOW] Sending 145")
+                    send_rpc_push(145, encode_sproto([]))
+                    print("[MAP FLOW] Sending 225")
+                    send_rpc_push(225, encode_sproto([]))
+                    print("[MAP FLOW] Sending 654")
                     send_rpc_push(654, encode_sproto([(0, 1)]))
 
             elif msg == 101: # move
@@ -487,12 +481,9 @@ def client_handler(conn, addr):
                 if session is not None and picked_char:
                     sk_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
                     sk_name = skill_db.get(sk_id, {}).get('name', 'Unknown')
-                    # Find slot index from the player's current skill map
                     slot = "Unknown"
-                    if sk_id in picked_char.get('skills', {}):
-                        slot = picked_char['skills'][sk_id].get('pos', 'Unknown')
-                    
-                    print(f"[SKILL USED]\nID: {sk_id}\nName: {sk_name}\nProfession: {picked_char.get('prof')}\nSlot: {slot}\nPlayer: {picked_char.get('id')}")
+                    if sk_id in picked_char.get('skills', {}): slot = picked_char['skills'][sk_id].get('pos', 'Unknown')
+                    print(f"[SKILL USED] ID: {sk_id} Name: {sk_name} Profession: {picked_char.get('prof')} Slot: {slot} Player: {picked_char.get('id')}")
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
@@ -515,27 +506,21 @@ def client_handler(conn, addr):
                             send_rpc_push(506, encode_sproto([(0, tid)]))
                             for mid, ms in picked_char.get('mission_state', {}).items():
                                     if tid in ms.get('alive_sids', []):
-                                        ms['alive_sids'].remove(tid)
                                         if 'dead_sids' not in ms: ms['dead_sids'] = []
-                                        ms['dead_sids'].append(tid)
-                                        ms['progress'] += 1
-                                        
-                                        if mid in picked_char['active_missions']:
-                                            picked_char['active_missions'][mid][2][0] = ms['progress']
-                                            logic = mission_logic_db.get(mid, {})
-                                            lid = logic.get('logicId')
-                                            ltype = logic.get('logicType')
-                                            req = kill_target_db.get(lid, {}).get('require', 1) if ltype == 23 else mission_require_db.get(lid, {}).get('require', 1)
-                                            
-                                            print(f"[MISSION DEAD]\nMission: {mid}\nSID: {tid}\nProgress: {ms['progress']}/{req}")
-                                            
-                                            if ms['progress'] >= req:
-                                                picked_char['active_missions'][mid][0] = 2 # COMPLETE
-                                                send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
-                                        
-                                        send_rpc_push(519, get_mission_sync(picked_char))
-                                        save_chars(all_accounts_chars)
-                                        break
+                                        if tid not in ms['dead_sids']:
+                                            ms['dead_sids'].append(tid)
+                                            ms['progress'] += 1
+                                            if mid in picked_char['active_missions']:
+                                                picked_char['active_missions'][mid][2][0] = ms['progress']
+                                                logic = mission_logic_db.get(mid, {})
+                                                req = kill_target_db.get(logic.get('logicId'), {}).get('require', 1) if logic.get('logicType') == 23 else mission_require_db.get(logic.get('logicId'), {}).get('require', 1)
+                                                print(f"[MISSION DEAD] Mission: {mid} SID: {tid} Progress: {ms['progress']}/{req}")
+                                                if ms['progress'] >= req:
+                                                    picked_char['active_missions'][mid][0] = 2 
+                                                    send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                                            send_rpc_push(519, get_mission_sync(picked_char))
+                                            save_chars(all_accounts_chars)
+                                            break
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
@@ -544,8 +529,7 @@ def client_handler(conn, addr):
                     mid = body.get(0, b"").decode('utf-8')
                     if mid in picked_char.get('active_missions', {}):
                         del picked_char['active_missions'][mid]
-                        if 'mission_state' in picked_char and mid in picked_char['mission_state']:
-                            del picked_char['mission_state'][mid]
+                        if 'mission_state' in picked_char and mid in picked_char['mission_state']: del picked_char['mission_state'][mid]
                         picked_char['last_main_mission'] = mid
                         logic = mission_logic_db.get(mid)
                         if logic and logic['nextId'] and logic['nextId'] != "#N/A":
@@ -607,5 +591,5 @@ def client_handler(conn, addr):
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM); server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT)); server.listen(20)
-print(f"GAME SERVER 9555 READY (v16 DATA-DRIVEN)")
+print(f"GAME SERVER 9555 READY (v17 LOADING FIX)")
 while True: cl, ad = server.accept(); threading.Thread(target=client_handler, args=(cl, ad), daemon=True).start()
