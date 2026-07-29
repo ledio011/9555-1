@@ -110,12 +110,15 @@ online_clients = {}
 npc_hps = {}
 
 def get_default_skills(prof):
-    sid = "101" if prof == 0 else "201" if prof == 1 else "301"
-    did = "104" if prof == 0 else "204" if prof == 1 else "304"
-    return {
-        sid: {"id": sid, "lv": 1, "pos": 0, "unlock": 1, "pos2": 0, "dis": False},
-        did: {"id": did, "lv": 1, "pos": 3, "unlock": 1, "pos2": 1, "dis": False}
-    }
+    # TEMPORARY DIAGNOSTIC MODE: Give ALL skills from SkillData
+    res = {}
+    i = 0
+    # Sort IDs so they appear in a somewhat consistent order
+    all_ids = sorted(skill_db.keys(), key=lambda x: int(x) if x.isdigit() else 999999)
+    for sid in all_ids:
+        res[sid] = {"id": sid, "lv": 1, "pos": i, "unlock": 1, "pos2": i, "dis": False}
+        i += 1
+    return res
 
 def init_mission_state(mid):
     logic = mission_logic_db.get(mid)
@@ -279,33 +282,25 @@ def get_char_ov(c):
 
 def get_full_char(c):
     gen = get_general(c)
-    # attribute_other: hp(0), exp(1), level(2), combValue(3), camp(15)
     attr_oth = encode_sproto([(0, 3000), (1, 0), (2, 1), (3, 5000), (15, 1)])
-    # property: Tag 13-15 are money fields. Cash: 1000, Gold: 100, Diamond: 10
     prop = encode_sproto([(13, 1000), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
 
-    # Position Persistence: Default to Mission 1001 area for new chars
     pos = c.get('pos', [29860, 100, -17005, 0])
     mv = get_movement(pos[0], pos[1], pos[2], pos[3])
-    # runtime_agent: max_hp(0), atk(2), def(3).
     attr_run = encode_sproto([(0, 3000), (2, 300), (3, 35)])
-    # attribute_all: mov(13)=500 (Speed 5.0)
     attr_all = encode_sproto([(0, 3000), (2, 300), (3, 35), (13, 500)])
     run = encode_sproto([(6, attr_run), (7, attr_all)])
 
     prof = c.get('prof', 0)
-    sid = "101" if prof == 0 else "201" if prof == 1 else "301"
-    did = "104" if prof == 0 else "204" if prof == 1 else "304"
+    # DIAGNOSTIC: Force all skills for any character being loaded
+    skills_data = get_default_skills(prof)
+    skills_map = {}
+    for sid, sd in skills_data.items():
+        skills_map[sid] = encode_sproto([(0, sd['id']), (1, sd['lv']), (2, sd['pos']), (3, sd['unlock']), (4, sd['pos2']), (5, sd['dis'])])
+
+    print(f"[SKILL DEBUG] Character profession: {prof} Skill count: {len(skills_map)}")
+
     wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
-
-    # Tag 8: skills (map string->skill_info). Attack(0), Dodge(3)
-    s1 = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)])
-    s2 = encode_sproto([(0, did), (1, 1), (2, 3), (3, 1), (4, 1), (5, False)])
-    skills_map = {sid: s1, did: s2}
-
-    print(f"[SKILL DEBUG]\nCharacter profession: {prof}\nStarter skill IDs: {[sid, did]}\nSkill count: 2")
-
-    # Tag 9: equip (map long->gameitem). Key 5 = WEAPON slot.
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
 
@@ -315,8 +310,12 @@ def get_full_char(c):
     ])
 
 def get_skill_sync(c):
-    # Empty update to match bak2 loading baseline
-    return encode_sproto([(0, []), (1, False)])
+    # DIAGNOSTIC: Sync all skills
+    skills_data = get_default_skills(c.get('prof', 0))
+    skills_map = {}
+    for sid, sd in skills_data.items():
+        skills_map[sid] = encode_sproto([(0, sd['id']), (1, sd['lv']), (2, sd['pos']), (3, sd['unlock']), (4, sd['pos2']), (5, sd['dis'])])
+    return encode_sproto([(0, skills_map), (1, False)])
 
 def get_mission_sync(c):
     try:
@@ -471,13 +470,13 @@ def client_handler(conn, addr):
                     send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(29860, 100, -17005))]))
 
             elif msg == 100: # map_ready
-                print("[MAP FLOW] Received map_ready 100")
+                print("[MAP FLOW] Received map_ready")
                 if picked_char:
                     print("[MAP FLOW] Sending 611 sync_item_pack")
                     send_rpc_push(611, encode_sproto([(0, [])]))
                     
-                    print("[MAP FLOW] Sending 540 sync_skill_info")
-                    send_rpc_push(540, encode_sproto([(0, []), (1, False)]))
+                    print("[MAP FLOW] Sending 540 sync_skill_info (Diagnostic Mode)")
+                    send_rpc_push(540, get_skill_sync(picked_char))
                     
                     print("[MAP FLOW] Sending 505 (World Objects)")
                     try:
@@ -512,9 +511,12 @@ def client_handler(conn, addr):
                 if session is not None and picked_char:
                     sk_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
                     sk_name = skill_db.get(sk_id, {}).get('name', 'Unknown')
+                    # Find slot index from the player's current skill map
                     slot = "Unknown"
-                    if sk_id in picked_char.get('skills', {}): slot = picked_char['skills'][sk_id].get('pos', 'Unknown')
-                    print(f"[SKILL USED] ID: {sk_id} Name: {sk_name} Profession: {picked_char.get('prof')} Slot: {slot} Player: {picked_char.get('id')}")
+                    if sk_id in picked_char.get('skills', {}):
+                        slot = picked_char['skills'][sk_id].get('pos', 'Unknown')
+                    
+                    print(f"[SKILL USED]\nSkill ID: {sk_id}\nSkill Name: {sk_name}\nProfession: {picked_char.get('prof')}\nSlot: {slot}\nPlayer ID: {picked_char.get('id')}")
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
