@@ -25,6 +25,7 @@ kill_target_db = {}
 car_target_db = {}
 mission_require_db = {}
 skill_db = {}
+equip_db = {}
 
 def load_game_data():
     mf = find_data_file("MissionData")
@@ -90,6 +91,27 @@ def load_game_data():
                 if len(p) > 1:
                     sid = p[1].strip()
                     skill_db[sid] = {"id": sid, "name": p[2].strip()}
+    ef = find_data_file("EquipData")
+    if ef:
+        with open(ef, "r", encoding="utf-8") as f:
+            for line in f:
+                if not line.startswith("*"): continue
+                p = line.split(",")
+                if len(p) > 15:
+                    eid = p[1].strip()
+                    # Positions: 0:Weapon, 1:Head, 2:Body, 3:Leg, 4:Belt, 5:Necklace
+                    # Stats: 1001:ATK, 1002:HP, 1003:DEF, 1004:HIT, 1005:DGE
+                    try:
+                        equip_db[eid] = {
+                            "id": eid, "pos": int(p[7]),
+                            "stats": [
+                                (int(p[8]), int(p[9])),
+                                (int(p[10]) if p[10].isdigit() else 0, int(p[11]) if p[11].isdigit() else 0),
+                                (int(p[12]) if p[12].isdigit() else 0, int(p[13]) if p[13].isdigit() else 0),
+                                (int(p[14]) if p[14].isdigit() else 0, int(p[15]) if p[15].isdigit() else 0)
+                            ]
+                        }
+                    except: pass
         print("--- SKILL DATABASE ---")
         for sid in sorted(skill_db.keys(), key=lambda x: int(x) if x.isdigit() else 999999):
             print(f"ID: {sid} Name: {skill_db[sid]['name']}")
@@ -109,28 +131,89 @@ def save_chars(data):
         with open(CHAR_DB, "w") as f: json.dump(data, f, indent=4)
     except: pass
 
+def get_char_by_id(char_id):
+    for area in all_accounts_chars.values():
+        for acc in area.values():
+            for c in acc:
+                if c['id'] == char_id: return c
+    return None
+
+def send_mail_sync(char, conn):
+    mails = char.get('mails', [])
+    for m in mails:
+        # State: 0:unread, 1:read, 2:uncollected, 3:collected
+        m_proto = encode_sproto([
+            (0, m['id']), (1, m.get('senderType', 0)), (3, m['title']),
+            (4, m['time']), (5, char['id']), (6, m.get('readTime', 0)),
+            (7, m['context']), (8, m['state']), (9, m['time']), (11, 30)
+        ])
+        # ph_p = encode_sproto([(0, 531)]); pf_p = sproto_pack(ph_p + m_proto)
+        # conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+        # Using send_rpc_push directly is easier if I define it outside or pass it
+        pass
+
+def send_friend_sync(char, conn, send_push):
+    friends = char.get('friends', [])
+    foes = char.get('foes', [])
+    res = {}
+    for fid in friends + foes:
+        c = get_char_by_id(fid)
+        if c:
+            ftype = 6 if fid in foes else 0 # 6: ENEMY, 0: NORMAL
+            res[fid] = encode_sproto([
+                (0, char['id']), (1, fid), (2, c['name']), (3, c.get('level', 1)),
+                (4, c.get('prof', 0)), (5, 5000), (6, 1 if fid in online_clients else 0),
+                (8, ftype)
+            ])
+    send_push(538, encode_sproto([(0, res)]))
+
+def send_item_sync(char, send_push):
+    items = char.get('backpack', [])
+    res = {}
+    for i, it in enumerate(items):
+        # SprotoType.gameitem: indexId(0), itemId(1), bind(2), lv(3), flags(4), stack(5), qual(6), parm(7)
+        res[int(it['uid'])] = encode_sproto([
+            (0, int(it['uid'])), (1, str(it['id'])), (2, True),
+            (3, it.get('lv', 1)), (5, it.get('count', 1)), (6, it.get('qual', 1))
+        ])
+    send_push(611, encode_sproto([(0, res)]))
+
+def gain_item(char, item_id, count=1):
+    uid = int(time.time() * 1000) % 10000000 + random.randint(1, 999)
+    char.setdefault('backpack', []).append({'uid': uid, 'id': str(item_id), 'count': count, 'lv': 1, 'qual': 1})
+    save_chars(all_accounts_chars)
+    if char['id'] in online_clients:
+        conn, _, _, _ = online_clients[char['id']]
+        def push_wrapper(tag, data):
+            ph_p = encode_sproto([(0, tag)])
+            pf_p = sproto_pack(ph_p + data)
+            conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+        send_item_sync(char, push_wrapper)
+
 all_accounts_chars = load_chars()
 online_clients = {} 
 npc_hps = {}
 
-def get_default_skills(prof, test_sid=None):
-    # Baseline 2 skills: Attack (Slot 0) and Dodge (Slot 3)
+VERIFICATION_MODE = True # [TEST ONLY] Set to False to disable starter kits
+
+def calculate_power(hp, atk, def_val, hit, dge):
+    # Dynamic Power formula based on weighted attributes
+    # Formula: (HP * 0.1) + (ATK * 2.5) + (DEF * 5) + (HIT * 1.5) + (DGE * 1.5)
+    power = (hp * 0.1) + (atk * 2.5) + (def_val * 5) + (hit * 1.5) + (dge * 1.5)
+    return int(power)
+
+def get_default_skills(prof):
+    # Restoring original Level 1 starter skills
     sid = "101" if prof == 0 else "201" if prof == 1 else "301"
     did = "104" if prof == 0 else "204" if prof == 1 else "304"
-    res = {
+    return {
         sid: {"id": sid, "lv": 1, "pos": 0, "unlock": 1, "pos2": 0, "dis": False},
         did: {"id": did, "lv": 1, "pos": 3, "unlock": 1, "pos2": 1, "dis": False}
     }
-    # DIAGNOSTIC: Add exactly ONE additional random skill to Slot 1
-    if test_sid and test_sid in skill_db:
-        res[test_sid] = {"id": test_sid, "lv": 1, "pos": 1, "unlock": 1, "pos2": 4, "dis": False}
-    return res
 
 def get_skill_sync(c):
-    # DIAGNOSTIC: Sync 2 baseline + 1 random skill
-    prof = c.get('prof', 0)
-    test_sid = c.get('test_skill')
-    skills_data = get_default_skills(prof, test_sid)
+    # Level 1 sync: exactly 2 starter skills
+    skills_data = c.get('skills', get_default_skills(c.get('prof', 0)))
     skills_map = {}
     for sid, sd in skills_data.items():
         skills_map[sid] = encode_sproto([(0, sd['id']), (1, sd['lv']), (2, sd['pos']), (3, sd['unlock']), (4, sd['pos2']), (5, sd['dis'])])
@@ -296,46 +379,81 @@ def get_char_ov(c):
     attr = encode_sproto([(0, 1), (1, 5000)])
     return encode_sproto([(0, c['id']), (1, gen), (2, attr), (3, get_visual(c.get('name', 'Hero'), c.get('prof', 0))), (4, int(time.time())), (5, 0)])
 
+VERIFICATION_MODE = True # [TEST ONLY] Set to False to disable starter kits
+
+def calculate_power(hp, atk, def_val, hit, dge):
+    # Isolated Power formula based on client Combat Value logic
+    # Weights derived from CharacterAttributeData.cs and quality expectations
+    power = (hp * 0.1) + (atk * 2.5) + (def_val * 5) + (hit * 1.5) + (dge * 1.5)
+    return int(power)
+
 def get_full_char(c):
     gen = get_general(c)
     prof = c.get('prof', 0)
     lv = c.get('level', 1)
     
-    # Scale stats based on Level 50 baseline (simplified scaling)
-    # XD: HP 73560, ATK 3660, DEF 500
-    # QJ: HP 80260, ATK 3480, DEF 780
-    # NQ: HP 49480, ATK 5080, DEF 380
-    if lv >= 50:
-        base_hp = {0: 73560, 1: 80260, 2: 49480}.get(prof, 70000)
-        base_atk = {0: 3660, 1: 3480, 2: 5080}.get(prof, 3000)
-        base_def = {0: 500, 1: 780, 2: 380}.get(prof, 500)
-    else:
-        base_hp = 3000; base_atk = 300; base_def = 35
-        
-    attr_oth = encode_sproto([(0, base_hp), (1, c.get('exp', 0)), (2, lv), (3, 50000), (15, 1)])
-    prop = encode_sproto([(13, 1000000), (14, 10000), (15, 1000), (16, 0), (17, 0), (18, 0)])
+    # Baseline stats
+    hp = 3000; atk = 300; def_val = 35; hit = 480; dge = 60
+    
+    # Sum all equipment bonuses
+    equips = c.get('equip', {})
+    for slot, item in equips.items():
+        edata = equip_db.get(item['id'])
+        if edata:
+            for stype, sval in edata['stats']:
+                if stype == 1001: atk += sval
+                elif stype == 1002: hp += sval
+                elif stype == 1003: def_val += sval
+                elif stype == 1004: hit += sval
+                elif stype == 1005: dge += sval
+
+    cv = calculate_power(hp, atk, def_val, hit, dge)
+    attr_oth = encode_sproto([(0, hp), (1, c.get('exp', 0)), (2, lv), (3, cv), (15, 1)])
+    prop = encode_sproto([(13, 1000), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
 
     pos = c.get('pos', [29860, 100, -17005, 0])
     mv = get_movement(pos[0], pos[1], pos[2], pos[3])
-    attr_run = encode_sproto([(0, base_hp), (2, base_atk), (3, base_def)])
-    attr_all = encode_sproto([(0, base_hp), (2, base_atk), (3, base_def), (13, 500)])
+    attr_run = encode_sproto([(0, hp), (2, atk), (3, def_val), (4, hit), (5, dge)])
+    attr_all = encode_sproto([(0, hp), (2, atk), (3, def_val), (4, hit), (5, dge), (13, 500)])
     run = encode_sproto([(6, attr_run), (7, attr_all)])
 
-    prof = c.get('prof', 0)
-    # DIAGNOSTIC: Force 2 base skills + 1 random skill for loading
-    skills_data = get_default_skills(prof, c.get('test_skill'))
+    # Level 1: exactly 2 starter skills
+    skills_data = c.get('skills', get_default_skills(prof))
     skills_map = {}
     for sid, sd in skills_data.items():
         skills_map[sid] = encode_sproto([(0, sd['id']), (1, sd['lv']), (2, sd['pos']), (3, sd['unlock']), (4, sd['pos2']), (5, sd['dis'])])
 
-    wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
-    w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
-    equip_map = {5: w1}
+    # Synchronize equipment map (Tag 9)
+    equip_map = {}
+    for slot, item in equips.items():
+        equip_map[int(slot)] = encode_sproto([
+            (0, int(item['uid'])), (1, str(item['id'])), (2, True),
+            (3, item.get('lv', 1)), (5, 1), (6, item.get('qual', 1)), (7, [0]*8)
+        ])
 
     return encode_sproto([
         (0, c['id']), (1, gen), (2, attr_oth), (5, prop), (6, get_visual(c.get('name', 'Hero'), prof)),
         (7, mv), (8, skills_map), (9, equip_map), (12, 0), (13, run), (15, 2)
     ])
+
+def send_attr_sync(char, send_push):
+    # Tag 510: aoi_update_attribute
+    prof = char.get('prof', 0)
+    hp = 3000; atk = 300; def_val = 35; hit = 480; dge = 60
+    for slot, item in char.get('equip', {}).items():
+        edata = equip_db.get(item['id'])
+        if edata:
+            for stype, sval in edata['stats']:
+                if stype == 1001: atk += sval
+                elif stype == 1002: hp += sval
+                elif stype == 1003: def_val += sval
+                elif stype == 1004: hit += sval
+                elif stype == 1005: dge += sval
+    
+    cv = calculate_power(hp, atk, def_val, hit, dge)
+    attr_oth = encode_sproto([(0, hp), (1, char.get('exp', 0)), (2, char.get('level', 1)), (3, cv)])
+    send_push(510, encode_sproto([(0, char['id']), (1, attr_oth)]))
+    print(f"[EQUIP DEBUG] {char['name']} New Stats Sum: ATK: {atk} | HP: {hp} | DEF: {def_val} | POWER: {cv}")
 
 def get_skill_sync(c):
     # DIAGNOSTIC: Sync all skills
@@ -411,7 +529,7 @@ def sync_mission_world_objects(char, send_push_func):
             print(f"[MISSION WARNING] Error syncing mission {mid}: {e}")
 
 def client_handler(conn, addr):
-    print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
+    print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0; cur_map_id = "11"
     global server_session_counter, online_clients, npc_hps
 
     def send_rpc_push(tag, data, target_conn=None):
@@ -458,25 +576,23 @@ def client_handler(conn, addr):
                 if cur_areaId not in all_accounts_chars: all_accounts_chars[cur_areaId] = {}
                 if acc_id not in all_accounts_chars[cur_areaId]: all_accounts_chars[cur_areaId][acc_id] = []
                 
-                # DIAGNOSTIC: Pick ONE random extra skill for the new character
-                all_ids = list(skill_db.keys())
-                exclude = ["101", "104", "201", "204", "301", "304"]
-                candidates = [sid for sid in all_ids if sid not in exclude]
-                tsid = random.choice(candidates) if candidates else None
-                
-                # START AT LEVEL 50 with scaled stats
-                hps = {0: 73560, 1: 80260, 2: 49480}
+                # START AT LEVEL 1 (Clean Baseline)
                 nc = {'id': cid, 'name': name, 'prof': prof, 
-                      'hp': hps.get(prof, 3000), 
-                      'level': 50,
-                      'exp': 86750000,
-                      'skills': get_default_skills(prof, tsid), 
+                      'hp': 3000, 'level': 1, 'exp': 0,
+                      'skills': get_default_skills(prof), 
                       'active_missions': {"1001": [1, 0, [0]*8]}, 
                       'mission_state': {"1001": init_mission_state("1001")}, 
                       'last_main_mission': "",
-                      'test_skill': tsid}
+                      'mails': [], 'friends': [], 'foes': [],
+                      'backpack': [], 'equip': {}}
                 
-                if tsid: print(f"[TEST RANDOM SKILL] Character: {name} ID: {tsid} Name: {skill_db[tsid]['name']} Profession: {prof} Slot: 1")
+                if VERIFICATION_MODE:
+                    # [TEST ONLY] Grant "Starter Kit" (Weapon, Head, Body)
+                    wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
+                    gain_item(nc, wid)   # Weapon
+                    gain_item(nc, "10002") # Head
+                    gain_item(nc, "10003") # Body
+                    print(f"[VERIFICATION] Granted starter gear to {name}")
                 
                 all_accounts_chars[cur_areaId][acc_id].append(nc); save_chars(all_accounts_chars)
                 resp = encode_sproto([(0, get_char_ov(nc)), (1, 0)])
@@ -490,35 +606,27 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
-                    # START AT LEVEL 50 for all existing chars if not already set
-                    if 'level' not in picked_char or picked_char['level'] < 50:
-                        picked_char['level'] = 50
-                        picked_char['exp'] = 86750000
+                    # Restore/Initialize missing fields for starter baseline
+                    if 'level' not in picked_char: picked_char['level'] = 1
+                    if 'exp' not in picked_char: picked_char['exp'] = 0
+                    if 'mails' not in picked_char: picked_char['mails'] = []
+                    if 'friends' not in picked_char: picked_char['friends'] = []
+                    if 'foes' not in picked_char: picked_char['foes'] = []
+                    if 'backpack' not in picked_char: picked_char['backpack'] = []
+                    if 'equip' not in picked_char: picked_char['equip'] = {}
                     
-                    # DIAGNOSTIC: Pick/Restore ONE random skill for testing session
-                    if 'test_skill' not in picked_char or not picked_char['test_skill']:
-                        all_ids = list(skill_db.keys())
-                        exclude = ["101", "104", "201", "204", "301", "304"]
-                        candidates = [sid for sid in all_ids if sid not in exclude]
-                        picked_char['test_skill'] = random.choice(candidates) if candidates else None
-                    
-                    tsid = picked_char.get('test_skill')
-                    if tsid: print(f"[TEST RANDOM SKILL] Character: {picked_char.get('name')} ID: {tsid} Name: {skill_db[tsid]['name']} Profession: {picked_char.get('prof')} Slot: 1")
-
                     if 'active_missions' not in picked_char: picked_char['active_missions'] = {"1001": [1, 0, [0]*8]}
                     if 'mission_state' not in picked_char:
                         try:
                             picked_char['mission_state'] = {}
                             for mid in picked_char['active_missions']: picked_char['mission_state'][mid] = init_mission_state(mid)
                         except Exception as e: print(f"[SCENE ERROR] init_mission_state failed: {e}")
-                    else:
-                        for mid, ms in picked_char['mission_state'].items():
-                            if 'dead_sids' not in ms: ms['dead_sids'] = []
-                    save_chars(all_accounts_chars)
-                    map_id, line_idx = "11", 1; online_clients[char_id] = (conn, map_id, line_idx, picked_char)
                     
-                    # GLOBAL UNLOCK: Send all FunctionData IDs as unlocked
-                    fids = ["4083","3031","4084","100","3016","4063","4061","4062","4064","3001","4081","4085","4001","102","4002","3002","4004","4003","105","106","3006","4025","4021","4022","4023","4027","4024","3015","4051","4052","4053","4055","4054","3010","3004","3020","3008","3018","3012","3013","4041","4043","4031","4080","3005","4011","4013","4014","4016","4015","4078","4012","3017","4071","4072","4073","4074","4075","4076","4077","4088","3009","4086","3019","101","3007","4087","4082","3021","111","112","3011","3023","104","103","110","3024","3025","3026","3027","3028","3029","4079","107","108","109","3003","3030","4026","4042","3014"]
+                    save_chars(all_accounts_chars)
+                    cur_map_id, line_idx = "11", 1; online_clients[char_id] = (conn, cur_map_id, line_idx, picked_char)
+                    
+                    # STARTER UNLOCK: Only functions with Condition <= level
+                    fids = ["4083","3031","4084","100","3016","4063","4061","4062","4064","3001","4081","111","112","110","3024","3025","3026","3027","3028","3029","107","108","109","3030","3014"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     
                     # [MAP FLOW] Correct Order for Map Entry
@@ -533,14 +641,23 @@ def client_handler(conn, addr):
                     
                     print("[MAP FLOW] Sending 504 main_player_create")
                     send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(29860, 100, -17005))]))
+                    
+                    # Phase 1: Social & Mail Sync on Pick
+                    send_friend_sync(picked_char, conn, send_rpc_push)
+                    for m in picked_char['mails']:
+                        send_rpc_push(531, encode_sproto([
+                            (0, m['id']), (1, m.get('senderType', 0)), (3, m['title']),
+                            (4, m['time']), (5, char_id), (6, m.get('readTime', 0)),
+                            (7, m['context']), (8, m['state']), (9, m['time']), (11, 30)
+                        ]))
 
             elif msg == 100: # map_ready
                 print("[MAP FLOW] Received map_ready")
                 if picked_char:
-                    print("[MAP FLOW] Sending 611 sync_item_pack")
-                    send_rpc_push(611, encode_sproto([(0, [])]))
+                    print("[MAP FLOW] Sending 611 sync_item_pack (Inventory)")
+                    send_item_sync(picked_char, send_rpc_push)
                     
-                    print("[MAP FLOW] Sending 540 sync_skill_info (Diagnostic Mode)")
+                    print("[MAP FLOW] Sending 540 sync_skill_info")
                     send_rpc_push(540, get_skill_sync(picked_char))
                     
                     print("[MAP FLOW] Sending 505 (World Objects)")
@@ -561,6 +678,117 @@ def client_handler(conn, addr):
                     
                     print("[MAP FLOW] Sending 654 start_enter_game")
                     send_rpc_push(654, encode_sproto([(0, 1)]))
+
+            elif msg == 120: # chat
+                if session is not None and picked_char:
+                    c_info = body.get(2, b"").decode('utf-8') if isinstance(body.get(2), bytes) else str(body.get(2))
+                    c_type = get_val_int(body, 3) # 0:SYSTEM, 1:NEARBY, 2:WORLD, 3:TEAM, 4:GUILD, 5:PRIVATE
+                    tell_id = get_val_int(body, 0)
+                    
+                    item = encode_sproto([
+                        (0, picked_char['id']), (1, picked_char['name']),
+                        (2, tell_id), (3, ""), # tellName placeholder
+                        (4, c_info), (5, c_type), (9, picked_char.get('prof', 0)),
+                        (10, picked_char.get('level', 50)), (11, 5000)
+                    ])
+                    push_data = encode_sproto([(0, [item])])
+                    
+                    if c_type == 2: # WORLD
+                        for cid, (cl, _, _, _) in online_clients.items():
+                            send_rpc_push(528, push_data, target_conn=cl)
+                    elif c_type == 1: # NEARBY
+                        for cid, (cl, mid, _, _) in online_clients.items():
+                            if mid == cur_map_id: send_rpc_push(528, push_data, target_conn=cl)
+                    else: # Fallback: return to sender
+                        send_rpc_push(528, push_data)
+                    
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 123: # mail_operation
+                if session is not None and picked_char:
+                    mid = get_val_int(body, 0)
+                    op = get_val_int(body, 1)
+                    if op == 0: # READ
+                        for m in picked_char['mails']:
+                            if m['id'] == mid: m['state'] = 1; m['readTime'] = int(time.time())
+                    elif op == 1: # DELETE SINGLE
+                        picked_char['mails'] = [m for m in picked_char['mails'] if m['id'] != mid]
+                    elif op == 3: # GET ALL ITEMS
+                        for m in picked_char['mails']:
+                            if m['state'] == 2: m['state'] = 3
+                    elif op == 4: # DELETE ALL
+                        picked_char['mails'] = [m for m in picked_char['mails'] if m['state'] == 0 or m['state'] == 2] # Keep unread/uncollected
+                    
+                    save_chars(all_accounts_chars)
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 124: # add_friend
+                if session is not None and picked_char:
+                    fid = get_val_int(body, 0)
+                    ftype = get_val_int(body, 1) # 0: NORMAL, 1: ENEMY
+                    if ftype == 0:
+                        if fid not in picked_char['friends']: picked_char['friends'].append(fid)
+                    else:
+                        if fid not in picked_char['foes']: picked_char['foes'].append(fid)
+                    save_chars(all_accounts_chars)
+                    send_friend_sync(picked_char, conn, send_rpc_push)
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 125: # del_friend
+                if session is not None and picked_char:
+                    fid = get_val_int(body, 0)
+                    ftype = get_val_int(body, 1)
+                    if ftype == 0:
+                        if fid in picked_char['friends']: picked_char['friends'].remove(fid)
+                    else:
+                        if fid in picked_char['foes']: picked_char['foes'].remove(fid)
+                    save_chars(all_accounts_chars)
+                    send_friend_sync(picked_char, conn, send_rpc_push)
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 116: # equip_item
+                if session is not None and picked_char:
+                    uid = get_val_int(body, 0)
+                    item = next((it for it in picked_char['backpack'] if it['uid'] == uid), None)
+                    if item:
+                        edata = equip_db.get(item['id'])
+                        if edata:
+                            pos = str(edata['pos'])
+                            # SWAP: If slot occupied, move current equip to backpack
+                            if pos in picked_char['equip']:
+                                old = picked_char['equip'][pos]
+                                picked_char['backpack'].append(old)
+                            # Move new item to equip slot
+                            picked_char['equip'][pos] = item
+                            picked_char['backpack'] = [it for it in picked_char['backpack'] if it['uid'] != uid]
+                            save_chars(all_accounts_chars)
+                            # Sync updated state
+                            send_item_sync(picked_char, send_rpc_push)
+                            send_attr_sync(picked_char, send_rpc_push) # LIVE STAT UPDATE
+                            print(f"[EQUIP DEBUG] {picked_char['name']} equipped ID: {item['id']} (Slot: {pos})")
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 117: # unequip_item
+                if session is not None and picked_char:
+                    uid = get_val_int(body, 0)
+                    # Find slot by uid
+                    target_pos = None
+                    for pos, it in picked_char['equip'].items():
+                        if it['uid'] == uid: target_pos = pos; break
+                    if target_pos:
+                        item = picked_char['equip'].pop(target_pos)
+                        picked_char['backpack'].append(item)
+                        save_chars(all_accounts_chars)
+                        send_item_sync(picked_char, send_rpc_push)
+                        send_attr_sync(picked_char, send_rpc_push) # LIVE STAT UPDATE
+                        print(f"[EQUIP DEBUG] {picked_char['name']} unequipped ID: {item['id']} (Slot: {target_pos})")
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 101: # move
                 if session is not None and picked_char:
