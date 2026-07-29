@@ -90,6 +90,10 @@ def load_game_data():
                 if len(p) > 1:
                     sid = p[1].strip()
                     skill_db[sid] = {"id": sid, "name": p[2].strip()}
+        print("--- SKILL DATABASE ---")
+        for sid in sorted(skill_db.keys(), key=lambda x: int(x) if x.isdigit() else 999999):
+            print(f"ID: {sid} Name: {skill_db[sid]['name']}")
+        print("----------------------")
 
 load_game_data()
 
@@ -110,15 +114,17 @@ online_clients = {}
 npc_hps = {}
 
 def get_default_skills(prof):
-    # TEMPORARY DIAGNOSTIC MODE: Give ALL skills from SkillData
-    res = {}
-    i = 0
-    # Sort IDs so they appear in a somewhat consistent order
-    all_ids = sorted(skill_db.keys(), key=lambda x: int(x) if x.isdigit() else 999999)
-    for sid in all_ids:
-        res[sid] = {"id": sid, "lv": 1, "pos": i, "unlock": 1, "pos2": i, "dis": False}
-        i += 1
-    return res
+    # Restoring loading-safe baseline from bak2
+    sid = "101" if prof == 0 else "201" if prof == 1 else "301"
+    did = "104" if prof == 0 else "204" if prof == 1 else "304"
+    return {
+        sid: {"id": sid, "lv": 1, "pos": 0, "unlock": 1, "pos2": 0, "dis": False},
+        did: {"id": did, "lv": 1, "pos": 3, "unlock": 1, "pos2": 1, "dis": False}
+    }
+
+def get_skill_sync(c):
+    # Restoring empty update from bak2
+    return encode_sproto([(0, []), (1, False)])
 
 def init_mission_state(mid):
     logic = mission_logic_db.get(mid)
@@ -292,7 +298,7 @@ def get_full_char(c):
     run = encode_sproto([(6, attr_run), (7, attr_all)])
 
     prof = c.get('prof', 0)
-    # DIAGNOSTIC: Force all skills for any character being loaded
+    # Reverting to baseline: exactly 2 skills
     skills_data = get_default_skills(prof)
     skills_map = {}
     for sid, sd in skills_data.items():
