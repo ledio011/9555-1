@@ -22,6 +22,7 @@ def save_chars(data):
 
 all_accounts_chars = load_chars()
 online_clients = {} # char_id -> (conn, map_id, line_index, picked_char_data)
+npc_hps = {} # server_id -> current_hp
 
 def generate_unique_char_id():
     return int(time.time() * 1000) % 1000000000
@@ -81,13 +82,12 @@ def encode_sproto(fields, fn=None):
                         items.append(struct.pack("<I", len(item)) + item)
                     v = b"".join(items)
             elif isinstance(val, dict):
-                # Sproto maps are encoded as arrays of objects (structs)
                 items = []
                 for item in val.values():
                     if isinstance(item, str): item = item.encode('utf-8')
                     if isinstance(item, (bytes, bytearray)):
                         items.append(struct.pack("<I", len(item)) + item)
-                    else: # Fallback for primitive types if ever passed in dict values
+                    else:
                         items.append(struct.pack("<I", 1) + (b'\x01' if item else b'\x00'))
                 v = b"".join(items)
             else:
@@ -161,8 +161,6 @@ def get_visual(name, prof):
     return encode_sproto([(0, name), (1, v["m"]), (2, v["h"]), (3, v["b"]), (4, v["l"]), (5, v["w"]), (10, 0)])
 
 def get_general(c):
-    # Tag 4: tutorial (1=finished). Unblocks HUD and NPCManagers immediately.
-    # If tutorial finished, default to map 101 (Main City)
     tut_state = c.get('tutorial', 1)
     map_id = c.get('map', "101" if tut_state == 1 else "11")
     return encode_sproto([
@@ -174,13 +172,11 @@ def get_general(c):
     ])
 
 def get_movement(x, y, z, o=0):
-    # Matches SprotoType.position (Tags 0-3: x, y, z, o)
     pos = encode_sproto([(0, x), (1, y), (2, z), (3, o)])
     return encode_sproto([(0, pos), (1, pos)])
 
 def get_char_ov(c):
     gen = get_general(c)
-    # AdaptData Level 1: HpStd=1000, combValue=5000
     attr = encode_sproto([(0, 1), (1, 5000)]) # level, combValue
     return encode_sproto([
         (0, c['id']),
@@ -193,73 +189,57 @@ def get_char_ov(c):
 
 def get_full_char(c):
     gen = get_general(c)
-    # attribute_other: hp(0), exp(1), level(2), combValue(3), camp(15)
-    # AdaptData Level 1 values. HP=1000, combValue=5000
-    attr_oth = encode_sproto([(0, 1000), (1, 0), (2, 1), (3, 5000), (15, 1)])
-    # property: Tag 13-15 are money fields. Cash: 1000, Gold: 100, Diamond: 10
-    prop = encode_sproto([(13, 1000), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
+    attr_oth = encode_sproto([(0, c.get('hp', 1000)), (1, 0), (2, 1), (3, 5000), (15, 1)])
+    prop_data = c.get('property', [0]*20)
+    prop = encode_sproto([(13, prop_data[13]), (14, prop_data[14]), (15, prop_data[15])])
 
-    # Position Persistence: Default to birth pos for the map
     tut_state = c.get('tutorial', 1)
     map_id = c.get('map', "101" if tut_state == 1 else "11")
     birth_pos = [6600, 44, -2371, 0] if map_id == "101" else [7007, 100, 5033, 0]
     pos = c.get('pos', birth_pos)
     mv = get_movement(pos[0], pos[1], pos[2], pos[3])
     
-    # runtime_agent & attribute_all: max_hp(0), atk(2), def(3), hit(4), eva(5), cri(6), mov(13)
-    # AdaptData Level 1: AtkStd=40, HpStd=1000, DefStd=100, HITStd=2844, DGEStd=129, CRIStd=351, mov=500
     stats = [(0, 1000), (2, 40), (3, 100), (4, 2844), (5, 129), (6, 351), (13, 500)]
-    attr_run = encode_sproto(stats)
-    attr_all = encode_sproto(stats)
+    attr_run = encode_sproto(stats); attr_all = encode_sproto(stats)
     run = encode_sproto([(6, attr_run), (7, attr_all)])
 
     prof = c.get('prof', 0)
     sid = "101" if prof == 0 else "201" if prof == 1 else "301"
     did = "104" if prof == 0 else "204" if prof == 1 else "304"
     wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
-
-    # Tag 8: skills (map string->skill_info). Attack(0), Dodge(3)
     s1 = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)])
     s2 = encode_sproto([(0, did), (1, 1), (2, 3), (3, 1), (4, 1), (5, False)])
     skills_map = {sid: s1, did: s2}
-
-    # Tag 9: equip (map long->gameitem). Key 5 = WEAPON slot.
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
 
     return encode_sproto([
-        (0, c['id']),
-        (1, gen),
-        (2, attr_oth),
-        (5, prop),
-        (6, get_visual(c.get('name', 'Hero'), prof)),
-        (7, mv),
-        (8, skills_map),
-        (9, equip_map),
-        (12, 0), # potionIndex
-        (13, run),
-        (15, 2)  # download finish
+        (0, c['id']), (1, gen), (2, attr_oth), (5, prop), (6, get_visual(c.get('name', 'Hero'), prof)),
+        (7, mv), (8, skills_map), (9, equip_map), (12, 0), (13, run), (15, 2)
     ])
 
 def get_aoi_char(c):
-    # character_aoi structure (Tag 0: id, Tag 1: visual, Tag 2: general, Tag 3: attr_oth, Tag 5: movement, Tag 6: runtime)
-    # Tag mapping from character_aoi.cs and character_aoi_attribute.cs
     tut_state = c.get('tutorial', 1)
     map_id = c.get('map', "101" if tut_state == 1 else "11")
     birth_pos = [6600, 44, -2371, 0] if map_id == "101" else [7007, 100, 5033, 0]
     pos = c.get('pos', birth_pos)
-    
     stats = [(0, 1000), (2, 40), (3, 100), (4, 2844), (5, 129), (6, 351), (13, 500)]
-    attr_run = encode_sproto([(6, encode_sproto(stats)), (7, encode_sproto(stats))]) # runtime_agent (Tags 6, 7)
-    
+    attr_run = encode_sproto([(6, encode_sproto(stats)), (7, encode_sproto(stats))])
     return encode_sproto([
-        (0, c['id']),
-        (1, get_visual(c.get('name', 'Hero'), c.get('prof', 0))),
-        (2, get_general(c)),
-        (3, encode_sproto([(0, 1000), (1, 0), (2, 1), (3, 5000), (15, 1)])),
-        (5, get_movement(pos[0], pos[1], pos[2], pos[3])),
-        (6, attr_run)
+        (0, c['id']), (1, get_visual(c.get('name', 'Hero'), c.get('prof', 0))), (2, get_general(c)),
+        (3, encode_sproto([(0, c.get('hp', 1000)), (1, 0), (2, 1), (3, 5000), (15, 1)])),
+        (5, get_movement(pos[0], pos[1], pos[2], pos[3])), (6, attr_run)
     ])
+
+def get_mission_data(c):
+    active = c.get('active_missions', {"1001": [1, 0, [0]*8]})
+    missions_map = {}
+    for mid, mdata in active.items():
+        state, qual, parms = mdata
+        missions_map[mid] = encode_sproto([(0, mid), (1, state), (2, qual), (3, parms)])
+    last_id = c.get('last_main_mission', "")
+    done_side = c.get('completed_side_missions', [])
+    return encode_sproto([(0, missions_map), (1, last_id), (2, done_side)])
 
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
@@ -290,11 +270,9 @@ def client_handler(conn, addr):
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
             print(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
-            print("BODY =", body)
 
             if msg == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
-                sid = get_val_int(body, 5, 1); cur_areaId = get_area_id(sid)
                 v_code = body.get(3, b"1.19").decode('utf-8') if isinstance(body.get(3), bytes) else str(body.get(3, "1.19"))
                 resp = encode_sproto([(0, 2), (1, v_code), (2, "200"), (3, 1)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
@@ -302,7 +280,6 @@ def client_handler(conn, addr):
 
             elif msg == 103: # character_list
                 chars = all_accounts_chars.get(cur_areaId, {}).get(acc_id, [])
-                # Client expects map<long, character_overview>
                 chars_map = {c['id']: get_char_ov(c) for c in chars}
                 resp = encode_sproto([(0, chars_map)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
@@ -314,7 +291,7 @@ def client_handler(conn, addr):
                 prof = get_val_int(c_data, 1, 0); cid = generate_unique_char_id()
                 if cur_areaId not in all_accounts_chars: all_accounts_chars[cur_areaId] = {}
                 if acc_id not in all_accounts_chars[cur_areaId]: all_accounts_chars[cur_areaId][acc_id] = []
-                nc = {'id': cid, 'name': name, 'prof': prof}
+                nc = {'id': cid, 'name': name, 'prof': prof, 'hp': 1000, 'property': [0]*20}
                 all_accounts_chars[cur_areaId][acc_id].append(nc); save_chars(all_accounts_chars)
                 resp = encode_sproto([(0, get_char_ov(nc)), (1, 0)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
@@ -327,41 +304,23 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
-                    # 0. Set Map/Line context
-                    tut_state = picked_char.get('tutorial', 1)
-                    map_id = picked_char.get('map', "101" if tut_state == 1 else "11")
-                    line_idx = 1
-                    online_clients[char_id] = (conn, map_id, line_idx, picked_char)
-
-                    # 1. Sync Common Data (Tag 614)
+                    if 'hp' not in picked_char: picked_char['hp'] = 1000
+                    if 'property' not in picked_char: picked_char['property'] = [0]*20
+                    tut_state = picked_char.get('tutorial', 1); map_id = picked_char.get('map', "101" if tut_state == 1 else "11")
+                    line_idx = 1; online_clients[char_id] = (conn, map_id, line_idx, picked_char)
                     fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     sync_fields = [(0, int(time.time())), (2, 0), (3, 1), (9, funcs), (10, -1), (12, random.randint(1000, 9999)), (13, 1), (14, int(time.time()))]
                     send_rpc_push(614, encode_sproto(sync_fields))
-
-                    # 2. Sync Missions (Tag 519)
-                    p = [0, 0, 0, 0, 0, 0, 0, int(time.time())]
-                    m1001 = encode_sproto([(0, "1001"), (1, 1), (2, 0), (3, p)])
-                    send_rpc_push(519, encode_sproto([(0, {"1001": m1001}), (1, "1001")]))
-
-                    # 3. Enter Map (Tag 503)
+                    send_rpc_push(519, get_mission_data(picked_char))
                     send_rpc_push(503, encode_sproto([(0, map_id), (1, line_idx), (2, 1)]))
-
-                    # 4. Create Main Player (Tag 504)
                     birth_pos = [6600, 44, -2371, 0] if map_id == "101" else [7007, 100, 5033, 0]
                     saved_pos = picked_char.get('pos', birth_pos)
                     send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(saved_pos[0], saved_pos[1], saved_pos[2], saved_pos[3]))]))
-
-                    # 5. AOI Broadcasting (Faithful Replication)
-                    # Evidence: aoi_add_handler.cs expects character_aoi objects.
-                    my_aoi_data = get_aoi_char(picked_char)
+                    my_aoi = get_aoi_char(picked_char)
                     for oid, (oconn, omap, oline, ochar) in online_clients.items():
-                        if oid == char_id: continue
-                        if omap == map_id and oline == line_idx:
-                            # Add self to other
-                            send_rpc_push(505, my_aoi_data, target_conn=oconn)
-                            # Add other to self
-                            send_rpc_push(505, get_aoi_char(ochar))
+                        if oid != char_id and omap == map_id and oline == line_idx:
+                            send_rpc_push(505, my_aoi, target_conn=oconn); send_rpc_push(505, get_aoi_char(ochar))
 
             elif msg == 100: # map_ready
                 if picked_char:
@@ -370,81 +329,154 @@ def client_handler(conn, addr):
                     send_rpc_push(654, encode_sproto([(0, 1)]))
 
             elif msg == 101: # move
-                if session is not None:
-                    p_raw = body.get(0)
-                    if p_raw and picked_char:
-                        pd = decode_sproto(p_raw)
-                        cid = picked_char['id']
-                        picked_char['pos'] = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
-                        save_chars(all_accounts_chars)
-                        
-                        # Movement Broadcast (Faithful Replication)
-                        # Evidence: aoi_update_move handler expects character_aoi_move (Tag 0: id, Tag 1: movement, Tag 2: walk)
-                        if cid in online_clients:
-                            _, map_id, line_idx, _ = online_clients[cid]
-                            # Update orientation in movement object
-                            mv_data = encode_sproto([(0, p_raw), (1, p_raw)]) # movement (Tags 0, 1 are position)
-                            # is_moving = body.get(1, False) # Evidence from ObjMainPlayer.cs line 563
-                            aoi_move = encode_sproto([(0, cid), (1, mv_data), (2, body.get(1, False))])
-                            
-                            for oid, (oconn, omap, oline, ochar) in online_clients.items():
-                                if oid != cid and omap == map_id and oline == line_idx:
-                                    # Send aoi_update_move (Tag 507)
-                                    try:
-                                        ph_m = encode_sproto([(0, 507)])
-                                        pf_m = sproto_pack(ph_m + aoi_move)
-                                        oconn.sendall(struct.pack(">H", len(pf_m)) + pf_m)
-                                    except: pass
-
+                if session is not None and picked_char:
+                    p_raw = body.get(0); pd = decode_sproto(p_raw); cid = picked_char['id']
+                    picked_char['pos'] = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
+                    save_chars(all_accounts_chars)
+                    if cid in online_clients:
+                        _, map_id, line_idx, _ = online_clients[cid]
+                        aoi_move = encode_sproto([(0, cid), (1, encode_sproto([(0, p_raw), (1, p_raw)])), (2, body.get(1, False))])
+                        for oid, (oconn, omap, oline, ochar) in online_clients.items():
+                            if oid != cid and omap == map_id and oline == line_idx:
+                                send_rpc_push(507, aoi_move, target_conn=oconn)
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, p_raw)]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 7: # update_game_server
-                servers = [encode_sproto([(0, 302), (1, "EU-001"), (2, "tokaido.proxy.rlwy.net"), (3, 48282), (4, 1), (5, 1), (6, 1), (7, 0), (8, 1), (9, 1)])]
-                resp = encode_sproto([(0, servers)])
-                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
-                conn.sendall(struct.pack(">H", len(pf)) + pf)
+            elif msg == 102: # skill_use
+                if session is not None and picked_char:
+                    cid = picked_char['id']; tid = get_val_int(body, 0); sid = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1)); al_raw = body.get(3, b"")
+                    if cid in online_clients:
+                        _, map_id, line_idx, _ = online_clients[cid]
+                        skill_push = encode_sproto([(0, cid), (1, tid), (2, sid), (3, al_raw)])
+                        for oid, (oconn, omap, oline, ochar) in online_clients.items():
+                            if oid != cid and omap == map_id and oline == line_idx:
+                                send_rpc_push(508, skill_push, target_conn=oconn)
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 113: # complete_mission
-                if session is not None:
+            elif msg == 111: # accept_damge
+                if session is not None and picked_char:
+                    cid = picked_char['id']; damages_list = body.get(0, [])
+                    if isinstance(damages_list, bytes):
+                        raw_list = damages_list; damages_list = []; ptr = 0
+                        while ptr < len(raw_list):
+                            l = struct.unpack("<I", raw_list[ptr:ptr+4])[0]; damages_list.append(decode_sproto(raw_list[ptr+4:ptr+4+l])); ptr += 4 + l
+                    if cid in online_clients:
+                        _, map_id, line_idx, _ = online_clients[cid]
+                        for dmg in damages_list:
+                            tid = get_val_int(dmg, 0); val = get_val_int(dmg, 1)
+                            target_is_player = tid in online_clients
+                            cur_h = online_clients[tid][3].get('hp', 1000) if target_is_player else npc_hps.get(tid, 1000)
+                            new_hp = cur_h - val
+                            if new_hp < 0: new_hp = 0
+                            if target_is_player: online_clients[tid][3]['hp'] = new_hp
+                            else: npc_hps[tid] = new_hp
+                            attr_oth = encode_sproto([(0, new_hp)]); char_attr = encode_sproto([(0, tid), (1, attr_oth)])
+                            dmg_push = encode_sproto([(0, [dmg])])
+                            for oid, (oconn, omap, oline, ochar) in online_clients.items():
+                                if omap == map_id and oline == line_idx:
+                                    send_rpc_push(510, char_attr, target_conn=oconn)
+                                    if oid != cid: send_rpc_push(511, dmg_push, target_conn=oconn)
+                            if new_hp == 0:
+                                aoi_rem = encode_sproto([(0, tid)])
+                                for oid, (oconn, omap, oline, ochar) in online_clients.items():
+                                    if omap == map_id and oline == line_idx: send_rpc_push(506, aoi_rem, target_conn=oconn)
+                                drop_id = int(time.time() * 1000) % 1000000; gold_item = encode_sproto([(0, "1"), (1, 100)])
+                                t_pos = online_clients[tid][3].get('pos', [0,0,0]) if target_is_player else [0,0,0]
+                                drop_data = encode_sproto([(0, drop_id), (1, t_pos[0]), (2, t_pos[2]), (3, 2), (4, gold_item), (7, cid)])
+                                picked_char['property'][13] += 100; save_chars(all_accounts_chars)
+                                prop_sync = encode_sproto([(13, picked_char['property'][13])]); my_attr = encode_sproto([(0, cid), (5, prop_sync)])
+                                send_rpc_push(510, my_attr)
+                                for oid, (oconn, omap, oline, ochar) in online_clients.items():
+                                    if omap == map_id and oline == line_idx: send_rpc_push(527, drop_data, target_conn=oconn)
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 209: # use_skill_buff
+                if session is not None and picked_char:
+                    cid = picked_char['id']; buffs_raw = body.get(0, b"")
+                    if cid in online_clients:
+                        _, map_id, line_idx, _ = online_clients[cid]
+                        if isinstance(buffs_raw, bytes):
+                            ptr = 0
+                            while ptr < len(buffs_raw):
+                                l = struct.unpack("<I", buffs_raw[ptr:ptr+4])[0]; b_data = decode_sproto(buffs_raw[ptr+4:ptr+4+l]); ptr += 4 + l
+                                tid = get_val_int(b_data, 0); eid = b_data.get(1, b"").decode('utf-8') if isinstance(b_data.get(1), bytes) else str(b_data.get(1))
+                                hit_push = encode_sproto([(0, tid), (1, cid), (2, eid)])
+                                for oid, (oconn, omap, oline, ochar) in online_clients.items():
+                                    if oid != cid and omap == map_id and oline == line_idx: send_rpc_push(514, hit_push, target_conn=oconn)
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 132: # relife_player
+                if session is not None and picked_char:
+                    cid = picked_char['id']; picked_char['hp'] = 1000; save_chars(all_accounts_chars)
+                    if cid in online_clients:
+                        _, map_id, line_idx, _ = online_clients[cid]
+                        relife_push = encode_sproto([(0, cid)])
+                        for oid, (oconn, omap, oline, ochar) in online_clients.items():
+                            if omap == map_id and oline == line_idx: send_rpc_push(512, relife_push, target_conn=oconn)
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 112: # accept_mission
                 if session is not None:
+                    mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
+                    if picked_char:
+                        if 'active_missions' not in picked_char: picked_char['active_missions'] = {}
+                        parms = [0]*8; parms[7] = int(time.time()); picked_char['active_missions'][mid] = [1, 0, parms]; save_chars(all_accounts_chars)
+                        send_rpc_push(519, get_mission_data(picked_char))
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
-                    mid = body.get(0, b"").decode('utf-8')
-                    m_new = encode_sproto([(0, mid), (1, 1), (2, 0), (3, [0]*8)])
-                    send_rpc_push(519, encode_sproto([(0, {mid: m_new}), (1, mid)]))
+
+            elif msg == 113: # complete_mission
+                if session is not None:
+                    mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
+                    if picked_char:
+                        if 'active_missions' in picked_char and mid in picked_char['active_missions']: del picked_char['active_missions'][mid]
+                        try:
+                            if int(mid) < 4000: picked_char['last_main_mission'] = mid
+                            else:
+                                if 'completed_side_missions' not in picked_char: picked_char['completed_side_missions'] = []
+                                picked_char['completed_side_missions'].append(int(mid))
+                        except: pass
+                        save_chars(all_accounts_chars); send_rpc_push(519, get_mission_data(picked_char))
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 178: # update_misison_parm
+                if session is not None:
+                    mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0)); idx = get_val_int(body, 1, 0); val = get_val_int(body, 2, 0)
+                    if picked_char and 'active_missions' in picked_char and mid in picked_char['active_missions']:
+                        picked_char['active_missions'][mid][2][idx] = val; save_chars(all_accounts_chars)
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 182: # update_misison_complete
+                if session is not None:
+                    mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
+                    if picked_char and 'active_missions' in picked_char and mid in picked_char['active_missions']:
+                        picked_char['active_missions'][mid][0] = 2; save_chars(all_accounts_chars); send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 301: # re_name
-                new_name = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, "Hero"))
-                if picked_char:
-                    picked_char['name'] = new_name
-                    save_chars(all_accounts_chars)
-                # Client expects ret_re_name.request (Tag 0: name, Tag 1: state)
-                resp = encode_sproto([(0, new_name), (1, 1)])
-                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                new_name = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0), "Hero")
+                if picked_char: picked_char['name'] = new_name; save_chars(all_accounts_chars)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, new_name), (1, 1)]))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 306: # tutorial_finish
-                if picked_char:
-                    picked_char['tutorial'] = 1
-                    save_chars(all_accounts_chars)
+                if picked_char: picked_char['tutorial'] = 1; save_chars(all_accounts_chars)
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg in [118, 218, 145, 225, 258, 261, 278, 296, 299, 310, 313, 319]:
-                # Generic Responder for Scene Info and UI Requests
                 resp_data = encode_sproto([])
                 if msg == 118: resp_data = encode_sproto([(0, f"User_{random.randint(100,999)}")])
                 elif msg == 218: resp_data = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))])
-
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp_data)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-                # Side effect pushes for scene completion
                 if msg == 310: send_rpc_push(684, encode_sproto([]))
                 elif msg == 145: send_rpc_push(555, encode_sproto([(0, [])]))
 
@@ -455,17 +487,12 @@ def client_handler(conn, addr):
     except: traceback.print_exc()
     finally:
         if picked_char and picked_char['id'] in online_clients:
-            char_id = picked_char['id']
-            _, map_id, line_idx, _ = online_clients[char_id]
-            # Remove self from neighbors
-            del online_clients[char_id]
+            cid = picked_char['id']; _, mid, lidx, _ = online_clients[cid]; del online_clients[cid]
+            rem_push = encode_sproto([(0, cid)])
             for oid, (oconn, omap, oline, ochar) in online_clients.items():
-                if omap == map_id and oline == line_idx:
-                    # Send aoi_remove (Tag 506) - Evidence: aoi_remove.request Tag 0 is character ID
+                if omap == mid and oline == lidx:
                     try:
-                        ph_r = encode_sproto([(0, 506)])
-                        pf_r = sproto_pack(ph_r + encode_sproto([(0, char_id)]))
-                        oconn.sendall(struct.pack(">H", len(pf_r)) + pf_r)
+                        ph_r = encode_sproto([(0, 506)]); pf_r = sproto_pack(ph_r + rem_push); oconn.sendall(struct.pack(">H", len(pf_r)) + pf_r)
                     except: pass
         conn.close()
 
