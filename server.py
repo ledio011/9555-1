@@ -1,5 +1,5 @@
 # ==========================================================
-# AUTO THEFT GANGSTERS REVIVAL - STABLE v15 FINAL GAMEPLAY
+# AUTO THEFT GANGSTERS REVIVAL - STABLE v16 DATA-DRIVEN
 # GAME SERVER 9555
 # ==========================================================
 import socket, struct, threading, random, json, os, time, traceback
@@ -49,7 +49,14 @@ def load_game_data():
                 if not line.startswith("*"): continue
                 p = line.split(",")
                 if len(p) > 8:
-                    kill_target_db[p[1].strip()] = {"npcId": p[6].strip(), "x": int(p[3]), "z": int(p[4]), "count": int(p[8])}
+                    lid = p[1].strip()
+                    kill_target_db[lid] = {
+                        "npcId": p[6].strip(), 
+                        "x": int(p[3]), 
+                        "z": int(p[4]), 
+                        "flashNum": int(p[7]) if p[7].isdigit() else 1,
+                        "count": int(p[8]) if p[8].isdigit() else 1
+                    }
     cf = find_data_file("TargetCarMissionData")
     if cf:
         with open(cf, "r", encoding="utf-8") as f:
@@ -82,16 +89,23 @@ def save_chars(data):
     except: pass
 
 all_accounts_chars = load_chars()
-online_clients = {} # char_id -> (conn, map_id, line_idx, char_obj)
+online_clients = {} 
 npc_hps = {}
 
 def get_default_skills(prof):
-    sid = "101" if prof == 0 else "201" if prof == 1 else "301"
-    did = "104" if prof == 0 else "204" if prof == 1 else "304"
-    return {
-        sid: {"id": sid, "lv": 1, "pos": 0, "unlock": 1, "pos2": 0, "dis": False},
-        did: {"id": did, "lv": 1, "pos": 3, "unlock": 1, "pos2": 1, "dis": False}
+    # Professional skill mapping based on original game sets
+    m = {
+        0: ["101", "104", "105", "106", "107", "108"], # Melee
+        1: ["201", "204", "205", "206", "207", "208"], # Boxer
+        2: ["301", "304", "305", "306", "307", "308"]  # Gunner
     }
+    ids = m.get(prof, m[0])
+    # Mapping slots: 0=Attack, 3=Dodge, 1,2,4,5=Actives
+    slots = {ids[0]:0, ids[1]:3, ids[2]:1, ids[3]:2, ids[4]:4, ids[5]:5}
+    res = {}
+    for sid in ids:
+        res[sid] = {"id": sid, "lv": 1, "pos": slots[sid], "unlock": 1, "pos2": slots[sid], "dis": False}
+    return res
 
 def generate_unique_char_id():
     return int(time.time() * 1000) % 1000000000
@@ -99,9 +113,9 @@ def generate_unique_char_id():
 def get_area_id(serverId):
     try:
         sid = int(serverId)
-        if sid == 1 or (300 <= sid < 400): return 1 # Europe
-        if sid == 2 or (600 <= sid < 700): return 2 # Asia
-        if sid == 3 or (10 <= sid < 100): return 0 # America
+        if sid == 1 or (300 <= sid < 400): return 1
+        if sid == 2 or (600 <= sid < 700): return 2
+        if sid == 3 or (10 <= sid < 100): return 0
     except: pass
     return 0
 
@@ -121,7 +135,6 @@ def encode_sproto(fields, fn=None):
     for tag, val in fields:
         skip = tag - last_tag - 1
         if skip > 0: header.append(2 * (skip - 1) + 1)
-
         if val is None:
             header.append(1)
         elif isinstance(val, bool):
@@ -163,7 +176,6 @@ def encode_sproto(fields, fn=None):
                 v = val
             body += struct.pack("<I", len(v)) + v
         last_tag = tag
-
     fn_val = fn if fn is not None else len(header)
     res = struct.pack("<H", fn_val)
     for h in header: res += struct.pack("<H", h)
@@ -230,13 +242,7 @@ def get_visual(name, prof):
     return encode_sproto([(0, name), (1, v["m"]), (2, v["h"]), (3, v["b"]), (4, v["l"]), (5, v["w"]), (10, 0)])
 
 def get_general(c):
-    return encode_sproto([
-        (0, c.get('name', 'Hero')),
-        (1, c.get('prof', 0)),
-        (2, 1), # lineIndex
-        (3, "11"), # mapInfoId
-        (4, 1) # tutorial state
-    ])
+    return encode_sproto([(0, c.get('name', 'Hero')), (1, c.get('prof', 0)), (2, 1), (3, "11"), (4, 1)])
 
 def get_movement(x, y, z, o=0):
     pos = encode_sproto([(0, x), (1, y), (2, z), (3, o)])
@@ -244,42 +250,28 @@ def get_movement(x, y, z, o=0):
 
 def get_char_ov(c):
     gen = get_general(c)
-    attr = encode_sproto([(0, 1), (1, 5000)]) # level, combValue
-    return encode_sproto([
-        (0, c['id']),
-        (1, gen),
-        (2, attr),
-        (3, get_visual(c.get('name', 'Hero'), c.get('prof', 0))),
-        (4, int(time.time())),
-        (5, 0) # forbidden
-    ])
+    attr = encode_sproto([(0, 1), (1, 5000)])
+    return encode_sproto([(0, c['id']), (1, gen), (2, attr), (3, get_visual(c.get('name', 'Hero'), c.get('prof', 0))), (4, int(time.time())), (5, 0)])
 
 def get_full_char(c):
     gen = get_general(c)
     attr_oth = encode_sproto([(0, 3000), (1, 0), (2, 1), (3, 5000), (15, 1)])
     prop_data = c.get('property', [0]*20)
-    prop = encode_sproto([(13, 1000), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
-
+    prop = encode_sproto([(13, prop_data[13]), (14, prop_data[14]), (15, prop_data[15]), (16, 0), (17, 0), (18, 0)])
     pos = c.get('pos', [29860, 100, -17005, 0])
     mv = get_movement(pos[0], pos[1], pos[2], pos[3])
     attr_run = encode_sproto([(0, 3000), (2, 300), (3, 35)])
     attr_all = encode_sproto([(0, 3000), (2, 300), (3, 35), (13, 500)])
     run = encode_sproto([(6, attr_run), (7, attr_all)])
-
     skills_data = c.get('skills', get_default_skills(c.get('prof', 0)))
     skills_map = {}
     for sid, sd in skills_data.items():
         skills_map[sid] = encode_sproto([(0, sd['id']), (1, sd['lv']), (2, sd['pos']), (3, sd['unlock']), (4, sd['pos2']), (5, sd['dis'])])
-
     prof = c.get('prof', 0)
     wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
-
-    return encode_sproto([
-        (0, c['id']), (1, gen), (2, attr_oth), (5, prop), (6, get_visual(c.get('name', 'Hero'), prof)),
-        (7, mv), (8, skills_map), (9, equip_map), (12, 0), (13, run), (15, 2)
-    ])
+    return encode_sproto([(0, c['id']), (1, gen), (2, attr_oth), (5, prop), (6, get_visual(c.get('name', 'Hero'), prof)), (7, mv), (8, skills_map), (9, equip_map), (12, 0), (13, run), (15, 2)])
 
 def get_skill_sync(c):
     skills_data = c.get('skills', get_default_skills(c.get('prof', 0)))
@@ -322,28 +314,31 @@ def sync_mission_world_objects(char, send_push_func):
         logic = mission_logic_db.get(mid)
         if not logic: continue
         lid = logic['logicId']
-        if logic['logicType'] == 23: # Kill Target (KillTargetMissionData)
-            target = kill_target_db.get(lid)
+        ltype = logic['logicType']
+        progress = mdata[2][0]
+        
+        if ltype == 23 or ltype == 1:
+            target = kill_target_db.get(lid) if ltype == 23 else mission_require_db.get(lid)
             if target:
-                sid = 900000 + int(lid)
-                npc_hps[sid] = 1000
-                npc_aoi = get_aoi_npc(target['npcId'], sid, target['x'], target['z'], "Target")
-                send_push_func(505, npc_aoi)
-        elif logic['logicType'] == 24: # Rob Car (TargetCarMissionData)
+                npc_id = target['npcId']
+                total_req = target.get('count', 1)
+                flash_num = target.get('flashNum', total_req)
+                
+                # Spawn only what's needed to reach progress goal
+                to_spawn = flash_num if flash_num < (total_req - progress) else (total_req - progress)
+                if to_spawn > 0:
+                    base_sid = 900000 + int(lid) if ltype == 23 else 700000 + int(lid)
+                    for i in range(to_spawn):
+                        sid = base_sid * 10 + i
+                        npc_hps[sid] = 1000
+                        x = target.get('x', 29860) + random.randint(-200, 200)
+                        z = target.get('z', -17005) + random.randint(-200, 200)
+                        send_push_func(505, get_aoi_npc(npc_id, sid, x, z, "Target"))
+        elif ltype == 24: # Rob Car
             target = car_target_db.get(lid)
-            if target:
+            if target and progress == 0:
                 sid = 800000 + int(lid)
-                car_aoi = get_aoi_car(target['carId'], sid, target['x'], target['z'], "Car")
-                send_push_func(505, car_aoi)
-        elif logic['logicType'] == 1: # Kill Monster (MissionRequireData)
-            target = mission_require_db.get(lid)
-            if target:
-                # Spawn near player or at fixed logic positions if available. 
-                # For now, spawn at fixed test location for Mission 1 logic
-                sid = 700000 + int(lid)
-                npc_hps[sid] = 1000
-                npc_aoi = get_aoi_npc(target['npcId'], sid, 29860, -17005, "Enemy")
-                send_push_func(505, npc_aoi)
+                send_push_func(505, get_aoi_car(target['carId'], sid, target['x'], target['z'], "Car"))
 
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
@@ -368,10 +363,8 @@ def client_handler(conn, addr):
                 if not chunk: break
                 data += chunk
             if len(data) < size: break
-
             raw = sproto_unpack(data); pkg = decode_sproto(raw, 0)
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
-            # print(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
 
             if msg == 4: # login
@@ -393,10 +386,7 @@ def client_handler(conn, addr):
                 prof = get_val_int(c_data, 1, 0); cid = generate_unique_char_id()
                 if cur_areaId not in all_accounts_chars: all_accounts_chars[cur_areaId] = {}
                 if acc_id not in all_accounts_chars[cur_areaId]: all_accounts_chars[cur_areaId][acc_id] = []
-                nc = {'id': cid, 'name': name, 'prof': prof, 'hp': 3000, 
-                      'skills': get_default_skills(prof),
-                      'active_missions': {"1001": [1, 0, [0]*8]},
-                      'last_main_mission': ""}
+                nc = {'id': cid, 'name': name, 'prof': prof, 'hp': 3000, 'skills': get_default_skills(prof), 'active_missions': {"1001": [1, 0, [0]*8]}, 'last_main_mission': ""}
                 all_accounts_chars[cur_areaId][acc_id].append(nc); save_chars(all_accounts_chars)
                 resp = encode_sproto([(0, get_char_ov(nc)), (1, 0)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
@@ -412,7 +402,7 @@ def client_handler(conn, addr):
                     if 'skills' not in picked_char: picked_char['skills'] = get_default_skills(picked_char.get('prof', 0))
                     if 'active_missions' not in picked_char: picked_char['active_missions'] = {"1001": [1, 0, [0]*8]}
                     save_chars(all_accounts_chars)
-                    map_id = "11"; line_idx = 1; online_clients[char_id] = (conn, map_id, line_idx, picked_char)
+                    map_id, line_idx = "11", 1; online_clients[char_id] = (conn, map_id, line_idx, picked_char)
                     fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))]))
@@ -428,9 +418,9 @@ def client_handler(conn, addr):
                     send_rpc_push(654, encode_sproto([(0, 1)]))
 
             elif msg == 101: # move
-                if session is not None:
+                if session is not None and picked_char:
                     p_raw = body.get(0)
-                    if p_raw and picked_char:
+                    if p_raw:
                         pd = decode_sproto(p_raw)
                         picked_char['pos'] = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
                         save_chars(all_accounts_chars)
@@ -439,33 +429,35 @@ def client_handler(conn, addr):
 
             elif msg == 111: # accept_damge
                 if session is not None and picked_char:
-                    damages_list = body.get(0, [])
-                    if isinstance(damages_list, bytes):
-                        raw_list = damages_list; damages_list = []; ptr = 0
-                        while ptr < len(raw_list):
-                            l = struct.unpack("<I", raw_list[ptr:ptr+4])[0]
-                            damages_list.append(decode_sproto(raw_list[ptr+4:ptr+4+l]))
-                            ptr += 4 + l
-                    for dmg in damages_list:
-                        tid = get_val_int(dmg, 0); val = get_val_int(dmg, 1)
+                    dmgs = body.get(0, [])
+                    if isinstance(dmgs, bytes):
+                        r, dmgs, p = dmgs, [], 0
+                        while p < len(r):
+                            l = struct.unpack("<I", r[p:p+4])[0]
+                            dmgs.append(decode_sproto(r[p+4:p+4+l])); p += 4 + l
+                    for d in dmgs:
+                        tid, val = get_val_int(d, 0), get_val_int(d, 1)
                         cur_h = npc_hps.get(tid, 1000)
                         new_hp = cur_h - val
                         if new_hp < 0: new_hp = 0
                         npc_hps[tid] = new_hp
-                        attr_oth = encode_sproto([(0, new_hp)]); char_attr = encode_sproto([(0, tid), (1, attr_oth)])
-                        for oid, (oconn, omap, oline, ochar) in online_clients.items():
-                            send_rpc_push(510, char_attr, target_conn=oconn)
+                        send_rpc_push(510, encode_sproto([(0, tid), (1, encode_sproto([(0, new_hp)]))]))
                         if new_hp == 0:
                             send_rpc_push(506, encode_sproto([(0, tid)]))
+                            base_sid = tid // 10
                             lid = ""
-                            if 900000 <= tid < 1000000: lid = str(tid - 900000)
-                            elif 700000 <= tid < 800000: lid = str(tid - 700000)
+                            if 900000 <= base_sid < 1000000: lid = str(base_sid - 900000)
+                            elif 700000 <= base_sid < 800000: lid = str(base_sid - 700000)
                             
                             if lid:
                                 for mid, mdata in picked_char.get('active_missions', {}).items():
                                     logic = mission_logic_db.get(mid)
                                     if logic and logic['logicId'] == lid:
                                         mdata[2][0] += 1
+                                        req = kill_target_db.get(lid, {}).get('count', 1) if logic['logicType'] == 23 else mission_require_db.get(lid, {}).get('count', 1)
+                                        if mdata[2][0] >= req:
+                                            mdata[0] = 2 # COMPLETE
+                                            send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
                                         send_rpc_push(519, get_mission_sync(picked_char))
                                         save_chars(all_accounts_chars)
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -481,7 +473,7 @@ def client_handler(conn, addr):
                         if logic and logic['nextId'] and logic['nextId'] != "#N/A":
                             next_mid = logic['nextId']
                             picked_char['active_missions'][next_mid] = [1, 0, [0]*8]
-                            print(f"[MISSION] {mid} completed. Starting {next_mid}")
+                            print(f"[MISSION] {mid} -> {next_mid}")
                         save_chars(all_accounts_chars)
                         send_rpc_push(519, get_mission_sync(picked_char))
                         sync_mission_world_objects(picked_char, send_rpc_push)
@@ -492,23 +484,31 @@ def client_handler(conn, addr):
                 if session is not None and picked_char:
                     mid = body.get(0, b"").decode('utf-8')
                     picked_char['active_missions'][mid] = [1, 0, [0]*8]
-                    save_chars(all_accounts_chars)
-                    send_rpc_push(519, get_mission_sync(picked_char))
+                    save_chars(all_accounts_chars); send_rpc_push(519, get_mission_sync(picked_char))
                     sync_mission_world_objects(picked_char, send_rpc_push)
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 7: # update_game_server
-                servers = [encode_sproto([(0, 302), (1, "EU-001"), (2, "tokaido.proxy.rlwy.net"), (3, 48282), (4, 1), (5, 1), (6, 1), (7, 0), (8, 1), (9, 1)])]
-                resp = encode_sproto([(0, servers)])
-                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+            elif msg == 238: # use_mount (rob car)
+                if session is not None and picked_char:
+                    for mid, mdata in picked_char.get('active_missions', {}).items():
+                        logic = mission_logic_db.get(mid)
+                        if logic and logic['logicType'] == 24:
+                            mdata[2][0], mdata[0] = 1, 2
+                            send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                            send_rpc_push(519, get_mission_sync(picked_char))
+                    save_chars(all_accounts_chars)
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 7: # game server list
+                srv = [encode_sproto([(0, 302), (1, "EU-001"), (2, "tokaido.proxy.rlwy.net"), (3, 48282), (4, 1), (5, 1), (6, 1), (7, 0), (8, 1), (9, 1)])]
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, srv)]))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg in [118, 218, 145, 225, 258, 261, 278, 296, 299, 310, 313, 319]:
-                resp_data = encode_sproto([])
-                if msg == 118: resp_data = encode_sproto([(0, f"User_{random.randint(100,999)}")])
-                elif msg == 218: resp_data = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))])
-                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp_data)
+                resp = encode_sproto([(0, f"U_{random.randint(10,99)}")]) if msg == 118 else encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))]) if msg == 218 else encode_sproto([])
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if msg == 310: send_rpc_push(684, encode_sproto([]))
                 elif msg == 145: send_rpc_push(555, encode_sproto([(0, [])]))
@@ -526,5 +526,5 @@ def client_handler(conn, addr):
 
 server = socket.socket(socket.AF_INET, socket.SOCK_STREAM); server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 server.bind(("0.0.0.0", PORT)); server.listen(20)
-print(f"GAME SERVER 9555 READY (STABLE v15)");
+print(f"GAME SERVER 9555 READY (v16 DATA-DRIVEN)")
 while True: cl, ad = server.accept(); threading.Thread(target=client_handler, args=(cl, ad), daemon=True).start()
