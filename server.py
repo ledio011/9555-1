@@ -441,11 +441,16 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
                     # DEBUG: Always grant all profession skills for now
-                    picked_char['skills'] = get_default_skills(picked_char.get('prof', 0))
+                    try:
+                        picked_char['skills'] = get_default_skills(picked_char.get('prof', 0))
+                    except Exception as e: print(f"[SCENE ERROR] get_default_skills failed: {e}")
+                    
                     if 'active_missions' not in picked_char: picked_char['active_missions'] = {"1001": [1, 0, [0]*8]}
                     if 'mission_state' not in picked_char:
-                        picked_char['mission_state'] = {}
-                        for mid in picked_char['active_missions']: picked_char['mission_state'][mid] = init_mission_state(mid)
+                        try:
+                            picked_char['mission_state'] = {}
+                            for mid in picked_char['active_missions']: picked_char['mission_state'][mid] = init_mission_state(mid)
+                        except Exception as e: print(f"[SCENE ERROR] init_mission_state failed: {e}")
                     else:
                         for mid, ms in picked_char['mission_state'].items():
                             if 'dead_sids' not in ms: ms['dead_sids'] = []
@@ -454,36 +459,45 @@ def client_handler(conn, addr):
                     fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     
-                    # [SCENE DEBUG] Correct Order for Map Entry
-                    print("[SCENE DEBUG] PUSH 614")
+                    # [MAP FLOW] Correct Order for Map Entry
+                    print("[MAP FLOW] Sending 614 sync_common_data")
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))]))
-                    print("[SCENE DEBUG] PUSH 519")
+                    
+                    print("[MAP FLOW] Sending 519 sync_mission")
                     send_rpc_push(519, get_mission_sync(picked_char))
-                    print("[SCENE DEBUG] PUSH 503")
+                    
+                    print("[MAP FLOW] Sending 503 enter_map")
                     send_rpc_push(503, encode_sproto([(0, map_id), (1, line_idx), (2, 1)]))
-                    print("[SCENE DEBUG] PUSH 504")
+                    
+                    print("[MAP FLOW] Sending 504 main_player_create")
                     send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(29860, 100, -17005))]))
 
             elif msg == 100: # map_ready
-                print("[SCENE DEBUG] RECEIVED msg 100 map_ready")
+                print("[MAP FLOW] Received map_ready 100")
                 if picked_char:
-                    print("[SCENE DEBUG] PUSH 611")
+                    print("[MAP FLOW] Sending 611 sync_item_pack")
                     send_rpc_push(611, encode_sproto([(0, [])]))
-                    print("[SCENE DEBUG] PUSH 540")
+                    
+                    print("[MAP FLOW] Sending 540 sync_skill_info")
                     send_rpc_push(540, get_skill_sync(picked_char))
-                    print("[SCENE DEBUG] PUSH 505")
+                    
+                    print("[MAP FLOW] Sending 505 (World Objects)")
                     try:
                         sync_mission_world_objects(picked_char, send_rpc_push)
                     except Exception as e:
                         print(f"[MISSION WARNING] Missing data for mission object: {e}")
                     
-                    print("[SCENE DEBUG] PUSH 310")
-                    send_rpc_push(310, encode_sproto([]))
-                    print("[SCENE DEBUG] PUSH 145")
-                    send_rpc_push(145, encode_sproto([]))
-                    print("[SCENE DEBUG] PUSH 225")
-                    send_rpc_push(225, encode_sproto([]))
-                    print("[SCENE DEBUG] PUSH 654")
+                    # Fix PUSH tags to use correct server-to-client versions
+                    print("[MAP FLOW] Sending 684 ret_domin_info")
+                    send_rpc_push(684, encode_sproto([]))
+                    
+                    print("[MAP FLOW] Sending 555 sync_copyscenes_info")
+                    send_rpc_push(555, encode_sproto([(0, [])]))
+                    
+                    print("[MAP FLOW] Sending 619 ret_request_activity_info")
+                    send_rpc_push(619, encode_sproto([(0, [])]))
+                    
+                    print("[MAP FLOW] Sending 654 start_enter_game")
                     send_rpc_push(654, encode_sproto([(0, 1)]))
 
             elif msg == 101: # move
@@ -590,12 +604,19 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, srv)]))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg in [118, 218, 145, 225, 258, 261, 278, 296, 299, 310, 313, 319]:
+            elif msg in [118, 218, 145, 225, 258, 261, 278, 296, 299, 310, 313, 319, 686, 588, 550, 207, 680, 582, 633, 235, 655, 115, 120, 107, 129, 121, 130, 137, 122]:
                 resp = encode_sproto([(0, f"U_{random.randint(10,99)}")]) if msg == 118 else encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))]) if msg == 218 else encode_sproto([])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
-                if msg == 310: send_rpc_push(684, encode_sproto([]))
-                elif msg == 145: send_rpc_push(555, encode_sproto([(0, [])]))
+                if msg == 310: 
+                    print("[MAP FLOW] Sending 684 ret_domin_info (via request)")
+                    send_rpc_push(684, encode_sproto([]))
+                elif msg == 145: 
+                    print("[MAP FLOW] Sending 555 sync_copyscenes_info (via request)")
+                    send_rpc_push(555, encode_sproto([(0, [])]))
+                elif msg == 225:
+                    print("[MAP FLOW] Sending 619 ret_request_activity_info (via request)")
+                    send_rpc_push(619, encode_sproto([(0, [])]))
 
             elif session is not None:
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
