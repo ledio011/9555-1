@@ -278,45 +278,45 @@ def get_char_ov(c):
     return encode_sproto([(0, c['id']), (1, gen), (2, attr), (3, get_visual(c.get('name', 'Hero'), c.get('prof', 0))), (4, int(time.time())), (5, 0)])
 
 def get_full_char(c):
-    try:
-        gen = get_general(c)
-        attr_oth = encode_sproto([(0, 3000), (1, 0), (2, 1), (3, 5000), (15, 1)])
-        prop_data = c.get('property', [0]*20)
-        prop = encode_sproto([(13, prop_data[13]), (14, prop_data[14]), (15, prop_data[15]), (16, 0), (17, 0), (18, 0)])
-        pos = c.get('pos', [29860, 100, -17005, 0])
-        mv = get_movement(pos[0], pos[1], pos[2], pos[3])
-        attr_run = encode_sproto([(0, 3000), (2, 300), (3, 35)])
-        attr_all = encode_sproto([(0, 3000), (2, 300), (3, 35), (13, 500)])
-        run = encode_sproto([(6, attr_run), (7, attr_all)])
-        prof = c.get('prof', 0)
-        sid = "101" if prof == 0 else "201" if prof == 1 else "301"
-        did = "104" if prof == 0 else "204" if prof == 1 else "304"
-        s1 = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)])
-        s2 = encode_sproto([(0, did), (1, 1), (2, 3), (3, 1), (4, 1), (5, False)])
-        skills_map = {sid: s1, did: s2}
-        prof = c.get('prof', 0)
-        wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
-        w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
-        equip_map = {5: w1}
-        return encode_sproto([(0, c['id']), (1, gen), (2, attr_oth), (5, prop), (6, get_visual(c.get('name', 'Hero'), prof)), (7, mv), (8, skills_map), (9, equip_map), (12, 0), (13, run), (15, 2)])
-    except Exception:
-        print("[SCENE ERROR] get_full_char failed:")
-        traceback.print_exc()
-        return encode_sproto([(0, c['id'])])
+    gen = get_general(c)
+    # attribute_other: hp(0), exp(1), level(2), combValue(3), camp(15)
+    attr_oth = encode_sproto([(0, 3000), (1, 0), (2, 1), (3, 5000), (15, 1)])
+    # property: Tag 13-15 are money fields. Cash: 1000, Gold: 100, Diamond: 10
+    prop = encode_sproto([(13, 1000), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
+
+    # Position Persistence: Default to Mission 1001 area for new chars
+    pos = c.get('pos', [29860, 100, -17005, 0])
+    mv = get_movement(pos[0], pos[1], pos[2], pos[3])
+    # runtime_agent: max_hp(0), atk(2), def(3).
+    attr_run = encode_sproto([(0, 3000), (2, 300), (3, 35)])
+    # attribute_all: mov(13)=500 (Speed 5.0)
+    attr_all = encode_sproto([(0, 3000), (2, 300), (3, 35), (13, 500)])
+    run = encode_sproto([(6, attr_run), (7, attr_all)])
+
+    prof = c.get('prof', 0)
+    sid = "101" if prof == 0 else "201" if prof == 1 else "301"
+    did = "104" if prof == 0 else "204" if prof == 1 else "304"
+    wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
+
+    # Tag 8: skills (map string->skill_info). Attack(0), Dodge(3)
+    s1 = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)])
+    s2 = encode_sproto([(0, did), (1, 1), (2, 3), (3, 1), (4, 1), (5, False)])
+    skills_map = {sid: s1, did: s2}
+
+    print(f"[SKILL DEBUG]\nCharacter profession: {prof}\nStarter skill IDs: {[sid, did]}\nSkill count: 2")
+
+    # Tag 9: equip (map long->gameitem). Key 5 = WEAPON slot.
+    w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
+    equip_map = {5: w1}
+
+    return encode_sproto([
+        (0, c['id']), (1, gen), (2, attr_oth), (5, prop), (6, get_visual(c.get('name', 'Hero'), prof)),
+        (7, mv), (8, skills_map), (9, equip_map), (12, 0), (13, run), (15, 2)
+    ])
 
 def get_skill_sync(c):
-    try:
-        prof = c.get('prof', 0)
-        sid = "101" if prof == 0 else "201" if prof == 1 else "301"
-        did = "104" if prof == 0 else "204" if prof == 1 else "304"
-        s1 = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)])
-        s2 = encode_sproto([(0, did), (1, 1), (2, 3), (3, 1), (4, 1), (5, False)])
-        skills_map = {sid: s1, did: s2}
-        return encode_sproto([(0, skills_map), (1, False)])
-    except Exception:
-        print("[SCENE ERROR] get_skill_sync failed:")
-        traceback.print_exc()
-        return encode_sproto([(0, {}), (1, False)])
+    # Empty update to match bak2 loading baseline
+    return encode_sproto([(0, []), (1, False)])
 
 def get_mission_sync(c):
     try:
