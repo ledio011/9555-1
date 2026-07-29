@@ -298,13 +298,27 @@ def get_char_ov(c):
 
 def get_full_char(c):
     gen = get_general(c)
-    attr_oth = encode_sproto([(0, 3000), (1, 0), (2, 1), (3, 5000), (15, 1)])
-    prop = encode_sproto([(13, 1000), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
+    prof = c.get('prof', 0)
+    lv = c.get('level', 1)
+    
+    # Scale stats based on Level 50 baseline (simplified scaling)
+    # XD: HP 73560, ATK 3660, DEF 500
+    # QJ: HP 80260, ATK 3480, DEF 780
+    # NQ: HP 49480, ATK 5080, DEF 380
+    if lv >= 50:
+        base_hp = {0: 73560, 1: 80260, 2: 49480}.get(prof, 70000)
+        base_atk = {0: 3660, 1: 3480, 2: 5080}.get(prof, 3000)
+        base_def = {0: 500, 1: 780, 2: 380}.get(prof, 500)
+    else:
+        base_hp = 3000; base_atk = 300; base_def = 35
+        
+    attr_oth = encode_sproto([(0, base_hp), (1, c.get('exp', 0)), (2, lv), (3, 50000), (15, 1)])
+    prop = encode_sproto([(13, 1000000), (14, 10000), (15, 1000), (16, 0), (17, 0), (18, 0)])
 
     pos = c.get('pos', [29860, 100, -17005, 0])
     mv = get_movement(pos[0], pos[1], pos[2], pos[3])
-    attr_run = encode_sproto([(0, 3000), (2, 300), (3, 35)])
-    attr_all = encode_sproto([(0, 3000), (2, 300), (3, 35), (13, 500)])
+    attr_run = encode_sproto([(0, base_hp), (2, base_atk), (3, base_def)])
+    attr_all = encode_sproto([(0, base_hp), (2, base_atk), (3, base_def), (13, 500)])
     run = encode_sproto([(6, attr_run), (7, attr_all)])
 
     prof = c.get('prof', 0)
@@ -450,7 +464,12 @@ def client_handler(conn, addr):
                 candidates = [sid for sid in all_ids if sid not in exclude]
                 tsid = random.choice(candidates) if candidates else None
                 
-                nc = {'id': cid, 'name': name, 'prof': prof, 'hp': 3000, 
+                # START AT LEVEL 50 with scaled stats
+                hps = {0: 73560, 1: 80260, 2: 49480}
+                nc = {'id': cid, 'name': name, 'prof': prof, 
+                      'hp': hps.get(prof, 3000), 
+                      'level': 50,
+                      'exp': 86750000,
                       'skills': get_default_skills(prof, tsid), 
                       'active_missions': {"1001": [1, 0, [0]*8]}, 
                       'mission_state': {"1001": init_mission_state("1001")}, 
@@ -471,6 +490,11 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
+                    # START AT LEVEL 50 for all existing chars if not already set
+                    if 'level' not in picked_char or picked_char['level'] < 50:
+                        picked_char['level'] = 50
+                        picked_char['exp'] = 86750000
+                    
                     # DIAGNOSTIC: Pick/Restore ONE random skill for testing session
                     if 'test_skill' not in picked_char or not picked_char['test_skill']:
                         all_ids = list(skill_db.keys())
@@ -492,7 +516,9 @@ def client_handler(conn, addr):
                             if 'dead_sids' not in ms: ms['dead_sids'] = []
                     save_chars(all_accounts_chars)
                     map_id, line_idx = "11", 1; online_clients[char_id] = (conn, map_id, line_idx, picked_char)
-                    fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
+                    
+                    # GLOBAL UNLOCK: Send all FunctionData IDs as unlocked
+                    fids = ["4083","3031","4084","100","3016","4063","4061","4062","4064","3001","4081","4085","4001","102","4002","3002","4004","4003","105","106","3006","4025","4021","4022","4023","4027","4024","3015","4051","4052","4053","4055","4054","3010","3004","3020","3008","3018","3012","3013","4041","4043","4031","4080","3005","4011","4013","4014","4016","4015","4078","4012","3017","4071","4072","4073","4074","4075","4076","4077","4088","3009","4086","3019","101","3007","4087","4082","3021","111","112","3011","3023","104","103","110","3024","3025","3026","3027","3028","3029","4079","107","108","109","3003","3030","4026","4042","3014"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     
                     # [MAP FLOW] Correct Order for Map Entry
