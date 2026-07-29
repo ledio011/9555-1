@@ -113,18 +113,28 @@ all_accounts_chars = load_chars()
 online_clients = {} 
 npc_hps = {}
 
-def get_default_skills(prof):
-    # Restoring loading-safe baseline from bak2
+def get_default_skills(prof, test_sid=None):
+    # Baseline 2 skills: Attack (Slot 0) and Dodge (Slot 3)
     sid = "101" if prof == 0 else "201" if prof == 1 else "301"
     did = "104" if prof == 0 else "204" if prof == 1 else "304"
-    return {
+    res = {
         sid: {"id": sid, "lv": 1, "pos": 0, "unlock": 1, "pos2": 0, "dis": False},
         did: {"id": did, "lv": 1, "pos": 3, "unlock": 1, "pos2": 1, "dis": False}
     }
+    # DIAGNOSTIC: Add exactly ONE additional random skill to Slot 1
+    if test_sid and test_sid in skill_db:
+        res[test_sid] = {"id": test_sid, "lv": 1, "pos": 1, "unlock": 1, "pos2": 4, "dis": False}
+    return res
 
 def get_skill_sync(c):
-    # Restoring empty update from bak2
-    return encode_sproto([(0, []), (1, False)])
+    # DIAGNOSTIC: Sync 2 baseline + 1 random skill
+    prof = c.get('prof', 0)
+    test_sid = c.get('test_skill')
+    skills_data = get_default_skills(prof, test_sid)
+    skills_map = {}
+    for sid, sd in skills_data.items():
+        skills_map[sid] = encode_sproto([(0, sd['id']), (1, sd['lv']), (2, sd['pos']), (3, sd['unlock']), (4, sd['pos2']), (5, sd['dis'])])
+    return encode_sproto([(0, skills_map), (1, False)])
 
 def init_mission_state(mid):
     logic = mission_logic_db.get(mid)
@@ -298,13 +308,11 @@ def get_full_char(c):
     run = encode_sproto([(6, attr_run), (7, attr_all)])
 
     prof = c.get('prof', 0)
-    # Reverting to baseline: exactly 2 skills
-    skills_data = get_default_skills(prof)
+    # DIAGNOSTIC: Force 2 base skills + 1 random skill for loading
+    skills_data = get_default_skills(prof, c.get('test_skill'))
     skills_map = {}
     for sid, sd in skills_data.items():
         skills_map[sid] = encode_sproto([(0, sd['id']), (1, sd['lv']), (2, sd['pos']), (3, sd['unlock']), (4, sd['pos2']), (5, sd['dis'])])
-
-    print(f"[SKILL DEBUG] Character profession: {prof} Skill count: {len(skills_map)}")
 
     wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
@@ -435,7 +443,22 @@ def client_handler(conn, addr):
                 prof = get_val_int(c_data, 1, 0); cid = generate_unique_char_id()
                 if cur_areaId not in all_accounts_chars: all_accounts_chars[cur_areaId] = {}
                 if acc_id not in all_accounts_chars[cur_areaId]: all_accounts_chars[cur_areaId][acc_id] = []
-                nc = {'id': cid, 'name': name, 'prof': prof, 'hp': 3000, 'skills': get_default_skills(prof), 'active_missions': {"1001": [1, 0, [0]*8]}, 'mission_state': {"1001": init_mission_state("1001")}, 'last_main_mission': ""}
+                
+                # DIAGNOSTIC: Pick ONE random extra skill for the new character
+                all_ids = list(skill_db.keys())
+                exclude = ["101", "104", "201", "204", "301", "304"]
+                candidates = [sid for sid in all_ids if sid not in exclude]
+                tsid = random.choice(candidates) if candidates else None
+                
+                nc = {'id': cid, 'name': name, 'prof': prof, 'hp': 3000, 
+                      'skills': get_default_skills(prof, tsid), 
+                      'active_missions': {"1001": [1, 0, [0]*8]}, 
+                      'mission_state': {"1001": init_mission_state("1001")}, 
+                      'last_main_mission': "",
+                      'test_skill': tsid}
+                
+                if tsid: print(f"[TEST RANDOM SKILL] Character: {name} ID: {tsid} Name: {skill_db[tsid]['name']} Profession: {prof} Slot: 1")
+                
                 all_accounts_chars[cur_areaId][acc_id].append(nc); save_chars(all_accounts_chars)
                 resp = encode_sproto([(0, get_char_ov(nc)), (1, 0)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
@@ -448,6 +471,16 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
+                    # DIAGNOSTIC: Pick/Restore ONE random skill for testing session
+                    if 'test_skill' not in picked_char or not picked_char['test_skill']:
+                        all_ids = list(skill_db.keys())
+                        exclude = ["101", "104", "201", "204", "301", "304"]
+                        candidates = [sid for sid in all_ids if sid not in exclude]
+                        picked_char['test_skill'] = random.choice(candidates) if candidates else None
+                    
+                    tsid = picked_char.get('test_skill')
+                    if tsid: print(f"[TEST RANDOM SKILL] Character: {picked_char.get('name')} ID: {tsid} Name: {skill_db[tsid]['name']} Profession: {picked_char.get('prof')} Slot: 1")
+
                     if 'active_missions' not in picked_char: picked_char['active_missions'] = {"1001": [1, 0, [0]*8]}
                     if 'mission_state' not in picked_char:
                         try:
