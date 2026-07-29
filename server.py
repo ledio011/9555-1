@@ -637,7 +637,7 @@ def client_handler(conn, addr):
                     send_rpc_push(519, get_mission_sync(picked_char))
                     
                     print("[MAP FLOW] Sending 503 enter_map")
-                    send_rpc_push(503, encode_sproto([(0, map_id), (1, line_idx), (2, 1)]))
+                    send_rpc_push(503, encode_sproto([(0, cur_map_id), (1, line_idx), (2, 1)]))
                     
                     print("[MAP FLOW] Sending 504 main_player_create")
                     send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(29860, 100, -17005))]))
