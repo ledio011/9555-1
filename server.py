@@ -279,41 +279,56 @@ def get_char_ov(c):
     return encode_sproto([(0, c['id']), (1, gen), (2, attr), (3, get_visual(c.get('name', 'Hero'), c.get('prof', 0))), (4, int(time.time())), (5, 0)])
 
 def get_full_char(c):
-    gen = get_general(c)
-    attr_oth = encode_sproto([(0, 3000), (1, 0), (2, 1), (3, 5000), (15, 1)])
-    prop_data = c.get('property', [0]*20)
-    prop = encode_sproto([(13, prop_data[13]), (14, prop_data[14]), (15, prop_data[15]), (16, 0), (17, 0), (18, 0)])
-    pos = c.get('pos', [29860, 100, -17005, 0])
-    mv = get_movement(pos[0], pos[1], pos[2], pos[3])
-    attr_run = encode_sproto([(0, 3000), (2, 300), (3, 35)])
-    attr_all = encode_sproto([(0, 3000), (2, 300), (3, 35), (13, 500)])
-    run = encode_sproto([(6, attr_run), (7, attr_all)])
-    skills_data = c.get('skills', get_default_skills(c.get('prof', 0)))
-    skills_map = {}
-    for sid, sd in skills_data.items():
-        skills_map[sid] = encode_sproto([(0, sd['id']), (1, sd['lv']), (2, sd['pos']), (3, sd['unlock']), (4, sd['pos2']), (5, sd['dis'])])
-    prof = c.get('prof', 0)
-    wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
-    w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
-    equip_map = {5: w1}
-    return encode_sproto([(0, c['id']), (1, gen), (2, attr_oth), (5, prop), (6, get_visual(c.get('name', 'Hero'), prof)), (7, mv), (8, skills_map), (9, equip_map), (12, 0), (13, run), (15, 2)])
+    try:
+        gen = get_general(c)
+        attr_oth = encode_sproto([(0, 3000), (1, 0), (2, 1), (3, 5000), (15, 1)])
+        prop_data = c.get('property', [0]*20)
+        prop = encode_sproto([(13, prop_data[13]), (14, prop_data[14]), (15, prop_data[15]), (16, 0), (17, 0), (18, 0)])
+        pos = c.get('pos', [29860, 100, -17005, 0])
+        mv = get_movement(pos[0], pos[1], pos[2], pos[3])
+        attr_run = encode_sproto([(0, 3000), (2, 300), (3, 35)])
+        attr_all = encode_sproto([(0, 3000), (2, 300), (3, 35), (13, 500)])
+        run = encode_sproto([(6, attr_run), (7, attr_all)])
+        skills_data = c.get('skills', get_default_skills(c.get('prof', 0)))
+        skills_map = {}
+        for sid, sd in skills_data.items():
+            skills_map[sid] = encode_sproto([(0, sd['id']), (1, sd['lv']), (2, sd['pos']), (3, sd['unlock']), (4, sd['pos2']), (5, sd['dis'])])
+        prof = c.get('prof', 0)
+        wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
+        w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
+        equip_map = {5: w1}
+        return encode_sproto([(0, c['id']), (1, gen), (2, attr_oth), (5, prop), (6, get_visual(c.get('name', 'Hero'), prof)), (7, mv), (8, skills_map), (9, equip_map), (12, 0), (13, run), (15, 2)])
+    except Exception:
+        print("[SCENE ERROR] get_full_char failed:")
+        traceback.print_exc()
+        return encode_sproto([(0, c['id'])])
 
 def get_skill_sync(c):
-    skills_data = c.get('skills', get_default_skills(c.get('prof', 0)))
-    skills_map = {}
-    for sid, sd in skills_data.items():
-        skills_map[sid] = encode_sproto([(0, sd['id']), (1, sd['lv']), (2, sd['pos']), (3, sd['unlock']), (4, sd['pos2']), (5, sd['dis'])])
-    return encode_sproto([(0, skills_map), (1, False)])
+    try:
+        skills_data = c.get('skills', get_default_skills(c.get('prof', 0)))
+        skills_map = {}
+        for sid, sd in skills_data.items():
+            skills_map[sid] = encode_sproto([(0, sd['id']), (1, sd['lv']), (2, sd['pos']), (3, sd['unlock']), (4, sd['pos2']), (5, sd['dis'])])
+        return encode_sproto([(0, skills_map), (1, False)])
+    except Exception:
+        print("[SCENE ERROR] get_skill_sync failed:")
+        traceback.print_exc()
+        return encode_sproto([(0, {}), (1, False)])
 
 def get_mission_sync(c):
-    active = c.get('active_missions', {"1001": [1, 0, [0]*8]})
-    missions_map = {}
-    for mid, mdata in active.items():
-        state, qual, parms = mdata
-        missions_map[mid] = encode_sproto([(0, mid), (1, state), (2, qual), (3, parms)])
-    last_id = c.get('last_main_mission', "")
-    done_side = c.get('completed_side_missions', [])
-    return encode_sproto([(0, missions_map), (1, last_id), (2, done_side)])
+    try:
+        active = c.get('active_missions', {"1001": [1, 0, [0]*8]})
+        missions_map = {}
+        for mid, mdata in active.items():
+            state, qual, parms = mdata
+            missions_map[mid] = encode_sproto([(0, mid), (1, state), (2, qual), (3, parms)])
+        last_id = c.get('last_main_mission', "")
+        done_side = c.get('completed_side_missions', [])
+        return encode_sproto([(0, missions_map), (1, last_id), (2, done_side)])
+    except Exception:
+        print("[SCENE ERROR] get_mission_sync failed:")
+        traceback.print_exc()
+        return encode_sproto([(0, {}), (1, "")])
 
 def get_aoi_npc(npc_id, server_id, x, z, name="NPC"):
     vis = encode_sproto([(0, name), (1, "NPC_Nan_013"), (10, 0)])
@@ -439,32 +454,36 @@ def client_handler(conn, addr):
                     fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     
-                    # [MAP FLOW] Correct Order for Map Entry
-                    print("[MAP FLOW] Sending 614")
+                    # [SCENE DEBUG] Correct Order for Map Entry
+                    print("[SCENE DEBUG] PUSH 614")
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))]))
-                    print("[MAP FLOW] Sending 519")
+                    print("[SCENE DEBUG] PUSH 519")
                     send_rpc_push(519, get_mission_sync(picked_char))
-                    print("[MAP FLOW] Sending 503")
+                    print("[SCENE DEBUG] PUSH 503")
                     send_rpc_push(503, encode_sproto([(0, map_id), (1, line_idx), (2, 1)]))
-                    print("[MAP FLOW] Sending 504")
+                    print("[SCENE DEBUG] PUSH 504")
                     send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(29860, 100, -17005))]))
 
             elif msg == 100: # map_ready
-                print("[MAP FLOW] Received map_ready")
+                print("[SCENE DEBUG] RECEIVED msg 100 map_ready")
                 if picked_char:
-                    print("[MAP FLOW] Sending 611")
+                    print("[SCENE DEBUG] PUSH 611")
                     send_rpc_push(611, encode_sproto([(0, [])]))
-                    print("[MAP FLOW] Sending 540")
+                    print("[SCENE DEBUG] PUSH 540")
                     send_rpc_push(540, get_skill_sync(picked_char))
-                    print("[MAP FLOW] Sending 505 (World Objects)")
-                    sync_mission_world_objects(picked_char, send_rpc_push)
-                    print("[MAP FLOW] Sending 310")
+                    print("[SCENE DEBUG] PUSH 505")
+                    try:
+                        sync_mission_world_objects(picked_char, send_rpc_push)
+                    except Exception as e:
+                        print(f"[MISSION WARNING] Missing data for mission object: {e}")
+                    
+                    print("[SCENE DEBUG] PUSH 310")
                     send_rpc_push(310, encode_sproto([]))
-                    print("[MAP FLOW] Sending 145")
+                    print("[SCENE DEBUG] PUSH 145")
                     send_rpc_push(145, encode_sproto([]))
-                    print("[MAP FLOW] Sending 225")
+                    print("[SCENE DEBUG] PUSH 225")
                     send_rpc_push(225, encode_sproto([]))
-                    print("[MAP FLOW] Sending 654")
+                    print("[SCENE DEBUG] PUSH 654")
                     send_rpc_push(654, encode_sproto([(0, 1)]))
 
             elif msg == 101: # move
