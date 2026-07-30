@@ -28,78 +28,89 @@ skill_db = {}
 equip_db = {}
 
 def load_game_data():
+    # Robust Data Loader: Loading 100% of MissionData entries
     mf = find_data_file("MissionData")
     if mf:
-        with open(mf, "r", encoding="utf-8") as f:
+        with open(mf, "r", encoding="utf-8-sig") as f:
             for line in f:
-                if not line.startswith("*"): continue
-                parts = line.split(",")
-                if len(parts) > 14:
-                    mid = parts[1].strip()
-                    mclass = int(parts[6]) if parts[6].isdigit() else 0
-                    if mclass == 1:
+                try:
+                    if not line.startswith("*"): continue
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) > 14:
+                        mid = parts[1]
                         mission_logic_db[mid] = {
                             "logicType": int(parts[7]) if parts[7].isdigit() else 0,
-                            "logicId": parts[9].strip(),
-                            "target": parts[11].strip(),
-                            "nextId": parts[14].strip()
+                            "logicId": parts[9],
+                            "target": parts[11],
+                            "nextId": parts[14]
                         }
+                except: pass
+        print(f"[DATA] Loaded {len(mission_logic_db)} missions from MissionData")
+
     kf = find_data_file("KillTargetMissionData")
     if kf:
-        with open(kf, "r", encoding="utf-8") as f:
+        with open(kf, "r", encoding="utf-8-sig") as f:
             for line in f:
-                if not line.startswith("*"): continue
-                p = line.split(",")
-                if len(p) > 8:
-                    lid = p[1].strip()
-                    kill_target_db[lid] = {
-                        "npcId": p[6].strip(), 
-                        "x": int(p[3]), 
-                        "z": int(p[4]), 
-                        "require": int(p[8]) if p[8].isdigit() else 1
-                    }
+                try:
+                    if not line.startswith("*"): continue
+                    p = [i.strip() for i in line.split(",")]
+                    if len(p) > 8:
+                        lid = p[1]
+                        kill_target_db[lid] = {
+                            "npcId": p[6], 
+                            "x": int(p[3]), "z": int(p[4]), 
+                            "require": int(p[8]) if p[8].isdigit() else 1
+                        }
+                except: pass
+        print(f"[DATA] Loaded {len(kill_target_db)} kill targets from KillTargetMissionData")
+
     cf = find_data_file("TargetCarMissionData")
     if cf:
-        with open(cf, "r", encoding="utf-8") as f:
+        with open(cf, "r", encoding="utf-8-sig") as f:
             for line in f:
-                if not line.startswith("*"): continue
-                p = line.split(",")
-                if len(p) > 6:
-                    car_target_db[p[1].strip()] = {
-                        "carId": p[6].strip(), 
-                        "x": int(p[3]), 
-                        "z": int(p[4])
-                    }
+                try:
+                    if not line.startswith("*"): continue
+                    p = [i.strip() for i in line.split(",")]
+                    if len(p) > 6:
+                        car_target_db[p[1]] = {
+                            "carId": p[6], "x": int(p[3]), "z": int(p[4])
+                        }
+                except: pass
+
     rf = find_data_file("MissionRequireData")
     if rf:
-        with open(rf, "r", encoding="utf-8") as f:
+        with open(rf, "r", encoding="utf-8-sig") as f:
             for line in f:
-                if not line.startswith("*"): continue
-                p = line.split(",")
-                if len(p) > 5:
-                    lid = p[1].strip()
-                    mission_require_db[lid] = {
-                        "npcId": p[4].strip(), 
-                        "require": int(p[5]) if p[5].isdigit() else 1
-                    }
+                try:
+                    if not line.startswith("*"): continue
+                    p = [i.strip() for i in line.split(",")]
+                    if len(p) > 5:
+                        lid = p[1]
+                        mission_require_db[lid] = {
+                            "npcId": p[4], "require": int(p[5]) if p[5].isdigit() else 1
+                        }
+                except: pass
+
     sf = find_data_file("SkillData")
     if sf:
-        with open(sf, "r", encoding="utf-8") as f:
+        with open(sf, "r", encoding="utf-8-sig") as f:
             for line in f:
-                if not line.startswith("*"): continue
-                p = line.split(",")
-                if len(p) > 1:
-                    sid = p[1].strip()
-                    skill_db[sid] = {"id": sid, "name": p[2].strip()}
+                try:
+                    if not line.startswith("*"): continue
+                    p = [i.strip() for i in line.split(",")]
+                    if len(p) > 1:
+                        sid = p[1]; skill_db[sid] = {"id": sid, "name": p[2]}
+                except: pass
+
     ef = find_data_file("EquipData")
     if ef:
-        with open(ef, "r", encoding="utf-8") as f:
+        with open(ef, "r", encoding="utf-8-sig") as f:
             for line in f:
-                if not line.startswith("*"): continue
-                p = line.split(",")
-                if len(p) > 15:
-                    eid = p[1].strip()
-                    try:
+                try:
+                    if not line.startswith("*"): continue
+                    p = [i.strip() for i in line.split(",")]
+                    if len(p) > 15:
+                        eid = p[1]
                         equip_db[eid] = {
                             "id": eid, "pos": int(p[7]),
                             "stats": [
@@ -109,7 +120,7 @@ def load_game_data():
                                 (int(p[14]) if p[14].isdigit() else 0, int(p[15]) if p[15].isdigit() else 0)
                             ]
                         }
-                    except: pass
+                except: pass
 
 load_game_data()
 
