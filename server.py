@@ -1234,8 +1234,9 @@ def client_handler(conn, addr):
                                         ms['progress'] += 1
                                         if mid in picked_char['active_missions']:
                                             picked_char['active_missions'][mid][2][0] = ms['progress']
-                                            # Tag 178: update_misison_parm: missionId(0), paramType(1), paramValue(2)
-                                            send_rpc_push(178, encode_sproto([(0, mid), (1, 0), (2, ms['progress'])]))
+                                            # Tag 524: set_mission_param: missionId(0), paramindex(1), param(2)
+                                            # paramindex 0 is standard for kill count / primary objective
+                                            send_rpc_push(524, encode_sproto([(0, mid), (1, 0), (2, ms['progress'])]))
                                             
                                             logic = mission_logic_db.get(mid, {})
                                             lid = logic.get('logicId')
