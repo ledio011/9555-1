@@ -31,6 +31,7 @@ def load_game_data():
     # Robust Data Loader: Loading 100% of MissionData entries
     mf = find_data_file("MissionData")
     if mf:
+        print(f"[DATA] Found MissionData at: {mf}")
         with open(mf, "r", encoding="utf-8-sig") as f:
             for line in f:
                 try:
@@ -46,6 +47,12 @@ def load_game_data():
                         }
                 except: pass
         print(f"[DATA] Loaded {len(mission_logic_db)} missions from MissionData")
+        if "1001" in mission_logic_db:
+            print(f"[DATA] Loaded 1001: {mission_logic_db['1001']}")
+        else:
+            print("[DATA WARNING] Mission 1001 NOT FOUND in database!")
+    else:
+        print("[DATA ERROR] MissionData file NOT FOUND!")
 
     kf = find_data_file("KillTargetMissionData")
     if kf:
@@ -577,9 +584,34 @@ def client_handler(conn, addr):
                 if session is not None and picked_char:
                     p_raw = body.get(0)
                     if p_raw:
-                        pd = decode_sproto(p_raw); picked_char['pos'] = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
-                        picked_char['mapId'] = cur_map_id; save_chars(all_accounts_chars)
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, p_raw)])); conn.sendall(struct.pack(">H", len(pf)) + pf)
+                        pd = decode_sproto(p_raw)
+                        x, y, z, o = get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)
+                        picked_char['pos'] = [x, y, z, o]
+                        picked_char['mapId'] = cur_map_id
+                        # Optimization: Removed save_chars() to fix joystick lag
+                        print(f"[MOVE RECEIVED] {picked_char['name']} x={x} y={y} z={z} o={o}")
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, p_raw)]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 123: # mail_operation
+                if session is not None and picked_char:
+                    mid, op = get_val_int(body, 0), get_val_int(body, 1)
+                    if op == 0: # READ
+                        for m in picked_char['mails']:
+                            if m['id'] == mid: m['state'] = 1; m['readTime'] = int(time.time())
+                    elif op == 1: # DELETE SINGLE
+                        picked_char['mails'] = [m for m in picked_char['mails'] if m['id'] != mid]
+                    elif op == 2: # GET SINGLE ITEM
+                        for m in picked_char['mails']:
+                            if m['id'] == mid and m['state'] == 2: m['state'] = 3
+                    elif op == 3: # GET ALL ITEMS
+                        for m in picked_char['mails']:
+                            if m['state'] == 2: m['state'] = 3
+                    elif op == 4: # DELETE ALL
+                        picked_char['mails'] = [m for m in picked_char['mails'] if m['state'] == 0 or m['state'] == 2]
+                    save_chars(all_accounts_chars)
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 111: # accept_damge
                 if session is not None and picked_char:
@@ -625,11 +657,8 @@ def client_handler(conn, addr):
                                                 print(f"[MISSION COMPLETE] {mid} is now ready to submit.")
                                                 picked_char['active_missions'][mid][0] = 2
                                                 send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
-                                        save_chars(all_accounts_chars)
                                         break
-                            if not found_mission:
-                                print(f"[COMBAT DEBUG] Killed target {tid} is not a mission target for {picked_char['name']}.")
-                    
+                    save_chars(all_accounts_chars)
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([])); conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 113: # complete_mission
@@ -640,7 +669,8 @@ def client_handler(conn, addr):
                         if 'mission_state' in picked_char: picked_char['mission_state'].pop(mid, None)
                         picked_char['last_main_mission'] = mid; logic = mission_logic_db.get(mid)
                         if logic and logic['nextId'] and logic['nextId'] != "#N/A":
-                            nm = logic['nextId']; picked_char['active_missions'][nm] = [1, 0, [0]*8]; picked_char['mission_state'][nm] = init_mission_state(picked_char['id'], nm)
+                            nm = logic['nextId']; picked_char['active_missions'][nm] = [1, 0, [0]*8]
+                            picked_char['mission_state'][nm] = init_mission_state(picked_char['id'], nm)
                             nl = mission_logic_db.get(nm)
                             if nl:
                                 if nl['logicType'] == 7 and picked_char.get('level', 1) >= int(nl['logicId']): picked_char['active_missions'][nm][0] = 2
