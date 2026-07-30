@@ -151,15 +151,14 @@ def send_mail_sync(char, conn, send_push):
         ])
         send_push(531, m_proto)
 
-def get_friend_info_proto(local_id, target_id, is_foe=False):
+def get_friend_info_proto(local_id, target_id, ftype=0):
     c = get_char_by_id(target_id)
     if not c: return None
-    # 0: characterId, 1: friendId, 2: name, 3: level, 4: profession
-    # 5: combValue, 6: state, 7: timeInfo, 8: friendType, 9: guildId, 10: guildName, 11: friendScore
-    ftype = 6 if is_foe else 0 # 6: ENEMY, 0: NORMAL
+    # ftype: 0:Normal, 1:Apply, 2:Applied, 6:Enemy
     return encode_sproto([
         (0, local_id), (1, target_id), (2, c['name']), (3, c.get('level', 1)),
-        (4, c.get('prof', 0)), (5, 5000), (6, 1 if target_id in online_clients else 0),
+        (4, c.get('prof', 0)), (5, calculate_power(3000, 300, 35, 480, 60)), 
+        (6, 1 if target_id in online_clients else 0),
         (7, 0), (8, ftype), (9, 0), (10, ""), (11, 0)
     ])
 
@@ -168,10 +167,10 @@ def send_friend_sync(char, conn, send_push):
     foes = char.get('foes', [])
     res = {}
     for fid in friends:
-        p = get_friend_info_proto(char['id'], fid, False)
+        p = get_friend_info_proto(char['id'], fid, 0) # Normal
         if p: res[fid] = p
     for fid in foes:
-        p = get_friend_info_proto(char['id'], fid, True)
+        p = get_friend_info_proto(char['id'], fid, 6) # Enemy
         if p: res[fid] = p
     send_push(538, encode_sproto([(0, res)]))
 
@@ -832,13 +831,41 @@ def client_handler(conn, addr):
             elif msg == 124: # add_friend
                 if session is not None and picked_char:
                     fid = get_val_int(body, 0)
-                    ftype = get_val_int(body, 1) # 0: NORMAL, 1: ENEMY
-                    if ftype == 0:
-                        if fid not in picked_char['friends']: picked_char['friends'].append(fid)
-                    else:
-                        if fid not in picked_char['foes']: picked_char['foes'].append(fid)
-                    save_chars(all_accounts_chars)
-                    send_friend_sync(picked_char, conn, send_rpc_push)
+                    ftype = get_val_int(body, 1) # 0: NORMAL/FRIEND, 1: ENEMY
+                    target_char = get_char_by_id(fid)
+                    
+                    if target_char:
+                        if ftype == 0: # Friend Request
+                            # Sender: APPLY (1)
+                            # (In a real system, we'd wait for accept, but let's implement the handshake)
+                            if fid not in picked_char['friends']: 
+                                picked_char['friends'].append(fid)
+                                # Remove from foes if exists
+                                if fid in picked_char.get('foes', []): picked_char['foes'].remove(fid)
+                            
+                            # Notify Sender: Tag 533 (Normal for now to satisfy UI)
+                            p_sender = get_friend_info_proto(picked_char['id'], fid, 0)
+                            send_rpc_push(533, encode_sproto([(0, p_sender)]))
+                            
+                            # Notify Receiver (if online): Tag 533 (APPLIED 2)
+                            if fid in online_clients:
+                                r_conn, _, _, _ = online_clients[fid]
+                                p_rec = get_friend_info_proto(fid, picked_char['id'], 2)
+                                ph_r = encode_sproto([(0, 533)]); pf_r = sproto_pack(ph_r + p_rec)
+                                try: r_conn.sendall(struct.pack(">H", len(pf_r)) + pf_r)
+                                except: pass
+                        
+                        else: # Add Enemy
+                            if fid not in picked_char.setdefault('foes', []):
+                                picked_char['foes'].append(fid)
+                                if fid in picked_char.get('friends', []): picked_char['friends'].remove(fid)
+                            
+                            p_enemy = get_friend_info_proto(picked_char['id'], fid, 6)
+                            send_rpc_push(533, encode_sproto([(0, p_enemy)]))
+                        
+                        save_chars(all_accounts_chars)
+                        send_friend_sync(picked_char, conn, send_rpc_push)
+                        
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
@@ -1198,24 +1225,31 @@ def client_handler(conn, addr):
                         npc_hps[tid] = new_hp
                         send_rpc_push(510, encode_sproto([(0, tid), (1, encode_sproto([(0, new_hp)]))]))
                         if new_hp == 0:
+                            print(f"[COMBAT] Target {tid} died.")
                             send_rpc_push(506, encode_sproto([(0, tid)]))
                             for mid, ms in picked_char.get('mission_state', {}).items():
-                                    if tid in ms.get('alive_sids', []):
-                                        if 'dead_sids' not in ms: ms['dead_sids'] = []
-                                        if tid not in ms['dead_sids']:
-                                            ms['dead_sids'].append(tid)
-                                            ms['progress'] += 1
-                                            if mid in picked_char['active_missions']:
-                                                picked_char['active_missions'][mid][2][0] = ms['progress']
-                                                logic = mission_logic_db.get(mid, {})
-                                                req = kill_target_db.get(logic.get('logicId'), {}).get('require', 1) if logic.get('logicType') == 23 else mission_require_db.get(logic.get('logicId'), {}).get('require', 1)
-                                                print(f"[MISSION DEAD] Mission: {mid} SID: {tid} Progress: {ms['progress']}/{req}")
-                                                if ms['progress'] >= req:
-                                                    picked_char['active_missions'][mid][0] = 2 
-                                                    send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
-                                            send_rpc_push(519, get_mission_sync(picked_char))
-                                            save_chars(all_accounts_chars)
-                                            break
+                                if tid in ms.get('alive_sids', []):
+                                    if tid not in ms.get('dead_sids', []):
+                                        ms.setdefault('dead_sids', []).append(tid)
+                                        ms['progress'] += 1
+                                        if mid in picked_char['active_missions']:
+                                            picked_char['active_missions'][mid][2][0] = ms['progress']
+                                            # Tag 178: update_misison_parm: missionId(0), paramType(1), paramValue(2)
+                                            send_rpc_push(178, encode_sproto([(0, mid), (1, 0), (2, ms['progress'])]))
+                                            
+                                            logic = mission_logic_db.get(mid, {})
+                                            lid = logic.get('logicId')
+                                            ltype = logic.get('logicType')
+                                            req_data = kill_target_db.get(lid) if ltype == 23 else mission_require_db.get(lid)
+                                            req = req_data.get('require', 1) if req_data else 1
+                                            
+                                            print(f"[MISSION PROGRESS] {mid}: {ms['progress']}/{req}")
+                                            if ms['progress'] >= req:
+                                                picked_char['active_missions'][mid][0] = 2 
+                                                # Tag 523: set_mission_state: missionId(0), missionstate(1)
+                                                send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                                        save_chars(all_accounts_chars)
+                                        break
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
