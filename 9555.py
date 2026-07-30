@@ -2,29 +2,33 @@ import socket, struct, threading, random, json, os, time, traceback
 
 PORT = int(os.environ.get("PORT", 9555))
 CHAR_DB = "characters_final.json"
-MISSION_DB_PATH = "missions.json"
-REWARD_DB_PATH = "mission_rewards.json"
 server_session_counter = 8000
 
-def load_json(path):
-    if os.path.exists(path):
+# Load Mission Data
+missions_data = {}
+rewards_data = {}
+try:
+    md_path = os.path.join(os.path.dirname(__file__), "missions.json")
+    rd_path = os.path.join(os.path.dirname(__file__), "mission_rewards.json")
+    if os.path.exists(md_path):
+        with open(md_path, "r", encoding='utf-8') as f: missions_data = json.load(f)
+    if os.path.exists(rd_path):
+        with open(rd_path, "r", encoding='utf-8') as f: rewards_data = json.load(f)
+except: traceback.print_exc()
+
+def load_chars():
+    if os.path.exists(CHAR_DB):
         try:
-            with open(path, "r", encoding="utf-8") as f: return json.load(f)
+            with open(CHAR_DB, "r") as f: return json.load(f)
         except: return {}
     return {}
-
-all_accounts_chars = load_json(CHAR_DB)
-MISSION_DB = load_json(MISSION_DB_PATH)
-REWARD_DB = load_json(REWARD_DB_PATH)
-
-def load_chars(): # Compatibility for existing code if needed
-    return load_json(CHAR_DB)
 
 def save_chars(data):
     try:
         with open(CHAR_DB, "w") as f: json.dump(data, f, indent=4)
     except: pass
 
+all_accounts_chars = load_chars()
 
 def generate_unique_char_id():
     return int(time.time() * 1000) % 1000000000
@@ -180,7 +184,7 @@ def get_movement(x, y, z, o=0):
 
 def get_char_ov(c):
     gen = get_general(c)
-    attr = encode_sproto([(0, 1), (1, 5000)]) # level, combValue
+    attr = encode_sproto([(0, c.get('level', 1)), (1, 5000)]) # level, combValue
     return encode_sproto([
         (0, c['id']),
         (1, gen),
@@ -193,11 +197,12 @@ def get_char_ov(c):
 def get_full_char(c):
     gen = get_general(c)
     # attribute_other: hp(0), exp(1), level(2), combValue(3), camp(15)
-    attr_oth = encode_sproto([(0, 3000), (1, 0), (2, 1), (3, 5000), (15, 1)])
-    # property: Tag 13-18 are money and other fields. Cash: 1000, Gold: 100, Diamond: 10
-    prop = encode_sproto([(13, 1000), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
+    attr_oth = encode_sproto([(0, 3000), (1, c.get('exp', 0)), (2, c.get('level', 1)), (3, 5000), (15, 1)])
+    # property: Tag 13-15 are money fields. Cash: 1000, Gold: 100, Diamond: 10
+    prop = encode_sproto([(13, c.get('cash', 1000)), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
 
     # Position Persistence: Default to Mission 1001 area for new chars
+    # Raw int coords in cm.
     pos = c.get('pos', [29860, 100, -17005, 0])
     mv = get_movement(pos[0], pos[1], pos[2], pos[3])
     # runtime_agent: max_hp(0), atk(2), def(3).
@@ -209,18 +214,16 @@ def get_full_char(c):
     prof = c.get('prof', 0)
     sid = "101" if prof == 0 else "201" if prof == 1 else "301"
     did = "104" if prof == 0 else "204" if prof == 1 else "304"
-    aid = "105" if prof == 0 else "205" if prof == 1 else "305"
     wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
 
-    # Tag 8: skills (map string->skill_info). Attack(0), Active(1), Dodge(3)
+    # Tag 8: skills (map string->skill_info). Attack(0), Dodge(3)
     s1 = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)])
     s2 = encode_sproto([(0, did), (1, 1), (2, 3), (3, 1), (4, 1), (5, False)])
-    s3 = encode_sproto([(0, aid), (1, 1), (2, 1), (3, 1), (4, 1), (5, False)])
-    skills_map = {sid: s1, did: s2, aid: s3}
+    skills_map = {sid: s1, did: s2}
 
-    # Tag 9: equip (map long->gameitem). Key 0 = WEAPON slot.
-    w1 = encode_sproto([(0, 0), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
-    equip_map = {0: w1}
+    # Tag 9: equip (map long->gameitem). Key 5 = WEAPON slot.
+    w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
+    equip_map = {5: w1}
 
     return encode_sproto([
         (0, c['id']),
@@ -235,6 +238,36 @@ def get_full_char(c):
         (13, run),
         (15, 2)  # download finish
     ])
+
+def sync_mission(picked_char):
+    own_missions = {}
+    for mid, mdata in picked_char.get('active_missions', {}).items():
+        own_missions[mid] = encode_sproto([
+            (0, mid),
+            (1, mdata['state']),
+            (3, mdata['parm'])
+        ])
+    return encode_sproto([
+        (0, own_missions),
+        (1, picked_char.get('last_main_mission_id', "")),
+        (2, picked_char.get('completed_side_missions', []))
+    ])
+
+def accept_mission_logic(picked_char, mid):
+    if mid not in missions_data: return False
+    m = missions_data[mid]
+    if picked_char.get('level', 1) < m.get('min_level', 0): return False
+    pre_id = m.get('pre_id', "")
+    if pre_id:
+        if m['class'] == 1:
+            if picked_char.get('last_main_mission_id', "") != pre_id: return False
+        else:
+            if pre_id not in picked_char.get('completed_side_missions', []): return False
+    if 'active_missions' not in picked_char: picked_char['active_missions'] = {}
+    if mid in picked_char['active_missions']: return False
+    parm = [0]*8; parm[7] = int(time.time())
+    picked_char['active_missions'][mid] = {'state': 1, 'parm': parm, 'accept_time': int(time.time())}
+    return True
 
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
@@ -285,12 +318,7 @@ def client_handler(conn, addr):
                 prof = get_val_int(c_data, 1, 0); cid = generate_unique_char_id()
                 if cur_areaId not in all_accounts_chars: all_accounts_chars[cur_areaId] = {}
                 if acc_id not in all_accounts_chars[cur_areaId]: all_accounts_chars[cur_areaId][acc_id] = []
-                nc = {
-                    'id': cid, 'name': name, 'prof': prof,
-                    'active_missions': {},
-                    'completed_missions': [],
-                    'last_main_id': ""
-                }
+                nc = {'id': cid, 'name': name, 'prof': prof, 'level': 1, 'exp': 0, 'cash': 1000, 'active_missions': {}, 'completed_side_missions': [], 'last_main_mission_id': ""}
                 all_accounts_chars[cur_areaId][acc_id].append(nc); save_chars(all_accounts_chars)
                 resp = encode_sproto([(0, get_char_ov(nc)), (1, 0)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
@@ -303,32 +331,33 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
-                    # Initialize missing mission fields for legacy characters
+                    # Init mission fields if missing
                     if 'active_missions' not in picked_char: picked_char['active_missions'] = {}
-                    if 'completed_missions' not in picked_char: picked_char['completed_missions'] = []
-                    if 'last_main_id' not in picked_char: picked_char['last_main_id'] = ""
+                    if 'completed_side_missions' not in picked_char: picked_char['completed_side_missions'] = []
+                    if 'last_main_mission_id' not in picked_char: picked_char['last_main_mission_id'] = ""
+                    if 'level' not in picked_char: picked_char['level'] = 1
+                    if 'exp' not in picked_char: picked_char['exp'] = 0
+                    if 'cash' not in picked_char: picked_char['cash'] = 1000
 
-                    # Bootstrap: if no missions, assign 1001
-                    if not picked_char['active_missions'] and not picked_char['completed_missions']:
-                        picked_char['active_missions']["1001"] = {"state": 1, "parm": [0, 0, 0, 0, 0, 0, 0, int(time.time())]}
-                        save_chars(all_accounts_chars)
+                    # Auto-accept next main mission if none active
+                    has_active_main = any(missions_data.get(mid, {}).get('class') == 1 for mid in picked_char['active_missions'])
+                    if not has_active_main:
+                        last_mid = picked_char['last_main_mission_id']
+                        if not last_mid:
+                            first_main = next((mid for mid, m in missions_data.items() if m['class'] == 1 and not m.get('pre_id')), None)
+                            if first_main: accept_mission_logic(picked_char, first_main)
+                        else:
+                            next_mid = missions_data.get(last_mid, {}).get('next_id')
+                            if next_mid: accept_mission_logic(picked_char, next_mid)
+                    save_chars(all_accounts_chars)
 
-                    # Sync common data and missions BEFORE map entry to ensure HUD and Spawner initialization
-                    fids = [100, 101, 102, 103, 104, 105, 106, 107, 108, 3001, 3010, 3012, 3013, 3014, 3015, 3018, 3020, 3030, 4014, 4026, 4061, 4064, 4081, 4084]
-                    funcs = {str(fid): encode_sproto([(0, str(fid)), (1, 1)]) for fid in fids}
+                    # Sync common data
+                    fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
+                    funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))]))
 
-                    # Dynamic sync of active missions
-                    ms_encoded = {}
-                    last_id = picked_char['last_main_id']
-                    for mid, mdata in picked_char['active_missions'].items():
-                        # mid (Tag 0) should be string for SprotoType.mission
-                        m_pkt = encode_sproto([(0, str(mid)), (1, mdata['state']), (2, 0), (3, mdata['parm'])])
-                        ms_encoded[str(mid)] = m_pkt
-                        if not last_id: last_id = str(mid) # Fallback for HUD focus
-                    
-                    send_rpc_push(519, encode_sproto([(0, ms_encoded), (1, last_id)]))
-
+                    # Push Missions and Full Char
+                    send_rpc_push(519, sync_mission(picked_char))
                     send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)]))
                     send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(29860, 100, -17005))]))
 
@@ -355,17 +384,63 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 113: # complete_mission
-                if session is not None:
+                if session is not None and picked_char:
+                    mid = body.get(0, b"").decode('utf-8')
+                    if mid in picked_char.get('active_missions', {}) and picked_char['active_missions'][mid]['state'] == 2:
+                        m = missions_data.get(mid)
+                        if m:
+                            prof = picked_char.get('prof', 0)
+                            rids = m.get('reward_ids', [])
+                            if rids and prof < len(rids):
+                                rid = rids[prof]
+                                reward = rewards_data.get(rid)
+                                if reward:
+                                    picked_char['exp'] = picked_char.get('exp', 0) + reward.get('exp', 0)
+                                    picked_char['cash'] = picked_char.get('cash', 1000) + reward.get('cash', 0)
+                                    while picked_char['exp'] >= picked_char['level'] * 100000:
+                                        picked_char['exp'] -= picked_char['level'] * 100000
+                                        picked_char['level'] += 1
+                            if m['class'] == 1: picked_char['last_main_mission_id'] = mid
+                            else:
+                                if mid not in picked_char['completed_side_missions']: picked_char['completed_side_missions'].append(mid)
+                            del picked_char['active_missions'][mid]
+                            if m.get('is_multi') == 1 or m['class'] == 8:
+                                next_id = m.get('next_id')
+                                if next_id: accept_mission_logic(picked_char, next_id)
+                            save_chars(all_accounts_chars)
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    send_rpc_push(519, sync_mission(picked_char))
 
             elif msg == 112: # accept_mission
-                if session is not None:
+                if session is not None and picked_char:
+                    mid = body.get(0, b"").decode('utf-8')
+                    accept_mission_logic(picked_char, mid)
+                    save_chars(all_accounts_chars)
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
-                    mid = body.get(0, b"").decode('utf-8')
-                    m_new = encode_sproto([(0, mid), (1, 1), (2, 0), (3, [0]*8)])
-                    send_rpc_push(519, encode_sproto([(0, {mid: m_new}), (1, mid)]))
+                    send_rpc_push(519, sync_mission(picked_char))
+
+            elif msg == 524: # set_mission_param
+                mid = body.get(0, b"").decode('utf-8')
+                idx = get_val_int(body, 1); val = get_val_int(body, 2)
+                if picked_char and mid in picked_char.get('active_missions', {}):
+                    picked_char['active_missions'][mid]['parm'][idx-1] = val
+                    save_chars(all_accounts_chars)
+                    if session is not None:
+                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                        conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 523: # set_mission_state
+                mid = body.get(0, b"").decode('utf-8')
+                state = get_val_int(body, 1)
+                if picked_char and mid in picked_char.get('active_missions', {}):
+                    picked_char['active_missions'][mid]['state'] = state
+                    save_chars(all_accounts_chars)
+                    if session is not None:
+                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                        conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    send_rpc_push(519, sync_mission(picked_char))
 
             elif msg in [118, 218, 145, 225, 258, 261, 278, 296, 299, 310, 313, 319]:
                 # Generic Responder for Scene Info and UI Requests
