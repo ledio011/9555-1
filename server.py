@@ -592,7 +592,8 @@ def client_handler(conn, addr):
                       'mission_state': {"1001": init_mission_state("1001")}, 
                       'last_main_mission': "",
                       'mails': [], 'friends': [], 'foes': [],
-                      'backpack': [], 'equip': {}}
+                      'backpack': [], 'equip': {},
+                      'mapId': "11", 'pos': [29860, 100, -17005, 0]}
                 
                 if VERIFICATION_MODE:
                     # [TEST ONLY] Grant "Starter Kit" (Weapon, Head, Body)
@@ -622,6 +623,8 @@ def client_handler(conn, addr):
                     if 'foes' not in picked_char: picked_char['foes'] = []
                     if 'backpack' not in picked_char: picked_char['backpack'] = []
                     if 'equip' not in picked_char: picked_char['equip'] = {}
+                    if 'mapId' not in picked_char: picked_char['mapId'] = "11"
+                    if 'pos' not in picked_char: picked_char['pos'] = [29860, 100, -17005, 0]
                     
                     if 'active_missions' not in picked_char: picked_char['active_missions'] = {"1001": [1, 0, [0]*8]}
                     if 'mission_state' not in picked_char:
@@ -631,7 +634,8 @@ def client_handler(conn, addr):
                         except Exception as e: print(f"[SCENE ERROR] init_mission_state failed: {e}")
                     
                     save_chars(all_accounts_chars)
-                    cur_map_id, line_idx = "11", 1; online_clients[char_id] = (conn, cur_map_id, line_idx, picked_char)
+                    cur_map_id = picked_char.get('mapId', "11")
+                    line_idx = 1; online_clients[char_id] = (conn, cur_map_id, line_idx, picked_char)
                     
                     # STARTER UNLOCK: Only functions with Condition <= level
                     fids = ["4083","3031","4084","100","3016","4063","4061","4062","4064","3001","4081","111","112","110","3024","3025","3026","3027","3028","3029","107","108","109","3030","3014"]
@@ -647,8 +651,9 @@ def client_handler(conn, addr):
                     print("[MAP FLOW] Sending 503 enter_map")
                     send_rpc_push(503, encode_sproto([(0, cur_map_id), (1, line_idx), (2, 1)]))
                     
-                    print("[MAP FLOW] Sending 504 main_player_create")
-                    send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(29860, 100, -17005))]))
+                    last_pos = picked_char.get('pos', [29860, 100, -17005, 0])
+                    print(f"[MAP FLOW] Sending 504 main_player_create at {last_pos}")
+                    send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(last_pos[0], last_pos[1], last_pos[2], last_pos[3]))]))
                     
                     # Phase 1: Social & Mail Sync on Pick
                     send_friend_sync(picked_char, conn, send_rpc_push)
@@ -1156,7 +1161,10 @@ def client_handler(conn, addr):
                     p_raw = body.get(0)
                     if p_raw:
                         pd = decode_sproto(p_raw)
+                        # Save [X, Y, Z, O]
                         picked_char['pos'] = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
+                        # Also keep character's current mapId in sync
+                        picked_char['mapId'] = cur_map_id
                         save_chars(all_accounts_chars)
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, p_raw)]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
