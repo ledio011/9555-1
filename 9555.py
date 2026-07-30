@@ -198,7 +198,6 @@ def get_full_char(c):
     prop = encode_sproto([(13, 1000), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
 
     # Position Persistence: Default to Mission 1001 area for new chars
-    # Raw int coords in cm.
     pos = c.get('pos', [29860, 100, -17005, 0])
     mv = get_movement(pos[0], pos[1], pos[2], pos[3])
     # runtime_agent: max_hp(0), atk(2), def(3).
@@ -208,11 +207,11 @@ def get_full_char(c):
     run = encode_sproto([(6, attr_run), (7, attr_all)])
 
     prof = c.get('prof', 0)
-    sid = 101 if prof == 0 else 201 if prof == 1 else 301
-    did = 104 if prof == 0 else 204 if prof == 1 else 304
-    wid = 10001 if prof == 0 else 20001 if prof == 1 else 30001
+    sid = "101" if prof == 0 else "201" if prof == 1 else "301"
+    did = "104" if prof == 0 else "204" if prof == 1 else "304"
+    wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
 
-    # Tag 8: skills (map long->skill_info). Attack(0), Dodge(3)
+    # Tag 8: skills (map string->skill_info). Attack(0), Dodge(3)
     s1 = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)])
     s2 = encode_sproto([(0, did), (1, 1), (2, 3), (3, 1), (4, 1), (5, False)])
     skills_map = {sid: s1, did: s2}
@@ -225,8 +224,9 @@ def get_full_char(c):
         (0, c['id']),
         (1, gen),
         (2, attr_oth),
+        (3, get_visual(c.get('name', 'Hero'), prof)),
+        (4, int(time.time())),
         (5, prop),
-        (6, get_visual(c.get('name', 'Hero'), prof)),
         (7, mv),
         (8, skills_map),
         (9, equip_map),
@@ -314,17 +314,17 @@ def client_handler(conn, addr):
 
                     # Sync common data and missions BEFORE map entry to ensure HUD and Spawner initialization
                     fids = [100, 101, 102, 103, 104, 105, 106, 107, 108, 3001, 3010, 3012, 3013, 3014, 3015, 3018, 3020, 3030, 4014, 4026, 4061, 4064, 4081, 4084]
-                    funcs = {str(fid): encode_sproto([(0, fid), (1, 1)]) for fid in fids}
+                    funcs = {str(fid): encode_sproto([(0, str(fid)), (1, 1)]) for fid in fids}
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))]))
 
                     # Dynamic sync of active missions
                     ms_encoded = {}
                     last_id = picked_char['last_main_id']
                     for mid, mdata in picked_char['active_missions'].items():
-                        # mid should be encoded as integer ID if tag 0 is int
-                        m_pkt = encode_sproto([(0, int(mid)), (1, mdata['state']), (2, 0), (3, mdata['parm'])])
-                        ms_encoded[mid] = m_pkt
-                        if not last_id: last_id = mid # Fallback for HUD focus
+                        # mid (Tag 0) should be string for SprotoType.mission
+                        m_pkt = encode_sproto([(0, str(mid)), (1, mdata['state']), (2, 0), (3, mdata['parm'])])
+                        ms_encoded[str(mid)] = m_pkt
+                        if not last_id: last_id = str(mid) # Fallback for HUD focus
                     
                     send_rpc_push(519, encode_sproto([(0, ms_encoded), (1, last_id)]))
 
@@ -363,7 +363,7 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
                     mid = body.get(0, b"").decode('utf-8')
-                    m_new = encode_sproto([(0, int(mid)), (1, 1), (2, 0), (3, [0]*8)])
+                    m_new = encode_sproto([(0, mid), (1, 1), (2, 0), (3, [0]*8)])
                     send_rpc_push(519, encode_sproto([(0, {mid: m_new}), (1, mid)]))
 
             elif msg in [118, 218, 145, 225, 258, 261, 278, 296, 299, 310, 313, 319]:
