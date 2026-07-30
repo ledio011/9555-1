@@ -503,6 +503,17 @@ def get_aoi_car(car_id, server_id, x, z, name="Car"):
     attr = encode_sproto([(6, stats), (7, stats)])
     return encode_sproto([(0, server_id), (1, vis), (2, gen), (3, stats), (5, mv), (6, attr)])
 
+def get_mission_npc_proto(npc_id, server_id, x, z, name="Mission Target"):
+    # SprotoType.npc_attribute (Tag 509 npc_create expects this)
+    # id(0), npcdataid(1), hp(2), max_hp(3), atk(4), def(5), hit(6), eva(7), cri(8)
+    # exd(9), exr(10), res(11), crd(12), crr(13), defa(14), x(15), z(16), o(17), level(18)
+    # player_name(21)
+    return encode_sproto([
+        (0, server_id), (1, str(npc_id)), (2, 1000), (3, 1000),
+        (4, 100), (5, 50), (6, 100), (15, x), (16, z), (17, 0), (18, 1),
+        (21, name)
+    ])
+
 def sync_mission_world_objects(char, send_push_func):
     active = char.get('active_missions', {})
     mstate = char.get('mission_state', {})
@@ -524,13 +535,14 @@ def sync_mission_world_objects(char, send_push_func):
                         npc_hps[sid] = 1000
                         x = target.get('x', 29860) + random.randint(-100, 100)
                         z = target.get('z', -17005) + random.randint(-100, 100)
-                        print(f"[MISSION SPAWN] Mission: {mid} SID: {sid} NPC: {npc_id} Pos: {x}, {z}")
-                        send_push_func(505, get_aoi_npc(npc_id, sid, x, z, "Target"))
+                        print(f"[MISSION SPAWN] {mid} SID: {sid} NPC: {npc_id}")
+                        # Tag 509: npc_create: npc_attribute(0)
+                        send_push_func(509, encode_sproto([(0, get_mission_npc_proto(npc_id, sid, x, z))]))
             elif ltype == 24 and state.get('progress', 0) == 0:
                 target = car_target_db.get(lid)
                 if target:
                     sid = 800000 + int(lid)
-                    print(f"[MISSION SPAWN] Mission: {mid} SID: {sid} Car: {target['carId']}")
+                    print(f"[MISSION SPAWN] {mid} SID: {sid} Car: {target['carId']}")
                     send_push_func(505, get_aoi_car(target['carId'], sid, target['x'], target['z'], "Car"))
         except Exception as e:
             print(f"[MISSION WARNING] Error syncing mission {mid}: {e}")
@@ -631,6 +643,13 @@ def client_handler(conn, addr):
                             picked_char['mission_state'] = {}
                             for mid in picked_char['active_missions']: picked_char['mission_state'][mid] = init_mission_state(mid)
                         except Exception as e: print(f"[SCENE ERROR] init_mission_state failed: {e}")
+                    
+                    # Check for automatic mission completions (Level Up)
+                    for mid, mdata in picked_char['active_missions'].items():
+                        logic = mission_logic_db.get(mid)
+                        if logic and logic['logicType'] == 7: # LEVEL_UP
+                            if picked_char.get('level', 1) >= int(logic['logicId']):
+                                mdata[0] = 2 # Completable
                     
                     save_chars(all_accounts_chars)
                     cur_map_id = picked_char.get('mapId', "11")
@@ -1261,15 +1280,29 @@ def client_handler(conn, addr):
                         del picked_char['active_missions'][mid]
                         if 'mission_state' in picked_char and mid in picked_char['mission_state']: del picked_char['mission_state'][mid]
                         picked_char['last_main_mission'] = mid
+                        
                         logic = mission_logic_db.get(mid)
                         if logic and logic['nextId'] and logic['nextId'] != "#N/A":
                             next_mid = logic['nextId']
+                            # Accept Next Mission automatically
                             picked_char['active_missions'][next_mid] = [1, 0, [0]*8]
                             picked_char['mission_state'][next_mid] = init_mission_state(next_mid)
-                            print(f"[MISSION] {mid} -> {next_mid}")
+                            
+                            # Check for immediate requirements (e.g. Level Up)
+                            n_logic = mission_logic_db.get(next_mid)
+                            if n_logic and n_logic['logicType'] == 7: # LEVEL_UP
+                                req_lv = int(n_logic['logicId'])
+                                if picked_char.get('level', 1) >= req_lv:
+                                    picked_char['active_missions'][next_mid][0] = 2
+                            
+                            print(f"[STORY PROGRESS] Completed {mid} -> Started {next_mid}")
+                        
                         save_chars(all_accounts_chars)
+                        # Push Updated Mission List (Tag 519)
                         send_rpc_push(519, get_mission_sync(picked_char))
+                        # Spawn next mission objects
                         sync_mission_world_objects(picked_char, send_rpc_push)
+                        
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
@@ -1279,6 +1312,12 @@ def client_handler(conn, addr):
                     picked_char['active_missions'][mid] = [1, 0, [0]*8]
                     if 'mission_state' not in picked_char: picked_char['mission_state'] = {}
                     picked_char['mission_state'][mid] = init_mission_state(mid)
+                    
+                    # Logic 2: Talk/Delivery - complete immediately upon interaction
+                    logic = mission_logic_db.get(mid)
+                    if logic and logic['logicType'] == 2:
+                        picked_char['active_missions'][mid][0] = 2
+                    
                     save_chars(all_accounts_chars); send_rpc_push(519, get_mission_sync(picked_char))
                     sync_mission_world_objects(picked_char, send_rpc_push)
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -1288,8 +1327,10 @@ def client_handler(conn, addr):
                 if session is not None and picked_char:
                     for mid, mdata in picked_char.get('active_missions', {}).items():
                         logic = mission_logic_db.get(mid)
+                        # Type 24: TARGET_ROB_CAR
                         if logic and logic['logicType'] == 24:
-                            mdata[2][0], mdata[0] = 1, 2
+                            mdata[0] = 2 # Completable
+                            # Tag 523: set_mission_state
                             send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
                             send_rpc_push(519, get_mission_sync(picked_char))
                     save_chars(all_accounts_chars)
