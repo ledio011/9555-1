@@ -679,6 +679,98 @@ def client_handler(conn, addr):
                     print("[MAP FLOW] Sending 654 start_enter_game")
                     send_rpc_push(654, encode_sproto([(0, 1)]))
 
+            elif msg == 126: # request_update_friend_useinfo
+                print(f"[UI REQUEST] tag={msg} (Social)")
+                ftype = get_val_int(body, 1)
+                res_map = {}
+                target_ids = picked_char.get('friends', []) if ftype == 0 else picked_char.get('foes', [])
+                for fid in target_ids:
+                    c = get_char_by_id(fid)
+                    if c:
+                        res_map[fid] = encode_sproto([
+                            (1, fid), (2, c['name']), (3, c.get('level', 1)),
+                            (4, c.get('prof', 0)), (5, 5000), (6, 1 if fid in online_clients else 0),
+                            (8, 6 if ftype == 1 else 0)
+                        ])
+                print(f"[UI RESPONSE] tag=534 (Social Sync)")
+                send_rpc_push(534, encode_sproto([(0, res_map), (1, ftype)]))
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 143: # ask_shop_list
+                print(f"[UI REQUEST] tag={msg} (Shop)")
+                stype = get_val_int(body, 0)
+                # SprotoType.ret_ask_shop_list (554): type(0), curPage(1), maxPage(2), shop_list(3), subType(4)
+                resp = encode_sproto([(0, stype), (1, 1), (2, 1), (3, []), (4, 0)])
+                print(f"[UI RESPONSE] tag=554 (Shop List)")
+                send_rpc_push(554, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 242: # request_slot_info
+                print(f"[UI REQUEST] tag={msg} (Slot Machine)")
+                # SprotoType.ret_slot_info (633): slot_info(0), slot_datas(1), slot_items(2)
+                s_info = encode_sproto([(1, 10), (2, 100)]) # Placeholder coins
+                resp = encode_sproto([(0, s_info), (1, {}), (2, {})])
+                print(f"[UI RESPONSE] tag=633 (Slot Info)")
+                send_rpc_push(633, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 145: # ask_copyscenes_info
+                print(f"[UI REQUEST] tag={msg} (Side Missions/Dungeons)")
+                # SprotoType.sync_copyscenes_info (555): copyscenes(0) map string->copyscene_info
+                resp = encode_sproto([(0, {})])
+                print(f"[UI RESPONSE] tag=555 (Copy Scenes Sync)")
+                send_rpc_push(555, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 225: # request_activity_info
+                print(f"[UI REQUEST] tag={msg} (Activities)")
+                # SprotoType.ret_request_activity_info (619): activity_info(0) map string->activity_info
+                resp = encode_sproto([(0, {})])
+                print(f"[UI RESPONSE] tag=619 (Activity Sync)")
+                send_rpc_push(619, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 254: # sign_30_day
+                print(f"[UI REQUEST] tag={msg} (Sign 30)")
+                # ret_sign_30_day (642): cur_sign(0), replenish(1), sys_sign(2), cur_sign_state(3), replenish_sign_state(4), count(5), str(6)
+                resp = encode_sproto([(0, 1), (1, 0), (2, 1), (3, False), (4, False), (5, 0), (6, "")])
+                print(f"[UI RESPONSE] tag=642")
+                send_rpc_push(642, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 255: # sign_week
+                print(f"[UI REQUEST] tag={msg} (Sign Week)")
+                # ret_sign_week (643): cur_sign(0), cur_sign_state(1)
+                resp = encode_sproto([(0, 1), (1, False)])
+                print(f"[UI RESPONSE] tag=643")
+                send_rpc_push(643, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 257: # request_invest_pack
+                print(f"[UI REQUEST] tag={msg} (Invest)")
+                # ret_request_invest_pack (645): invest_pack(0) map string->invest_pack
+                resp = encode_sproto([(0, {})])
+                print(f"[UI RESPONSE] tag=645")
+                send_rpc_push(645, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 261: # request_daily_active
+                print(f"[UI REQUEST] tag={msg} (Daily Active)")
+                # ret_request_daily_active (649): daily_actives(0), daily_rewards(1), score(2)
+                resp = encode_sproto([(0, {}), (1, {}), (2, 0)])
+                print(f"[UI RESPONSE] tag=649")
+                send_rpc_push(649, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
             elif msg == 120: # chat
                 if session is not None and picked_char:
                     c_info = body.get(2, b"").decode('utf-8') if isinstance(body.get(2), bytes) else str(body.get(2))
@@ -789,6 +881,273 @@ def client_handler(conn, addr):
                         print(f"[EQUIP DEBUG] {picked_char['name']} unequipped ID: {item['id']} (Slot: {target_pos})")
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 126: # request_update_friend_useinfo
+                print(f"[UI REQUEST] tag=126 (Friends Sync) SESSION={session}")
+                # Use the existing send_friend_sync helper logic but wrap it in 534
+                friends = picked_char.get('friends', [])
+                foes = picked_char.get('foes', [])
+                res = {}
+                for fid in friends + foes:
+                    c = get_char_by_id(fid)
+                    if c:
+                        ftype = 6 if fid in foes else 0
+                        res[fid] = encode_sproto([
+                            (0, picked_char['id']), (1, fid), (2, c['name']), (3, c.get('level', 1)),
+                            (4, c.get('prof', 0)), (5, 5000), (6, 1 if fid in online_clients else 0),
+                            (8, ftype)
+                        ])
+                # ret_request_update_friend_useinfo (534): friend_list(0), type(1)
+                resp = encode_sproto([(0, res), (1, body.get(0, 0))])
+                print(f"[UI RESPONSE] tag=534 (Friends Sync)")
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 143: # ask_shop_list
+                print(f"[UI REQUEST] tag=143 (Shop List) SESSION={session}")
+                # ret_ask_shop_list (554): type(0), curPage(1), maxPage(2), shop_list(3)
+                resp = encode_sproto([(0, body.get(0, 0)), (1, 1), (2, 1), (3, [])])
+                print(f"[UI RESPONSE] tag=554 (Shop List)")
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 242: # request_slot_info
+                print(f"[UI REQUEST] tag=242 (Slot Info) SESSION={session}")
+                # ret_slot_info (633): slot_info(0), slot_datas(1), slot_items(2)
+                # slot_info: type(0), free_count(1), total_count(2)...
+                si = encode_sproto([(0, 0), (1, 5), (2, 0)])
+                resp = encode_sproto([(0, si), (1, {}), (2, {})])
+                print(f"[UI RESPONSE] tag=633 (Slot Info)")
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 145: # ask_copyscenes_info
+                print(f"[UI REQUEST] tag=145 (Side Missions) SESSION={session}")
+                # sync_copyscenes_info (555): copyscenes(0) map
+                resp = encode_sproto([(0, {})])
+                print(f"[UI RESPONSE] tag=555 (Side Missions)")
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 225: # request_activity_info
+                print(f"[UI REQUEST] tag=225 (Activity Info) SESSION={session}")
+                # ret_request_activity_info (619): activity_info(0) map
+                resp = encode_sproto([(0, {})])
+                print(f"[UI RESPONSE] tag=619 (Activity Info)")
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 156: # title_req_level_up
+                print(f"[UI REQUEST] tag=156 (Title Up) SESSION={session}")
+                # ret_title_req_level_up (569): title_level(0), title_exp(1)
+                tl = picked_char.get('title_level', 0)
+                te = picked_char.get('title_exp', 0)
+                resp = encode_sproto([(0, tl), (1, te)])
+                print(f"[UI RESPONSE] tag=569 (Title Up)")
+                send_rpc_push(569, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 191: # request_top_rank_list
+                print(f"[UI REQUEST] tag=191 (Ranking) SESSION={session}")
+                # ret_top_rank_list (598): rank_list(0) list
+                resp = encode_sproto([(0, [])])
+                print(f"[UI RESPONSE] tag=598 (Ranking)")
+                send_rpc_push(598, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 263: # require_invest_reward
+                print(f"[UI REQUEST] tag=263 (Invest) SESSION={session}")
+                # ret_request_invest_pack (645): invest_list(0) map
+                resp = encode_sproto([(0, {})])
+                print(f"[UI RESPONSE] tag=645 (Invest)")
+                send_rpc_push(645, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 254: # sign_30_day
+                print(f"[UI REQUEST] tag=254 (SignMonth) SESSION={session}")
+                # ret_sign_30_day (642): sign_list(0) map
+                resp = encode_sproto([(0, {})])
+                print(f"[UI RESPONSE] tag=642 (SignMonth)")
+                send_rpc_push(642, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 255: # sign_week
+                print(f"[UI REQUEST] tag=255 (SignWeek) SESSION={session}")
+                # ret_sign_week (643): sign_list(0) map
+                resp = encode_sproto([(0, {})])
+                print(f"[UI RESPONSE] tag=643 (SignWeek)")
+                send_rpc_push(643, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 299: # require_vip_info
+                print(f"[UI REQUEST] tag=299 (VIP Info) SESSION={session}")
+                # ret_require_vip_info (678): vip_level(0), recharge_count(1)...
+                resp = encode_sproto([(0, 0), (1, 0), (2, 0)])
+                print(f"[UI RESPONSE] tag=678 (VIP Info)")
+                send_rpc_push(678, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 296: # req_level_reward
+                print(f"[UI REQUEST] tag=296 (Level Reward) SESSION={session}")
+                # ret_level_reward (674): reward_list(0) map
+                resp = encode_sproto([(0, {})])
+                print(f"[UI RESPONSE] tag=674 (Level Reward)")
+                send_rpc_push(674, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 258: # request_daily_buy
+                print(f"[UI REQUEST] tag=258 (Daily Buy) SESSION={session}")
+                # ret_request_daily_buy (646): buy_list(0) map
+                resp = encode_sproto([(0, {})])
+                print(f"[UI RESPONSE] tag=646 (Daily Buy)")
+                send_rpc_push(646, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 261: # request_daily_active
+                print(f"[UI REQUEST] tag=261 (Daily Active) SESSION={session}")
+                # ret_request_daily_active (649): active_info(0) obj
+                ai = encode_sproto([(0, 0), (1, {})]) # score(0), rewards(1)
+                resp = encode_sproto([(0, ai)])
+                print(f"[UI RESPONSE] tag=649 (Daily Active)")
+                send_rpc_push(649, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 260: # request_big_pack
+                print(f"[UI REQUEST] tag=260 (Big Pack Info) SESSION={session}")
+                # ret_request_big_pack (648): pack_list(0) map
+                resp = encode_sproto([(0, {})])
+                send_rpc_push(648, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 259: # request_first_buy
+                print(f"[UI REQUEST] tag=259 (First Buy Info) SESSION={session}")
+                # ret_request_first_buy (647): first_buy_info(0) obj
+                fbi = encode_sproto([(0, 0)]) # state(0)
+                resp = encode_sproto([(0, fbi)])
+                send_rpc_push(647, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 318: # request_guild_map_domine_top
+                print(f"[UI REQUEST] tag=318 (Domin Top) SESSION={session}")
+                # ret_guild_map_domine_top (688): top_list(0) map
+                resp = encode_sproto([(0, {})])
+                send_rpc_push(688, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 235: # request_mount_info
+                print(f"[UI REQUEST] tag=235 (Mount Info) SESSION={session}")
+                # ret_mount_info (630): mount_info(0) map
+                resp = encode_sproto([(0, {})])
+                send_rpc_push(630, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 253: # request_sign_week_info
+                print(f"[UI REQUEST] tag=253 (Sign Week Info) SESSION={session}")
+                # ret_request_sign_week_info (641): sign_info(0) obj
+                swi = encode_sproto([(0, 0), (1, 0)]) # day(0), state(1)
+                resp = encode_sproto([(0, swi)])
+                send_rpc_push(641, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 274: # request_special_big_pack
+                print(f"[UI REQUEST] tag=274 (Special Big Pack) SESSION={session}")
+                # ret_special_big_pack (656): pack_list(0) map
+                resp = encode_sproto([(0, {})])
+                send_rpc_push(656, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 252: # request_sign_30_day_info
+                print(f"[UI REQUEST] tag=252 (Sign Month Info) SESSION={session}")
+                # ret_request_30_day_info (640): sign_info(0) obj
+                smi = encode_sproto([(0, 0), (1, 0)]) # day(0), state(1)
+                resp = encode_sproto([(0, smi)])
+                send_rpc_push(640, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 133: # request_random_rank_pvp_opponent
+                print(f"[UI REQUEST] tag=133 (Arena) SESSION={session}")
+                # ret_request_random_rank_pvp_opponent (542): opponent_list(0) map
+                resp = encode_sproto([(0, {})])
+                send_rpc_push(542, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 202: # request_tower_copy_info
+                print(f"[UI REQUEST] tag=202 (Tower) SESSION={session}")
+                # ret_request_tower_copy_info (606): tower_info(0) obj
+                ti = encode_sproto([(0, 0), (1, 1), (2, 0)]) # max_floor(0), cur_floor(1), today_count(2)
+                resp = encode_sproto([(0, ti)])
+                send_rpc_push(606, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 313: # request_dance_state_info
+                print(f"[UI REQUEST] tag=313 (Dance State) SESSION={session}")
+                # ret_request_dance_info (623): dance_info(0) obj
+                di = encode_sproto([(0, 0)]) # state(0)
+                resp = encode_sproto([(0, di)])
+                send_rpc_push(623, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 319: # request_guild_map_info
+                print(f"[UI REQUEST] tag=319 (Guild Map) SESSION={session}")
+                # ret_request_guild_map_info (689): map_info(0) map
+                resp = encode_sproto([(0, {})])
+                send_rpc_push(689, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 310: # request_domin_info
+                print(f"[UI REQUEST] tag=310 (Domin Info) SESSION={session}")
+                # ret_domin_info (684): domin_info(0) map
+                resp = encode_sproto([(0, {})])
+                send_rpc_push(684, resp)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 156: # title_req_level_up (Promote)
+                print(f"[UI REQUEST] tag={msg} (Promote)")
+                # ret_title_req_level_up (569): title_level(0), title_exp(1)
+                resp_push = encode_sproto([(0, picked_char.get('title_lv', 0)), (1, picked_char.get('title_exp', 0))])
+                print(f"[UI RESPONSE] tag=569")
+                send_rpc_push(569, resp_push)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 210: # request_rank_pvp_data
+                print(f"[UI REQUEST] tag={msg} (Ranking)")
+                # syn_rank_pvp_data (541): combValue(0), times(1), rankPos(2)...
+                resp_push = encode_sproto([(0, calculate_power(3000, 300, 35, 480, 60)), (1, 10), (2, 999)])
+                print(f"[UI RESPONSE] tag=541")
+                send_rpc_push(541, resp_push)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 235: # request_mount_info
+                print(f"[UI REQUEST] tag={msg} (Vehicle Info)")
+                # ret_mount_info (630): mount_info(0) map string->mount
+                resp_push = encode_sproto([(0, {})])
+                print(f"[UI RESPONSE] tag=630")
+                send_rpc_push(630, resp_push)
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 101: # move
                 if session is not None and picked_char:
