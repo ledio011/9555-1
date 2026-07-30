@@ -1343,7 +1343,7 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg in [118, 218, 145, 225, 258, 261, 278, 296, 299, 310, 313, 319, 686, 588, 550, 207, 680, 582, 633, 235, 655, 115, 120, 107, 129, 121, 130, 137, 122]:
-                resp = encode_sproto([(0, f"U_{random.randint(10,99)}")]) if msg == 118 else encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))]) if msg == 218 else encode_sproto([])
+                resp = encode_sproto([(0, f"User{random.randint(10,99)}")]) if msg == 118 else encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))]) if msg == 218 else encode_sproto([])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if msg == 310:
