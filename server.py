@@ -419,9 +419,13 @@ def get_aoi_car(car_id, server_id, x, z, name="Car"):
     return encode_sproto([(0, server_id), (1, vis), (2, gen), (3, stats), (5, mv), (6, attr)])
 
 def get_mission_npc_proto(npc_id, server_id, x, z, name="Mission Target"):
+    # SprotoType.npc_attribute (Tag 509 npc_create)
+    # 0:id, 1:npcdataid, 2:hp, 3:max_hp, 4:atk, 5:def, 6:hit, 7:eva, 8:cri, 9:exd, 10:exr, 11:res
+    # 12:crd, 13:crr, 14:defa, 15:x, 16:z, 17:o, 18:level, 19:anti_stun, 20:anti_knock_down, 21:player_name
     return encode_sproto([
         (0, server_id), (1, str(npc_id)), (2, 1000), (3, 1000), (4, 100), (5, 50),
-        (6, 100), (7, 50), (8, 50), (15, x), (16, z), (17, 0), (18, 1), (21, name)
+        (6, 100), (7, 50), (8, 50), (9, 0), (10, 0), (11, 0), (12, 0), (13, 0),
+        (14, 0), (15, x), (16, z), (17, 0), (18, 1), (19, 0), (20, 0), (21, name)
     ])
 
 def sync_mission_world_objects(char, send_push_func):
@@ -549,7 +553,7 @@ def client_handler(conn, addr):
                     send_rpc_push(519, get_mission_sync(picked_char))
                     send_rpc_push(503, encode_sproto([(0, cur_map_id), (1, line_idx), (2, 1)]))
                     lp = picked_char.get('pos', [29860, 100, -17005, 0]); send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(lp[0], lp[1], lp[2], lp[3]))]))
-                    send_friend_sync(picked_char, send_rpc_push); send_mail_sync(picked_char, conn, send_rpc_push)
+                    send_friend_sync(picked_char, send_rpc_push); send_mail_sync(picked_char, send_rpc_push)
 
             elif msg == 100: # map_ready
                 if picked_char:
@@ -638,9 +642,14 @@ def client_handler(conn, addr):
                 if session is not None and picked_char:
                     mid = body.get(0, b"").decode('utf-8'); picked_char['active_missions'][mid] = [1, 0, [0]*8]
                     picked_char['mission_state'][mid] = init_mission_state(picked_char['id'], mid); logic = mission_logic_db.get(mid)
+                    print(f"[MISSION START] {picked_char['name']} accepted {mid}. Targets: {picked_char['mission_state'][mid].get('alive_sids')}")
                     if logic:
-                        if logic['logicType'] == 2: picked_char['active_missions'][mid][0] = 2
-                        elif logic['logicType'] == 7 and picked_char.get('level', 1) >= int(logic['logicId']): picked_char['active_missions'][mid][0] = 2
+                        if logic['logicType'] == 2: 
+                            print(f"[MISSION] Auto-completing Talk mission {mid}")
+                            picked_char['active_missions'][mid][0] = 2
+                        elif logic['logicType'] == 7 and picked_char.get('level', 1) >= int(logic['logicId']): 
+                            print(f"[MISSION] Auto-completing Level mission {mid}")
+                            picked_char['active_missions'][mid][0] = 2
                     save_chars(all_accounts_chars); send_rpc_push(519, get_mission_sync(picked_char)); sync_mission_world_objects(picked_char, send_rpc_push)
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([])); conn.sendall(struct.pack(">H", len(pf)) + pf)
 
@@ -731,6 +740,17 @@ def client_handler(conn, addr):
             elif msg == 156: # title_req_level_up
                 tl, te = picked_char.get('title_level', 0), picked_char.get('title_exp', 0); resp = encode_sproto([(0, tl), (1, te)])
                 send_rpc_push(569, resp); ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([])); conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 118: # request_random_name
+                resp = encode_sproto([(0, f"U_{random.randint(10,99)}")])
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp); conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 218: # heart_beat
+                resp = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))])
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp); conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 129: # sell_item
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([])); conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg in [191, 263, 254, 255, 299, 296, 258, 261, 260, 259, 318, 235, 253, 274, 252, 133, 202, 313, 319, 310]:
                 tags = {191:598, 263:645, 254:642, 255:643, 299:678, 296:674, 258:646, 261:649, 260:648, 259:647, 318:688, 235:630, 253:641, 274:656, 252:640, 133:542, 202:606, 313:623, 319:689, 310:684}
