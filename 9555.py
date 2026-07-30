@@ -194,7 +194,7 @@ def get_full_char(c):
     gen = get_general(c)
     # attribute_other: hp(0), exp(1), level(2), combValue(3), camp(15)
     attr_oth = encode_sproto([(0, 3000), (1, 0), (2, 1), (3, 5000), (15, 1)])
-    # property: Tag 13-15 are money fields. Cash: 1000, Gold: 100, Diamond: 10
+    # property: Tag 13-18 are money and other fields. Cash: 1000, Gold: 100, Diamond: 10
     prop = encode_sproto([(13, 1000), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
 
     # Position Persistence: Default to Mission 1001 area for new chars
@@ -209,12 +209,14 @@ def get_full_char(c):
     prof = c.get('prof', 0)
     sid = "101" if prof == 0 else "201" if prof == 1 else "301"
     did = "104" if prof == 0 else "204" if prof == 1 else "304"
+    aid = "105" if prof == 0 else "205" if prof == 1 else "305"
     wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
 
-    # Tag 8: skills (map string->skill_info). Attack(0), Dodge(3)
+    # Tag 8: skills (map string->skill_info). Attack(0), Active(1), Dodge(3)
     s1 = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)])
     s2 = encode_sproto([(0, did), (1, 1), (2, 3), (3, 1), (4, 1), (5, False)])
-    skills_map = {sid: s1, did: s2}
+    s3 = encode_sproto([(0, aid), (1, 1), (2, 1), (3, 1), (4, 1), (5, False)])
+    skills_map = {sid: s1, did: s2, aid: s3}
 
     # Tag 9: equip (map long->gameitem). Key 0 = WEAPON slot.
     w1 = encode_sproto([(0, 0), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
@@ -224,9 +226,8 @@ def get_full_char(c):
         (0, c['id']),
         (1, gen),
         (2, attr_oth),
-        (3, get_visual(c.get('name', 'Hero'), prof)),
-        (4, int(time.time())),
         (5, prop),
+        (6, get_visual(c.get('name', 'Hero'), prof)),
         (7, mv),
         (8, skills_map),
         (9, equip_map),
