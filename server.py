@@ -138,33 +138,41 @@ def get_char_by_id(char_id):
                 if c['id'] == char_id: return c
     return None
 
-def send_mail_sync(char, conn):
+def send_mail_sync(char, conn, send_push):
     mails = char.get('mails', [])
     for m in mails:
-        # State: 0:unread, 1:read, 2:uncollected, 3:collected
+        # SprotoType.mail_update.request (Tag 531)
+        # 0: mailId, 1: sendertype, 3: title, 4: senderTime, 5: receiveId, 6: readTime
+        # 7: context, 8: mailState, 9: sortTime, 10: items (map string->item), 11: expireday
         m_proto = encode_sproto([
             (0, m['id']), (1, m.get('senderType', 0)), (3, m['title']),
             (4, m['time']), (5, char['id']), (6, m.get('readTime', 0)),
-            (7, m['context']), (8, m['state']), (9, m['time']), (11, 30)
+            (7, m['context']), (8, m['state']), (9, m['time']), (10, {}), (11, 30)
         ])
-        # ph_p = encode_sproto([(0, 531)]); pf_p = sproto_pack(ph_p + m_proto)
-        # conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
-        # Using send_rpc_push directly is easier if I define it outside or pass it
-        pass
+        send_push(531, m_proto)
+
+def get_friend_info_proto(local_id, target_id, is_foe=False):
+    c = get_char_by_id(target_id)
+    if not c: return None
+    # 0: characterId, 1: friendId, 2: name, 3: level, 4: profession
+    # 5: combValue, 6: state, 7: timeInfo, 8: friendType, 9: guildId, 10: guildName, 11: friendScore
+    ftype = 6 if is_foe else 0 # 6: ENEMY, 0: NORMAL
+    return encode_sproto([
+        (0, local_id), (1, target_id), (2, c['name']), (3, c.get('level', 1)),
+        (4, c.get('prof', 0)), (5, 5000), (6, 1 if target_id in online_clients else 0),
+        (7, 0), (8, ftype), (9, 0), (10, ""), (11, 0)
+    ])
 
 def send_friend_sync(char, conn, send_push):
     friends = char.get('friends', [])
     foes = char.get('foes', [])
     res = {}
-    for fid in friends + foes:
-        c = get_char_by_id(fid)
-        if c:
-            ftype = 6 if fid in foes else 0 # 6: ENEMY, 0: NORMAL
-            res[fid] = encode_sproto([
-                (0, char['id']), (1, fid), (2, c['name']), (3, c.get('level', 1)),
-                (4, c.get('prof', 0)), (5, 5000), (6, 1 if fid in online_clients else 0),
-                (8, ftype)
-            ])
+    for fid in friends:
+        p = get_friend_info_proto(char['id'], fid, False)
+        if p: res[fid] = p
+    for fid in foes:
+        p = get_friend_info_proto(char['id'], fid, True)
+        if p: res[fid] = p
     send_push(538, encode_sproto([(0, res)]))
 
 def send_item_sync(char, send_push):
@@ -644,12 +652,7 @@ def client_handler(conn, addr):
                     
                     # Phase 1: Social & Mail Sync on Pick
                     send_friend_sync(picked_char, conn, send_rpc_push)
-                    for m in picked_char['mails']:
-                        send_rpc_push(531, encode_sproto([
-                            (0, m['id']), (1, m.get('senderType', 0)), (3, m['title']),
-                            (4, m['time']), (5, char_id), (6, m.get('readTime', 0)),
-                            (7, m['context']), (8, m['state']), (9, m['time']), (11, 30)
-                        ]))
+                    send_mail_sync(picked_char, conn, send_rpc_push)
 
             elif msg == 100: # map_ready
                 print("[MAP FLOW] Received map_ready")
@@ -801,16 +804,21 @@ def client_handler(conn, addr):
                 if session is not None and picked_char:
                     mid = get_val_int(body, 0)
                     op = get_val_int(body, 1)
+                    # Operations: 0:Read, 1:Delete, 2:Get Single, 3:Get All, 4:Delete All
                     if op == 0: # READ
                         for m in picked_char['mails']:
                             if m['id'] == mid: m['state'] = 1; m['readTime'] = int(time.time())
                     elif op == 1: # DELETE SINGLE
                         picked_char['mails'] = [m for m in picked_char['mails'] if m['id'] != mid]
+                    elif op == 2: # GET SINGLE ITEM
+                        for m in picked_char['mails']:
+                            if m['id'] == mid and m['state'] == 2: m['state'] = 3
                     elif op == 3: # GET ALL ITEMS
                         for m in picked_char['mails']:
                             if m['state'] == 2: m['state'] = 3
                     elif op == 4: # DELETE ALL
-                        picked_char['mails'] = [m for m in picked_char['mails'] if m['state'] == 0 or m['state'] == 2] # Keep unread/uncollected
+                        # Delete all except unread (0) or uncollected (2)
+                        picked_char['mails'] = [m for m in picked_char['mails'] if m['state'] == 0 or m['state'] == 2]
                     
                     save_chars(all_accounts_chars)
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -884,21 +892,15 @@ def client_handler(conn, addr):
 
             elif msg == 126: # request_update_friend_useinfo
                 print(f"[UI REQUEST] tag=126 (Friends Sync) SESSION={session}")
-                # Use the existing send_friend_sync helper logic but wrap it in 534
-                friends = picked_char.get('friends', [])
-                foes = picked_char.get('foes', [])
+                ftype = get_val_int(body, 1)
                 res = {}
-                for fid in friends + foes:
-                    c = get_char_by_id(fid)
-                    if c:
-                        ftype = 6 if fid in foes else 0
-                        res[fid] = encode_sproto([
-                            (0, picked_char['id']), (1, fid), (2, c['name']), (3, c.get('level', 1)),
-                            (4, c.get('prof', 0)), (5, 5000), (6, 1 if fid in online_clients else 0),
-                            (8, ftype)
-                        ])
+                target_ids = picked_char.get('friends', []) if ftype == 0 else picked_char.get('foes', [])
+                for fid in target_ids:
+                    p = get_friend_info_proto(picked_char['id'], fid, ftype == 1)
+                    if p: res[fid] = p
+                
                 # ret_request_update_friend_useinfo (534): friend_list(0), type(1)
-                resp = encode_sproto([(0, res), (1, body.get(0, 0))])
+                resp = encode_sproto([(0, res), (1, ftype)])
                 print(f"[UI RESPONSE] tag=534 (Friends Sync)")
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
