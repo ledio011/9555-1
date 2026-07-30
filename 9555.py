@@ -167,6 +167,55 @@ def get_visual(name, prof):
     v = m.get(prof, m[1])
     return encode_sproto([(0, name), (1, v["m"]), (2, v["h"]), (3, v["b"]), (4, v["l"]), (5, v["w"]), (10, 0)])
 
+# Skill System Constants
+PROF_SKILLS = {
+    0: { # XD
+        "atk": "101", "dodge": "104", 
+        "actives": ["105", "106", "107", "108", "109", "110"]
+    },
+    1: { # QJ
+        "atk": "201", "dodge": "204", 
+        "actives": ["205", "206", "207", "208", "209", "210"]
+    },
+    2: { # NQS
+        "atk": "301", "dodge": "304", 
+        "actives": ["305", "306", "307", "308", "309", "310"]
+    }
+}
+
+SKILL_UNLOCKS = [1, 5, 10, 15, 20, 25]
+
+def get_skill_info(sid, level, hud_pos, menu_pos, char_level, unlock_req):
+    disabled = char_level < unlock_req
+    return encode_sproto([
+        (0, sid),
+        (1, level if not disabled else 0),
+        (2, hud_pos),
+        (3, unlock_req),
+        (4, menu_pos),
+        (5, disabled)
+    ])
+
+def build_skills_map(prof, char_level, skill_levels=None):
+    if skill_levels is None: skill_levels = {}
+    p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
+    smap = {}
+    
+    # Attack and Dodge always unlocked (Level 1)
+    smap[p["atk"]] = get_skill_info(p["atk"], skill_levels.get(p["atk"], 1), 0, 0, char_level, 1)
+    smap[p["dodge"]] = get_skill_info(p["dodge"], skill_levels.get(p["dodge"], 1), 3, 1, char_level, 1)
+    
+    # Actives
+    for i in range(len(p["actives"])):
+        sid = p["actives"][i]
+        unlock_lv = SKILL_UNLOCKS[i]
+        # HUD pos: 4,5,6 for first set, 7,8,9 for second set
+        hud_pos = 4 + i
+        menu_pos = 2 + i
+        smap[sid] = get_skill_info(sid, skill_levels.get(sid, 0), hud_pos, menu_pos, char_level, unlock_lv)
+        
+    return smap
+
 def get_general(c):
     # Tag 4: tutorial (1=finished). Unblocks HUD and NPCManagers immediately.
     return encode_sproto([
@@ -212,16 +261,12 @@ def get_full_char(c):
     run = encode_sproto([(6, attr_run), (7, attr_all)])
 
     prof = c.get('prof', 0)
-    sid = "101" if prof == 0 else "201" if prof == 1 else "301"
-    did = "104" if prof == 0 else "204" if prof == 1 else "304"
-    wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
-
-    # Tag 8: skills (map string->skill_info). Attack(0), Dodge(3)
-    s1 = encode_sproto([(0, sid), (1, 1), (2, 0), (3, 1), (4, 0), (5, False)])
-    s2 = encode_sproto([(0, did), (1, 1), (2, 3), (3, 1), (4, 1), (5, False)])
-    skills_map = {sid: s1, did: s2}
+    char_level = c.get('level', 1)
+    skill_levels = c.get('skill_levels', {})
+    skills_map = build_skills_map(prof, char_level, skill_levels)
 
     # Tag 9: equip (map long->gameitem). Key 5 = WEAPON slot.
+    wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
 
@@ -441,6 +486,34 @@ def client_handler(conn, addr):
                         ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                         conn.sendall(struct.pack(">H", len(pf)) + pf)
                     send_rpc_push(519, sync_mission(picked_char))
+
+            elif msg == 130: # skill_level_up
+                sid = body.get(0, b"").decode('utf-8')
+                cur_lv = get_val_int(body, 1)
+                is_all = get_val_int(body, 2)
+                if picked_char:
+                    cost = (cur_lv + 1) * 10000
+                    if picked_char.get('cash', 0) >= cost and picked_char.get('level', 1) > cur_lv + 1:
+                        picked_char['cash'] -= cost
+                        if 'skill_levels' not in picked_char: picked_char['skill_levels'] = {}
+                        new_lv = cur_lv + 1
+                        picked_char['skill_levels'][sid] = new_lv
+                        save_chars(all_accounts_chars)
+                        # sync_skill_info (Tag 540)
+                        smap = build_skills_map(picked_char['prof'], picked_char['level'], picked_char['skill_levels'])
+                        send_rpc_push(540, encode_sproto([(0, smap), (1, True)]))
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 102: # skill_use
+                sid = body.get(1, b"").decode('utf-8')
+                tid = get_val_int(body, 0)
+                alist = body.get(3, [])
+                if picked_char:
+                    # ret_skill_use (Tag 508)
+                    send_rpc_push(508, encode_sproto([(0, picked_char['id']), (1, tid), (2, sid), (3, alist)]))
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg in [118, 218, 145, 225, 258, 261, 278, 296, 299, 310, 313, 319]:
                 # Generic Responder for Scene Info and UI Requests
