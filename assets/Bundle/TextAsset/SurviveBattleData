@@ -1,0 +1,4 @@
+,boss相对应的ID,MapID,MapID,活动类型,开启时间,存活持续时间,等待关闭时间,副本存活时间,最大人数,等级区间,第一层最大分数,第二层最小分数,第一档奖励,第一档奖励区间,第二档奖励,第二档奖励区间,第三档奖励,第三档奖励区间,第四档奖励,第四档奖励区间,第五档奖励,显示掉落,名字,描述,规则,副本背景图片,UI图标
+,STRING,STRING,STRING,INT,INT,INT,INT,INT,INT,INT,INT,INT,STRING,STRING,STRING,STRING,STRING,STRING,STRING,STRING,STRING,STRING,STRING,STRING,STRING,STRING,STRING
+*,ID,MapID,MapID2,Type,StartTime,DurationTime,WaitTime,ExistTime,MaxPlayer,UnlockLevel,FirstMaxScore,SecondMinScore,FirstDropID,FirstRank,SecondDropID,SecondRank,ThirdDropID,ThirdRank,FourthDropID,FourthRank,FifthDropID,ShowRewardID,Name,Desc,Rule,Background,Icon
+*,1101,1101,1102,7,41400#68400,1740,600,1800,40,20,200,100,32301,1,32302,5,32303,15,32304,30,32305,32001,#{101517},#{101627},#{101628},shengCun_PVP,CZ_shengCun_PVP

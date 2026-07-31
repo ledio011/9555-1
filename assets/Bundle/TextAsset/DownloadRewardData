@@ -1,0 +1,4 @@
+,ID,奖励ID,,,,,,,,,,,
+,STRING,STRING,INT,STRING,,,,,,,,,
+*,ID,ItemID1,ItemCount1,Quality1,ItemID2,ItemCount2,Quality2,ItemID3,ItemCount3,Quality3,ItemID4,ItemCount4,Quality4
+*,1,9301,1,0,9011,10,2,9001,20,0,5026,5,1

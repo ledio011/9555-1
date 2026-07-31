@@ -1,0 +1,4 @@
+,编号,描述,经验,金钱1,金钱2,物品1,物品1品质,物品数量,物品1,物品1品质,物品数量,物品1,物品1品质,物品数量,物品1,物品1品质,物品数量
+,STRING,STRING,INT,INT,INT,STRING,INT,INT,STRING,INT,INT,STRING,INT,INT,STRING,INT,INT
+*,ID,Desc,EXP,Money1,Money2,Item1,Quality1,ItemCount1,Item2,Quality2,ItemCount2,Item3,Quality3,ItemCount3,Item4,Quality4,ItemCount4
+*,1,,20,10,20,1,0,1,10001,1,1,,,,,,

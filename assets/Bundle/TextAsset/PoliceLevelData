@@ -1,0 +1,4 @@
+,ID,1星分数,2星分数,3星分数,最大分数,"1星刷新间隔,毫秒","2星刷新间隔,毫秒","3星刷新间隔,毫秒",1星警察人数,2星警察人数,3星警察人数,1星警察随机ID,2星警察随机ID,3星警察随机ID
+,STRING,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,STRING,STRING,STRING
+*,ID,Star1Scores,Star2Scores,Star3Scores,MaxScores,Star1FlashTime,Star2FlashTime,Star3FlashTime,Star1Num,Star2Num,Star3Num,Star1PoliceId,Star2PoliceId,Star3PoliceId
+*,0,10,25,50,85,500,500,500,2,3,4,9909,9909,9909

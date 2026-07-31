@@ -1,0 +1,7 @@
+,社交ID,名字,解锁等级,对应的ActionDataID,
+,STRING,STRING,INT,STRING,STRING
+*,ID,Name,Level,ActionID,ICON
+*,1,#{100175},6,SJ_gaoXing,CZ_biaoQing_Happy
+*,2,#{100176},8,SJ_fenNu,CZ_biaoQing_fennu
+*,3,#{100177},10,SJ_tiaoXin,CZ_biaoQing_TiaoXin
+*,4,#{100126},10,tiaoWu_mianFei,CZ_biaoQing_Dance
