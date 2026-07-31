@@ -186,6 +186,7 @@ def get_skill_upgrade_cost(lv):
     return 20000000 # Fallback
 
 def build_skills_map(prof, char_level, skill_levels=None):
+    prof = int(prof)
     if skill_levels is None: skill_levels = {}
     p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
     smap = {}
@@ -359,7 +360,7 @@ def client_handler(conn, addr):
                 prof = get_val_int(c_data, 1, 0); cid = generate_unique_char_id()
                 if cur_areaId not in all_accounts_chars: all_accounts_chars[cur_areaId] = {}
                 if acc_id not in all_accounts_chars[cur_areaId]: all_accounts_chars[cur_areaId][acc_id] = []
-                nc = {'id': cid, 'name': name, 'prof': prof, 'level': 1, 'exp': 0, 'cash': 1000, 'active_missions': {}, 'completed_side_missions': [], 'last_main_mission_id': ""}
+                nc = {'id': cid, 'name': name, 'prof': prof, 'level': 1, 'exp': 0, 'cash': 1000, 'skill_levels': {}, 'active_missions': {}, 'completed_side_missions': [], 'last_main_mission_id': ""}
                 all_accounts_chars[cur_areaId][acc_id].append(nc); save_chars(all_accounts_chars)
                 resp = encode_sproto([(0, get_char_ov(nc)), (1, 0)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
@@ -405,7 +406,16 @@ def client_handler(conn, addr):
             elif msg == 100: # map_ready
                 if picked_char:
                     send_rpc_push(611, encode_sproto([(0, [])]))
-                    send_rpc_push(540, encode_sproto([(0, []), (1, False)]))
+                    skill_levels = picked_char.get('skill_levels', {})
+                    smap = build_skills_map(
+                        picked_char.get('prof', 0),
+                        picked_char.get('level', 1),
+                        skill_levels
+                    )
+                    send_rpc_push(540, encode_sproto([
+                        (0, smap),
+                        (1, False)
+                    ]))
                     send_rpc_push(654, encode_sproto([(0, 1)]))
 
             elif msg == 101: # move
