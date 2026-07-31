@@ -480,6 +480,17 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
                     init_character_fields(picked_char)
+                    # Initial Mission Assignment for new characters
+                    has_active_main = False
+                    for active_id in picked_char['active_missions']:
+                        if missions_data.get(active_id, {}).get('class') == 1:
+                            has_active_main = True
+                            break
+                    
+                    if not picked_char.get('last_main_mission_id') and not has_active_main:
+                        if accept_mission_logic(picked_char, "1001"):
+                            print(f"[MISSION ACCEPT] mission_id=1001 (Starting mission)")
+                    
                     save_chars(all_accounts_chars)
                     # Sync
                     fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
@@ -521,36 +532,40 @@ def client_handler(conn, addr):
                 if session is not None and picked_char:
                     mid = body.get(0, b"").decode('utf-8')
                     m_entry = picked_char.get('active_missions', {}).get(mid)
-                    # Prevent duplicate rewards and ensure mission is completed
                     if m_entry and m_entry['state'] == 2:
                         m_cfg = missions_data.get(mid)
                         if m_cfg:
                             exp_add, cash_add, items_add = give_mission_rewards(picked_char, mid)
                             
-                            # Unlock logic: Update trackers to make next mission available in UI
+                            # Mission Chain and Unlocking logic
                             if m_cfg.get('class') == 1:
                                 picked_char['last_main_mission_id'] = mid
+                                # Auto-chain to next Main Mission
+                                next_mid = m_cfg.get('next_id')
+                                if next_mid and str(next_mid) in missions_data:
+                                    if accept_mission_logic(picked_char, str(next_mid)):
+                                        print(f"[MISSION ACCEPT] mission_id={next_mid} (Auto-chained)")
                             else:
-                                imid = int(mid)
-                                if imid not in picked_char.get('completed_side_missions', []):
-                                    picked_char['completed_side_missions'].append(imid)
+                                try:
+                                    imid = int(mid)
+                                    if imid not in picked_char.get('completed_side_missions', []):
+                                        picked_char['completed_side_missions'].append(imid)
+                                except: pass
                             
-                            # Cleanup active mission
                             del picked_char['active_missions'][mid]
                             save_chars(all_accounts_chars)
-                            
-                            print(f"[MISSION COMPLETE] id={mid} exp={exp_add} cash={cash_add} next={m_cfg.get('next_id')}")
+                            print(f"[MISSION COMPLETE] mission_id={mid}")
                             
                             # Standard completion response
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                             conn.sendall(struct.pack(">H", len(pf)) + pf)
                             
                             # Push Sync sequence
-                            send_rpc_push(521, encode_sproto([(0, mid), (1, 1)])) # ret_complete_mission: Success
-                            sync_char_attrs_rpc(conn, picked_char)               # Real-time Level/EXP/Cash update
-                            send_rpc_push(519, sync_mission_data(picked_char))   # Update mission UI (Unlocks next)
+                            send_rpc_push(521, encode_sproto([(0, mid), (1, 1)])) # Success feedback
+                            sync_char_attrs_rpc(conn, picked_char)               # Stats update
+                            send_rpc_push(519, sync_mission_data(picked_char))   # Mission UI update
                             if items_add:
-                                send_rpc_push(611, sync_inventory_data(picked_char)) # Inventory update
+                                send_rpc_push(611, sync_inventory_data(picked_char)) # Inventory sync
                         else:
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                             conn.sendall(struct.pack(">H", len(pf)) + pf)
