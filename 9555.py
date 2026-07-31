@@ -625,14 +625,19 @@ def start_map_transition(conn, picked_char, target_map_id):
     
     save_chars(all_accounts_chars)
     # TAG 503: enter_map
+    print("[DEBUG] BEFORE MAP ENTER")
     try:
         ph_p = encode_sproto([(0, 503)])
         # mapInfoId(0), line_index(1), line_count(2)
-        data = encode_sproto([(0, picked_char['map_id']), (1, 0), (2, 1)])
+        data = encode_sproto([(0, str(picked_char['map_id'])), (1, 0), (2, 1)])
         pf_p = sproto_pack(ph_p + data)
         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+        print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
         print(f"[MAP ENTER SEND] map_id={picked_char['map_id']} scene={scene_name} birth={picked_char['pos']}")
-    except: pass
+    except Exception:
+        print("[!] FAILED TO SEND MAP ENTER TRANSITION")
+        traceback.print_exc()
+    print("[DEBUG] AFTER MAP ENTER")
 
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
@@ -644,7 +649,9 @@ def client_handler(conn, addr):
             pf_p = sproto_pack(ph_p + data)
             conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
             print(f"[TX] PUSH TAG={tag} SIZE={len(data)}")
-        except Exception: pass
+        except Exception: 
+            print(f"[!] FAILED TO SEND PUSH TAG={tag}")
+            traceback.print_exc()
 
     try:
         while True:
@@ -729,10 +736,25 @@ def client_handler(conn, addr):
                     send_rpc_push(519, sync_mission_data(picked_char))
                     
                     # TAG 503: enter_map
-                    mid = picked_char.get('map_id', '11')
-                    scene_name = MAP_CONFIG.get(mid, {}).get('scene', 'Unknown')
-                    send_rpc_push(503, encode_sproto([(0, mid), (1, 0), (2, 1)]))
-                    print(f"[MAP ENTER SEND] map_id={mid} scene={scene_name} birth={picked_char['pos']}")
+                    mid = str(picked_char.get('map_id', '11'))
+                    scene_name = "Unknown"
+                    if mid in MAP_CONFIG:
+                        scene_name = MAP_CONFIG[mid]['scene']
+                    else:
+                        print(f"[MAP CONFIG MISSING] map_id={mid}")
+                    
+                    print("[DEBUG] BEFORE MAP ENTER")
+                    try:
+                        ph_p = encode_sproto([(0, 503)])
+                        data = encode_sproto([(0, mid), (1, 0), (2, 1)])
+                        pf_p = sproto_pack(ph_p + data)
+                        conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+                        print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
+                        print(f"[MAP ENTER SEND] map_id={mid} scene={scene_name} birth={picked_char['pos']}")
+                    except Exception:
+                        print("[!] FAILED TO SEND INITIAL MAP ENTER")
+                        traceback.print_exc()
+                    print("[DEBUG] AFTER MAP ENTER")
                     # Initial main_player_create handled by map_ready (MSG 100)
 
             elif msg == 100: # map_ready
