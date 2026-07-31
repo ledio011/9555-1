@@ -609,7 +609,7 @@ def init_character_fields(c):
         ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1, {'hp': [3000,3000,3000]}))
         c['hp'] = ld['hp'][prof] if prof < len(ld['hp']) else ld['hp'][0]
 
-def start_map_transition(conn, picked_char, target_map_id):
+def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
     picked_char['map_id'] = str(target_map_id)
     scene_name = "Unknown"
     # Update position to birth pos if map exists
@@ -634,6 +634,17 @@ def start_map_transition(conn, picked_char, target_map_id):
         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
         print(f"[MAP ENTER SEND] map_id={picked_char['map_id']} scene={scene_name} birth={picked_char['pos']}")
+
+        # TAG 504: main_player_create (Queueing packet to unblock 90% freeze)
+        send_rpc_push(504, encode_sproto([
+            (0, get_full_char(picked_char)), 
+            (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
+        ]))
+        print(f"[MAIN PLAYER CREATE SEND] map_id={picked_char['map_id']}")
+
+        # TAG 505: aoi_add (NPCs)
+        spawn_map_npcs(conn, picked_char['map_id'])
+
     except Exception:
         print("[!] FAILED TO SEND MAP ENTER TRANSITION")
         traceback.print_exc()
@@ -751,6 +762,17 @@ def client_handler(conn, addr):
                         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
                         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
                         print(f"[MAP ENTER SEND] map_id={mid} scene={scene_name} birth={picked_char['pos']}")
+
+                        # TAG 504: main_player_create (Queueing packet to unblock 90% freeze)
+                        send_rpc_push(504, encode_sproto([
+                            (0, get_full_char(picked_char)), 
+                            (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
+                        ]))
+                        print(f"[MAIN PLAYER CREATE SEND] map_id={mid}")
+
+                        # TAG 505: aoi_add (NPCs)
+                        spawn_map_npcs(conn, mid)
+
                     except Exception:
                         print("[!] FAILED TO SEND INITIAL MAP ENTER")
                         traceback.print_exc()
@@ -762,25 +784,17 @@ def client_handler(conn, addr):
                     mid = picked_char.get('map_id', '11')
                     print(f"[MAP READY RECEIVED] map_id={mid}")
                     
-                    # TAG 504: main_player_create (Fixes 90% freeze)
-                    send_rpc_push(504, encode_sproto([
-                        (0, get_full_char(picked_char)), 
-                        (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
-                    ]))
-                    print(f"[MAIN PLAYER CREATE SEND] map_id={mid}")
-                    
-                    send_rpc_push(611, sync_inventory_data(picked_char))
-                    send_rpc_push(519, sync_mission_data(picked_char))
-                    smap = build_skills_map(picked_char['prof'], picked_char['level'], picked_char.get('skill_levels', {}))
-                    send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
+                    # send_rpc_push(611, sync_inventory_data(picked_char))
+                    # send_rpc_push(519, sync_mission_data(picked_char))
+                    # smap = build_skills_map(picked_char['prof'], picked_char['level'], picked_char.get('skill_levels', {}))
+                    # send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
                     send_rpc_push(654, encode_sproto([(0, 1)]))
-                    spawn_map_npcs(conn, mid)
 
             elif msg == 106: # enter_new_map
                 mid = body.get(0, b"").decode('utf-8')
                 print(f"[RX] enter_new_map: {mid}")
                 if picked_char:
-                    start_map_transition(conn, picked_char, mid)
+                    start_map_transition(conn, picked_char, mid, send_rpc_push)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -789,35 +803,35 @@ def client_handler(conn, addr):
                 mid = body.get(0, b"").decode('utf-8')
                 print(f"[RX] enter_copy_scene: {mid}")
                 if picked_char:
-                    start_map_transition(conn, picked_char, mid)
+                    start_map_transition(conn, picked_char, mid, send_rpc_push)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 246: # enter_survive_batttle
                 mid = body.get(0, b"").decode('utf-8')
-                if picked_char: start_map_transition(conn, picked_char, mid)
+                if picked_char: start_map_transition(conn, picked_char, mid, send_rpc_push)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 273: # enter_scuffle_batttle
                 mid = body.get(0, b"").decode('utf-8')
-                if picked_char: start_map_transition(conn, picked_char, mid)
+                if picked_char: start_map_transition(conn, picked_char, mid, send_rpc_push)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 207: # enter_bar_fight
                 mid = body.get(0, b"").decode('utf-8')
-                if picked_char: start_map_transition(conn, picked_char, mid)
+                if picked_char: start_map_transition(conn, picked_char, mid, send_rpc_push)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 201: # enter_wild_boss
                 mid = body.get(0, b"").decode('utf-8')
-                if picked_char: start_map_transition(conn, picked_char, mid)
+                if picked_char: start_map_transition(conn, picked_char, mid, send_rpc_push)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -825,7 +839,7 @@ def client_handler(conn, addr):
             elif msg == 322: # enter_guild_city_scene
                 did = body.get(0, b"").decode('utf-8')
                 mid = GUILD_CAPTURE_DATA.get(did, did)
-                if picked_char: start_map_transition(conn, picked_char, mid)
+                if picked_char: start_map_transition(conn, picked_char, mid, send_rpc_push)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
