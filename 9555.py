@@ -427,13 +427,16 @@ def spawn_map_npcs(conn, map_id):
     if map_str not in MONSTER_DATA: return
     
     aoi_list = []
-    for m in MONSTER_DATA[map_str]:
+    # Limit to first 20 NPCs to avoid huge packets during testing
+    for m in MONSTER_DATA[map_str][:20]:
         cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}", 'model': 'NPC_Nan_013'})
         # Unique ID for AOI NPCs (simple offset)
         aoi_id = 2000000 + int(m['nid']) + len(aoi_list)
         
         gen = encode_sproto([(0, cfg['name']), (1, 0), (2, 0), (3, map_str), (4, 0)])
-        pos = encode_sproto([(0, encode_sproto([(0, m['x']), (1, 0), (2, m['z']), (3, m['o'])]))])
+        # Position uses m['x'], 0, m['z'], m['o']
+        pos_data = encode_sproto([(0, m['x']), (1, 0), (2, m['z']), (3, m['o'])])
+        pos = encode_sproto([(0, pos_data)])
         # Use simple visual for NPC (Model Tag 1)
         vis = encode_sproto([(0, cfg['name']), (1, cfg['model']), (10, 0)])
         
@@ -609,23 +612,27 @@ def init_character_fields(c):
 
 def start_map_transition(conn, picked_char, target_map_id):
     picked_char['map_id'] = str(target_map_id)
+    scene_name = "Unknown"
     # Update position to birth pos if map exists
     if picked_char['map_id'] in MAP_CONFIG:
         birth = MAP_CONFIG[picked_char['map_id']]['birth']
+        scene_name = MAP_CONFIG[picked_char['map_id']]['scene']
         if birth:
             parts = birth.split('#')
             if len(parts) >= 3:
                 picked_char['pos'] = [int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3]) if len(parts) > 3 else 0]
+    else:
+        print(f"[MAP CONFIG MISSING] map_id={picked_char['map_id']}")
     
     save_chars(all_accounts_chars)
     # TAG 503: enter_map
     try:
         ph_p = encode_sproto([(0, 503)])
         # mapInfoId(0), line_index(1), line_count(2)
-        data = encode_sproto([(0, picked_char['map_id']), (1, 1), (2, 1)])
+        data = encode_sproto([(0, picked_char['map_id']), (1, 0), (2, 1)])
         pf_p = sproto_pack(ph_p + data)
         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
-        print(f"[MAP TRANSITION] id={picked_char['id']} to map={picked_char['map_id']}")
+        print(f"[MAP ENTER SEND] map_id={picked_char['map_id']} scene={scene_name} birth={picked_char['pos']}")
     except: pass
 
 def client_handler(conn, addr):
@@ -704,28 +711,42 @@ def client_handler(conn, addr):
                             print(f"[MISSION ACCEPT] mission_id=1001 (Starting mission)")
                     
                     save_chars(all_accounts_chars)
-                    # Sync
+                    
+                    # Correct Sequence: 614 -> 611 -> 540 -> 519 -> 503
+                    
+                    # 614: function_sync
                     fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))]))
-                    send_rpc_push(519, sync_mission_data(picked_char))
+                    
+                    # 611: inventory_sync
                     send_rpc_push(611, sync_inventory_data(picked_char))
+                    
+                    # 540: skill_sync
+                    smap = build_skills_map(picked_char['prof'], picked_char['level'], picked_char.get('skill_levels', {}))
+                    send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
+                    
+                    # 519: mission_sync
+                    send_rpc_push(519, sync_mission_data(picked_char))
                     
                     # TAG 503: enter_map
                     mid = picked_char.get('map_id', '11')
-                    send_rpc_push(503, encode_sproto([(0, mid), (1, 1), (2, 1)]))
+                    scene_name = MAP_CONFIG.get(mid, {}).get('scene', 'Unknown')
+                    send_rpc_push(503, encode_sproto([(0, mid), (1, 0), (2, 1)]))
+                    print(f"[MAP ENTER SEND] map_id={mid} scene={scene_name} birth={picked_char['pos']}")
                     # Initial main_player_create handled by map_ready (MSG 100)
 
             elif msg == 100: # map_ready
                 if picked_char:
                     mid = picked_char.get('map_id', '11')
-                    print(f"[MAP READY] map={mid} id={picked_char['id']}")
+                    print(f"[MAP READY RECEIVED] map_id={mid}")
                     
                     # TAG 504: main_player_create (Fixes 90% freeze)
                     send_rpc_push(504, encode_sproto([
                         (0, get_full_char(picked_char)), 
                         (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
                     ]))
+                    print(f"[MAIN PLAYER CREATE SEND] map_id={mid}")
                     
                     send_rpc_push(611, sync_inventory_data(picked_char))
                     send_rpc_push(519, sync_mission_data(picked_char))
