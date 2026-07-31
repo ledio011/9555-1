@@ -10,6 +10,8 @@ rewards_data = {}
 LEVEL_DATA = {}
 MONSTER_DATA = {} # mapId -> list of monster spawns
 NPC_CONFIG = {}   # npcId -> npc info
+MAP_CONFIG = {}   # mapId -> map info
+GUILD_CAPTURE_DATA = {} # id -> mapId
 
 try:
     script_dir = os.path.dirname(__file__)
@@ -38,6 +40,34 @@ try:
                         }
         print(f"[LEVEL TABLE LOADED] levels={len(LEVEL_DATA)}")
     
+    # Load MapInfoData
+    map_info_path = os.path.join(script_dir, "assets/Bundle/TextAsset/MapInfoData")
+    if os.path.exists(map_info_path):
+        with open(map_info_path, "r", encoding='utf-8') as f:
+            for line in f:
+                if line.startswith("*,"):
+                    parts = line.strip().split(",")
+                    if len(parts) > 8:
+                        mid = parts[1]
+                        MAP_CONFIG[mid] = {
+                            'name': parts[2],
+                            'scene': parts[3],
+                            'birth': parts[8],
+                            'open_lv': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 0
+                        }
+        print(f"[MAP CONFIG LOADED] count={len(MAP_CONFIG)}")
+
+    # Load GuildCaptureData
+    gc_path = os.path.join(script_dir, "assets/Bundle/TextAsset/GuildCaptureData")
+    if os.path.exists(gc_path):
+        with open(gc_path, "r", encoding='utf-8') as f:
+            for line in f:
+                if line.startswith("*,"):
+                    parts = line.strip().split(",")
+                    if len(parts) > 2:
+                        GUILD_CAPTURE_DATA[parts[1]] = parts[2]
+        print(f"[GUILD CAPTURE DATA LOADED] count={len(GUILD_CAPTURE_DATA)}")
+
     # Load NpcData
     npc_path = os.path.join(script_dir, "assets/Bundle/TextAsset/NpcData")
     if os.path.exists(npc_path):
@@ -265,7 +295,7 @@ def get_general(c):
         (0, c.get('name', 'Hero')),
         (1, c.get('prof', 0)),
         (2, 1),
-        (3, "11"),
+        (3, str(c.get('map_id', '11'))),
         (4, 1)
     ])
 
@@ -564,7 +594,8 @@ def init_character_fields(c):
         'completed_side_missions': [], 
         'last_main_mission_id': "",
         'inventory': [],
-        'pos': [29860, 100, -17005, 0]
+        'pos': [29860, 100, -17005, 0],
+        'map_id': "11"
     }
     for k, v in fields.items():
         if k not in c: c[k] = v
@@ -575,6 +606,27 @@ def init_character_fields(c):
         prof = c.get('prof', 0)
         ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1, {'hp': [3000,3000,3000]}))
         c['hp'] = ld['hp'][prof] if prof < len(ld['hp']) else ld['hp'][0]
+
+def start_map_transition(conn, picked_char, target_map_id):
+    picked_char['map_id'] = str(target_map_id)
+    # Update position to birth pos if map exists
+    if picked_char['map_id'] in MAP_CONFIG:
+        birth = MAP_CONFIG[picked_char['map_id']]['birth']
+        if birth:
+            parts = birth.split('#')
+            if len(parts) >= 3:
+                picked_char['pos'] = [int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3]) if len(parts) > 3 else 0]
+    
+    save_chars(all_accounts_chars)
+    # TAG 503: enter_map
+    try:
+        ph_p = encode_sproto([(0, 503)])
+        # mapInfoId(0), line_index(1), line_count(2)
+        data = encode_sproto([(0, picked_char['map_id']), (1, 1), (2, 1)])
+        pf_p = sproto_pack(ph_p + data)
+        conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+        print(f"[MAP TRANSITION] id={picked_char['id']} to map={picked_char['map_id']}")
+    except: pass
 
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
@@ -658,18 +710,83 @@ def client_handler(conn, addr):
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))]))
                     send_rpc_push(519, sync_mission_data(picked_char))
                     send_rpc_push(611, sync_inventory_data(picked_char))
-                    send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)]))
-                    send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2]))]))
-                    spawn_map_npcs(conn, "11")
+                    
+                    # TAG 503: enter_map
+                    mid = picked_char.get('map_id', '11')
+                    send_rpc_push(503, encode_sproto([(0, mid), (1, 1), (2, 1)]))
+                    # Initial main_player_create handled by map_ready (MSG 100)
 
             elif msg == 100: # map_ready
                 if picked_char:
+                    mid = picked_char.get('map_id', '11')
+                    print(f"[MAP READY] map={mid} id={picked_char['id']}")
+                    
+                    # TAG 504: main_player_create (Fixes 90% freeze)
+                    send_rpc_push(504, encode_sproto([
+                        (0, get_full_char(picked_char)), 
+                        (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
+                    ]))
+                    
                     send_rpc_push(611, sync_inventory_data(picked_char))
                     send_rpc_push(519, sync_mission_data(picked_char))
                     smap = build_skills_map(picked_char['prof'], picked_char['level'], picked_char.get('skill_levels', {}))
                     send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
                     send_rpc_push(654, encode_sproto([(0, 1)]))
-                    spawn_map_npcs(conn, "11")
+                    spawn_map_npcs(conn, mid)
+
+            elif msg == 106: # enter_new_map
+                mid = body.get(0, b"").decode('utf-8')
+                print(f"[RX] enter_new_map: {mid}")
+                if picked_char:
+                    start_map_transition(conn, picked_char, mid)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 107: # enter_copy_scene
+                mid = body.get(0, b"").decode('utf-8')
+                print(f"[RX] enter_copy_scene: {mid}")
+                if picked_char:
+                    start_map_transition(conn, picked_char, mid)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 246: # enter_survive_batttle
+                mid = body.get(0, b"").decode('utf-8')
+                if picked_char: start_map_transition(conn, picked_char, mid)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 273: # enter_scuffle_batttle
+                mid = body.get(0, b"").decode('utf-8')
+                if picked_char: start_map_transition(conn, picked_char, mid)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 207: # enter_bar_fight
+                mid = body.get(0, b"").decode('utf-8')
+                if picked_char: start_map_transition(conn, picked_char, mid)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 201: # enter_wild_boss
+                mid = body.get(0, b"").decode('utf-8')
+                if picked_char: start_map_transition(conn, picked_char, mid)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 322: # enter_guild_city_scene
+                did = body.get(0, b"").decode('utf-8')
+                mid = GUILD_CAPTURE_DATA.get(did, did)
+                if picked_char: start_map_transition(conn, picked_char, mid)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 101: # move
                 if session is not None:
