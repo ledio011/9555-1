@@ -427,8 +427,7 @@ def spawn_map_npcs(conn, map_id):
     if map_str not in MONSTER_DATA: return
     
     aoi_list = []
-    # Limit to first 20 NPCs to avoid huge packets during testing
-    for m in MONSTER_DATA[map_str][:20]:
+    for m in MONSTER_DATA[map_str]:
         cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}", 'model': 'NPC_Nan_013'})
         # Unique ID for AOI NPCs (simple offset)
         aoi_id = 2000000 + int(m['nid']) + len(aoi_list)
