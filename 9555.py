@@ -9,8 +9,10 @@ missions_data = {}
 rewards_data = {}
 LEVEL_DATA = {}
 MONSTER_DATA = {} # mapId -> list of monster spawns
-NPC_CONFIG = {}   # npcId -> npc info
+STATIC_NPC_DATA = {} # mapId -> list of static NPC spawns
+NPC_CONFIG = {}   # npcId -> npc info template
 MAP_CONFIG = {}   # mapId -> map info
+MAP_CONNECT_DATA = {} # (src_id, target_id) -> PosX, PosY, PosZ
 GUILD_CAPTURE_DATA = {} # id -> mapId
 
 try:
@@ -52,10 +54,32 @@ try:
                         MAP_CONFIG[mid] = {
                             'name': parts[2],
                             'scene': parts[3],
+                            'type': int(parts[4]) if parts[4].isdigit() else 0,
+                            'width': int(parts[6]) if parts[6].isdigit() else 0,
+                            'height': int(parts[7]) if parts[7].isdigit() else 0,
                             'birth': parts[8],
+                            'teleport_pos': parts[10] if len(parts) > 10 else "",
                             'open_lv': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 0
                         }
         print(f"[MAP CONFIG LOADED] count={len(MAP_CONFIG)}")
+
+    # Load MapConnectInfoData
+    conn_path = os.path.join(script_dir, "assets/Bundle/TextAsset/MapConnectInfoData")
+    if os.path.exists(conn_path):
+        with open(conn_path, "r", encoding='utf-8') as f:
+            for line in f:
+                if line.startswith("*,"):
+                    parts = line.strip().split(",")
+                    if len(parts) > 6:
+                        src = parts[2]
+                        dst = parts[3]
+                        try:
+                            px = float(parts[4])
+                            py = float(parts[5]) if parts[5] else 0.0
+                            pz = float(parts[6])
+                            MAP_CONNECT_DATA[(src, dst)] = (px, py, pz)
+                        except: pass
+        print(f"[MAP CONNECT DATA LOADED] count={len(MAP_CONNECT_DATA)}")
 
     # Load GuildCaptureData
     gc_path = os.path.join(script_dir, "assets/Bundle/TextAsset/GuildCaptureData")
@@ -75,31 +99,43 @@ try:
             for line in f:
                 if line.startswith("*,"):
                     parts = line.strip().split(",")
-                    if len(parts) > 4:
+                    if len(parts) > 13:
                         nid = parts[1]
                         NPC_CONFIG[nid] = {
                             'name': parts[2],
-                            'model': parts[4]
+                            'model': parts[4],
+                            'group': int(parts[6]) if parts[6].isdigit() else 0,
+                            'talk_group': parts[7],
+                            'func_type': int(parts[8]) if parts[8].isdigit() else 0,
+                            'level': int(parts[9]) if parts[9].isdigit() else 1,
+                            'type': int(parts[13]) if parts[13].isdigit() else 0
                         }
         print(f"[NPC CONFIG LOADED] count={len(NPC_CONFIG)}")
 
-    # Load MonsterData
+    # Load MonsterData (and split into Monster vs Static NPC)
     mon_path = os.path.join(script_dir, "assets/Bundle/TextAsset/MonsterData")
     if os.path.exists(mon_path):
         with open(mon_path, "r", encoding='utf-8') as f:
             for line in f:
                 if line.startswith("*,"):
                     parts = line.strip().split(",")
-                    if len(parts) > 5 and parts[1].isdigit():
+                    if len(parts) > 6 and parts[1].isdigit():
                         mid = parts[1]
-                        if mid not in MONSTER_DATA: MONSTER_DATA[mid] = []
-                        MONSTER_DATA[mid].append({
-                            'nid': parts[3],
+                        group = int(parts[2]) if parts[2].isdigit() else 0
+                        nid = parts[3]
+                        entry = {
+                            'nid': nid,
                             'x': int(parts[4]),
                             'z': int(parts[5]),
                             'o': int(parts[6])
-                        })
-        print(f"[MONSTER DATA LOADED] map_count={len(MONSTER_DATA)}")
+                        }
+                        if group == 9999:
+                            if mid not in STATIC_NPC_DATA: STATIC_NPC_DATA[mid] = []
+                            STATIC_NPC_DATA[mid].append(entry)
+                        else:
+                            if mid not in MONSTER_DATA: MONSTER_DATA[mid] = []
+                            MONSTER_DATA[mid].append(entry)
+        print(f"[MONSTER DATA LOADED] monsters_map={len(MONSTER_DATA)} static_npcs_map={len(STATIC_NPC_DATA)}")
 except: traceback.print_exc()
 
 def load_chars():
@@ -424,32 +460,49 @@ def sync_char_attrs_rpc(conn, picked_char):
 def spawn_map_npcs(conn, map_id):
     """Spawns all NPCs and Monsters defined in data for the map."""
     map_str = str(map_id)
-    if map_str not in MONSTER_DATA: return
     
     aoi_list = []
-    for m in MONSTER_DATA[map_str]:
-        cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}", 'model': 'NPC_Nan_013'})
-        # Unique ID for AOI NPCs (simple offset)
-        aoi_id = 2000000 + int(m['nid']) + len(aoi_list)
-        
-        gen = encode_sproto([(0, cfg['name']), (1, 0), (2, 0), (3, map_str), (4, 0)])
-        # Position uses m['x'], 0, m['z'], m['o']
-        pos_data = encode_sproto([(0, m['x']), (1, 0), (2, m['z']), (3, m['o'])])
-        pos = encode_sproto([(0, pos_data)])
-        # Use simple visual for NPC (Model Tag 1)
-        vis = encode_sproto([(0, cfg['name']), (1, cfg['model']), (10, 0)])
-        
-        aoi_list.append(encode_sproto([
-            (0, aoi_id),
-            (1, gen),
-            (2, pos),
-            (4, vis),
-            (10, str(m['nid']))
-        ]))
+    
+    # 1. Spawn Static NPCs (Group 9999)
+    if map_str in STATIC_NPC_DATA:
+        for m in STATIC_NPC_DATA[map_str]:
+            cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}", 'model': 'NPC_Nan_013'})
+            aoi_id = 2000000 + int(m['nid'])
+            
+            gen = encode_sproto([(0, cfg['name']), (1, 0), (2, 0), (3, map_str), (4, 0)])
+            pos_data = encode_sproto([(0, m['x']), (1, 0), (2, m['z']), (3, m['o'])])
+            pos = encode_sproto([(0, pos_data)])
+            vis = encode_sproto([(0, cfg['name']), (1, cfg['model']), (10, 0)])
+            
+            aoi_list.append(encode_sproto([
+                (0, aoi_id),
+                (1, gen),
+                (2, pos),
+                (4, vis),
+                (10, str(m['nid']))
+            ]))
+
+    # 2. Spawn Monsters
+    if map_str in MONSTER_DATA:
+        for i, m in enumerate(MONSTER_DATA[map_str]):
+            cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}", 'model': 'NPC_Nan_013'})
+            aoi_id = 3000000 + i # Instance ID
+            
+            gen = encode_sproto([(0, cfg['name']), (1, 0), (2, 0), (3, map_str), (4, 0)])
+            pos_data = encode_sproto([(0, m['x']), (1, 0), (2, m['z']), (3, m['o'])])
+            pos = encode_sproto([(0, pos_data)])
+            vis = encode_sproto([(0, cfg['name']), (1, cfg['model']), (10, 0)])
+            
+            aoi_list.append(encode_sproto([
+                (0, aoi_id),
+                (1, gen),
+                (2, pos),
+                (4, vis),
+                (10, str(m['nid']))
+            ]))
     
     if aoi_list:
-        print(f"[AOI ADD] Spawning {len(aoi_list)} NPCs on map {map_id}")
-        # Local send helper inside client_handler will be used, but for now we define a generic one
+        print(f"[AOI ADD] Spawning {len(aoi_list)} entities on map {map_id}")
         try:
             ph_p = encode_sproto([(0, 505)])
             pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_list)]))
@@ -610,18 +663,34 @@ def init_character_fields(c):
         c['hp'] = ld['hp'][prof] if prof < len(ld['hp']) else ld['hp'][0]
 
 def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
-    picked_char['map_id'] = str(target_map_id)
+    src_map = picked_char.get('map_id', '11')
+    target_map_id = str(target_map_id)
+    picked_char['map_id'] = target_map_id
     scene_name = "Unknown"
-    # Update position to birth pos if map exists
-    if picked_char['map_id'] in MAP_CONFIG:
-        birth = MAP_CONFIG[picked_char['map_id']]['birth']
-        scene_name = MAP_CONFIG[picked_char['map_id']]['scene']
+    
+    # Update position
+    landing_pos = None
+    # 1. Try teleport portal heuristic
+    if (target_map_id, src_map) in MAP_CONNECT_DATA:
+        px, py, pz = MAP_CONNECT_DATA[(target_map_id, src_map)]
+        # Add a small offset so player isn't exactly on the trigger
+        landing_pos = [int(px * 100), int(py * 100), int(pz * 100), 0]
+        print(f"[TELEPORT] Transition {src_map} -> {target_map_id} using portal heuristic: {landing_pos}")
+    
+    # 2. Fallback to birth pos
+    if not landing_pos and target_map_id in MAP_CONFIG:
+        birth = MAP_CONFIG[target_map_id]['birth']
+        scene_name = MAP_CONFIG[target_map_id]['scene']
         if birth:
             parts = birth.split('#')
             if len(parts) >= 3:
-                picked_char['pos'] = [int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3]) if len(parts) > 3 else 0]
+                landing_pos = [int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3]) if len(parts) > 3 else 0]
+                print(f"[TELEPORT] Fallback to birth pos for {target_map_id}: {landing_pos}")
+
+    if landing_pos:
+        picked_char['pos'] = landing_pos
     else:
-        print(f"[MAP CONFIG MISSING] map_id={picked_char['map_id']}")
+        print(f"[MAP CONFIG MISSING] map_id={target_map_id}")
     
     save_chars(all_accounts_chars)
     # TAG 503: enter_map
@@ -629,21 +698,21 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
     try:
         ph_p = encode_sproto([(0, 503)])
         # mapInfoId(0), line_index(1), line_count(2)
-        data = encode_sproto([(0, str(picked_char['map_id'])), (1, 0), (2, 1)])
+        data = encode_sproto([(0, target_map_id), (1, 0), (2, 1)])
         pf_p = sproto_pack(ph_p + data)
         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
-        print(f"[MAP ENTER SEND] map_id={picked_char['map_id']} scene={scene_name} birth={picked_char['pos']}")
+        print(f"[MAP ENTER SEND] map_id={target_map_id} scene={scene_name} pos={picked_char['pos']}")
 
-        # TAG 504: main_player_create (Queueing packet to unblock 90% freeze)
+        # TAG 504: main_player_create
         send_rpc_push(504, encode_sproto([
             (0, get_full_char(picked_char)), 
             (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
         ]))
-        print(f"[MAIN PLAYER CREATE SEND] map_id={picked_char['map_id']}")
+        print(f"[MAIN PLAYER CREATE SEND] map_id={target_map_id}")
 
         # TAG 505: aoi_add (NPCs)
-        spawn_map_npcs(conn, picked_char['map_id'])
+        spawn_map_npcs(conn, target_map_id)
 
     except Exception:
         print("[!] FAILED TO SEND MAP ENTER TRANSITION")
@@ -761,9 +830,9 @@ def client_handler(conn, addr):
                         pf_p = sproto_pack(ph_p + data)
                         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
                         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
-                        print(f"[MAP ENTER SEND] map_id={mid} scene={scene_name} birth={picked_char['pos']}")
+                        print(f"[MAP ENTER SEND] map_id={mid} scene={scene_name} pos={picked_char['pos']}")
 
-                        # TAG 504: main_player_create (Queueing packet to unblock 90% freeze)
+                        # TAG 504: main_player_create
                         send_rpc_push(504, encode_sproto([
                             (0, get_full_char(picked_char)), 
                             (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
@@ -980,8 +1049,8 @@ def client_handler(conn, addr):
                         if not m_cfg: continue
                         
                         ltype = m_cfg.get('logic_type')
-                        # 1: KILLMONSTER, 17: MASSACRE_NPC, 23: KILL_TARGET_NPC
-                        if ltype in [1, 17, 23]:
+                        # 1: KILLMONSTER, 4: KILL_DROP, 6: INVESTIGATE, 11: COPY_KILL, 17: MASSACRE_NPC, 23: KILL_TARGET_NPC
+                        if ltype in [1, 4, 6, 11, 17, 23]:
                             if m_cfg.get('target_id') == npcid or ltype == 17:
                                 mdata['parm'][0] += 1
                                 print(f"[*] Mission {mid} progress: {mdata['parm'][0]}/{m_cfg.get('require_num')}")
@@ -1008,9 +1077,9 @@ def client_handler(conn, addr):
                                     mdata['state'] = 2
                                     send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
                                 updated = True
-                        # 0: STORY, 21: ARRIVE_TARGET
-                        elif ltype in [0, 21]:
-                            if die_type == 4:
+                        # 0: STORY, 2: SEND_MSG, 21: ARRIVE_TARGET
+                        elif ltype in [0, 2, 21]:
+                            if die_type == 4 and npcid == mid:
                                 mdata['state'] = 2
                                 send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
                                 updated = True
