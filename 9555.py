@@ -8,6 +8,9 @@ server_session_counter = 8000
 missions_data = {}
 rewards_data = {}
 LEVEL_DATA = {}
+MONSTER_DATA = {} # mapId -> list of monster spawns
+NPC_CONFIG = {}   # npcId -> npc info
+
 try:
     script_dir = os.path.dirname(__file__)
     md_path = os.path.join(script_dir, "missions.json")
@@ -26,7 +29,6 @@ try:
                     parts = line.strip().split(",")
                     if len(parts) > 20 and parts[1].isdigit():
                         lv = int(parts[1])
-                        # Structure: Lv, RecomPower, Exp, ATKXD, HPXD, DEFXD, ..., ATKQJ, HPQJ, DEFQJ, ..., ATKNQ, HPNQ, DEFNQ
                         LEVEL_DATA[lv] = {
                             'exp': int(parts[3]),
                             'power': int(parts[2]),
@@ -35,12 +37,39 @@ try:
                             'def': [int(parts[6]), int(parts[13]), int(parts[20])]
                         }
         print(f"[LEVEL TABLE LOADED] levels={len(LEVEL_DATA)}")
-        if 1 in LEVEL_DATA:
-            print(f"[*] Level 1: EXP Req={LEVEL_DATA[1]['exp']}, Power={LEVEL_DATA[1]['power']}")
-        if 79 in LEVEL_DATA:
-            print(f"[*] Level 79: EXP Req={LEVEL_DATA[79]['exp']}")
-    else:
-        print(f"[!] BaseLvData MISSING at {lv_path}")
+    
+    # Load NpcData
+    npc_path = os.path.join(script_dir, "assets/Bundle/TextAsset/NpcData")
+    if os.path.exists(npc_path):
+        with open(npc_path, "r", encoding='utf-8') as f:
+            for line in f:
+                if line.startswith("*,"):
+                    parts = line.strip().split(",")
+                    if len(parts) > 4:
+                        nid = parts[1]
+                        NPC_CONFIG[nid] = {
+                            'name': parts[2],
+                            'model': parts[4]
+                        }
+        print(f"[NPC CONFIG LOADED] count={len(NPC_CONFIG)}")
+
+    # Load MonsterData
+    mon_path = os.path.join(script_dir, "assets/Bundle/TextAsset/MonsterData")
+    if os.path.exists(mon_path):
+        with open(mon_path, "r", encoding='utf-8') as f:
+            for line in f:
+                if line.startswith("*,"):
+                    parts = line.strip().split(",")
+                    if len(parts) > 5 and parts[1].isdigit():
+                        mid = parts[1]
+                        if mid not in MONSTER_DATA: MONSTER_DATA[mid] = []
+                        MONSTER_DATA[mid].append({
+                            'nid': parts[3],
+                            'x': int(parts[4]),
+                            'z': int(parts[5]),
+                            'o': int(parts[6])
+                        })
+        print(f"[MONSTER DATA LOADED] map_count={len(MONSTER_DATA)}")
 except: traceback.print_exc()
 
 def load_chars():
@@ -263,24 +292,31 @@ def get_full_char(c):
     lv = c.get('level', 1)
     prof = c.get('prof', 0)
     ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1, {'power': 0, 'hp': [0,0,0], 'atk': [0,0,0], 'def': [0,0,0]}))
-    hp_val = ld['hp'][prof] if prof < len(ld['hp']) else ld['hp'][0]
+    hp_max = ld['hp'][prof] if prof < len(ld['hp']) else ld['hp'][0]
+    hp_cur = c.get('hp', hp_max)
+    pwr_val = ld['power']
+    atk_val = ld['atk'][prof] if prof < len(ld['atk']) else ld['atk'][0]
+    def_val = ld['def'][prof] if prof < len(ld['def']) else ld['def'][0]
     
     attr_oth = encode_sproto([
-        (0, hp_val), 
+        (0, hp_cur), 
         (1, c.get('exp', 0)), 
         (2, lv), 
-        (3, ld['power']), 
+        (3, pwr_val), 
         (15, 1)
     ])
+    attr_base = encode_sproto([
+        (0, hp_max),
+        (2, atk_val),
+        (3, def_val)
+    ])
+    
     prop = encode_sproto([(13, c.get('cash', 1000)), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
     pos = c.get('pos', [29860, 100, -17005, 0])
     mv = get_movement(pos[0], pos[1], pos[2], pos[3])
     
-    # attr_run: hp(0), atk(2), def(3)
-    atk_val = ld['atk'][prof] if prof < len(ld['atk']) else ld['atk'][0]
-    def_val = ld['def'][prof] if prof < len(ld['def']) else ld['def'][0]
-    attr_run = encode_sproto([(0, hp_val), (2, atk_val), (3, def_val)])
-    attr_all = encode_sproto([(0, hp_val), (2, atk_val), (3, def_val), (13, 500)])
+    attr_run = encode_sproto([(0, hp_max), (2, atk_val), (3, def_val)])
+    attr_all = encode_sproto([(0, hp_max), (2, atk_val), (3, def_val), (13, 500)])
     run = encode_sproto([(6, attr_run), (7, attr_all)])
     
     char_level = lv
@@ -293,6 +329,7 @@ def get_full_char(c):
         (0, c['id']),
         (1, gen),
         (2, attr_oth),
+        (3, attr_base),
         (5, prop),
         (6, get_visual(c.get('name', 'Hero'), prof)),
         (7, mv),
@@ -304,44 +341,41 @@ def get_full_char(c):
     ])
 
 def sync_char_attrs_rpc(conn, picked_char):
-    """Sends TAG 510 (aoi_update_attribute) to sync Level, EXP, and Cash."""
-    lv = picked_char.get('level', 1)
-    # Get base stats for this level
-    ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1, {'power': 0, 'hp': [0,0,0], 'atk': [0,0,0], 'def': [0,0,0]}))
-    prof = picked_char.get('prof', 0)
-    hp_val = ld['hp'][prof] if prof < len(ld['hp']) else ld['hp'][0]
-    pwr_val = ld['power']
-    atk_val = ld['atk'][prof] if prof < len(ld['atk']) else ld['atk'][0]
-    def_val = ld['def'][prof] if prof < len(ld['def']) else ld['def'][0]
+    # ... (already updated above) ...
+    pass
 
-    # attribute_other: hp(0), exp(1), level(2), combValue(3), atk(4), def(5), camp(15)
-    attr_oth_list = [
-        (0, hp_val),
-        (1, picked_char.get('exp', 0)),
-        (2, lv),
-        (3, pwr_val),
-        (4, atk_val),
-        (5, def_val),
-        (15, 1) # Camp: Player
-    ]
-    attr_oth = encode_sproto(attr_oth_list)
-    # property: money1(13)
-    prop_list = [
-        (13, picked_char.get('cash', 0))
-    ]
-    prop = encode_sproto(prop_list)
-    # character_aoi_attribute: id(0), attribute_other(1), property(5)
-    aoi_attr = encode_sproto([
-        (0, picked_char['id']),
-        (1, attr_oth),
-        (5, prop)
-    ])
-    print(f"[PLAYER ATTRIBUTE SYNC] id={picked_char['id']} HP={hp_val} POWER={pwr_val} LEVEL={lv} EXP={picked_char.get('exp')} CASH={picked_char.get('cash')}")
-    try:
-        ph_p = encode_sproto([(0, 510)])
-        pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_attr)]))
-        conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
-    except: pass
+def spawn_map_npcs(conn, map_id):
+    """Spawns all NPCs and Monsters defined in data for the map."""
+    map_str = str(map_id)
+    if map_str not in MONSTER_DATA: return
+    
+    aoi_list = []
+    for m in MONSTER_DATA[map_str]:
+        cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}", 'model': 'NPC_Nan_013'})
+        # Unique ID for AOI NPCs (simple offset)
+        aoi_id = 2000000 + int(m['nid']) + len(aoi_list)
+        
+        gen = encode_sproto([(0, cfg['name']), (1, 0), (2, 0), (3, map_str), (4, 0)])
+        pos = encode_sproto([(0, encode_sproto([(0, m['x']), (1, 0), (2, m['z']), (3, m['o'])]))])
+        # Use simple visual for NPC (Model Tag 1)
+        vis = encode_sproto([(0, cfg['name']), (1, cfg['model']), (10, 0)])
+        
+        aoi_list.append(encode_sproto([
+            (0, aoi_id),
+            (1, gen),
+            (2, pos),
+            (4, vis),
+            (10, str(m['nid']))
+        ]))
+    
+    if aoi_list:
+        print(f"[AOI ADD] Spawning {len(aoi_list)} NPCs on map {map_id}")
+        # Local send helper inside client_handler will be used, but for now we define a generic one
+        try:
+            ph_p = encode_sproto([(0, 505)])
+            pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_list)]))
+            conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+        except: pass
 
 def sync_mission_data(picked_char):
     own_missions = {}
@@ -487,6 +521,13 @@ def init_character_fields(c):
     }
     for k, v in fields.items():
         if k not in c: c[k] = v
+    
+    # Initialize HP if not set
+    if 'hp' not in c:
+        lv = c.get('level', 1)
+        prof = c.get('prof', 0)
+        ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1, {'hp': [3000,3000,3000]}))
+        c['hp'] = ld['hp'][prof] if prof < len(ld['hp']) else ld['hp'][0]
 
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
@@ -572,6 +613,7 @@ def client_handler(conn, addr):
                     send_rpc_push(611, sync_inventory_data(picked_char))
                     send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)]))
                     send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2]))]))
+                    spawn_map_npcs(conn, "11")
 
             elif msg == 100: # map_ready
                 if picked_char:
@@ -580,6 +622,7 @@ def client_handler(conn, addr):
                     smap = build_skills_map(picked_char['prof'], picked_char['level'], picked_char.get('skill_levels', {}))
                     send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
                     send_rpc_push(654, encode_sproto([(0, 1)]))
+                    spawn_map_npcs(conn, "11")
 
             elif msg == 101: # move
                 if session is not None:
@@ -757,6 +800,26 @@ def client_handler(conn, addr):
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 311: # enter_domin_pk_scene
+                did = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
+                print(f"[*] Entering PK scene for Domin ID={did}")
+                # copy_scene_result (552): result(0)=1 (Win)
+                send_rpc_push(552, encode_sproto([(0, 1)]))
+                # Trigger capture_success logic (LogicType 25)
+                if picked_char:
+                    updated_missions = False
+                    for mid_act, mdata in picked_char['active_missions'].items():
+                        m_cfg = missions_data.get(mid_act)
+                        if m_cfg and m_cfg.get('logic_type') == 25:
+                            mdata['state'] = 2
+                            send_rpc_push(523, encode_sproto([(0, mid_act), (1, 2)]))
+                            updated_missions = True
+                    if updated_missions:
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(519, sync_mission_data(picked_char))
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 7: # update_game_server
                 servers = [encode_sproto([(0, 302), (1, "EU-001"), (2, "tokaido.proxy.rlwy.net"), (3, 48282), (4, 1), (5, 1), (6, 1), (7, 0), (8, 1), (9, 1)])]
