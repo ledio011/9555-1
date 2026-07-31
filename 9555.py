@@ -520,16 +520,18 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 112: # accept_mission
-                if session is not None and picked_char:
+                if picked_char:
                     mid = body.get(0, b"").decode('utf-8')
-                    accept_mission_logic(picked_char, mid)
-                    save_chars(all_accounts_chars)
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    if accept_mission_logic(picked_char, mid):
+                        save_chars(all_accounts_chars)
+                        print(f"[MISSION ACCEPT] mission_id={mid}")
+                    if session is not None:
+                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                        conn.sendall(struct.pack(">H", len(pf)) + pf)
                     send_rpc_push(519, sync_mission_data(picked_char))
 
             elif msg == 113: # complete_mission
-                if session is not None and picked_char:
+                if picked_char:
                     mid = body.get(0, b"").decode('utf-8')
                     m_entry = picked_char.get('active_missions', {}).get(mid)
                     if m_entry and m_entry['state'] == 2:
@@ -557,8 +559,9 @@ def client_handler(conn, addr):
                             print(f"[MISSION COMPLETE] mission_id={mid}")
                             
                             # Standard completion response
-                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                            conn.sendall(struct.pack(">H", len(pf)) + pf)
+                            if session is not None:
+                                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                                conn.sendall(struct.pack(">H", len(pf)) + pf)
                             
                             # Push Sync sequence
                             send_rpc_push(521, encode_sproto([(0, mid), (1, 1)])) # Success feedback
@@ -567,11 +570,13 @@ def client_handler(conn, addr):
                             if items_add:
                                 send_rpc_push(611, sync_inventory_data(picked_char)) # Inventory sync
                         else:
+                            if session is not None:
+                                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                                conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    else:
+                        if session is not None:
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                             conn.sendall(struct.pack(">H", len(pf)) + pf)
-                    else:
-                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                        conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 524: # set_mission_param
                 mid = body.get(0, b"").decode('utf-8')
