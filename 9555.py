@@ -7,7 +7,7 @@ server_session_counter = 8000
 # Load Mission Data
 missions_data = {}
 rewards_data = {}
-LEVEL_EXP_REQS = {}
+LEVEL_DATA = {}
 try:
     script_dir = os.path.dirname(__file__)
     md_path = os.path.join(script_dir, "missions.json")
@@ -17,20 +17,30 @@ try:
     if os.path.exists(rd_path):
         with open(rd_path, "r", encoding='utf-8') as f: rewards_data = json.load(f)
     
-    # Load BaseLvData for EXP requirements
+    # Load BaseLvData for EXP requirements and stats
     lv_path = os.path.join(script_dir, "assets/Bundle/TextAsset/BaseLvData")
     if os.path.exists(lv_path):
         with open(lv_path, "r", encoding='utf-8') as f:
             for line in f:
                 if line.startswith("*,"):
                     parts = line.strip().split(",")
-                    if len(parts) > 3 and parts[1].isdigit():
-                        LEVEL_EXP_REQS[int(parts[1])] = int(parts[3])
-        print(f"[*] Loaded {len(LEVEL_EXP_REQS)} level exp requirements.")
-        if 1 in LEVEL_EXP_REQS:
-            print(f"[*] LEVEL_EXP_REQS[1] = {LEVEL_EXP_REQS[1]}")
-        else:
-            print(f"[!] LEVEL_EXP_REQS[1] is MISSING!")
+                    if len(parts) > 20 and parts[1].isdigit():
+                        lv = int(parts[1])
+                        # Structure: Lv, RecomPower, Exp, ATKXD, HPXD, DEFXD, ..., ATKQJ, HPQJ, DEFQJ, ..., ATKNQ, HPNQ, DEFNQ
+                        LEVEL_DATA[lv] = {
+                            'exp': int(parts[3]),
+                            'power': int(parts[2]),
+                            'atk': [int(parts[4]), int(parts[11]), int(parts[18])],
+                            'hp': [int(parts[5]), int(parts[12]), int(parts[19])],
+                            'def': [int(parts[6]), int(parts[13]), int(parts[20])]
+                        }
+        print(f"[LEVEL TABLE LOADED] levels={len(LEVEL_DATA)}")
+        if 1 in LEVEL_DATA:
+            print(f"[*] Level 1: EXP Req={LEVEL_DATA[1]['exp']}, Power={LEVEL_DATA[1]['power']}")
+        if 79 in LEVEL_DATA:
+            print(f"[*] Level 79: EXP Req={LEVEL_DATA[79]['exp']}")
+    else:
+        print(f"[!] BaseLvData MISSING at {lv_path}")
 except: traceback.print_exc()
 
 def load_chars():
@@ -236,7 +246,9 @@ def get_movement(x, y, z, o=0):
 
 def get_char_ov(c):
     gen = get_general(c)
-    attr = encode_sproto([(0, c.get('level', 1)), (1, 5000)])
+    lv = c.get('level', 1)
+    ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1, {'power': 0}))
+    attr = encode_sproto([(0, lv), (1, ld['power'])])
     return encode_sproto([
         (0, c['id']),
         (1, gen),
@@ -248,15 +260,30 @@ def get_char_ov(c):
 
 def get_full_char(c):
     gen = get_general(c)
-    attr_oth = encode_sproto([(0, 3000), (1, c.get('exp', 0)), (2, c.get('level', 1)), (3, 5000), (15, 1)])
+    lv = c.get('level', 1)
+    prof = c.get('prof', 0)
+    ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1, {'power': 0, 'hp': [0,0,0], 'atk': [0,0,0], 'def': [0,0,0]}))
+    hp_val = ld['hp'][prof] if prof < len(ld['hp']) else ld['hp'][0]
+    
+    attr_oth = encode_sproto([
+        (0, hp_val), 
+        (1, c.get('exp', 0)), 
+        (2, lv), 
+        (3, ld['power']), 
+        (15, 1)
+    ])
     prop = encode_sproto([(13, c.get('cash', 1000)), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
     pos = c.get('pos', [29860, 100, -17005, 0])
     mv = get_movement(pos[0], pos[1], pos[2], pos[3])
-    attr_run = encode_sproto([(0, 3000), (2, 300), (3, 35)])
-    attr_all = encode_sproto([(0, 3000), (2, 300), (3, 35), (13, 500)])
+    
+    # attr_run: hp(0), atk(2), def(3)
+    atk_val = ld['atk'][prof] if prof < len(ld['atk']) else ld['atk'][0]
+    def_val = ld['def'][prof] if prof < len(ld['def']) else ld['def'][0]
+    attr_run = encode_sproto([(0, hp_val), (2, atk_val), (3, def_val)])
+    attr_all = encode_sproto([(0, hp_val), (2, atk_val), (3, def_val), (13, 500)])
     run = encode_sproto([(6, attr_run), (7, attr_all)])
-    prof = c.get('prof', 0)
-    char_level = c.get('level', 1)
+    
+    char_level = lv
     skill_levels = c.get('skill_levels', {})
     skills_map = build_skills_map(prof, char_level, skill_levels)
     wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
@@ -278,10 +305,24 @@ def get_full_char(c):
 
 def sync_char_attrs_rpc(conn, picked_char):
     """Sends TAG 510 (aoi_update_attribute) to sync Level, EXP, and Cash."""
-    # attribute_other: hp(0), exp(1), level(2), combValue(3)
+    lv = picked_char.get('level', 1)
+    # Get base stats for this level
+    ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1, {'power': 0, 'hp': [0,0,0], 'atk': [0,0,0], 'def': [0,0,0]}))
+    prof = picked_char.get('prof', 0)
+    hp_val = ld['hp'][prof] if prof < len(ld['hp']) else ld['hp'][0]
+    pwr_val = ld['power']
+    atk_val = ld['atk'][prof] if prof < len(ld['atk']) else ld['atk'][0]
+    def_val = ld['def'][prof] if prof < len(ld['def']) else ld['def'][0]
+
+    # attribute_other: hp(0), exp(1), level(2), combValue(3), atk(4), def(5), camp(15)
     attr_oth_list = [
+        (0, hp_val),
         (1, picked_char.get('exp', 0)),
-        (2, picked_char.get('level', 1))
+        (2, lv),
+        (3, pwr_val),
+        (4, atk_val),
+        (5, def_val),
+        (15, 1) # Camp: Player
     ]
     attr_oth = encode_sproto(attr_oth_list)
     # property: money1(13)
@@ -295,7 +336,7 @@ def sync_char_attrs_rpc(conn, picked_char):
         (1, attr_oth),
         (5, prop)
     ])
-    print(f"[PLAYER ATTRIBUTE SYNC] id={picked_char['id']} attr_other={attr_oth_list} property={prop_list}")
+    print(f"[PLAYER ATTRIBUTE SYNC] id={picked_char['id']} HP={hp_val} POWER={pwr_val} LEVEL={lv} EXP={picked_char.get('exp')} CASH={picked_char.get('cash')}")
     try:
         ph_p = encode_sproto([(0, 510)])
         pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_attr)]))
@@ -312,8 +353,8 @@ def sync_mission_data(picked_char):
         ])
     data_list = [
         (0, own_missions),
-        (1, picked_char.get('last_main_mission_id', "")),
-        (2, picked_char.get('completed_side_missions', []))
+        (1, str(picked_char.get('last_main_mission_id', ""))),
+        (2, [int(x) for x in picked_char.get('completed_side_missions', [])])
     ]
     print(f"[TAG 519 SYNC] last_main={picked_char.get('last_main_mission_id')} active={list(own_missions.keys())} completed_side={picked_char.get('completed_side_missions')}")
     return encode_sproto(data_list)
@@ -366,15 +407,20 @@ def give_mission_rewards(picked_char, mid):
     # Level up loop (per-level requirements)
     while True:
         lv = picked_char.get('level', 1)
-        req = LEVEL_EXP_REQS.get(lv, 999999999)
+        req_data = LEVEL_DATA.get(lv)
+        if not req_data:
+            print(f"[!] LEVEL DEBUG: No data for level {lv}")
+            break
+        req = req_data['exp']
         print(f"[LEVEL DEBUG] current level: {lv}, current exp: {picked_char['exp']}, required exp: {req}")
         if picked_char['exp'] >= req:
             picked_char['exp'] -= req
             picked_char['level'] = lv + 1
-            print(f"[*] Level up! {lv} -> {picked_char['level']}, remaining exp: {picked_char['exp']}")
+            print(f"[LEVEL UP] old_level={lv}, new_level={picked_char['level']}, remaining_exp={picked_char['exp']}")
         else:
             break
             
+    print(f"[LEVEL RESULT] level={picked_char['level']} exp={picked_char['exp']}")
     print(f"[MISSION REWARD DEBUG] mission_id={mid} reward_id={rid} profession={prof} exp_before={exp_before} exp_added={added_exp} exp_after={picked_char['exp']} level_before={lv_before} level_after={picked_char['level']} cash_added={added_cash}")
 
     granted_items = []
@@ -570,6 +616,7 @@ def client_handler(conn, addr):
                             exp_add, cash_add, items_add = give_mission_rewards(picked_char, mid)
                             
                             # Mission Chain and Unlocking logic
+                            is_chained = False
                             if m_cfg.get('class') == 1:
                                 picked_char['last_main_mission_id'] = mid
                                 print(f"[MISSION CHAIN] updated last_main={mid}")
@@ -577,7 +624,8 @@ def client_handler(conn, addr):
                                 next_mid = m_cfg.get('next_id')
                                 if next_mid and str(next_mid) in missions_data:
                                     res = accept_mission_logic(picked_char, str(next_mid))
-                                    print(f"[MISSION CHAIN] next={next_mid} accepted={res}")
+                                    print(f"[MISSION NEXT] previous={mid} next={next_mid} accepted={res}")
+                                    is_chained = res
                             else:
                                 try:
                                     imid = int(mid)
@@ -587,7 +635,7 @@ def client_handler(conn, addr):
                             
                             del picked_char['active_missions'][mid]
                             save_chars(all_accounts_chars)
-                            print(f"[MISSION COMPLETE] mission_id={mid}")
+                            print(f"[MISSION COMPLETE] mission_id={mid} chained={is_chained}")
                             
                             # Standard completion response
                             if session is not None:
