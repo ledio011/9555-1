@@ -27,6 +27,10 @@ try:
                     if len(parts) > 3 and parts[1].isdigit():
                         LEVEL_EXP_REQS[int(parts[1])] = int(parts[3])
         print(f"[*] Loaded {len(LEVEL_EXP_REQS)} level exp requirements.")
+        if 1 in LEVEL_EXP_REQS:
+            print(f"[*] LEVEL_EXP_REQS[1] = {LEVEL_EXP_REQS[1]}")
+        else:
+            print(f"[!] LEVEL_EXP_REQS[1] is MISSING!")
 except: traceback.print_exc()
 
 def load_chars():
@@ -275,20 +279,23 @@ def get_full_char(c):
 def sync_char_attrs_rpc(conn, picked_char):
     """Sends TAG 510 (aoi_update_attribute) to sync Level, EXP, and Cash."""
     # attribute_other: hp(0), exp(1), level(2), combValue(3)
-    attr_oth = encode_sproto([
+    attr_oth_list = [
         (1, picked_char.get('exp', 0)),
         (2, picked_char.get('level', 1))
-    ])
+    ]
+    attr_oth = encode_sproto(attr_oth_list)
     # property: money1(13)
-    prop = encode_sproto([
+    prop_list = [
         (13, picked_char.get('cash', 0))
-    ])
+    ]
+    prop = encode_sproto(prop_list)
     # character_aoi_attribute: id(0), attribute_other(1), property(5)
     aoi_attr = encode_sproto([
         (0, picked_char['id']),
         (1, attr_oth),
         (5, prop)
     ])
+    print(f"[PLAYER ATTRIBUTE SYNC] id={picked_char['id']} attr_other={attr_oth_list} property={prop_list}")
     try:
         ph_p = encode_sproto([(0, 510)])
         pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_attr)]))
@@ -303,11 +310,13 @@ def sync_mission_data(picked_char):
             (1, mdata['state']),
             (3, mdata['parm'])
         ])
-    return encode_sproto([
+    data_list = [
         (0, own_missions),
         (1, picked_char.get('last_main_mission_id', "")),
         (2, picked_char.get('completed_side_missions', []))
-    ])
+    ]
+    print(f"[TAG 519 SYNC] last_main={picked_char.get('last_main_mission_id')} active={list(own_missions.keys())} completed_side={picked_char.get('completed_side_missions')}")
+    return encode_sproto(data_list)
 
 def sync_inventory_data(picked_char):
     items = {}
@@ -358,11 +367,13 @@ def give_mission_rewards(picked_char, mid):
     while True:
         lv = picked_char.get('level', 1)
         req = LEVEL_EXP_REQS.get(lv, 999999999)
+        print(f"[LEVEL DEBUG] current level: {lv}, current exp: {picked_char['exp']}, required exp: {req}")
         if picked_char['exp'] >= req:
             picked_char['exp'] -= req
             picked_char['level'] = lv + 1
-            print(f"[*] Level up! {lv} -> {picked_char['level']}")
-        else: break
+            print(f"[*] Level up! {lv} -> {picked_char['level']}, remaining exp: {picked_char['exp']}")
+        else:
+            break
             
     print(f"[MISSION REWARD DEBUG] mission_id={mid} reward_id={rid} profession={prof} exp_before={exp_before} exp_added={added_exp} exp_after={picked_char['exp']} level_before={lv_before} level_after={picked_char['level']} cash_added={added_cash}")
 
@@ -378,27 +389,41 @@ def give_mission_rewards(picked_char, mid):
     return added_exp, added_cash, granted_items
 
 def accept_mission_logic(picked_char, mid):
-    if mid not in missions_data: return False
+    if mid not in missions_data:
+        print(f"[accept_mission_logic] FAILED: {mid} not in missions_data")
+        return False
     m = missions_data[mid]
-    if picked_char.get('level', 1) < m.get('min_level', 0): return False
+    if picked_char.get('level', 1) < m.get('min_level', 0):
+        print(f"[accept_mission_logic] FAILED: level too low {picked_char.get('level')} < {m.get('min_level')}")
+        return False
     
     pre_id = m.get('pre_id', "")
     if pre_id:
         if m.get('class') == 1:
-            if picked_char.get('last_main_mission_id', "") != pre_id: return False
+            if str(picked_char.get('last_main_mission_id', "")) != str(pre_id):
+                print(f"[accept_mission_logic] FAILED: last_main {picked_char.get('last_main_mission_id')} != pre_id {pre_id}")
+                return False
         else:
             try:
                 ipre = int(pre_id)
-                if ipre not in picked_char.get('completed_side_missions', []): return False
+                if ipre not in picked_char.get('completed_side_missions', []):
+                    print(f"[accept_mission_logic] FAILED: side pre_id {ipre} not in completed {picked_char.get('completed_side_missions')}")
+                    return False
             except: return False
             
     if 'active_missions' not in picked_char: picked_char['active_missions'] = {}
-    if mid in picked_char['active_missions']: return False
+    if mid in picked_char['active_missions']:
+        print(f"[accept_mission_logic] FAILED: {mid} already active")
+        return False
     try:
         imid = int(mid)
-        if imid in picked_char.get('completed_side_missions', []): return False
+        if imid in picked_char.get('completed_side_missions', []):
+            print(f"[accept_mission_logic] FAILED: {mid} already in completed_side")
+            return False
     except: pass
-    if mid == picked_char.get('last_main_mission_id'): return False
+    if str(mid) == str(picked_char.get('last_main_mission_id')):
+        print(f"[accept_mission_logic] FAILED: {mid} is last_main_mission_id")
+        return False
 
     parm = [0]*8; parm[7] = int(time.time())
     picked_char['active_missions'][mid] = {'state': 1, 'parm': parm, 'accept_time': int(time.time())}
@@ -479,6 +504,7 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
+                    print(f"[CHARACTER PICK] id={picked_char['id']} level={picked_char.get('level')} exp={picked_char.get('exp')} last_main={picked_char.get('last_main_mission_id')}")
                     init_character_fields(picked_char)
                     # Initial Mission Assignment for new characters
                     has_active_main = False
@@ -522,7 +548,9 @@ def client_handler(conn, addr):
             elif msg == 112: # accept_mission
                 if picked_char:
                     mid = body.get(0, b"").decode('utf-8')
-                    if accept_mission_logic(picked_char, mid):
+                    res = accept_mission_logic(picked_char, mid)
+                    print(f"[MISSION ACCEPT REQ] mid={mid} result={res}")
+                    if res:
                         save_chars(all_accounts_chars)
                         print(f"[MISSION ACCEPT] mission_id={mid}")
                     if session is not None:
@@ -534,19 +562,22 @@ def client_handler(conn, addr):
                 if picked_char:
                     mid = body.get(0, b"").decode('utf-8')
                     m_entry = picked_char.get('active_missions', {}).get(mid)
+                    print(f"[MISSION COMPLETE REQ] mid={mid} entry_exists={m_entry is not None} state={m_entry['state'] if m_entry else 'N/A'}")
                     if m_entry and m_entry['state'] == 2:
                         m_cfg = missions_data.get(mid)
                         if m_cfg:
+                            print(f"[MISSION CHAIN] completed={mid} last_main_before={picked_char.get('last_main_mission_id')}")
                             exp_add, cash_add, items_add = give_mission_rewards(picked_char, mid)
                             
                             # Mission Chain and Unlocking logic
                             if m_cfg.get('class') == 1:
                                 picked_char['last_main_mission_id'] = mid
+                                print(f"[MISSION CHAIN] updated last_main={mid}")
                                 # Auto-chain to next Main Mission
                                 next_mid = m_cfg.get('next_id')
                                 if next_mid and str(next_mid) in missions_data:
-                                    if accept_mission_logic(picked_char, str(next_mid)):
-                                        print(f"[MISSION ACCEPT] mission_id={next_mid} (Auto-chained)")
+                                    res = accept_mission_logic(picked_char, str(next_mid))
+                                    print(f"[MISSION CHAIN] next={next_mid} accepted={res}")
                             else:
                                 try:
                                     imid = int(mid)
