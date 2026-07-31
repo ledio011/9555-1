@@ -527,6 +527,65 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif msg == 111: # accept_damge
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 307: # local_npc_die
+                npcid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
+                die_type = get_val_int(body, 3)
+                print(f"[*] local_npc_die npcid={npcid} type={die_type}")
+                if picked_char:
+                    updated = False
+                    for mid, mdata in picked_char.get('active_missions', {}).items():
+                        m_cfg = missions_data.get(mid)
+                        if not m_cfg: continue
+                        
+                        ltype = m_cfg.get('logic_type')
+                        # 1: KILLMONSTER, 17: MASSACRE_NPC, 23: KILL_TARGET_NPC
+                        if ltype in [1, 17, 23]:
+                            if m_cfg.get('target_id') == npcid or ltype == 17:
+                                mdata['parm'][0] += 1
+                                print(f"[*] Mission {mid} progress: {mdata['parm'][0]}/{m_cfg.get('require_num')}")
+                                send_rpc_push(524, encode_sproto([(0, mid), (1, 1), (2, mdata['parm'][0])]))
+                                if mdata['parm'][0] >= m_cfg.get('require_num'):
+                                    mdata['state'] = 2 # COMPLETE
+                                    send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                                updated = True
+                        # 19: ROB_CAR, 24: TARGET_ROB_CAR
+                        elif ltype in [19, 24]:
+                            if die_type in [2, 6]:
+                                mdata['parm'][0] += 1
+                                send_rpc_push(524, encode_sproto([(0, mid), (1, 1), (2, mdata['parm'][0])]))
+                                if mdata['parm'][0] >= m_cfg.get('require_num'):
+                                    mdata['state'] = 2
+                                    send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                                updated = True
+                        # 20: IMPACT_NPC
+                        elif ltype == 20:
+                            if die_type == 3:
+                                mdata['parm'][0] += 1
+                                send_rpc_push(524, encode_sproto([(0, mid), (1, 1), (2, mdata['parm'][0])]))
+                                if mdata['parm'][0] >= m_cfg.get('require_num'):
+                                    mdata['state'] = 2
+                                    send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                                updated = True
+                        # 0: STORY, 21: ARRIVE_TARGET
+                        elif ltype in [0, 21]:
+                            if die_type == 4:
+                                mdata['state'] = 2
+                                send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                                updated = True
+
+                    if updated:
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(519, sync_mission_data(picked_char))
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
             elif msg == 7: # update_game_server
                 servers = [encode_sproto([(0, 302), (1, "EU-001"), (2, "tokaido.proxy.rlwy.net"), (3, 48282), (4, 1), (5, 1), (6, 1), (7, 0), (8, 1), (9, 1)])]
                 resp = encode_sproto([(0, servers)])
