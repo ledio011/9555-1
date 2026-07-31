@@ -1,0 +1,12 @@
+,,Buff名称,图标,描述,动作组,特效,最大层数,类型,属性ID,属性值,修改方式,标记,优先级,互斥组,触发器,加工器,技能,技能释放者,技能目标,初始间隔,循环间隔,开始脚本,结束脚本
+,STRING,STRING,STRING,STRING,STRING,STRING,INT,INT,STRING,INT,INT,INT,INT,INT,STRING,STRING,STRING,INT,INT,INT,INT,STRING,STRING
+*,ID,Name,Icon,Description,Action,Effect,MaxStack,BuffType,AttrID,AttrValue,AttrType,Flags,Priority,Group,TriggerIDList,ProcessorIDList,SkillID,Caster,Target,DelayTime,LoopInterval,BeginScript,EndScript
+*,10000,无敌,,,,,1,4,,,,,,,,,,,,,,,
+*,10001,眩晕,Buff_stun,,xuanYun,118,1,1,,,,,,,,,,,,,,,
+*,10002,击倒,,,knockDown,,,3,,,,,,,,,,,,,,,
+*,20011,加攻击,Buff_Rage,add Attack,,129,1,0,2001,1000,1,,,,,,,,,,,,
+*,20012,攻击药剂,,,,302,1,0,2001,500,1,,,,,,,,,,,,
+*,20021,生命药剂,,,,301,1,0,2002,500,1,,,,,,,,,,,,
+*,20031,加防御,Buff_defence,,,117,1,0,2003,1000,1,,,,,,,,,,,,
+*,20032,防御药剂,,,,303,1,0,2003,500,1,,,,,,,,,,,,
+*,20061,加暴击,,,,151,1,0,2006,1000,1,,,,,,,,,,,,
