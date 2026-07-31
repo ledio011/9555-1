@@ -341,8 +341,55 @@ def get_full_char(c):
     ])
 
 def sync_char_attrs_rpc(conn, picked_char):
-    # ... (already updated above) ...
-    pass
+    """Sends TAG 510 (aoi_update_attribute) to sync all stats."""
+    lv = picked_char.get('level', 1)
+    ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1, {'power': 0, 'hp': [0,0,0], 'atk': [0,0,0], 'def': [0,0,0]}))
+    prof = picked_char.get('prof', 0)
+    
+    hp_max = ld['hp'][prof] if prof < len(ld['hp']) else ld['hp'][0]
+    hp_cur = picked_char.get('hp', hp_max)
+    pwr_val = ld['power']
+    atk_val = ld['atk'][prof] if prof < len(ld['atk']) else ld['atk'][0]
+    def_val = ld['def'][prof] if prof < len(ld['def']) else ld['def'][0]
+
+    # attribute_other (Tag 1 in character_aoi_attribute):
+    # Tag 0: hp, Tag 1: exp, Tag 2: level, Tag 3: combValue, Tag 15: camp
+    attr_oth_list = [
+        (0, hp_cur),
+        (1, picked_char.get('exp', 0)),
+        (2, lv),
+        (3, pwr_val),
+        (15, 1) # Camp: Player
+    ]
+    attr_oth = encode_sproto(attr_oth_list)
+
+    # attribute (Tag 2 in character_aoi_attribute):
+    # Tag 0: max_hp, Tag 2: atk, Tag 3: def
+    attr_base_list = [
+        (0, hp_max),
+        (2, atk_val),
+        (3, def_val)
+    ]
+    attr_base = encode_sproto(attr_base_list)
+
+    # property (Tag 5 in character_aoi_attribute):
+    # Tag 13: money1 (Cash)
+    prop = encode_sproto([(13, picked_char.get('cash', 0))])
+    
+    # character_aoi_attribute: id(0), attribute_other(1), attribute(2), property(5)
+    aoi_attr = encode_sproto([
+        (0, picked_char['id']),
+        (1, attr_oth),
+        (2, attr_base),
+        (5, prop)
+    ])
+    
+    print(f"[PLAYER ATTRIBUTE SYNC] id={picked_char['id']} HP={hp_cur}/{hp_max} POWER={pwr_val} LEVEL={lv} EXP={picked_char.get('exp')} CASH={picked_char.get('cash')}")
+    try:
+        ph_p = encode_sproto([(0, 510)]) # TAG 510
+        pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_attr)])) # character is tag 0
+        conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+    except: pass
 
 def spawn_map_npcs(conn, map_id):
     """Spawns all NPCs and Monsters defined in data for the map."""
@@ -733,8 +780,10 @@ def client_handler(conn, addr):
                         save_chars(all_accounts_chars)
                         smap = build_skills_map(picked_char['prof'], picked_char['level'], picked_char['skill_levels'])
                         send_rpc_push(540, encode_sproto([(0, smap), (1, True)]))
-                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                conn.sendall(struct.pack(">H", len(pf)) + pf)
+                        sync_char_attrs_rpc(conn, picked_char)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 102: # skill_use
                 sid = body.get(1, b"").decode('utf-8'); tid = get_val_int(body, 0); alist = body.get(3, [])
