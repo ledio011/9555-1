@@ -7,13 +7,26 @@ server_session_counter = 8000
 # Load Mission Data
 missions_data = {}
 rewards_data = {}
+LEVEL_EXP_REQS = {}
 try:
-    md_path = os.path.join(os.path.dirname(__file__), "missions.json")
-    rd_path = os.path.join(os.path.dirname(__file__), "mission_rewards.json")
+    script_dir = os.path.dirname(__file__)
+    md_path = os.path.join(script_dir, "missions.json")
+    rd_path = os.path.join(script_dir, "mission_rewards.json")
     if os.path.exists(md_path):
         with open(md_path, "r", encoding='utf-8') as f: missions_data = json.load(f)
     if os.path.exists(rd_path):
         with open(rd_path, "r", encoding='utf-8') as f: rewards_data = json.load(f)
+    
+    # Load BaseLvData for EXP requirements
+    lv_path = os.path.join(script_dir, "assets/Bundle/TextAsset/BaseLvData")
+    if os.path.exists(lv_path):
+        with open(lv_path, "r", encoding='utf-8') as f:
+            for line in f:
+                if line.startswith("*,"):
+                    parts = line.strip().split(",")
+                    if len(parts) > 3 and parts[1].isdigit():
+                        LEVEL_EXP_REQS[int(parts[1])] = int(parts[3])
+        print(f"[*] Loaded {len(LEVEL_EXP_REQS)} level exp requirements.")
 except: traceback.print_exc()
 
 def load_chars():
@@ -259,6 +272,29 @@ def get_full_char(c):
         (15, 2)
     ])
 
+def sync_char_attrs_rpc(conn, picked_char):
+    """Sends TAG 510 (aoi_update_attribute) to sync Level, EXP, and Cash."""
+    # attribute_other: hp(0), exp(1), level(2), combValue(3)
+    attr_oth = encode_sproto([
+        (1, picked_char.get('exp', 0)),
+        (2, picked_char.get('level', 1))
+    ])
+    # property: money1(13)
+    prop = encode_sproto([
+        (13, picked_char.get('cash', 0))
+    ])
+    # character_aoi_attribute: id(0), attribute_other(1), property(5)
+    aoi_attr = encode_sproto([
+        (0, picked_char['id']),
+        (1, attr_oth),
+        (5, prop)
+    ])
+    try:
+        ph_p = encode_sproto([(0, 510)])
+        pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_attr)]))
+        conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+    except: pass
+
 def sync_mission_data(picked_char):
     own_missions = {}
     for mid, mdata in picked_char.get('active_missions', {}).items():
@@ -296,29 +332,50 @@ def add_to_inventory(picked_char, item_id, amount):
     picked_char['inventory'].append({'id': item_id, 'amount': amount})
 
 def give_mission_rewards(picked_char, mid):
+    """Resolves rewards by profession and calculates level ups using BaseLvData."""
     m = missions_data.get(mid)
-    if not m: return
-    rids = m.get('reward_ids', [])
-    if not rids: return
+    if not m or not m.get('reward_ids'): return 0, 0, []
+    
+    # Profession Mapping: 0: Melee, 1: Boxer, 2: Gunslinger
     prof = picked_char.get('prof', 0)
-    # Mapping: Profession 0 -> reward_ids[0], 1 -> reward_ids[1], 2 -> reward_ids[2]
+    rids = m['reward_ids']
     rid = rids[prof] if prof < len(rids) else rids[0]
     reward = rewards_data.get(rid)
-    if not reward: return
+    if not reward:
+        print(f"[!] Reward mapping failed for mission {mid}, rid {rid}")
+        return 0, 0, []
 
-    picked_char['cash'] = picked_char.get('cash', 0) + reward.get('cash', 0)
-    picked_char['exp'] = picked_char.get('exp', 0) + reward.get('exp', 0)
+    added_exp = reward.get('exp', 0)
+    added_cash = reward.get('cash', 0)
     
-    # Simple Level Up
-    while picked_char['exp'] >= picked_char['level'] * 100000:
-        picked_char['exp'] -= picked_char['level'] * 100000
-        picked_char['level'] += 1
+    exp_before = picked_char.get('exp', 0)
+    lv_before = picked_char.get('level', 1)
     
-    items = reward.get('items', [])
-    amounts = reward.get('item_amounts', [])
+    picked_char['cash'] = picked_char.get('cash', 0) + added_cash
+    picked_char['exp'] = exp_before + added_exp
+    
+    # Level up loop (per-level requirements)
+    while True:
+        lv = picked_char.get('level', 1)
+        req = LEVEL_EXP_REQS.get(lv, 999999999)
+        if picked_char['exp'] >= req:
+            picked_char['exp'] -= req
+            picked_char['level'] = lv + 1
+            print(f"[*] Level up! {lv} -> {picked_char['level']}")
+        else: break
+            
+    print(f"[MISSION REWARD DEBUG] mission_id={mid} reward_id={rid} profession={prof} exp_before={exp_before} exp_added={added_exp} exp_after={picked_char['exp']} level_before={lv_before} level_after={picked_char['level']} cash_added={added_cash}")
+
+    granted_items = []
+    items, amounts = reward.get('items', []), reward.get('item_amounts', [])
     for i in range(len(items)):
-        amt = amounts[i] if i < len(amounts) else 1
-        add_to_inventory(picked_char, items[i], amt)
+        iid = items[i]
+        if iid:
+            amt = amounts[i] if i < len(amounts) else 1
+            add_to_inventory(picked_char, iid, amt)
+            granted_items.append((iid, amt))
+            
+    return added_exp, added_cash, granted_items
 
 def accept_mission_logic(picked_char, mid):
     if mid not in missions_data: return False
@@ -330,11 +387,17 @@ def accept_mission_logic(picked_char, mid):
         if m.get('class') == 1:
             if picked_char.get('last_main_mission_id', "") != pre_id: return False
         else:
-            if pre_id not in picked_char.get('completed_side_missions', []): return False
+            try:
+                ipre = int(pre_id)
+                if ipre not in picked_char.get('completed_side_missions', []): return False
+            except: return False
             
     if 'active_missions' not in picked_char: picked_char['active_missions'] = {}
     if mid in picked_char['active_missions']: return False
-    if mid in picked_char.get('completed_side_missions', []): return False
+    try:
+        imid = int(mid)
+        if imid in picked_char.get('completed_side_missions', []): return False
+    except: pass
     if mid == picked_char.get('last_main_mission_id'): return False
 
     parm = [0]*8; parm[7] = int(time.time())
@@ -417,16 +480,6 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
                     init_character_fields(picked_char)
-                    # Auto-accept next main mission if none active
-                    has_active_main = any(missions_data.get(mid, {}).get('class') == 1 for mid in picked_char['active_missions'])
-                    if not has_active_main:
-                        last_mid = picked_char.get('last_main_mission_id')
-                        if not last_mid:
-                            first_main = next((mid for mid, m in missions_data.items() if m['class'] == 1 and not m.get('pre_id')), None)
-                            if first_main: accept_mission_logic(picked_char, first_main)
-                        else:
-                            next_mid = missions_data.get(last_mid, {}).get('next_id')
-                            if next_mid: accept_mission_logic(picked_char, next_mid)
                     save_chars(all_accounts_chars)
                     # Sync
                     fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
@@ -467,23 +520,43 @@ def client_handler(conn, addr):
             elif msg == 113: # complete_mission
                 if session is not None and picked_char:
                     mid = body.get(0, b"").decode('utf-8')
-                    if mid in picked_char.get('active_missions', {}) and picked_char['active_missions'][mid]['state'] == 2:
-                        m = missions_data.get(mid)
-                        if m:
-                            give_mission_rewards(picked_char, mid)
-                            if m.get('class') == 1: picked_char['last_main_mission_id'] = mid
+                    m_entry = picked_char.get('active_missions', {}).get(mid)
+                    # Prevent duplicate rewards and ensure mission is completed
+                    if m_entry and m_entry['state'] == 2:
+                        m_cfg = missions_data.get(mid)
+                        if m_cfg:
+                            exp_add, cash_add, items_add = give_mission_rewards(picked_char, mid)
+                            
+                            # Unlock logic: Update trackers to make next mission available in UI
+                            if m_cfg.get('class') == 1:
+                                picked_char['last_main_mission_id'] = mid
                             else:
-                                if mid not in picked_char['completed_side_missions']: picked_char['completed_side_missions'].append(mid)
+                                imid = int(mid)
+                                if imid not in picked_char.get('completed_side_missions', []):
+                                    picked_char['completed_side_missions'].append(imid)
+                            
+                            # Cleanup active mission
                             del picked_char['active_missions'][mid]
-                            # Auto-Chaining
-                            if m.get('is_multi') == 1 or m.get('class') == 8:
-                                next_id = m.get('next_id')
-                                if next_id: accept_mission_logic(picked_char, next_id)
                             save_chars(all_accounts_chars)
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-                    send_rpc_push(519, sync_mission_data(picked_char))
-                    send_rpc_push(611, sync_inventory_data(picked_char))
+                            
+                            print(f"[MISSION COMPLETE] id={mid} exp={exp_add} cash={cash_add} next={m_cfg.get('next_id')}")
+                            
+                            # Standard completion response
+                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                            conn.sendall(struct.pack(">H", len(pf)) + pf)
+                            
+                            # Push Sync sequence
+                            send_rpc_push(521, encode_sproto([(0, mid), (1, 1)])) # ret_complete_mission: Success
+                            sync_char_attrs_rpc(conn, picked_char)               # Real-time Level/EXP/Cash update
+                            send_rpc_push(519, sync_mission_data(picked_char))   # Update mission UI (Unlocks next)
+                            if items_add:
+                                send_rpc_push(611, sync_inventory_data(picked_char)) # Inventory update
+                        else:
+                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                            conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    else:
+                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                        conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 524: # set_mission_param
                 mid = body.get(0, b"").decode('utf-8')
