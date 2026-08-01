@@ -403,7 +403,7 @@ def get_full_char(c):
         (9, equip_map),
         (12, 0),
         (13, run),
-        (15, 0)
+        (15, 2)
     ])
 
 def sync_char_attrs_rpc(conn, picked_char):
@@ -753,7 +753,7 @@ def client_handler(conn, addr):
             if msg == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
                 sid = get_val_int(body, 5, 1); cur_areaId = get_area_id(sid)
-                resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "100"), (3, 1)])
+                resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "200"), (3, 1)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
@@ -852,14 +852,12 @@ def client_handler(conn, addr):
                 if picked_char:
                     mid = picked_char.get('map_id', '11')
                     print(f"[MAP READY RECEIVED] map_id={mid}")
-
-            elif msg == 270: # download_finish
-                if picked_char:
-                    print("[MSG 270] Client finished download. Sending start_enter_game.")
+                    
+                    # send_rpc_push(611, sync_inventory_data(picked_char))
+                    # send_rpc_push(519, sync_mission_data(picked_char))
+                    # smap = build_skills_map(picked_char['prof'], picked_char['level'], picked_char.get('skill_levels', {}))
+                    # send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
                     send_rpc_push(654, encode_sproto([(0, 1)]))
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 106: # enter_new_map
                 mid = body.get(0, b"").decode('utf-8')
