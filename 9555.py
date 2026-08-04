@@ -371,11 +371,6 @@ def get_full_char(c):
         (3, pwr_val), 
         (15, 1)
     ])
-    attr_base = encode_sproto([
-        (0, hp_max),
-        (2, atk_val),
-        (3, def_val)
-    ])
     
     prop = encode_sproto([(13, c.get('cash', 1000)), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
     pos = c.get('pos', [29860, 100, -17005, 0])
@@ -395,7 +390,6 @@ def get_full_char(c):
         (0, c['id']),
         (1, gen),
         (2, attr_oth),
-        (3, attr_base),
         (5, prop),
         (6, get_visual(c.get('name', 'Hero'), prof)),
         (7, mv),
@@ -461,53 +455,36 @@ def spawn_map_npcs(conn, map_id):
     """Spawns all NPCs and Monsters defined in data for the map."""
     map_str = str(map_id)
     
-    aoi_list = []
-    
-    # 1. Spawn Static NPCs (Group 9999)
+    def send_npc_create(nid, name, x, z, o):
+        # npc_attribute schema (Tags 0-27)
+        attr = encode_sproto([
+            (0, 2000000 + int(nid)), # id
+            (1, str(nid)),           # npcdataid
+            (2, 10000),              # hp
+            (3, 10000),              # max_hp
+            (15, x),                 # x
+            (16, z),                 # z
+            (17, o),                 # o
+            (18, 1),                 # level
+            (21, name)               # player_name
+        ])
+        # Protocol 509: npc_create (Request has npc_attribute at Tag 0)
+        ph = encode_sproto([(0, 509)])
+        req = encode_sproto([(0, attr)])
+        pf = sproto_pack(ph + req)
+        try:
+            conn.sendall(struct.pack(">H", len(pf)) + pf)
+        except: pass
+
     if map_str in STATIC_NPC_DATA:
         for m in STATIC_NPC_DATA[map_str]:
-            cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}", 'model': 'NPC_Nan_013'})
-            aoi_id = 2000000 + int(m['nid'])
-            
-            gen = encode_sproto([(0, cfg['name']), (1, 0), (2, 0), (3, map_str), (4, 0)])
-            pos_data = encode_sproto([(0, m['x']), (1, 0), (2, m['z']), (3, m['o'])])
-            pos = encode_sproto([(0, pos_data)])
-            vis = encode_sproto([(0, cfg['name']), (1, cfg['model']), (10, 0)])
-            
-            aoi_list.append(encode_sproto([
-                (0, aoi_id),
-                (1, gen),
-                (2, pos),
-                (4, vis),
-                (10, str(m['nid']))
-            ]))
+            cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}"})
+            send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
-    # 2. Spawn Monsters
     if map_str in MONSTER_DATA:
         for i, m in enumerate(MONSTER_DATA[map_str]):
-            cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}", 'model': 'NPC_Nan_013'})
-            aoi_id = 3000000 + i # Instance ID
-            
-            gen = encode_sproto([(0, cfg['name']), (1, 0), (2, 0), (3, map_str), (4, 0)])
-            pos_data = encode_sproto([(0, m['x']), (1, 0), (2, m['z']), (3, m['o'])])
-            pos = encode_sproto([(0, pos_data)])
-            vis = encode_sproto([(0, cfg['name']), (1, cfg['model']), (10, 0)])
-            
-            aoi_list.append(encode_sproto([
-                (0, aoi_id),
-                (1, gen),
-                (2, pos),
-                (4, vis),
-                (10, str(m['nid']))
-            ]))
-    
-    if aoi_list:
-        print(f"[AOI ADD] Spawning {len(aoi_list)} entities on map {map_id}")
-        try:
-            ph_p = encode_sproto([(0, 505)])
-            pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_list)]))
-            conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
-        except: pass
+            cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
+            send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
 def sync_mission_data(picked_char):
     own_missions = {}
@@ -753,7 +730,7 @@ def client_handler(conn, addr):
             if msg == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
                 sid = get_val_int(body, 5, 1); cur_areaId = get_area_id(sid)
-                resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "100"), (3, 1)])
+                resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "200"), (3, 1)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
@@ -808,6 +785,15 @@ def client_handler(conn, addr):
                     # 611: inventory_sync
                     send_rpc_push(611, sync_inventory_data(picked_char))
                     
+                    # 592: backpack_sync
+                    send_rpc_push(592, encode_sproto([(0, {})]))
+
+                    # 616: fashion_sync
+                    send_rpc_push(616, encode_sproto([(0, {})]))
+
+                    # 510: initial stats sync
+                    sync_char_attrs_rpc(conn, picked_char)
+                    
                     # 540: skill_sync
                     smap = build_skills_map(picked_char['prof'], picked_char['level'], picked_char.get('skill_levels', {}))
                     send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
@@ -852,6 +838,7 @@ def client_handler(conn, addr):
                 if picked_char:
                     mid = picked_char.get('map_id', '11')
                     print(f"[MAP READY RECEIVED] map_id={mid}")
+                    send_rpc_push(654, encode_sproto([(0, 1)]))
 
             elif msg == 270: # download_finish
                 if picked_char:
