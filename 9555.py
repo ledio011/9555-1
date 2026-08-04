@@ -736,7 +736,7 @@ def is_skill_locked(sid, level, prof):
             return True, SKILL_UNLOCK_LVS[idx]
     return False, 0
 
-async def client_handler(conn, addr):
+def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
     global server_session_counter
 
