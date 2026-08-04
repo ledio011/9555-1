@@ -728,7 +728,15 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
         traceback.print_exc()
     print("[DEBUG] AFTER MAP ENTER")
 
-def client_handler(conn, addr):
+def is_skill_locked(sid, level, prof):
+    p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
+    if sid in p["actives"]:
+        idx = p["actives"].index(sid)
+        if level < SKILL_UNLOCK_LVS[idx]:
+            return True, SKILL_UNLOCK_LVS[idx]
+    return False, 0
+
+async def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
     global server_session_counter
 
@@ -1051,18 +1059,11 @@ def client_handler(conn, addr):
             elif msg == 102: # skill_use
                 sid = body.get(1, b"").decode('utf-8'); tid = get_val_int(body, 0); alist = body.get(3, [])
                 if picked_char:
-                    prof = picked_char.get('prof', 0)
-                    lv = picked_char.get('level', 1)
-                    p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
-                    is_locked = False
-                    if sid in p["actives"]:
-                        idx = p["actives"].index(sid)
-                        if lv < SKILL_UNLOCK_LVS[idx]:
-                            is_locked = True
-                    
-                    if is_locked:
-                        print(f"[SKILL LOCKED] sid={sid} level={lv} req={SKILL_UNLOCK_LVS[idx] if sid in p['actives'] else '?'}")
+                    locked, req_lv = is_skill_locked(sid, picked_char.get('level', 1), picked_char.get('prof', 0))
+                    if locked:
+                        print(f"[SKILL LOCKED] sid={sid} req={req_lv}")
                         send_rpc_push(529, encode_sproto([(0, "#{100681}"), (1, True)]))
+                        # Do NOT send 508. Response will be empty.
                     else:
                         send_rpc_push(508, encode_sproto([(0, picked_char['id']), (1, tid), (2, sid), (3, alist)]))
                 
@@ -1070,7 +1071,19 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 111: # accept_damge
-                if session is not None:
+                if picked_char and session is not None:
+                    dlist = body.get(0, [])
+                    valid_hits = []
+                    for d in dlist:
+                        dsid = d.get(2, b"").decode('utf-8') if isinstance(d.get(2), bytes) else str(d.get(2))
+                        locked, _ = is_skill_locked(dsid, picked_char.get('level', 1), picked_char.get('prof', 0))
+                        if not locked:
+                            valid_hits.append(d)
+                        else:
+                            print(f"[DAMAGE BLOCKED] locked skill={dsid}")
+                    
+                    # If all hits were from locked skills, we could theoretically block this.
+                    # But for now, we just reply to the session to maintain protocol flow.
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
