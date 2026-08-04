@@ -38,7 +38,11 @@ try:
                             'power': int(parts[2]),
                             'atk': [int(parts[4]), int(parts[11]), int(parts[18])],
                             'hp': [int(parts[5]), int(parts[12]), int(parts[19])],
-                            'def': [int(parts[6]), int(parts[13]), int(parts[20])]
+                            'def': [int(parts[6]), int(parts[13]), int(parts[20])],
+                            'hit': [int(parts[7]), int(parts[14]), int(parts[21])],
+                            'eva': [int(parts[8]), int(parts[15]), int(parts[22])],
+                            'cri': [int(parts[9]), int(parts[16]), int(parts[23])],
+                            'res': [int(parts[10]), int(parts[17]), int(parts[24])]
                         }
         print(f"[LEVEL TABLE LOADED] levels={len(LEVEL_DATA)}")
     
@@ -99,16 +103,21 @@ try:
             for line in f:
                 if line.startswith("*,"):
                     parts = line.strip().split(",")
-                    if len(parts) > 13:
+                    if len(parts) > 60:
                         nid = parts[1]
+                        lvl = int(parts[9]) if parts[9].isdigit() else 1
+                        is_abs = "绝对值" in parts[12]
                         NPC_CONFIG[nid] = {
                             'name': parts[2],
                             'model': parts[4],
-                            'group': int(parts[6]) if parts[6].isdigit() else 0,
-                            'talk_group': parts[7],
-                            'func_type': int(parts[8]) if parts[8].isdigit() else 0,
-                            'level': int(parts[9]) if parts[9].isdigit() else 1,
-                            'type': int(parts[13]) if parts[13].isdigit() else 0
+                            'level': lvl,
+                            'is_abs': is_abs,
+                            'atk_coe': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 10000,
+                            'hp_coe': int(parts[27]) if len(parts) > 27 and parts[27].isdigit() else 10000,
+                            'def_coe': int(parts[28]) if len(parts) > 28 and parts[28].isdigit() else 10000,
+                            'atk_abs': int(parts[44]) if is_abs and len(parts) > 44 and parts[44].isdigit() else 0,
+                            'hp_abs': int(parts[45]) if is_abs and len(parts) > 45 and parts[45].isdigit() else 0,
+                            'def_abs': int(parts[46]) if is_abs and len(parts) > 46 and parts[46].isdigit() else 0
                         }
         print(f"[NPC CONFIG LOADED] count={len(NPC_CONFIG)}")
 
@@ -357,12 +366,15 @@ def get_full_char(c):
     gen = get_general(c)
     lv = c.get('level', 1)
     prof = c.get('prof', 0)
-    ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1, {'power': 0, 'hp': [0,0,0], 'atk': [0,0,0], 'def': [0,0,0]}))
-    hp_max = ld['hp'][prof] if prof < len(ld['hp']) else ld['hp'][0]
+    ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1))
+    
+    hp_max = ld['hp'][prof]
     hp_cur = c.get('hp', hp_max)
-    pwr_val = ld['power']
-    atk_val = ld['atk'][prof] if prof < len(ld['atk']) else ld['atk'][0]
-    def_val = ld['def'][prof] if prof < len(ld['def']) else ld['def'][0]
+    atk_val = ld['atk'][prof]
+    def_val = ld['def'][prof]
+    
+    # Formula observed from original gameplay matching: ATK*100 + HP*1 + DEF*100
+    pwr_val = (atk_val * 100) + hp_max + (def_val * 100)
     
     attr_oth = encode_sproto([
         (0, hp_cur), 
@@ -376,8 +388,16 @@ def get_full_char(c):
     pos = c.get('pos', [29860, 100, -17005, 0])
     mv = get_movement(pos[0], pos[1], pos[2], pos[3])
     
+    # attr_all: Tags mapping attribute.cs
+    # 0:max_hp, 2:atk, 3:def, 4:hit, 5:eva, 6:cri, 7:res, 13:mov
+    attr_all_data = [
+        (0, hp_max), (2, atk_val), (3, def_val),
+        (4, ld['hit'][prof]), (5, ld['eva'][prof]),
+        (6, ld['cri'][prof]), (7, ld['res'][prof]),
+        (13, 500) # Speed
+    ]
     attr_run = encode_sproto([(0, hp_max), (2, atk_val), (3, def_val)])
-    attr_all = encode_sproto([(0, hp_max), (2, atk_val), (3, def_val), (13, 500)])
+    attr_all = encode_sproto(attr_all_data)
     run = encode_sproto([(6, attr_run), (7, attr_all)])
     
     char_level = lv
@@ -403,75 +423,87 @@ def get_full_char(c):
 def sync_char_attrs_rpc(conn, picked_char):
     """Sends TAG 510 (aoi_update_attribute) to sync all stats."""
     lv = picked_char.get('level', 1)
-    ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1, {'power': 0, 'hp': [0,0,0], 'atk': [0,0,0], 'def': [0,0,0]}))
+    ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1))
     prof = picked_char.get('prof', 0)
     
-    hp_max = ld['hp'][prof] if prof < len(ld['hp']) else ld['hp'][0]
+    hp_max = ld['hp'][prof]
     hp_cur = picked_char.get('hp', hp_max)
-    pwr_val = ld['power']
-    atk_val = ld['atk'][prof] if prof < len(ld['atk']) else ld['atk'][0]
-    def_val = ld['def'][prof] if prof < len(ld['def']) else ld['def'][0]
+    atk_val = ld['atk'][prof]
+    def_val = ld['def'][prof]
+    pwr_val = (atk_val * 100) + hp_max + (def_val * 100)
 
-    # attribute_other (Tag 1 in character_aoi_attribute):
-    # Tag 0: hp, Tag 1: exp, Tag 2: level, Tag 3: combValue, Tag 15: camp
-    attr_oth_list = [
-        (0, hp_cur),
-        (1, picked_char.get('exp', 0)),
-        (2, lv),
-        (3, pwr_val),
-        (15, 1) # Camp: Player
-    ]
-    attr_oth = encode_sproto(attr_oth_list)
+    # attribute_other (Tag 1 in character_aoi_attribute)
+    attr_oth = encode_sproto([
+        (0, hp_cur), (1, picked_char.get('exp', 0)), (2, lv), (3, pwr_val), (15, 1)
+    ])
 
-    # attribute (Tag 2 in character_aoi_attribute):
-    # Tag 0: max_hp, Tag 2: atk, Tag 3: def
-    attr_base_list = [
-        (0, hp_max),
-        (2, atk_val),
-        (3, def_val)
-    ]
-    attr_base = encode_sproto(attr_base_list)
+    # attribute (Tag 2 in character_aoi_attribute)
+    attr_base = encode_sproto([(0, hp_max), (2, atk_val), (3, def_val)])
 
-    # property (Tag 5 in character_aoi_attribute):
-    # Tag 13: money1 (Cash)
+    # attribute_all (Tag 4 in character_aoi_attribute)
+    attr_all = encode_sproto([
+        (0, hp_max), (2, atk_val), (3, def_val),
+        (4, ld['hit'][prof]), (5, ld['eva'][prof]),
+        (6, ld['cri'][prof]), (7, ld['res'][prof]),
+        (13, 500)
+    ])
+
     prop = encode_sproto([(13, picked_char.get('cash', 0))])
     
-    # character_aoi_attribute: id(0), attribute_other(1), attribute(2), property(5)
     aoi_attr = encode_sproto([
-        (0, picked_char['id']),
-        (1, attr_oth),
-        (2, attr_base),
-        (5, prop)
+        (0, picked_char['id']), (1, attr_oth), (2, attr_base), (4, attr_all), (5, prop)
     ])
     
-    print(f"[PLAYER ATTRIBUTE SYNC] id={picked_char['id']} HP={hp_cur}/{hp_max} POWER={pwr_val} LEVEL={lv} EXP={picked_char.get('exp')} CASH={picked_char.get('cash')}")
+    print(f"[PLAYER SYNC] HP={hp_cur}/{hp_max} POWER={pwr_val} LV={lv}")
     try:
-        ph_p = encode_sproto([(0, 510)]) # TAG 510
-        pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_attr)])) # character is tag 0
+        ph_p = encode_sproto([(0, 510)])
+        pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_attr)]))
         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
     except: pass
+
+def get_npc_attr(nid):
+    cfg = NPC_CONFIG.get(nid)
+    if not cfg: return 10000, 10000, 100, 10, 1 # Default fallback
+    
+    lvl = cfg.get('level', 1)
+    ld = LEVEL_DATA.get(lvl, LEVEL_DATA.get(1))
+    
+    if cfg.get('is_abs'):
+        hp = cfg.get('hp_abs', 10000)
+        atk = cfg.get('atk_abs', 100)
+        df = cfg.get('def_abs', 10)
+    else:
+        # Percentage calculation: Base * COE / 10000
+        # Using Melee (Prof 0) as generic NPC base
+        hp = (ld['hp'][0] * cfg.get('hp_coe', 10000)) // 10000
+        atk = (ld['atk'][0] * cfg.get('atk_coe', 10000)) // 10000
+        df = (ld['def'][0] * cfg.get('def_coe', 10000)) // 10000
+    
+    return hp, hp, atk, df, lvl
 
 def spawn_map_npcs(conn, map_id):
     """Spawns all NPCs and Monsters defined in data for the map."""
     map_str = str(map_id)
     
     def send_npc_create(nid, name, x, z, o):
+        hp_cur, hp_max, atk, df, lvl = get_npc_attr(nid)
         # npc_attribute schema (Tags 0-27)
         attr = encode_sproto([
             (0, 2000000 + int(nid)), # id
             (1, str(nid)),           # npcdataid
-            (2, 10000),              # hp
-            (3, 10000),              # max_hp
+            (2, hp_cur),             # hp
+            (3, hp_max),             # max_hp
+            (4, atk),                # atk
+            (5, df),                 # def
             (15, x),                 # x
             (16, z),                 # z
             (17, o),                 # o
-            (18, 1),                 # level
+            (18, lvl),               # level
             (21, name)               # player_name
         ])
-        # Protocol 509: npc_create (Request has npc_attribute at Tag 0)
+        # Protocol 509: npc_create
         ph = encode_sproto([(0, 509)])
-        req = encode_sproto([(0, attr)])
-        pf = sproto_pack(ph + req)
+        pf = sproto_pack(ph + encode_sproto([(0, attr)]))
         try:
             conn.sendall(struct.pack(">H", len(pf)) + pf)
         except: pass
