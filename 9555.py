@@ -324,15 +324,15 @@ def build_skills_map(prof, char_level, skill_levels=None):
     for i in range(len(p["actives"])):
         sid = p["actives"][i]
         unlock_lv = SKILL_UNLOCK_LVS[i]
-        disabled = char_level < unlock_lv
-        smap[sid] = encode_sproto([
-            (0, sid),
-            (1, 0 if disabled else skill_levels.get(sid, 0)),
-            (2, 4 + i),
-            (3, unlock_lv),
-            (4, 2 + i),
-            (5, disabled)
-        ])
+        if char_level >= unlock_lv:
+            smap[sid] = encode_sproto([
+                (0, sid),
+                (1, skill_levels.get(sid, 0)),
+                (2, 4 + i),
+                (3, unlock_lv),
+                (4, 2 + i),
+                (5, False)
+            ])
     return smap
 
 def get_general(c):
@@ -451,7 +451,7 @@ def sync_char_attrs_rpc(conn, picked_char):
     prop = encode_sproto([(13, picked_char.get('cash', 0))])
     
     aoi_attr = encode_sproto([
-        (0, picked_char['id']), (1, attr_oth), (2, attr_base), (4, attr_all), (5, prop)
+        (0, picked_char['id']), (1, attr_oth), (2, attr_base), (3, attr_all), (5, prop)
     ])
     
     print(f"[PLAYER SYNC] HP={hp_cur}/{hp_max} POWER={pwr_val} LV={lv}")
@@ -1071,19 +1071,7 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 111: # accept_damge
-                if picked_char and session is not None:
-                    dlist = body.get(0, [])
-                    valid_hits = []
-                    for d in dlist:
-                        dsid = d.get(2, b"").decode('utf-8') if isinstance(d.get(2), bytes) else str(d.get(2))
-                        locked, _ = is_skill_locked(dsid, picked_char.get('level', 1), picked_char.get('prof', 0))
-                        if not locked:
-                            valid_hits.append(d)
-                        else:
-                            print(f"[DAMAGE BLOCKED] locked skill={dsid}")
-                    
-                    # If all hits were from locked skills, we could theoretically block this.
-                    # But for now, we just reply to the session to maintain protocol flow.
+                if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
