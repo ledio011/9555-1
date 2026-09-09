@@ -1,6 +1,6 @@
 import socket, struct, threading, random, json, os, time, traceback
 
-PORT = int(os.environ.get("PORT", 1027))
+PORT = int(os.environ.get("PORT", 15678))
 CHAR_DB = "characters_final.json"
 server_session_counter = 8000
 
