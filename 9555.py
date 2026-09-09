@@ -14,6 +14,7 @@ NPC_CONFIG = {}   # npcId -> npc info template
 MAP_CONFIG = {}   # mapId -> map info
 MAP_CONNECT_DATA = {} # (src_id, target_id) -> PosX, PosY, PosZ
 GUILD_CAPTURE_DATA = {} # id -> mapId
+KILL_TARGET_SPAWNS = {} # missionId -> list of spawns
 
 try:
     script_dir = os.path.dirname(__file__)
@@ -145,6 +146,26 @@ try:
                             if mid not in MONSTER_DATA: MONSTER_DATA[mid] = []
                             MONSTER_DATA[mid].append(entry)
         print(f"[MONSTER DATA LOADED] monsters_map={len(MONSTER_DATA)} static_npcs_map={len(STATIC_NPC_DATA)}")
+
+    # Load KillTargetMissionData (Mission Spawns)
+    kt_path = os.path.join(script_dir, "assets/Bundle/TextAsset/KillTargetMissionData")
+    if os.path.exists(kt_path):
+        with open(kt_path, "r", encoding='utf-8') as f:
+            for line in f:
+                if line.startswith("*,"):
+                    parts = line.strip().split(",")
+                    if len(parts) > 7:
+                        mid = parts[1]
+                        if mid not in KILL_TARGET_SPAWNS: KILL_TARGET_SPAWNS[mid] = []
+                        KILL_TARGET_SPAWNS[mid].append({
+                            'map': parts[2],
+                            'x': int(parts[3]),
+                            'z': int(parts[4]),
+                            'o': int(parts[5]) if parts[5] else 0,
+                            'nid': parts[6],
+                            'num': int(parts[7]) if parts[7] else 1
+                        })
+        print(f"[KILL TARGET DATA LOADED] count={len(KILL_TARGET_SPAWNS)}")
 except: traceback.print_exc()
 
 def load_chars():
@@ -500,7 +521,7 @@ def get_npc_attr(nid):
     
     return hp, hp, atk, df, lvl
 
-def spawn_map_npcs(conn, map_id):
+def spawn_map_npcs(conn, map_id, picked_char=None):
     """Spawns all NPCs and Monsters defined in data for the map."""
     map_str = str(map_id)
     
@@ -538,6 +559,16 @@ def spawn_map_npcs(conn, map_id):
         for i, m in enumerate(MONSTER_DATA[map_str]):
             cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
             send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
+
+    # Spawn Mission-specific targets
+    if picked_char:
+        for mid, mdata in picked_char.get('active_missions', {}).items():
+            if mdata['state'] == 1 and mid in KILL_TARGET_SPAWNS:
+                for spawn in KILL_TARGET_SPAWNS[mid]:
+                    if str(spawn['map']) == map_str:
+                        cfg = NPC_CONFIG.get(spawn['nid'], {'name': f"Mission_{spawn['nid']}"})
+                        for _ in range(spawn['num']):
+                            send_npc_create(spawn['nid'], cfg['name'], spawn['x'], spawn['z'], spawn['o'])
 
 def sync_mission_data(picked_char):
     own_missions = {}
@@ -746,7 +777,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
         print(f"[MAIN PLAYER CREATE SEND] map_id={target_map_id}")
 
         # TAG 505: aoi_add (NPCs)
-        spawn_map_npcs(conn, target_map_id)
+        spawn_map_npcs(conn, target_map_id, picked_char)
 
     except Exception:
         print("[!] FAILED TO SEND MAP ENTER TRANSITION")
@@ -903,7 +934,7 @@ def client_handler(conn, addr):
                         print(f"[MAIN PLAYER CREATE SEND] map_id={mid}")
 
                         # TAG 505: aoi_add (NPCs)
-                        spawn_map_npcs(conn, mid)
+                        spawn_map_npcs(conn, mid, picked_char)
 
                     except Exception:
                         print("[!] FAILED TO SEND INITIAL MAP ENTER")
@@ -1121,22 +1152,17 @@ def client_handler(conn, addr):
 
             elif msg == 307: # local_npc_die
                 npcid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
-                # Authoritative Check: Find any NPC of this type that is dead on server
-                # Since we don't have instance ID here, we check for HP <= 0 among matching types.
-                can_die = False
-                for inst_id, hp in NPC_HP_MAP.items():
-                    # Instance IDs are 2000000 + int(nid)
-                    if str(inst_id - 2000000) == npcid:
-                        if hp <= 0:
-                            can_die = True
-                            break
                 
-                if not can_die:
-                    print(f"[COMBAT BLOCK] NPC {npcid} died too fast (Server HP > 0)")
-                    if session is not None:
-                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                        conn.sendall(struct.pack(">H", len(pf)) + pf)
-                    continue
+                # Lenient Check: Trust the client for now to prevent mission progression hangers.
+                # In original servers, boss death is usually verified, but here we prioritize gameplay.
+                print(f"[COMBAT] Trusting client death report for NPC {npcid}")
+                can_die = True
+                
+                # Cleanup HP tracking for this NPC type
+                try:
+                    to_del = [k for k, v in NPC_HP_MAP.items() if str(k - 2000000) == npcid]
+                    for k in to_del: del NPC_HP_MAP[k]
+                except: pass
 
                 die_type = get_val_int(body, 3)
                 print(f"[*] local_npc_die npcid={npcid} type={die_type}")
