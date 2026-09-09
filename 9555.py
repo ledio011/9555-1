@@ -1,6 +1,6 @@
 import socket, struct, threading, random, json, os, time, traceback
 
-PORT = int(os.environ.get("PORT", 9555))
+PORT = int(os.environ.get("PORT", 1027))
 CHAR_DB = "characters_final.json"
 server_session_counter = 8000
 
@@ -348,39 +348,102 @@ def get_movement(x, y, z, o=0):
     pos = encode_sproto([(0, x), (1, y), (2, z), (3, o)])
     return encode_sproto([(0, pos), (1, pos)])
 
-def get_char_ov(c):
-    gen = get_general(c)
+def get_character_stats(c):
+    """Calculates all character attributes and Power based on profession and level."""
     lv = c.get('level', 1)
-    ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1, {'power': 0}))
-    attr = encode_sproto([(0, lv), (1, ld['power'])])
+    prof = c.get('prof', 0)
+    ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1))
+    
+    # Base attributes from BaseLvData
+    atk = ld['atk'][prof]
+    hp_max = ld['hp'][prof]
+    df = ld['def'][prof]
+    hit = ld['hit'][prof]
+    eva = ld['eva'][prof]
+    cri = ld['cri'][prof]
+    res = ld['res'][prof]
+    
+    # Profession-specific coefficients from GameDefine.cs
+    # XD (0), QJ (1), NQS (2)
+    coeffs = [
+        {"atk":16, "hp":1, "def":11, "hit":2, "eva":5.5, "cri":10, "res":10},
+        {"atk":20, "hp":1, "def":12, "hit":1, "eva":6, "cri":5, "res":10},
+        {"atk":7, "hp":1, "def":7.4, "hit":3, "eva":3.7, "cri":15, "res":10}
+    ][prof]
+    
+    # Calculate Power (ComboValue) using the real weighting system found in client coefficients
+    # Multiplied by 3.0 to match original gameplay scaling (approx 60k for starter)
+    raw_power = (atk * coeffs['atk'] + hp_max * coeffs['hp'] + df * coeffs['def'] + 
+                 hit * coeffs['hit'] + eva * coeffs['eva'] + cri * coeffs['cri'] + res * coeffs['res'])
+    power = int(raw_power * 3.0)
+    
+    return {
+        'atk': atk, 'hp_max': hp_max, 'def': df, 
+        'hit': hit, 'eva': eva, 'cri': cri, 'res': res,
+        'power': power, 'lv': lv, 'exp': c.get('exp', 0)
+    }
+
+def get_character_stats(c):
+    """Calculates all character attributes and Power based on profession and level."""
+    lv = c.get('level', 1)
+    prof = c.get('prof', 0)
+    ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1))
+    
+    # Base attributes from BaseLvData
+    atk = ld['atk'][prof]
+    hp_max = ld['hp'][prof]
+    df = ld['def'][prof]
+    hit = ld['hit'][prof]
+    eva = ld['eva'][prof]
+    cri = ld['cri'][prof]
+    res = ld['res'][prof]
+    
+    # Coefficients from GameDefine.cs
+    # XD (0), QJ (1), NQS (2)
+    coeffs = [
+        {"atk":16, "hp":1, "def":11, "hit":2, "eva":5.5, "cri":10, "res":10},
+        {"atk":20, "hp":1, "def":12, "hit":1, "eva":6, "cri":5, "res":10},
+        {"atk":7, "hp":1, "def":7.4, "hit":3, "eva":3.7, "cri":15, "res":10}
+    ][prof]
+    
+    # Real Power Formula (approx based on original game values)
+    raw_power = (atk * coeffs['atk'] + hp_max * coeffs['hp'] + df * coeffs['def'] + 
+                 hit * coeffs['hit'] + eva * coeffs['eva'] + cri * coeffs['cri'] + res * coeffs['res'])
+    power = int(raw_power * 3.0)
+    
+    return {
+        'atk': atk, 'hp_max': hp_max, 'def': df, 
+        'hit': hit, 'eva': eva, 'cri': cri, 'res': res,
+        'power': power, 'lv': lv, 'exp': c.get('exp', 0)
+    }
+
+def get_char_ov(c, sort_index=None):
+    gen = get_general(c)
+    stats = get_character_stats(c)
+    attr = encode_sproto([(0, stats['lv']), (1, stats['power'])])
+    # The client sorts character_overview.createtime ASCENDING.
+    # To make last played show first, we use a virtual index as createtime.
+    ctime = sort_index if sort_index is not None else c.get('createtime', int(time.time()))
     return encode_sproto([
         (0, c['id']),
         (1, gen),
         (2, attr),
         (3, get_visual(c.get('name', 'Hero'), c.get('prof', 0))),
-        (4, int(time.time())),
+        (4, ctime),
         (5, 0)
     ])
 
 def get_full_char(c):
     gen = get_general(c)
-    lv = c.get('level', 1)
-    prof = c.get('prof', 0)
-    ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1))
+    stats = get_character_stats(c)
     
-    hp_max = ld['hp'][prof]
-    hp_cur = c.get('hp', hp_max)
-    atk_val = ld['atk'][prof]
-    def_val = ld['def'][prof]
-    
-    # Formula observed from original gameplay matching: ATK*100 + HP*1 + DEF*100
-    pwr_val = (atk_val * 100) + hp_max + (def_val * 100)
+    hp_cur = c.get('hp', stats['hp_max'])
     
     attr_oth = encode_sproto([
         (0, hp_cur), 
-        (1, c.get('exp', 0)), 
-        (2, lv), 
-        (3, pwr_val), 
+        (1, stats['exp']), 
+        (2, stats['lv']), 
+        (3, stats['power']), 
         (15, 1)
     ])
     
@@ -388,22 +451,20 @@ def get_full_char(c):
     pos = c.get('pos', [29860, 100, -17005, 0])
     mv = get_movement(pos[0], pos[1], pos[2], pos[3])
     
-    # attr_all: Tags mapping attribute.cs
-    # 0:max_hp, 2:atk, 3:def, 4:hit, 5:eva, 6:cri, 7:res, 13:mov
+    attr_run = encode_sproto([(0, stats['hp_max']), (2, stats['atk']), (3, stats['def'])])
+    # attr_all tags (attribute.cs): 0:max_hp, 2:atk, 3:def, 4:hit, 5:eva, 6:cri, 7:res, 13:mov
     attr_all_data = [
-        (0, hp_max), (2, atk_val), (3, def_val),
-        (4, ld['hit'][prof]), (5, ld['eva'][prof]),
-        (6, ld['cri'][prof]), (7, ld['res'][prof]),
-        (13, 500) # Speed
+        (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
+        (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
+        (13, 500)
     ]
-    attr_run = encode_sproto([(0, hp_max), (2, atk_val), (3, def_val)])
     attr_all = encode_sproto(attr_all_data)
     run = encode_sproto([(6, attr_run), (7, attr_all)])
     
-    char_level = lv
+    char_level = stats['lv']
     skill_levels = c.get('skill_levels', {})
-    skills_map = build_skills_map(prof, char_level, skill_levels)
-    wid = "10001" if prof == 0 else "20001" if prof == 1 else "30001"
+    skills_map = build_skills_map(c.get('prof', 0), char_level, skill_levels)
+    wid = "10001" if c.get('prof', 0) == 0 else "20001" if c.get('prof', 0) == 1 else "30001"
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
     return encode_sproto([
@@ -411,7 +472,7 @@ def get_full_char(c):
         (1, gen),
         (2, attr_oth),
         (5, prop),
-        (6, get_visual(c.get('name', 'Hero'), prof)),
+        (6, get_visual(c.get('name', 'Hero'), c.get('prof', 0))),
         (7, mv),
         (8, skills_map),
         (9, equip_map),
@@ -422,29 +483,21 @@ def get_full_char(c):
 
 def sync_char_attrs_rpc(conn, picked_char):
     """Sends TAG 510 (aoi_update_attribute) to sync all stats."""
-    lv = picked_char.get('level', 1)
-    ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1))
-    prof = picked_char.get('prof', 0)
-    
-    hp_max = ld['hp'][prof]
-    hp_cur = picked_char.get('hp', hp_max)
-    atk_val = ld['atk'][prof]
-    def_val = ld['def'][prof]
-    pwr_val = (atk_val * 100) + hp_max + (def_val * 100)
+    stats = get_character_stats(picked_char)
+    hp_cur = picked_char.get('hp', stats['hp_max'])
 
     # attribute_other (Tag 1 in character_aoi_attribute)
     attr_oth = encode_sproto([
-        (0, hp_cur), (1, picked_char.get('exp', 0)), (2, lv), (3, pwr_val), (15, 1)
+        (0, hp_cur), (1, stats['exp']), (2, stats['lv']), (3, stats['power']), (15, 1)
     ])
 
     # attribute (Tag 2 in character_aoi_attribute)
-    attr_base = encode_sproto([(0, hp_max), (2, atk_val), (3, def_val)])
+    attr_base = encode_sproto([(0, stats['hp_max']), (2, stats['atk']), (3, stats['def'])])
 
-    # attribute_all (Tag 4 in character_aoi_attribute)
+    # attribute_all (Tag 3 in character_aoi_attribute)
     attr_all = encode_sproto([
-        (0, hp_max), (2, atk_val), (3, def_val),
-        (4, ld['hit'][prof]), (5, ld['eva'][prof]),
-        (6, ld['cri'][prof]), (7, ld['res'][prof]),
+        (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
+        (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
         (13, 500)
     ])
 
@@ -454,7 +507,7 @@ def sync_char_attrs_rpc(conn, picked_char):
         (0, picked_char['id']), (1, attr_oth), (2, attr_base), (3, attr_all), (5, prop)
     ])
     
-    print(f"[PLAYER SYNC] HP={hp_cur}/{hp_max} POWER={pwr_val} LV={lv}")
+    print(f"[PLAYER SYNC] HP={hp_cur}/{stats['hp_max']} POWER={stats['power']} LV={stats['lv']}")
     try:
         ph_p = encode_sproto([(0, 510)])
         pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_attr)]))
@@ -487,9 +540,11 @@ def spawn_map_npcs(conn, map_id):
     
     def send_npc_create(nid, name, x, z, o):
         hp_cur, hp_max, atk, df, lvl = get_npc_attr(nid)
+        inst_id = 2000000 + int(nid)
+        NPC_HP_MAP[inst_id] = hp_max # Authoritative HP Init
         # npc_attribute schema (Tags 0-27)
         attr = encode_sproto([
-            (0, 2000000 + int(nid)), # id
+            (0, inst_id),            # id
             (1, str(nid)),           # npcdataid
             (2, hp_cur),             # hp
             (3, hp_max),             # max_hp
@@ -583,31 +638,41 @@ def give_mission_rewards(picked_char, mid):
     while True:
         lv = picked_char.get('level', 1)
         req_data = LEVEL_DATA.get(lv)
-        if not req_data:
-            print(f"[!] LEVEL DEBUG: No data for level {lv}")
-            break
+        if not req_data: break
         req = req_data['exp']
-        print(f"[LEVEL DEBUG] current level: {lv}, current exp: {picked_char['exp']}, required exp: {req}")
         if picked_char['exp'] >= req:
             picked_char['exp'] -= req
             picked_char['level'] = lv + 1
-            print(f"[LEVEL UP] old_level={lv}, new_level={picked_char['level']}, remaining_exp={picked_char['exp']}")
+            print(f"[LEVEL UP] old_level={lv}, new_level={picked_char['level']}")
         else:
             break
             
-    print(f"[LEVEL RESULT] level={picked_char['level']} exp={picked_char['exp']}")
-    print(f"[MISSION REWARD DEBUG] mission_id={mid} reward_id={rid} profession={prof} exp_before={exp_before} exp_added={added_exp} exp_after={picked_char['exp']} level_before={lv_before} level_after={picked_char['level']} cash_added={added_cash}")
-
-    granted_items = []
-    items, amounts = reward.get('items', []), reward.get('item_amounts', [])
-    for i in range(len(items)):
-        iid = items[i]
+    # Send reward popup notification (Tag 638: show_reward_items_tips)
+    # 2001: EXP, 1001: CASH
+    reward_items = [
+        encode_sproto([(0, "2001"), (1, added_exp), (2, 0)]),
+        encode_sproto([(0, "1001"), (1, added_cash), (2, 0)])
+    ]
+    # Send reward popup notification (Tag 638: show_reward_items_tips)
+    # IDs: 2001 (EXP), 1001 (CASH)
+    popup_items = [
+        encode_sproto([(0, "2001"), (1, added_exp), (2, 0)]),
+        encode_sproto([(0, "1001"), (1, added_cash), (2, 0)])
+    ]
+    
+    granted_items_list = []
+    granted_items_data = reward.get('items', [])
+    granted_amounts = reward.get('item_amounts', [])
+    for i in range(len(granted_items_data)):
+        iid = granted_items_data[i]
         if iid:
-            amt = amounts[i] if i < len(amounts) else 1
+            amt = granted_amounts[i] if i < len(granted_amounts) else 1
+            popup_items.append(encode_sproto([(0, iid), (1, amt), (2, 0)]))
             add_to_inventory(picked_char, iid, amt)
-            granted_items.append((iid, amt))
+            granted_items_list.append((iid, amt))
             
-    return added_exp, added_cash, granted_items
+    send_rpc_push(638, encode_sproto([(0, popup_items)]))
+    return added_exp, added_cash, granted_items_list
 
 def accept_mission_logic(picked_char, mid):
     if mid not in missions_data:
@@ -736,6 +801,8 @@ def is_skill_locked(sid, level, prof):
             return True, SKILL_UNLOCK_LVS[idx]
     return False, 0
 
+NPC_HP_MAP = {} # server-id -> current_hp
+
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
     global server_session_counter
@@ -776,7 +843,16 @@ def client_handler(conn, addr):
 
             elif msg == 103: # character_list
                 chars = all_accounts_chars.get(cur_areaId, {}).get(acc_id, [])
-                resp = encode_sproto([(0, [get_char_ov(c) for c in chars])])
+                # Sort by last_played descending (internal)
+                chars.sort(key=lambda x: x.get('last_played', 0), reverse=True)
+                
+                # The client sorts character_overview.createtime ASCENDING.
+                # To make the last played (newest) show first, we give it the smallest createtime.
+                ov_list = []
+                for i, c in enumerate(chars):
+                    ov_list.append(get_char_ov(c, i))
+                
+                resp = encode_sproto([(0, ov_list)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
@@ -800,7 +876,8 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
-                    print(f"[CHARACTER PICK] id={picked_char['id']} level={picked_char.get('level')} exp={picked_char.get('exp')} last_main={picked_char.get('last_main_mission_id')}")
+                    picked_char['last_played'] = int(time.time())
+                    print(f"[CHARACTER PICK] id={picked_char['id']} level={picked_char.get('level')}")
                     init_character_fields(picked_char)
                     # Initial Mission Assignment for new characters
                     has_active_main = False
@@ -1071,12 +1148,36 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 111: # accept_damge
-                if session is not None:
+                if picked_char and session is not None:
+                    dlist = body.get(0, [])
+                    for d in dlist:
+                        target_id = d.get(0)
+                        dmg = d.get(1)
+                        if target_id in NPC_HP_MAP:
+                            NPC_HP_MAP[target_id] -= dmg
+                            # print(f"[COMBAT AUTHORITATIVE] ID={target_id} HP_REM={NPC_HP_MAP[target_id]}")
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 307: # local_npc_die
                 npcid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
+                # Authoritative Check: Find any NPC of this type that is dead on server
+                # Since we don't have instance ID here, we check for HP <= 0 among matching types.
+                can_die = False
+                for inst_id, hp in NPC_HP_MAP.items():
+                    # Instance IDs are 2000000 + int(nid)
+                    if str(inst_id - 2000000) == npcid:
+                        if hp <= 0:
+                            can_die = True
+                            break
+                
+                if not can_die:
+                    print(f"[COMBAT BLOCK] NPC {npcid} died too fast (Server HP > 0)")
+                    if session is not None:
+                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                        conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    continue
+
                 die_type = get_val_int(body, 3)
                 print(f"[*] local_npc_die npcid={npcid} type={die_type}")
                 if picked_char:
