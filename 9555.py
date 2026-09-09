@@ -383,40 +383,6 @@ def get_character_stats(c):
         'power': power, 'lv': lv, 'exp': c.get('exp', 0)
     }
 
-def get_character_stats(c):
-    """Calculates all character attributes and Power based on profession and level."""
-    lv = c.get('level', 1)
-    prof = c.get('prof', 0)
-    ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1))
-    
-    # Base attributes from BaseLvData
-    atk = ld['atk'][prof]
-    hp_max = ld['hp'][prof]
-    df = ld['def'][prof]
-    hit = ld['hit'][prof]
-    eva = ld['eva'][prof]
-    cri = ld['cri'][prof]
-    res = ld['res'][prof]
-    
-    # Coefficients from GameDefine.cs
-    # XD (0), QJ (1), NQS (2)
-    coeffs = [
-        {"atk":16, "hp":1, "def":11, "hit":2, "eva":5.5, "cri":10, "res":10},
-        {"atk":20, "hp":1, "def":12, "hit":1, "eva":6, "cri":5, "res":10},
-        {"atk":7, "hp":1, "def":7.4, "hit":3, "eva":3.7, "cri":15, "res":10}
-    ][prof]
-    
-    # Real Power Formula (approx based on original game values)
-    raw_power = (atk * coeffs['atk'] + hp_max * coeffs['hp'] + df * coeffs['def'] + 
-                 hit * coeffs['hit'] + eva * coeffs['eva'] + cri * coeffs['cri'] + res * coeffs['res'])
-    power = int(raw_power * 3.0)
-    
-    return {
-        'atk': atk, 'hp_max': hp_max, 'def': df, 
-        'hit': hit, 'eva': eva, 'cri': cri, 'res': res,
-        'power': power, 'lv': lv, 'exp': c.get('exp', 0)
-    }
-
 def get_char_ov(c, sort_index=None):
     gen = get_general(c)
     stats = get_character_stats(c)
@@ -647,12 +613,6 @@ def give_mission_rewards(picked_char, mid):
         else:
             break
             
-    # Send reward popup notification (Tag 638: show_reward_items_tips)
-    # 2001: EXP, 1001: CASH
-    reward_items = [
-        encode_sproto([(0, "2001"), (1, added_exp), (2, 0)]),
-        encode_sproto([(0, "1001"), (1, added_cash), (2, 0)])
-    ]
     # Send reward popup notification (Tag 638: show_reward_items_tips)
     # IDs: 2001 (EXP), 1001 (CASH)
     popup_items = [
