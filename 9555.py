@@ -578,10 +578,13 @@ def sync_mission_data(picked_char):
             (1, mdata['state']),
             (3, mdata['parm'])
         ])
+    last_main = str(picked_char.get('last_main_mission_id', "0"))
+    if not last_main or last_main == "None": last_main = "0"
+    
     data_list = [
         (0, own_missions),
-        (1, str(picked_char.get('last_main_mission_id', ""))),
-        (2, [int(x) for x in picked_char.get('completed_side_missions', [])])
+        (1, last_main),
+        (2, [int(x) for x in picked_char.get('completed_side_missions', []) if x])
     ]
     print(f"[TAG 519 SYNC] last_main={picked_char.get('last_main_mission_id')} active={list(own_missions.keys())} completed_side={picked_char.get('completed_side_missions')}")
     return encode_sproto(data_list)
@@ -703,7 +706,7 @@ def init_character_fields(c):
         'skill_levels': {}, 
         'active_missions': {}, 
         'completed_side_missions': [], 
-        'last_main_mission_id': "",
+        'last_main_mission_id': "0",
         'inventory': [],
         'pos': [29860, 100, -17005, 0],
         'map_id': "11"
@@ -1164,8 +1167,8 @@ def client_handler(conn, addr):
                         if not m_cfg: continue
                         
                         ltype = m_cfg.get('logic_type')
-                        # 1: KILLMONSTER, 4: KILL_DROP, 6: INVESTIGATE, 11: COPY_KILL, 17: MASSACRE_NPC, 23: KILL_TARGET_NPC
-                        if ltype in [1, 4, 6, 11, 17, 23]:
+                        # 1: KILLMONSTER, 4: KILL_DROP, 6: INVESTIGATE, 11: COPY_KILL, 17: MASSACRE_NPC, 23: KILL_TARGET_NPC, 25: CAPTURE
+                        if ltype in [1, 4, 6, 11, 17, 23, 25]:
                             if m_cfg.get('target_id') == npcid or ltype == 17:
                                 mdata['parm'][0] += 1
                                 print(f"[*] Mission {mid} progress: {mdata['parm'][0]}/{m_cfg.get('require_num')}")
