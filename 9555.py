@@ -26,12 +26,14 @@ try:
     if os.path.exists(rd_path):
         with open(rd_path, "r", encoding='utf-8') as f: rewards_data = json.load(f)
 
+    def is_data(line): return line.startswith("*,") or ("," in line and line.split(",")[1].isdigit())
+
     # Load BaseLvData for EXP requirements and stats
     lv_path = os.path.join(script_dir, "assets/Bundle/TextAsset/BaseLvData")
     if os.path.exists(lv_path):
         with open(lv_path, "r", encoding='utf-8') as f:
             for line in f:
-                if line.startswith("*,"):
+                if is_data(line):
                     parts = line.strip().split(",")
                     if len(parts) > 20 and parts[1].isdigit():
                         lv = int(parts[1])
@@ -53,7 +55,7 @@ try:
     if os.path.exists(map_info_path):
         with open(map_info_path, "r", encoding='utf-8') as f:
             for line in f:
-                if line.startswith("*,"):
+                if line.startswith("*,") or line.startswith(","):
                     parts = line.strip().split(",")
                     if len(parts) > 8:
                         mid = parts[1]
@@ -74,7 +76,7 @@ try:
     if os.path.exists(conn_path):
         with open(conn_path, "r", encoding='utf-8') as f:
             for line in f:
-                if line.startswith("*,"):
+                if line.startswith("*,") or line.startswith(","):
                     parts = line.strip().split(",")
                     if len(parts) > 6:
                         src = parts[2]
@@ -103,7 +105,7 @@ try:
     if os.path.exists(npc_path):
         with open(npc_path, "r", encoding='utf-8') as f:
             for line in f:
-                if line.startswith("*,"):
+                if line.startswith("*,") or line.startswith(","):
                     parts = line.strip().split(",")
                     if len(parts) > 60:
                         nid = parts[1]
@@ -128,7 +130,7 @@ try:
     if os.path.exists(mon_path):
         with open(mon_path, "r", encoding='utf-8') as f:
             for line in f:
-                if line.startswith("*,"):
+                if line.startswith("*,") or line.startswith(","):
                     parts = line.strip().split(",")
                     if len(parts) > 6 and parts[1].isdigit():
                         mid = parts[1]
@@ -276,7 +278,7 @@ def encode_sproto(fields, fn=None):
                         elif isinstance(item, (bytes, bytearray)): pass
                         else: item = str(item).encode('utf-8')
                         items.append(struct.pack("<I", len(item)) + item)
-                    v = b"".join(items)
+                    v = b"\x00" + b"".join(items) # Added \x00 header for object array
             elif isinstance(val, dict):
                 items = []
                 for item in val.values():
@@ -285,7 +287,7 @@ def encode_sproto(fields, fn=None):
                         items.append(struct.pack("<I", len(item)) + item)
                     else:
                         items.append(struct.pack("<I", 1) + (b'\x01' if item else b'\x00'))
-                v = b"".join(items)
+                v = b"\x00" + b"".join(items) # Added \x00 header for object array
             else:
                 v = val
             body += struct.pack("<I", len(v)) + v
@@ -413,10 +415,10 @@ def get_character_stats(c):
     prof = c.get('prof', 0)
     ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1))
 
-    # Base attributes from BaseLvData with growth factor
-    atk = int(ld['atk'][prof] * 1.5)
-    hp_max = int(ld['hp'][prof] * 2.0)
-    df = int(ld['def'][prof] * 1.2)
+    # Base attributes from BaseLvData
+    atk = ld['atk'][prof]
+    hp_max = ld['hp'][prof]
+    df = ld['def'][prof]
     hit = ld['hit'][prof]
     eva = ld['eva'][prof]
     cri = ld['cri'][prof]
@@ -492,7 +494,7 @@ def get_full_char(c):
     wid = "10001" if c.get('prof', 0) == 0 else "20001" if c.get('prof', 0) == 1 else "30001"
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
-    
+
     # download tag(15) set to 1 to enable expansion features in client
     return encode_sproto([
         (0, c['id']),
@@ -553,18 +555,20 @@ def get_npc_attr(nid):
         atk = cfg.get('atk_abs', 100)
         df = cfg.get('def_abs', 10)
     else:
-        # Percentage calculation: Base * COE / 10000
-        # Using Melee (Prof 0) as generic NPC base
         hp = (ld['hp'][0] * cfg.get('hp_coe', 10000)) // 10000
         atk = (ld['atk'][0] * cfg.get('atk_coe', 10000)) // 10000
         df = (ld['def'][0] * cfg.get('def_coe', 10000)) // 10000
-
+    
+    # Original stats check: if Atk/Hp are defined explicitly in NpcData, use them as minimums
+    if cfg.get('hp_abs', 0) > hp: hp = cfg['hp_abs']
+    if cfg.get('atk_abs', 0) > atk: atk = cfg['atk_abs']
+    
     return hp, hp, atk, df, lvl
 
 def spawn_map_npcs(conn, map_id, picked_char=None):
     """Spawns all NPCs, Monsters, and Traffic defined in data for the map."""
     map_str = str(map_id)
-    
+
     def send_npc_create(nid, name, x, z, o):
         hp_cur, hp_max, atk, df, lvl = get_npc_attr(nid)
         inst_id = 2000000 + (int(nid) if nid.isdigit() else random.randint(1, 999999))
@@ -599,13 +603,13 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
             send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
-    # 2. Spawn Traffic (Cars) - Increase density for the "Dance City" and Main City
-    if map_str in ["11", "101", "105"]:
+    # Traffic Simulation (Random Cars) - Increased density
+    if map_str == "11" or map_str == "101" or map_str == "105":
         car_models = ["Chevrolet", "SportsCar", "PoliceCar", "daKeChe", "jiaoChe_01", "jiaoChe_02", "chuZuChe", "xiaoKeChe"]
-        spawn_count = 30 if map_str == "11" else 15
+        spawn_count = 35 if map_str == "11" else 20
         for _ in range(spawn_count):
             model = random.choice(car_models)
-            rx, rz = random.randint(-40000, 40000), random.randint(-40000, 40000)
+            rx, rz = random.randint(-45000, 45000), random.randint(-45000, 45000)
             send_npc_create(model, f"CityCar_{model}", rx, rz, random.randint(0, 36000))
 
     # 3. Spawn Mission targets
@@ -800,7 +804,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
                 if target_map_id == "11": y_coord = 100
                 elif target_map_id == "101": y_coord = 200 # Dance City
                 elif y_coord == 0: y_coord = 100
-                
+
                 landing_pos = [int(parts[0]), y_coord, int(parts[2]), int(parts[3]) if len(parts) > 3 else 0]
                 print(f"[TELEPORT] Spawn height fix for {target_map_id}: {landing_pos}")
 
@@ -999,6 +1003,7 @@ def client_handler(conn, addr):
                     mid = picked_char.get('map_id', '11')
                     print(f"[MAP READY RECEIVED] map_id={mid}")
                     send_rpc_push(654, encode_sproto([(0, 1)]))
+                    send_rpc_push(519, sync_mission_data(picked_char))
 
             elif msg == 270: # download_finish
                 if picked_char:
@@ -1196,9 +1201,12 @@ def client_handler(conn, addr):
                     for d in dlist:
                         target_id = d.get(0)
                         dmg = d.get(1)
-                        if target_id in NPC_HP_MAP:
+                        if target_id == picked_char['id']:
+                            new_hp = picked_char.get('hp', 0) - dmg
+                            picked_char['hp'] = new_hp if new_hp > 0 else 0
+                            sync_char_attrs_rpc(conn, picked_char)
+                        elif target_id in NPC_HP_MAP:
                             NPC_HP_MAP[target_id] -= dmg
-                            # print(f"[COMBAT AUTHORITATIVE] ID={target_id} HP_REM={NPC_HP_MAP[target_id]}")
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
@@ -1289,10 +1297,22 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 7: # update_game_server
-                servers = [encode_sproto([(0, 302), (1, "EU-001"), (2, "tokaido.proxy.rlwy.net"), (3, 48282), (4, 1), (5, 1), (6, 1), (7, 0), (8, 1), (9, 1)])]
+                servers = [encode_sproto([(0, 302), (1, "EU-001"), (2, "s16.serv00.com"), (3, 15678), (4, 1), (5, 1), (6, 1), (7, 0), (8, 1), (9, 1)])]
                 resp = encode_sproto([(0, servers)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 270: # download_finish - Give free car and items
+                if picked_char:
+                    picked_char['mount_id'] = "1001" # DJ_Car_01
+                    add_to_inventory(picked_char, "9011", 10)
+                    add_to_inventory(picked_char, "9001", 20)
+                    add_to_inventory(picked_char, "5026", 5)
+                    save_chars(all_accounts_chars)
+                    send_rpc_push(611, sync_inventory_data(picked_char))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg in [118, 218, 145, 225, 258, 261, 278, 296, 299, 310, 313, 319]:
                 resp_data = encode_sproto([])
