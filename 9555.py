@@ -270,7 +270,8 @@ def encode_sproto(fields, fn=None):
                 v = val.encode('utf-8')
             elif isinstance(val, list):
                 if val and isinstance(val[0], int):
-                    v = b"\x04" + b"".join([struct.pack("<i", item) for item in val])
+                    # Use 8-byte integers (long) for compatibility with List<long>
+                    v = b"\x08" + b"".join([struct.pack("<q", item) for item in val])
                 else:
                     items = []
                     for item in val:
@@ -278,16 +279,16 @@ def encode_sproto(fields, fn=None):
                         elif isinstance(item, (bytes, bytearray)): pass
                         else: item = str(item).encode('utf-8')
                         items.append(struct.pack("<I", len(item)) + item)
-                    v = b"\x00" + b"".join(items) # Added \x00 header for object array
+                    v = b"\x00" + b"".join(items) 
             elif isinstance(val, dict):
+                # A Sproto map is encoded as an array of its elements
                 items = []
                 for item in val.values():
-                    if isinstance(item, str): item = item.encode('utf-8')
                     if isinstance(item, (bytes, bytearray)):
                         items.append(struct.pack("<I", len(item)) + item)
                     else:
                         items.append(struct.pack("<I", 1) + (b'\x01' if item else b'\x00'))
-                v = b"\x00" + b"".join(items) # Added \x00 header for object array
+                v = b"\x00" + b"".join(items)
             else:
                 v = val
             body += struct.pack("<I", len(v)) + v
@@ -495,7 +496,7 @@ def get_full_char(c):
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
 
-    # download tag(15) set to 1 to enable expansion features in client
+    # download tag(15) set to 0 to trigger the download notification/process
     return encode_sproto([
         (0, c['id']),
         (1, gen),
@@ -507,7 +508,7 @@ def get_full_char(c):
         (9, equip_map),
         (12, 0),
         (13, run),
-        (15, 1)
+        (15, 0)
     ])
 
 def sync_char_attrs_rpc(conn, picked_char):
@@ -628,20 +629,23 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
 def sync_mission_data(picked_char):
     own_missions = {}
     for mid, mdata in picked_char.get('active_missions', {}).items():
+        # Ensure parm has 8 elements and is long list
+        parm = mdata.get('parm', [0]*8)
+        if len(parm) < 8: parm += [0]*(8-len(parm))
         own_missions[mid] = encode_sproto([
-            (0, mid),
-            (1, mdata['state']),
-            (3, mdata['parm'])
+            (0, str(mid)),
+            (1, int(mdata['state'])),
+            (3, [int(x) for x in parm])
         ])
-    last_main = str(picked_char.get('last_main_mission_id', "0"))
-    if not last_main or last_main == "None": last_main = "0"
+    
+    last_main = picked_char.get('last_main_mission_id', "0")
+    if last_main == "" or last_main == "None": last_main = "0"
 
     data_list = [
         (0, own_missions),
-        (1, last_main),
+        (1, str(last_main)),
         (2, [int(x) for x in picked_char.get('completed_side_missions', []) if x])
     ]
-    print(f"[TAG 519 SYNC] last_main={picked_char.get('last_main_mission_id')} active={list(own_missions.keys())} completed_side={picked_char.get('completed_side_missions')}")
     return encode_sproto(data_list)
 
 def sync_inventory_data(picked_char):
@@ -798,15 +802,14 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
         if birth:
             parts = birth.split('#')
             if len(parts) >= 3:
-                # Fix: If height is 0, set it to 100 (1 meter) to prevent spawning underground
+                # Fix: If height is 0, set it to a safe level
                 y_coord = int(parts[1])
-                # Specific map height fixes based on scene topology
-                if target_map_id == "11": y_coord = 100
-                elif target_map_id == "101": y_coord = 200 # Dance City
+                if target_map_id == "101": y_coord = 500 # Dance City safe height
+                elif target_map_id == "105": y_coord = 500 # Business Center safe height
                 elif y_coord == 0: y_coord = 100
-
+                
                 landing_pos = [int(parts[0]), y_coord, int(parts[2]), int(parts[3]) if len(parts) > 3 else 0]
-                print(f"[TELEPORT] Spawn height fix for {target_map_id}: {landing_pos}")
+                print(f"[TELEPORT] Spawn fix map={target_map_id} pos={landing_pos}")
 
     if landing_pos:
         picked_char['pos'] = landing_pos
@@ -1202,11 +1205,21 @@ def client_handler(conn, addr):
                         target_id = d.get(0)
                         dmg = d.get(1)
                         if target_id == picked_char['id']:
-                            new_hp = picked_char.get('hp', 0) - dmg
+                            # Ensure NPCs deal enough damage to be a threat
+                            final_dmg = dmg if dmg > 10 else 10
+                            new_hp = picked_char.get('hp', 0) - final_dmg
                             picked_char['hp'] = new_hp if new_hp > 0 else 0
                             sync_char_attrs_rpc(conn, picked_char)
                         elif target_id in NPC_HP_MAP:
                             NPC_HP_MAP[target_id] -= dmg
+                            if NPC_HP_MAP[target_id] <= 0:
+                                # Spawn original reward drop (Cash 1001, Exp 2001)
+                                global GLOBAL_INST_COUNTER
+                                GLOBAL_INST_COUNTER += 1
+                                # drop_item_info (527): id(0), itemid(1), count(2), x(3), z(4)
+                                pos = picked_char['pos']
+                                drop_data = encode_sproto([(0, GLOBAL_INST_COUNTER), (1, "1001"), (2, 50), (3, pos[0]+100), (4, pos[2]+100)])
+                                send_rpc_push(527, drop_data)
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
