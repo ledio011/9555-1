@@ -238,6 +238,7 @@ def get_val_int(fields, tag, default=0):
     if isinstance(val, (bytes, bytearray)):
         if len(val) == 4: return struct.unpack("<i", val)[0]
         if len(val) == 8: return struct.unpack("<q", val)[0]
+        if len(val) == 1: return val[0]
     return default
 
 def encode_sproto(fields, fn=None):
@@ -412,10 +413,10 @@ def get_character_stats(c):
     prof = c.get('prof', 0)
     ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1))
 
-    # Base attributes from BaseLvData
-    atk = ld['atk'][prof]
-    hp_max = ld['hp'][prof]
-    df = ld['def'][prof]
+    # Base attributes from BaseLvData with growth factor
+    atk = int(ld['atk'][prof] * 1.5)
+    hp_max = int(ld['hp'][prof] * 2.0)
+    df = int(ld['def'][prof] * 1.2)
     hit = ld['hit'][prof]
     eva = ld['eva'][prof]
     cri = ld['cri'][prof]
@@ -491,6 +492,8 @@ def get_full_char(c):
     wid = "10001" if c.get('prof', 0) == 0 else "20001" if c.get('prof', 0) == 1 else "30001"
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
+    
+    # download tag(15) set to 1 to enable expansion features in client
     return encode_sproto([
         (0, c['id']),
         (1, gen),
@@ -502,7 +505,7 @@ def get_full_char(c):
         (9, equip_map),
         (12, 0),
         (13, run),
-        (15, 0)
+        (15, 1)
     ])
 
 def sync_char_attrs_rpc(conn, picked_char):
@@ -793,7 +796,11 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
             if len(parts) >= 3:
                 # Fix: If height is 0, set it to 100 (1 meter) to prevent spawning underground
                 y_coord = int(parts[1])
-                if y_coord == 0: y_coord = 100 
+                # Specific map height fixes based on scene topology
+                if target_map_id == "11": y_coord = 100
+                elif target_map_id == "101": y_coord = 200 # Dance City
+                elif y_coord == 0: y_coord = 100
+                
                 landing_pos = [int(parts[0]), y_coord, int(parts[2]), int(parts[3]) if len(parts) > 3 else 0]
                 print(f"[TELEPORT] Spawn height fix for {target_map_id}: {landing_pos}")
 
