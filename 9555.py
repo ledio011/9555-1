@@ -608,62 +608,53 @@ def add_to_inventory(picked_char, item_id, amount):
             return
     picked_char['inventory'].append({'id': item_id, 'amount': amount})
 
-def give_mission_rewards(picked_char, mid):
+def give_mission_rewards(picked_char, mid, send_rpc_push):
     """Resolves rewards by profession and calculates level ups using BaseLvData."""
-    m = missions_data.get(mid)
-    if not m or not m.get('reward_ids'): return 0, 0, []
-    
-    # Profession Mapping: 0: Melee, 1: Boxer, 2: Gunslinger
-    prof = picked_char.get('prof', 0)
-    rids = m['reward_ids']
-    rid = rids[prof] if prof < len(rids) else rids[0]
-    reward = rewards_data.get(rid)
-    if not reward:
-        print(f"[!] Reward mapping failed for mission {mid}, rid {rid}")
-        return 0, 0, []
+    try:
+        m = missions_data.get(mid)
+        if not m or not m.get('reward_ids'): return 0, 0, []
+        
+        prof = picked_char.get('prof', 0)
+        rids = m['reward_ids']
+        rid = rids[prof] if prof < len(rids) else rids[0]
+        reward = rewards_data.get(rid)
+        if not reward: return 0, 0, []
 
-    added_exp = reward.get('exp', 0)
-    added_cash = reward.get('cash', 0)
-    
-    exp_before = picked_char.get('exp', 0)
-    lv_before = picked_char.get('level', 1)
-    
-    picked_char['cash'] = picked_char.get('cash', 0) + added_cash
-    picked_char['exp'] = exp_before + added_exp
-    
-    # Level up loop (per-level requirements)
-    while True:
-        lv = picked_char.get('level', 1)
-        req_data = LEVEL_DATA.get(lv)
-        if not req_data: break
-        req = req_data['exp']
-        if picked_char['exp'] >= req:
-            picked_char['exp'] -= req
-            picked_char['level'] = lv + 1
-            print(f"[LEVEL UP] old_level={lv}, new_level={picked_char['level']}")
-        else:
-            break
-            
-    # Send reward popup notification (Tag 638: show_reward_items_tips)
-    # IDs: 2001 (EXP), 1001 (CASH)
-    popup_items = [
-        encode_sproto([(0, "2001"), (1, added_exp), (2, 0)]),
-        encode_sproto([(0, "1001"), (1, added_cash), (2, 0)])
-    ]
-    
-    granted_items_list = []
-    granted_items_data = reward.get('items', [])
-    granted_amounts = reward.get('item_amounts', [])
-    for i in range(len(granted_items_data)):
-        iid = granted_items_data[i]
-        if iid:
-            amt = granted_amounts[i] if i < len(granted_amounts) else 1
-            popup_items.append(encode_sproto([(0, iid), (1, amt), (2, 0)]))
-            add_to_inventory(picked_char, iid, amt)
-            granted_items_list.append((iid, amt))
-            
-    send_rpc_push(638, encode_sproto([(0, popup_items)]))
-    return added_exp, added_cash, granted_items_list
+        added_exp = reward.get('exp', 0)
+        added_cash = reward.get('cash', 0)
+        
+        picked_char['cash'] = picked_char.get('cash', 0) + added_cash
+        picked_char['exp'] = picked_char.get('exp', 0) + added_exp
+        
+        while True:
+            lv = picked_char.get('level', 1)
+            req_data = LEVEL_DATA.get(lv)
+            if not req_data: break
+            if picked_char['exp'] >= req_data['exp']:
+                picked_char['exp'] -= req_data['exp']
+                picked_char['level'] = lv + 1
+            else: break
+                
+        # Send original reward popup (Tag 638)
+        popup_items = [
+            encode_sproto([(0, "2001"), (1, added_exp), (2, 0)]),
+            encode_sproto([(0, "1001"), (1, added_cash), (2, 0)])
+        ]
+        
+        items, amts = reward.get('items', []), reward.get('item_amounts', [])
+        granted_items = []
+        for i in range(len(items)):
+            if items[i]:
+                amt = amts[i] if i < len(amts) else 1
+                popup_items.append(encode_sproto([(0, items[i]), (1, amt), (2, 0)]))
+                add_to_inventory(picked_char, items[i], amt)
+                granted_items.append((items[i], amt))
+                
+        send_rpc_push(638, encode_sproto([(0, popup_items)]))
+        return added_exp, added_cash, granted_items
+    except:
+        traceback.print_exc()
+        return 0, 0, []
 
 def accept_mission_logic(picked_char, mid):
     if mid not in missions_data:
@@ -1042,7 +1033,7 @@ def client_handler(conn, addr):
                         m_cfg = missions_data.get(mid)
                         if m_cfg:
                             print(f"[MISSION CHAIN] completed={mid} last_main_before={picked_char.get('last_main_mission_id')}")
-                            exp_add, cash_add, items_add = give_mission_rewards(picked_char, mid)
+                            exp_add, cash_add, items_add = give_mission_rewards(picked_char, mid, send_rpc_push)
                             
                             # Mission Chain and Unlocking logic
                             is_chained = False
