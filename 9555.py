@@ -559,34 +559,33 @@ def get_npc_attr(nid):
     return hp, hp, atk, df, lvl
 
 def spawn_map_npcs(conn, map_id, picked_char=None):
-    """Spawns all NPCs and Monsters defined in data for the map."""
+    """Spawns all NPCs, Monsters, and Traffic defined in data for the map."""
     map_str = str(map_id)
-
+    
     def send_npc_create(nid, name, x, z, o):
         hp_cur, hp_max, atk, df, lvl = get_npc_attr(nid)
-        inst_id = 2000000 + int(nid)
-        NPC_HP_MAP[inst_id] = hp_max # Authoritative HP Init
-        # npc_attribute schema (Tags 0-27)
+        inst_id = 2000000 + (int(nid) if nid.isdigit() else random.randint(1, 999999))
+        NPC_HP_MAP[inst_id] = hp_max
+        
+        # Handle composite models like "PartA;PartB;PartC" to prevent client crashes
+        # npc_attribute (Tag 1: npcdataid)
+        final_nid = str(nid)
+        if ";" in final_nid:
+            # If it's a composite string, we often need to map it to a base character model
+            # For "XD_A_WQ;XD_A_T;XD_A_S;XD_A_X", we use "100" (Melee Player Model)
+            if "XD_A" in final_nid: final_nid = "100"
+            elif "QJ_A" in final_nid: final_nid = "104"
+            elif "NQS_A" in final_nid: final_nid = "105"
+
         attr = encode_sproto([
-            (0, inst_id),            # id
-            (1, str(nid)),           # npcdataid
-            (2, hp_cur),             # hp
-            (3, hp_max),             # max_hp
-            (4, atk),                # atk
-            (5, df),                 # def
-            (15, x),                 # x
-            (16, z),                 # z
-            (17, o),                 # o
-            (18, lvl),               # level
-            (21, name)               # player_name
+            (0, inst_id), (1, final_nid), (2, hp_cur), (3, hp_max), (4, atk), (5, df),
+            (15, x), (16, z), (17, o), (18, lvl), (21, name)
         ])
-        # Protocol 509: npc_create
-        ph = encode_sproto([(0, 509)])
-        pf = sproto_pack(ph + encode_sproto([(0, attr)]))
-        try:
-            conn.sendall(struct.pack(">H", len(pf)) + pf)
+        ph = encode_sproto([(0, 509)]); pf = sproto_pack(ph + encode_sproto([(0, attr)]))
+        try: conn.sendall(struct.pack(">H", len(pf)) + pf)
         except: pass
 
+    # 1. Spawn Static NPCs & Monsters
     if map_str in STATIC_NPC_DATA:
         for m in STATIC_NPC_DATA[map_str]:
             cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}"})
@@ -597,28 +596,27 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
             send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
-    # Traffic Simulation (Random Cars) - Fixed: only 1 car was spawning before
-    if map_str == "11":
-        car_models = ["DJ_Car_01", "DJ_Car_02", "DJ_Car_03", "daKeChe", "jiaoChe_01", "chuZuChe", "jingChe"]
-        for i in range(20):
+    # 2. Spawn Traffic (Cars) - Increase density for the "Dance City" and Main City
+    if map_str in ["11", "101", "105"]:
+        car_models = ["Chevrolet", "SportsCar", "PoliceCar", "daKeChe", "jiaoChe_01", "jiaoChe_02", "chuZuChe", "xiaoKeChe"]
+        spawn_count = 30 if map_str == "11" else 15
+        for _ in range(spawn_count):
             model = random.choice(car_models)
-            rx, rz = random.randint(-50000, 50000), random.randint(-50000, 50000)
-            send_npc_create(model, f"Traffic_{model}", rx, rz, random.randint(0, 36000))
+            rx, rz = random.randint(-40000, 40000), random.randint(-40000, 40000)
+            send_npc_create(model, f"CityCar_{model}", rx, rz, random.randint(0, 36000))
 
-    # Spawn Mission-specific targets
+    # 3. Spawn Mission targets
     if picked_char:
         for mid, mdata in picked_char.get('active_missions', {}).items():
-            if mdata['state'] == 1 and mid in KILL_TARGET_SPAWNS:
-                for spawn in KILL_TARGET_SPAWNS[mid]:
-                    if str(spawn['map']) == map_str:
-                        cfg = NPC_CONFIG.get(spawn['nid'], {'name': f"Mission_{spawn['nid']}"})
-                        for _ in range(spawn['num']):
-                            send_npc_create(spawn['nid'], cfg['name'], spawn['x'], spawn['z'], spawn['o'])
-                # Spawning Target Cars (Mission 2, etc.)
+            if mdata['state'] == 1:
+                if mid in KILL_TARGET_SPAWNS:
+                    for s in KILL_TARGET_SPAWNS[mid]:
+                        if str(s['map']) == map_str:
+                            for _ in range(s['num']): send_npc_create(s['nid'], f"Quest_{s['nid']}", s['x'], s['z'], 0)
                 if mid in TARGET_CAR_SPAWNS:
-                    for spawn in TARGET_CAR_SPAWNS[mid]:
-                        if str(spawn['map']) == map_str:
-                            send_npc_create(spawn['car_id'], f"MissionCar_{spawn['car_id']}", spawn['x'], spawn['z'], 0)
+                    for s in TARGET_CAR_SPAWNS[mid]:
+                        if str(s['map']) == map_str:
+                            send_npc_create(s['car_id'], f"QuestCar_{s['car_id']}", s['x'], s['z'], 0)
 
 def sync_mission_data(picked_char):
     own_missions = {}
@@ -793,8 +791,11 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
         if birth:
             parts = birth.split('#')
             if len(parts) >= 3:
-                landing_pos = [int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3]) if len(parts) > 3 else 0]
-                print(f"[TELEPORT] Fallback to birth pos for {target_map_id}: {landing_pos}")
+                # Fix: If height is 0, set it to 100 (1 meter) to prevent spawning underground
+                y_coord = int(parts[1])
+                if y_coord == 0: y_coord = 100 
+                landing_pos = [int(parts[0]), y_coord, int(parts[2]), int(parts[3]) if len(parts) > 3 else 0]
+                print(f"[TELEPORT] Spawn height fix for {target_map_id}: {landing_pos}")
 
     if landing_pos:
         picked_char['pos'] = landing_pos
