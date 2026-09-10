@@ -15,6 +15,7 @@ MAP_CONFIG = {}   # mapId -> map info
 MAP_CONNECT_DATA = {} # (src_id, target_id) -> PosX, PosY, PosZ
 GUILD_CAPTURE_DATA = {} # id -> mapId
 KILL_TARGET_SPAWNS = {} # missionId -> list of spawns
+TARGET_CAR_SPAWNS = {}  # missionId -> list of car spawns
 
 try:
     script_dir = os.path.dirname(__file__)
@@ -24,7 +25,7 @@ try:
         with open(md_path, "r", encoding='utf-8') as f: missions_data = json.load(f)
     if os.path.exists(rd_path):
         with open(rd_path, "r", encoding='utf-8') as f: rewards_data = json.load(f)
-    
+
     # Load BaseLvData for EXP requirements and stats
     lv_path = os.path.join(script_dir, "assets/Bundle/TextAsset/BaseLvData")
     if os.path.exists(lv_path):
@@ -46,7 +47,7 @@ try:
                             'res': [int(parts[10]), int(parts[17]), int(parts[24])]
                         }
         print(f"[LEVEL TABLE LOADED] levels={len(LEVEL_DATA)}")
-    
+
     # Load MapInfoData
     map_info_path = os.path.join(script_dir, "assets/Bundle/TextAsset/MapInfoData")
     if os.path.exists(map_info_path):
@@ -148,6 +149,42 @@ try:
         print(f"[MONSTER DATA LOADED] monsters_map={len(MONSTER_DATA)} static_npcs_map={len(STATIC_NPC_DATA)}")
 
     # Load KillTargetMissionData (Mission Spawns)
+    kt_path = os.path.join(script_dir, "assets/Bundle/TextAsset/KillTargetMissionData")
+    if os.path.exists(kt_path):
+        with open(kt_path, "r", encoding='utf-8') as f:
+            for line in f:
+                if line.startswith("*,"):
+                    parts = line.strip().split(",")
+                    if len(parts) > 7:
+                        mid = parts[1]
+                        if mid not in KILL_TARGET_SPAWNS: KILL_TARGET_SPAWNS[mid] = []
+                        KILL_TARGET_SPAWNS[mid].append({
+                            'map': parts[2],
+                            'x': int(parts[3]),
+                            'z': int(parts[4]),
+                            'o': int(parts[5]) if parts[5] else 0,
+                            'nid': parts[6],
+                            'num': int(parts[7]) if parts[7] else 1
+                        })
+        print(f"[KILL TARGET DATA LOADED] count={len(KILL_TARGET_SPAWNS)}")
+
+    # Load TargetCarMissionData
+    tc_path = os.path.join(script_dir, "assets/Bundle/TextAsset/TargetCarMissionData")
+    if os.path.exists(tc_path):
+        with open(tc_path, "r", encoding='utf-8') as f:
+            for line in f:
+                if line.startswith("*,") or ("," in line and line.split(",")[1].isdigit()):
+                    parts = line.strip().split(",")
+                    if len(parts) > 6:
+                        mid = parts[1]
+                        if mid not in TARGET_CAR_SPAWNS: TARGET_CAR_SPAWNS[mid] = []
+                        TARGET_CAR_SPAWNS[mid].append({
+                            'map': parts[2],
+                            'x': int(float(parts[3])),
+                            'z': int(float(parts[4])),
+                            'car_id': parts[6] # e.g. "Chevrolet"
+                        })
+        print(f"[TARGET CAR DATA LOADED] count={len(TARGET_CAR_SPAWNS)}")
     kt_path = os.path.join(script_dir, "assets/Bundle/TextAsset/KillTargetMissionData")
     if os.path.exists(kt_path):
         with open(kt_path, "r", encoding='utf-8') as f:
@@ -374,7 +411,7 @@ def get_character_stats(c):
     lv = c.get('level', 1)
     prof = c.get('prof', 0)
     ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1))
-    
+
     # Base attributes from BaseLvData
     atk = ld['atk'][prof]
     hp_max = ld['hp'][prof]
@@ -383,7 +420,7 @@ def get_character_stats(c):
     eva = ld['eva'][prof]
     cri = ld['cri'][prof]
     res = ld['res'][prof]
-    
+
     # Profession-specific coefficients from GameDefine.cs
     # XD (0), QJ (1), NQS (2)
     coeffs = [
@@ -391,15 +428,15 @@ def get_character_stats(c):
         {"atk":20, "hp":1, "def":12, "hit":1, "eva":6, "cri":5, "res":10},
         {"atk":7, "hp":1, "def":7.4, "hit":3, "eva":3.7, "cri":15, "res":10}
     ][prof]
-    
+
     # Calculate Power (ComboValue) using the real weighting system found in client coefficients
     # Multiplied by 3.0 to match original gameplay scaling (approx 60k for starter)
-    raw_power = (atk * coeffs['atk'] + hp_max * coeffs['hp'] + df * coeffs['def'] + 
+    raw_power = (atk * coeffs['atk'] + hp_max * coeffs['hp'] + df * coeffs['def'] +
                  hit * coeffs['hit'] + eva * coeffs['eva'] + cri * coeffs['cri'] + res * coeffs['res'])
     power = int(raw_power * 3.0)
-    
+
     return {
-        'atk': atk, 'hp_max': hp_max, 'def': df, 
+        'atk': atk, 'hp_max': hp_max, 'def': df,
         'hit': hit, 'eva': eva, 'cri': cri, 'res': res,
         'power': power, 'lv': lv, 'exp': c.get('exp', 0)
     }
@@ -423,21 +460,21 @@ def get_char_ov(c, sort_index=None):
 def get_full_char(c):
     gen = get_general(c)
     stats = get_character_stats(c)
-    
+
     hp_cur = c.get('hp', stats['hp_max'])
-    
+
     attr_oth = encode_sproto([
-        (0, hp_cur), 
-        (1, stats['exp']), 
-        (2, stats['lv']), 
-        (3, stats['power']), 
+        (0, hp_cur),
+        (1, stats['exp']),
+        (2, stats['lv']),
+        (3, stats['power']),
         (15, 1)
     ])
-    
+
     prop = encode_sproto([(13, c.get('cash', 1000)), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
     pos = c.get('pos', [29860, 100, -17005, 0])
     mv = get_movement(pos[0], pos[1], pos[2], pos[3])
-    
+
     attr_run = encode_sproto([(0, stats['hp_max']), (2, stats['atk']), (3, stats['def'])])
     # attr_all tags (attribute.cs): 0:max_hp, 2:atk, 3:def, 4:hit, 5:eva, 6:cri, 7:res, 13:mov
     attr_all_data = [
@@ -447,7 +484,7 @@ def get_full_char(c):
     ]
     attr_all = encode_sproto(attr_all_data)
     run = encode_sproto([(6, attr_run), (7, attr_all)])
-    
+
     char_level = stats['lv']
     skill_levels = c.get('skill_levels', {})
     skills_map = build_skills_map(c.get('prof', 0), char_level, skill_levels)
@@ -489,11 +526,11 @@ def sync_char_attrs_rpc(conn, picked_char):
     ])
 
     prop = encode_sproto([(13, picked_char.get('cash', 0))])
-    
+
     aoi_attr = encode_sproto([
         (0, picked_char['id']), (1, attr_oth), (2, attr_base), (3, attr_all), (5, prop)
     ])
-    
+
     print(f"[PLAYER SYNC] HP={hp_cur}/{stats['hp_max']} POWER={stats['power']} LV={stats['lv']}")
     try:
         ph_p = encode_sproto([(0, 510)])
@@ -504,10 +541,10 @@ def sync_char_attrs_rpc(conn, picked_char):
 def get_npc_attr(nid):
     cfg = NPC_CONFIG.get(nid)
     if not cfg: return 10000, 10000, 100, 10, 1 # Default fallback
-    
+
     lvl = cfg.get('level', 1)
     ld = LEVEL_DATA.get(lvl, LEVEL_DATA.get(1))
-    
+
     if cfg.get('is_abs'):
         hp = cfg.get('hp_abs', 10000)
         atk = cfg.get('atk_abs', 100)
@@ -518,13 +555,13 @@ def get_npc_attr(nid):
         hp = (ld['hp'][0] * cfg.get('hp_coe', 10000)) // 10000
         atk = (ld['atk'][0] * cfg.get('atk_coe', 10000)) // 10000
         df = (ld['def'][0] * cfg.get('def_coe', 10000)) // 10000
-    
+
     return hp, hp, atk, df, lvl
 
 def spawn_map_npcs(conn, map_id, picked_char=None):
     """Spawns all NPCs and Monsters defined in data for the map."""
     map_str = str(map_id)
-    
+
     def send_npc_create(nid, name, x, z, o):
         hp_cur, hp_max, atk, df, lvl = get_npc_attr(nid)
         inst_id = 2000000 + int(nid)
@@ -560,6 +597,14 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
             send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
+    # Traffic Simulation (Random Cars) - Fixed: only 1 car was spawning before
+    if map_str == "11":
+        car_models = ["DJ_Car_01", "DJ_Car_02", "DJ_Car_03", "daKeChe", "jiaoChe_01", "chuZuChe", "jingChe"]
+        for i in range(20):
+            model = random.choice(car_models)
+            rx, rz = random.randint(-50000, 50000), random.randint(-50000, 50000)
+            send_npc_create(model, f"Traffic_{model}", rx, rz, random.randint(0, 36000))
+
     # Spawn Mission-specific targets
     if picked_char:
         for mid, mdata in picked_char.get('active_missions', {}).items():
@@ -569,6 +614,11 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                         cfg = NPC_CONFIG.get(spawn['nid'], {'name': f"Mission_{spawn['nid']}"})
                         for _ in range(spawn['num']):
                             send_npc_create(spawn['nid'], cfg['name'], spawn['x'], spawn['z'], spawn['o'])
+                # Spawning Target Cars (Mission 2, etc.)
+                if mid in TARGET_CAR_SPAWNS:
+                    for spawn in TARGET_CAR_SPAWNS[mid]:
+                        if str(spawn['map']) == map_str:
+                            send_npc_create(spawn['car_id'], f"MissionCar_{spawn['car_id']}", spawn['x'], spawn['z'], 0)
 
 def sync_mission_data(picked_char):
     own_missions = {}
@@ -580,7 +630,7 @@ def sync_mission_data(picked_char):
         ])
     last_main = str(picked_char.get('last_main_mission_id', "0"))
     if not last_main or last_main == "None": last_main = "0"
-    
+
     data_list = [
         (0, own_missions),
         (1, last_main),
@@ -616,7 +666,7 @@ def give_mission_rewards(picked_char, mid, send_rpc_push):
     try:
         m = missions_data.get(mid)
         if not m or not m.get('reward_ids'): return 0, 0, []
-        
+
         prof = picked_char.get('prof', 0)
         rids = m['reward_ids']
         rid = rids[prof] if prof < len(rids) else rids[0]
@@ -625,10 +675,10 @@ def give_mission_rewards(picked_char, mid, send_rpc_push):
 
         added_exp = reward.get('exp', 0)
         added_cash = reward.get('cash', 0)
-        
+
         picked_char['cash'] = picked_char.get('cash', 0) + added_cash
         picked_char['exp'] = picked_char.get('exp', 0) + added_exp
-        
+
         while True:
             lv = picked_char.get('level', 1)
             req_data = LEVEL_DATA.get(lv)
@@ -637,13 +687,13 @@ def give_mission_rewards(picked_char, mid, send_rpc_push):
                 picked_char['exp'] -= req_data['exp']
                 picked_char['level'] = lv + 1
             else: break
-                
+
         # Send original reward popup (Tag 638)
         popup_items = [
             encode_sproto([(0, "2001"), (1, added_exp), (2, 0)]),
             encode_sproto([(0, "1001"), (1, added_cash), (2, 0)])
         ]
-        
+
         items, amts = reward.get('items', []), reward.get('item_amounts', [])
         granted_items = []
         for i in range(len(items)):
@@ -652,7 +702,7 @@ def give_mission_rewards(picked_char, mid, send_rpc_push):
                 popup_items.append(encode_sproto([(0, items[i]), (1, amt), (2, 0)]))
                 add_to_inventory(picked_char, items[i], amt)
                 granted_items.append((items[i], amt))
-                
+
         send_rpc_push(638, encode_sproto([(0, popup_items)]))
         return added_exp, added_cash, granted_items
     except:
@@ -667,7 +717,7 @@ def accept_mission_logic(picked_char, mid):
     if picked_char.get('level', 1) < m.get('min_level', 0):
         print(f"[accept_mission_logic] FAILED: level too low {picked_char.get('level')} < {m.get('min_level')}")
         return False
-    
+
     pre_id = m.get('pre_id', "")
     if pre_id:
         if m.get('class') == 1:
@@ -681,7 +731,7 @@ def accept_mission_logic(picked_char, mid):
                     print(f"[accept_mission_logic] FAILED: side pre_id {ipre} not in completed {picked_char.get('completed_side_missions')}")
                     return False
             except: return False
-            
+
     if 'active_missions' not in picked_char: picked_char['active_missions'] = {}
     if mid in picked_char['active_missions']:
         print(f"[accept_mission_logic] FAILED: {mid} already active")
@@ -702,10 +752,10 @@ def accept_mission_logic(picked_char, mid):
 
 def init_character_fields(c):
     fields = {
-        'level': 1, 'exp': 0, 'cash': 1000, 
-        'skill_levels': {}, 
-        'active_missions': {}, 
-        'completed_side_missions': [], 
+        'level': 1, 'exp': 0, 'cash': 1000,
+        'skill_levels': {},
+        'active_missions': {},
+        'completed_side_missions': [],
         'last_main_mission_id': "0",
         'inventory': [],
         'pos': [29860, 100, -17005, 0],
@@ -713,7 +763,7 @@ def init_character_fields(c):
     }
     for k, v in fields.items():
         if k not in c: c[k] = v
-    
+
     # Initialize HP if not set
     if 'hp' not in c:
         lv = c.get('level', 1)
@@ -726,7 +776,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
     target_map_id = str(target_map_id)
     picked_char['map_id'] = target_map_id
     scene_name = "Unknown"
-    
+
     # Update position
     landing_pos = None
     # 1. Try teleport portal heuristic
@@ -735,7 +785,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
         # Add a small offset so player isn't exactly on the trigger
         landing_pos = [int(px * 100), int(py * 100), int(pz * 100), 0]
         print(f"[TELEPORT] Transition {src_map} -> {target_map_id} using portal heuristic: {landing_pos}")
-    
+
     # 2. Fallback to birth pos
     if not landing_pos and target_map_id in MAP_CONFIG:
         birth = MAP_CONFIG[target_map_id]['birth']
@@ -750,7 +800,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
         picked_char['pos'] = landing_pos
     else:
         print(f"[MAP CONFIG MISSING] map_id={target_map_id}")
-    
+
     save_chars(all_accounts_chars)
     # TAG 503: enter_map
     print("[DEBUG] BEFORE MAP ENTER")
@@ -765,7 +815,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
 
         # TAG 504: main_player_create
         send_rpc_push(504, encode_sproto([
-            (0, get_full_char(picked_char)), 
+            (0, get_full_char(picked_char)),
             (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
         ]))
         print(f"[MAIN PLAYER CREATE SEND] map_id={target_map_id}")
@@ -798,7 +848,7 @@ def client_handler(conn, addr):
             pf_p = sproto_pack(ph_p + data)
             conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
             print(f"[TX] PUSH TAG={tag} SIZE={len(data)}")
-        except Exception: 
+        except Exception:
             print(f"[!] FAILED TO SEND PUSH TAG={tag}")
             traceback.print_exc()
 
@@ -830,13 +880,13 @@ def client_handler(conn, addr):
                 chars = all_accounts_chars.get(cur_areaId, {}).get(acc_id, [])
                 # Sort by last_played descending (internal)
                 chars.sort(key=lambda x: x.get('last_played', 0), reverse=True)
-                
+
                 # The client sorts character_overview.createtime ASCENDING.
                 # To make the last played (newest) show first, we give it the smallest createtime.
                 ov_list = []
                 for i, c in enumerate(chars):
                     ov_list.append(get_char_ov(c, i))
-                
+
                 resp = encode_sproto([(0, ov_list)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -870,23 +920,23 @@ def client_handler(conn, addr):
                         if missions_data.get(active_id, {}).get('class') == 1:
                             has_active_main = True
                             break
-                    
+
                     if not picked_char.get('last_main_mission_id') and not has_active_main:
                         if accept_mission_logic(picked_char, "1001"):
                             print(f"[MISSION ACCEPT] mission_id=1001 (Starting mission)")
-                    
+
                     save_chars(all_accounts_chars)
-                    
+
                     # Correct Sequence: 614 -> 611 -> 540 -> 519 -> 503
-                    
+
                     # 614: function_sync
                     fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))]))
-                    
+
                     # 611: inventory_sync
                     send_rpc_push(611, sync_inventory_data(picked_char))
-                    
+
                     # 592: backpack_sync
                     send_rpc_push(592, encode_sproto([(0, {})]))
 
@@ -895,14 +945,14 @@ def client_handler(conn, addr):
 
                     # 510: initial stats sync
                     sync_char_attrs_rpc(conn, picked_char)
-                    
+
                     # 540: skill_sync
                     smap = build_skills_map(picked_char['prof'], picked_char['level'], picked_char.get('skill_levels', {}))
                     send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
-                    
+
                     # 519: mission_sync
                     send_rpc_push(519, sync_mission_data(picked_char))
-                    
+
                     # TAG 503: enter_map
                     mid = str(picked_char.get('map_id', '11'))
                     scene_name = "Unknown"
@@ -910,7 +960,7 @@ def client_handler(conn, addr):
                         scene_name = MAP_CONFIG[mid]['scene']
                     else:
                         print(f"[MAP CONFIG MISSING] map_id={mid}")
-                    
+
                     print("[DEBUG] BEFORE MAP ENTER")
                     try:
                         ph_p = encode_sproto([(0, 503)])
@@ -922,7 +972,7 @@ def client_handler(conn, addr):
 
                         # TAG 504: main_player_create
                         send_rpc_push(504, encode_sproto([
-                            (0, get_full_char(picked_char)), 
+                            (0, get_full_char(picked_char)),
                             (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
                         ]))
                         print(f"[MAIN PLAYER CREATE SEND] map_id={mid}")
@@ -1037,7 +1087,7 @@ def client_handler(conn, addr):
                         if m_cfg:
                             print(f"[MISSION CHAIN] completed={mid} last_main_before={picked_char.get('last_main_mission_id')}")
                             exp_add, cash_add, items_add = give_mission_rewards(picked_char, mid, send_rpc_push)
-                            
+
                             # Mission Chain and Unlocking logic
                             is_chained = False
                             if m_cfg.get('class') == 1:
@@ -1055,16 +1105,16 @@ def client_handler(conn, addr):
                                     if imid not in picked_char.get('completed_side_missions', []):
                                         picked_char['completed_side_missions'].append(imid)
                                 except: pass
-                            
+
                             del picked_char['active_missions'][mid]
                             save_chars(all_accounts_chars)
                             print(f"[MISSION COMPLETE] mission_id={mid} chained={is_chained}")
-                            
+
                             # Standard completion response
                             if session is not None:
                                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                                 conn.sendall(struct.pack(">H", len(pf)) + pf)
-                            
+
                             # Push Sync sequence
                             send_rpc_push(521, encode_sproto([(0, mid), (1, 1)])) # Success feedback
                             sync_char_attrs_rpc(conn, picked_char)               # Stats update
@@ -1128,7 +1178,7 @@ def client_handler(conn, addr):
                         # Do NOT send 508. Response will be empty.
                     else:
                         send_rpc_push(508, encode_sproto([(0, picked_char['id']), (1, tid), (2, sid), (3, alist)]))
-                
+
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
@@ -1146,12 +1196,12 @@ def client_handler(conn, addr):
 
             elif msg == 307: # local_npc_die
                 npcid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
-                
+
                 # Lenient Check: Trust the client for now to prevent mission progression hangers.
                 # In original servers, boss death is usually verified, but here we prioritize gameplay.
                 print(f"[COMBAT] Trusting client death report for NPC {npcid}")
                 can_die = True
-                
+
                 # Cleanup HP tracking for this NPC type
                 try:
                     to_del = [k for k, v in NPC_HP_MAP.items() if str(k - 2000000) == npcid]
@@ -1165,7 +1215,7 @@ def client_handler(conn, addr):
                     for mid, mdata in picked_char.get('active_missions', {}).items():
                         m_cfg = missions_data.get(mid)
                         if not m_cfg: continue
-                        
+
                         ltype = m_cfg.get('logic_type')
                         # 1: KILLMONSTER, 4: KILL_DROP, 6: INVESTIGATE, 11: COPY_KILL, 17: MASSACRE_NPC, 23: KILL_TARGET_NPC, 25: CAPTURE
                         if ltype in [1, 4, 6, 11, 17, 23, 25]:
