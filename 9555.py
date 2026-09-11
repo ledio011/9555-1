@@ -497,7 +497,7 @@ def get_full_char(c):
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
 
-    # download tag(15) set to 1 to trigger the download notification/process
+    # download tag(15) set to 2 to make IsFinishDownload = true (prevents mission blocking)
     return encode_sproto([
         (0, c['id']),
         (1, gen),
@@ -509,7 +509,7 @@ def get_full_char(c):
         (9, equip_map),
         (12, 0),
         (13, run),
-        (15, 1)
+        (15, 2)
     ])
 
 def sync_char_attrs_rpc(conn, picked_char):
