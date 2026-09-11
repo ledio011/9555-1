@@ -497,7 +497,7 @@ def get_full_char(c):
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
 
-    # download tag(15) set to 2 to make IsFinishDownload = true (prevents mission blocking)
+    # download tag(15) set to 1 to trigger the download notification/process
     return encode_sproto([
         (0, c['id']),
         (1, gen),
@@ -509,7 +509,7 @@ def get_full_char(c):
         (9, equip_map),
         (12, 0),
         (13, run),
-        (15, 2)
+        (15, 1)
     ])
 
 def sync_char_attrs_rpc(conn, picked_char):
@@ -573,21 +573,27 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
 
     def send_npc_create(nid, name, x, z, o):
         global GLOBAL_INST_COUNTER
+        hp_cur, hp_max, atk, df, lvl = get_npc_attr(nid)
         GLOBAL_INST_COUNTER += 1
         inst_id = GLOBAL_INST_COUNTER
-        
-        hp_cur, hp_max, atk, df, lvl = get_npc_attr(nid)
         NPC_HP_MAP[inst_id] = hp_max
         
-        # Tag 1: npcdataid (must be the ID from NpcData table)
+        # FIX: Handle composite models like "PartA;PartB;PartC" which client cannot resolve
+        final_nid = str(nid)
+        if ";" in final_nid:
+            if "XD_A" in final_nid: final_nid = "100"
+            elif "QJ_A" in final_nid: final_nid = "104"
+            elif "NQS_A" in final_nid: final_nid = "105"
+
         # npc_attribute schema: id(0), npcdataid(1), hp(2), max_hp(3), atk(4), def(5), x(15), z(16), o(17), level(18), player_name(21)
         attr = encode_sproto([
-            (0, inst_id), (1, str(nid)), (2, hp_cur), (3, hp_max), (4, atk), (5, df),
+            (0, inst_id), (1, final_nid), (2, hp_cur), (3, hp_max), (4, atk), (5, df),
             (15, x), (16, z), (17, o), (18, lvl), (21, name)
         ])
         ph = encode_sproto([(0, 509)]); pf = sproto_pack(ph + encode_sproto([(0, attr)]))
         try: conn.sendall(struct.pack(">H", len(pf)) + pf)
         except: pass
+        return inst_id
 
     # 1. Spawn Static NPCs & Monsters
     if map_str in STATIC_NPC_DATA:
@@ -629,6 +635,7 @@ def sync_mission_data(picked_char):
         parm = mdata.get('parm', [0]*8)
         if len(parm) < 8: parm += [0]*(8-len(parm))
         # ownmission schema: missionId(0), missionstate(1), missionquality(2), parm(3)
+        # FIX: APK logic for SyncMissionList requires int.Parse(mid) for main missions check
         m_bytes = encode_sproto([
             (0, str(mid)),
             (1, int(mdata['state'])),
@@ -638,9 +645,10 @@ def sync_mission_data(picked_char):
         own_missions_list.append(m_bytes)
     
     last_main = picked_char.get('last_main_mission_id', "0")
-    if not last_main or last_main == "None": last_main = "0"
+    if last_main == "" or last_main == "None": last_main = "0"
 
     # sync_mission.request schema: missions(0), last_missionId(1), sidedone_mission(2)
+    # FIX: missions must be encoded as a Sproto array of objects (concatenated length-prefixed chunks)
     data_list = [
         (0, own_missions_list),
         (1, str(last_main)),
@@ -1334,6 +1342,30 @@ def client_handler(conn, addr):
                 if picked_char and nid == "1105":
                     # Special logic for Mission 1003 Challenge Dialogue
                     # This triggers the client-side Yes/No box
+                    send_rpc_push(529, encode_sproto([(0, "102098"), (1, True)]))
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 298: # impact_npc
+                nid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
+                print(f"[*] Interaction with NPC ID={nid}")
+                if picked_char and nid == "1105":
+                    # Special logic for Mission 1003 Challenge Dialogue
+                    # This triggers the client-side Yes/No box (Dialog string 102098)
+                    send_rpc_push(529, encode_sproto([(0, "102098"), (1, True)]))
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 298: # impact_npc
+                nid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
+                print(f"[*] Interaction with NPC ID={nid}")
+                if picked_char and nid == "1105":
+                    # Special logic for Mission 1003 Challenge Dialogue
+                    # This triggers the client-side Yes/No box (Dialog string 102098)
                     send_rpc_push(529, encode_sproto([(0, "102098"), (1, True)]))
 
                 if session is not None:
