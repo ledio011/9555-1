@@ -3,6 +3,7 @@ import socket, struct, threading, random, json, os, time, traceback
 PORT = int(os.environ.get("PORT", 15678))
 CHAR_DB = "characters_final.json"
 server_session_counter = 8000
+GLOBAL_INST_COUNTER = 3000000
 
 # Load Mission Data
 missions_data = {}
@@ -571,22 +572,17 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
     map_str = str(map_id)
 
     def send_npc_create(nid, name, x, z, o):
+        global GLOBAL_INST_COUNTER
+        GLOBAL_INST_COUNTER += 1
+        inst_id = GLOBAL_INST_COUNTER
+        
         hp_cur, hp_max, atk, df, lvl = get_npc_attr(nid)
-        inst_id = 2000000 + (int(nid) if nid.isdigit() else random.randint(1, 999999))
         NPC_HP_MAP[inst_id] = hp_max
         
-        # Handle composite models like "PartA;PartB;PartC" to prevent client crashes
-        # npc_attribute (Tag 1: npcdataid)
-        final_nid = str(nid)
-        if ";" in final_nid:
-            # If it's a composite string, we often need to map it to a base character model
-            # For "XD_A_WQ;XD_A_T;XD_A_S;XD_A_X", we use "100" (Melee Player Model)
-            if "XD_A" in final_nid: final_nid = "100"
-            elif "QJ_A" in final_nid: final_nid = "104"
-            elif "NQS_A" in final_nid: final_nid = "105"
-
+        # Tag 1: npcdataid (must be the ID from NpcData table)
+        # npc_attribute schema: id(0), npcdataid(1), hp(2), max_hp(3), atk(4), def(5), x(15), z(16), o(17), level(18), player_name(21)
         attr = encode_sproto([
-            (0, inst_id), (1, final_nid), (2, hp_cur), (3, hp_max), (4, atk), (5, df),
+            (0, inst_id), (1, str(nid)), (2, hp_cur), (3, hp_max), (4, atk), (5, df),
             (15, x), (16, z), (17, o), (18, lvl), (21, name)
         ])
         ph = encode_sproto([(0, 509)]); pf = sproto_pack(ph + encode_sproto([(0, attr)]))
@@ -627,22 +623,26 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                             send_npc_create(s['car_id'], f"QuestCar_{s['car_id']}", s['x'], s['z'], 0)
 
 def sync_mission_data(picked_char):
-    own_missions = {}
+    own_missions_list = []
     for mid, mdata in picked_char.get('active_missions', {}).items():
         # Ensure parm has 8 elements and is long list
         parm = mdata.get('parm', [0]*8)
         if len(parm) < 8: parm += [0]*(8-len(parm))
-        own_missions[mid] = encode_sproto([
+        # ownmission schema: missionId(0), missionstate(1), missionquality(2), parm(3)
+        m_bytes = encode_sproto([
             (0, str(mid)),
             (1, int(mdata['state'])),
+            (2, 0), # missionquality
             (3, [int(x) for x in parm])
         ])
+        own_missions_list.append(m_bytes)
     
     last_main = picked_char.get('last_main_mission_id', "0")
-    if last_main == "" or last_main == "None": last_main = "0"
+    if not last_main or last_main == "None": last_main = "0"
 
+    # sync_mission.request schema: missions(0), last_missionId(1), sidedone_mission(2)
     data_list = [
-        (0, own_missions),
+        (0, own_missions_list),
         (1, str(last_main)),
         (2, [int(x) for x in picked_char.get('completed_side_missions', []) if x])
     ]
@@ -804,9 +804,10 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
             if len(parts) >= 3:
                 # Fix: If height is 0, set it to a safe level
                 y_coord = int(parts[1])
-                if target_map_id == "101": y_coord = 500 # Dance City safe height
-                elif target_map_id == "105": y_coord = 500 # Business Center safe height
-                elif y_coord == 0: y_coord = 100
+                if target_map_id == "101" or target_map_id == "105":
+                    y_coord = 200 # Safe height above floor
+                elif y_coord == 0:
+                    y_coord = 100
                 
                 landing_pos = [int(parts[0]), y_coord, int(parts[2]), int(parts[3]) if len(parts) > 3 else 0]
                 print(f"[TELEPORT] Spawn fix map={target_map_id} pos={landing_pos}")
@@ -1225,21 +1226,39 @@ def client_handler(conn, addr):
 
             elif msg == 307: # local_npc_die
                 npcid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
-
-                # Lenient Check: Trust the client for now to prevent mission progression hangers.
-                # In original servers, boss death is usually verified, but here we prioritize gameplay.
-                print(f"[COMBAT] Trusting client death report for NPC {npcid}")
-                can_die = True
-
-                # Cleanup HP tracking for this NPC type
+                die_type = get_val_int(body, 3)
+                
+                # Cleanup HP tracking
                 try:
-                    to_del = [k for k, v in NPC_HP_MAP.items() if str(k - 2000000) == npcid]
+                    to_del = [k for k, v in NPC_HP_MAP.items() if str(k - 3000000) == npcid]
                     for k in to_del: del NPC_HP_MAP[k]
                 except: pass
 
-                die_type = get_val_int(body, 3)
-                print(f"[*] local_npc_die npcid={npcid} type={die_type}")
                 if picked_char:
+                    # Original Kill Reward Logic
+                    h_m, h_m, a_m, d_m, lvl_m = get_npc_attr(npcid)
+                    # Increased base reward for generic kills
+                    exp_kill = lvl_m * 20
+                    cash_kill = lvl_m * 100
+                    picked_char['exp'] = picked_char.get('exp', 0) + exp_kill
+                    picked_char['cash'] = picked_char.get('cash', 0) + cash_kill
+                    
+                    # Send reward tip (Tag 638)
+                    send_rpc_push(638, encode_sproto([(0, [
+                        encode_sproto([(0, "2001"), (1, exp_kill), (2, 0)]),
+                        encode_sproto([(0, "1001"), (1, cash_kill), (2, 0)])
+                    ])]))
+                    
+                    # Level up loop
+                    while True:
+                        lv = picked_char.get('level', 1)
+                        rd = LEVEL_DATA.get(lv)
+                        if rd and picked_char['exp'] >= rd['exp']:
+                            picked_char['exp'] -= rd['exp']
+                            picked_char['level'] = lv + 1
+                            print(f"[LEVEL UP] CharID={picked_char['id']} NewLevel={picked_char['level']}")
+                        else: break
+
                     updated = False
                     for mid, mdata in picked_char.get('active_missions', {}).items():
                         m_cfg = missions_data.get(mid)
@@ -1308,6 +1327,30 @@ def client_handler(conn, addr):
                         send_rpc_push(519, sync_mission_data(picked_char))
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 298: # impact_npc
+                nid = body.get(0, b"").decode('utf-8')
+                print(f"[*] Interaction with NPC ID={nid}")
+                if picked_char and nid == "1105":
+                    # Special logic for Mission 1003 Challenge Dialogue
+                    # This triggers the client-side Yes/No box
+                    send_rpc_push(529, encode_sproto([(0, "102098"), (1, True)]))
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 298: # impact_npc
+                nid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
+                print(f"[*] Interaction with NPC ID={nid}")
+                if picked_char and nid == "1105":
+                    # Special logic for Mission 1003 Challenge Dialogue
+                    # This triggers the client-side Yes/No box (Dialog string 102098)
+                    send_rpc_push(529, encode_sproto([(0, "102098"), (1, True)]))
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 7: # update_game_server
                 servers = [encode_sproto([(0, 302), (1, "EU-001"), (2, "s16.serv00.com"), (3, 15678), (4, 1), (5, 1), (6, 1), (7, 0), (8, 1), (9, 1)])]
