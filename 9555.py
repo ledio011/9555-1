@@ -280,7 +280,7 @@ def encode_sproto(fields, fn=None):
                         elif isinstance(item, (bytes, bytearray)): pass
                         else: item = str(item).encode('utf-8')
                         items.append(struct.pack("<I", len(item)) + item)
-                    v = b"\x00" + b"".join(items) 
+                    v = b"".join(items) 
             elif isinstance(val, dict):
                 # A Sproto map is encoded as an array of its elements
                 items = []
@@ -289,7 +289,7 @@ def encode_sproto(fields, fn=None):
                         items.append(struct.pack("<I", len(item)) + item)
                     else:
                         items.append(struct.pack("<I", 1) + (b'\x01' if item else b'\x00'))
-                v = b"\x00" + b"".join(items)
+                v = b"".join(items)
             else:
                 v = val
             body += struct.pack("<I", len(v)) + v
@@ -497,7 +497,7 @@ def get_full_char(c):
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
 
-    # download tag(15) set to 0 to trigger the download notification/process
+    # download tag(15) set to 2 to make IsFinishDownload = true (prevents mission blocking)
     return encode_sproto([
         (0, c['id']),
         (1, gen),
@@ -509,7 +509,7 @@ def get_full_char(c):
         (9, equip_map),
         (12, 0),
         (13, run),
-        (15, 0)
+        (15, 2)
     ])
 
 def sync_char_attrs_rpc(conn, picked_char):
