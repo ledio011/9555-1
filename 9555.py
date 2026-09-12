@@ -945,7 +945,7 @@ def client_handler(conn, addr):
                             has_active_main = True
                             break
 
-                    if not picked_char.get('last_main_mission_id') and not has_active_main:
+                    if picked_char.get('last_main_mission_id') in [None, "", "-1", "0"] and not has_active_main:
                         if accept_mission_logic(picked_char, "1001"):
                             print(f"[MISSION ACCEPT] mission_id=1001 (Starting mission)")
 
