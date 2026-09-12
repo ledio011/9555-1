@@ -280,7 +280,7 @@ def encode_sproto(fields, fn=None):
                         elif isinstance(item, (bytes, bytearray)): pass
                         else: item = str(item).encode('utf-8')
                         items.append(struct.pack("<I", len(item)) + item)
-                    v = b"".join(items) 
+                    v = b"".join(items)
             elif isinstance(val, dict):
                 # A Sproto map is encoded as an array of its elements
                 items = []
@@ -560,11 +560,11 @@ def get_npc_attr(nid):
         hp = (ld['hp'][0] * cfg.get('hp_coe', 10000)) // 10000
         atk = (ld['atk'][0] * cfg.get('atk_coe', 10000)) // 10000
         df = (ld['def'][0] * cfg.get('def_coe', 10000)) // 10000
-    
+
     # Original stats check: if Atk/Hp are defined explicitly in NpcData, use them as minimums
     if cfg.get('hp_abs', 0) > hp: hp = cfg['hp_abs']
     if cfg.get('atk_abs', 0) > atk: atk = cfg['atk_abs']
-    
+
     return hp, hp, atk, df, lvl
 
 def spawn_map_npcs(conn, map_id, picked_char=None):
@@ -577,7 +577,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         GLOBAL_INST_COUNTER += 1
         inst_id = GLOBAL_INST_COUNTER
         NPC_HP_MAP[inst_id] = hp_max
-        
+
         # FIX: Handle composite models like "PartA;PartB;PartC" which client cannot resolve
         final_nid = str(nid)
         if ";" in final_nid:
@@ -644,8 +644,8 @@ def sync_mission_data(picked_char):
         ])
         own_missions_list.append(m_bytes)
     
-    last_main = picked_char.get('last_main_mission_id', "0")
-    if last_main == "" or last_main == "None": last_main = "0"
+    last_main = picked_char.get('last_main_mission_id', "-1")
+    if last_main == "" or last_main == "None": last_main = "-1"
 
     # sync_mission.request schema: missions(0), last_missionId(1), sidedone_mission(2)
     # FIX: missions must be encoded as a Sproto array of objects (concatenated length-prefixed chunks)
@@ -773,7 +773,7 @@ def init_character_fields(c):
         'skill_levels': {},
         'active_missions': {},
         'completed_side_missions': [],
-        'last_main_mission_id': "0",
+        'last_main_mission_id': "-1",
         'inventory': [],
         'pos': [29860, 100, -17005, 0],
         'map_id': "11"
@@ -816,7 +816,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
                     y_coord = 200 # Safe height above floor
                 elif y_coord == 0:
                     y_coord = 100
-                
+
                 landing_pos = [int(parts[0]), y_coord, int(parts[2]), int(parts[3]) if len(parts) > 3 else 0]
                 print(f"[TELEPORT] Spawn fix map={target_map_id} pos={landing_pos}")
 
@@ -1250,13 +1250,13 @@ def client_handler(conn, addr):
                     cash_kill = lvl_m * 100
                     picked_char['exp'] = picked_char.get('exp', 0) + exp_kill
                     picked_char['cash'] = picked_char.get('cash', 0) + cash_kill
-                    
+
                     # Send reward tip (Tag 638)
                     send_rpc_push(638, encode_sproto([(0, [
                         encode_sproto([(0, "2001"), (1, exp_kill), (2, 0)]),
                         encode_sproto([(0, "1001"), (1, cash_kill), (2, 0)])
                     ])]))
-                    
+
                     # Level up loop
                     while True:
                         lv = picked_char.get('level', 1)
