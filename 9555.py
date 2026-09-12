@@ -158,9 +158,9 @@ try:
     if os.path.exists(kt_path):
         with open(kt_path, "r", encoding='utf-8') as f:
             for line in f:
-                if line.startswith("*,"):
+                if line.startswith("*,") or line.startswith(","):
                     parts = line.strip().split(",")
-                    if len(parts) > 7:
+                    if len(parts) > 7 and parts[1].isdigit():
                         mid = parts[1]
                         if mid not in KILL_TARGET_SPAWNS: KILL_TARGET_SPAWNS[mid] = []
                         KILL_TARGET_SPAWNS[mid].append({
@@ -190,24 +190,6 @@ try:
                             'car_id': parts[6] # e.g. "Chevrolet"
                         })
         print(f"[TARGET CAR DATA LOADED] count={len(TARGET_CAR_SPAWNS)}")
-    kt_path = os.path.join(script_dir, "assets/Bundle/TextAsset/KillTargetMissionData")
-    if os.path.exists(kt_path):
-        with open(kt_path, "r", encoding='utf-8') as f:
-            for line in f:
-                if line.startswith("*,"):
-                    parts = line.strip().split(",")
-                    if len(parts) > 7:
-                        mid = parts[1]
-                        if mid not in KILL_TARGET_SPAWNS: KILL_TARGET_SPAWNS[mid] = []
-                        KILL_TARGET_SPAWNS[mid].append({
-                            'map': parts[2],
-                            'x': int(parts[3]),
-                            'z': int(parts[4]),
-                            'o': int(parts[5]) if parts[5] else 0,
-                            'nid': parts[6],
-                            'num': int(parts[7]) if parts[7] else 1
-                        })
-        print(f"[KILL TARGET DATA LOADED] count={len(KILL_TARGET_SPAWNS)}")
 except: traceback.print_exc()
 
 def load_chars():
