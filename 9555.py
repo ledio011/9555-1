@@ -180,7 +180,7 @@ try:
             for line in f:
                 if line.startswith("*,") or ("," in line and line.split(",")[1].isdigit()):
                     parts = line.strip().split(",")
-                    if len(parts) > 6:
+                    if len(parts) > 6 and parts[1].isdigit():
                         mid = parts[1]
                         if mid not in TARGET_CAR_SPAWNS: TARGET_CAR_SPAWNS[mid] = []
                         TARGET_CAR_SPAWNS[mid].append({
