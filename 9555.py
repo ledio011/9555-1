@@ -691,9 +691,10 @@ def give_mission_rewards(picked_char, mid, send_rpc_push):
             else: break
 
         # Send original reward popup (Tag 638)
+        # item schema: itemId(0), itemCount(1), quality(3)
         popup_items = [
-            encode_sproto([(0, "2001"), (1, added_exp), (2, 0)]),
-            encode_sproto([(0, "1001"), (1, added_cash), (2, 0)])
+            encode_sproto([(0, "2001"), (1, added_exp), (3, 0)]),
+            encode_sproto([(0, "1001"), (1, added_cash), (3, 0)])
         ]
 
         items, amts = reward.get('items', []), reward.get('item_amounts', [])
@@ -701,7 +702,8 @@ def give_mission_rewards(picked_char, mid, send_rpc_push):
         for i in range(len(items)):
             if items[i]:
                 amt = amts[i] if i < len(amts) else 1
-                popup_items.append(encode_sproto([(0, items[i]), (1, amt), (2, 0)]))
+                # Use Tag 3 for quality as per SprotoType/item.cs
+                popup_items.append(encode_sproto([(0, items[i]), (1, amt), (3, 0)]))
                 add_to_inventory(picked_char, items[i], amt)
                 granted_items.append((items[i], amt))
 
@@ -1283,9 +1285,10 @@ def client_handler(conn, addr):
                     picked_char['cash'] = picked_char.get('cash', 0) + cash_kill
 
                     # Send reward tip (Tag 638)
+                    # item schema: itemId(0), itemCount(1), quality(3)
                     send_rpc_push(638, encode_sproto([(0, [
-                        encode_sproto([(0, "2001"), (1, exp_kill), (2, 0)]),
-                        encode_sproto([(0, "1001"), (1, cash_kill), (2, 0)])
+                        encode_sproto([(0, "2001"), (1, exp_kill), (3, 0)]),
+                        encode_sproto([(0, "1001"), (1, cash_kill), (3, 0)])
                     ])]))
 
                     # Level up loop
