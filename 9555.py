@@ -9,7 +9,7 @@ import traceback
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", "15678"))
 DB_PATH = os.environ.get("DB_PATH", "db")
-DATA_DIR = os.environ.get("DATA_DIR", "Decompiled/assets/Bundle/TextAsset")
+DATA_DIR = os.environ.get("DATA_DIR", "assets/Bundle/TextAsset")
 
 os.makedirs(DB_PATH, exist_ok=True)
 
@@ -230,8 +230,6 @@ def load_textassets():
                 if not line:
                     continue
 
-                # The first *, header establishes the columns.
-                # Later rows beginning with * are DATA, not new headers.
                 if headers is None and line.startswith("*,"):
                     raw_headers = line.split(",")
                     headers = raw_headers[1:]
@@ -429,7 +427,6 @@ def handle_message(conn, msg, session, body):
     log(f"[RX RPC] tag={msg} session={session}")
 
     if msg == 4:
-        # Client login confirmation before character list.
         return encode_sproto([
             (0, 2),
             (1, GAME_VERSION),
@@ -463,8 +460,6 @@ def handle_message(conn, msg, session, body):
         ONLINE_PLAYERS[str(cid)] = {"data": char, "conn": conn}
         log(f"[CHARACTER PICK] id={cid} map={char.get('map_id', '11')}")
 
-        # IMPORTANT: character_pick response first. Then the initial game sync.
-        # This is the point where the previous discovery server stopped.
         threading.Thread(
             target=send_initial_game_flow,
             args=(conn, char),
@@ -529,7 +524,6 @@ def send_initial_game_flow(conn, char):
     try:
         now = int(time.time())
 
-        # These are verified protocol tags from the APK. Keep the flow explicit.
         send_rpc_push(conn, 614, encode_sproto([
             (0, now),
             (13, 1),
@@ -539,8 +533,6 @@ def send_initial_game_flow(conn, char):
         send_rpc_push(conn, 611, encode_sproto([(0, {})]))
         send_rpc_push(conn, 540, encode_sproto([(0, {}), (1, False)]))
 
-        # Map entry must precede the mission sync. The client uses its current
-        # RunningMapIdStr when processing map-dependent mission state.
         map_id = str(char.get("map_id", "11"))
         send_rpc_push(conn, 503, encode_sproto([
             (0, map_id),
@@ -552,9 +544,6 @@ def send_initial_game_flow(conn, char):
             (0, get_full_char(char))
         ]))
 
-        # 505 is the verified AOI-add protocol tag. We do not fabricate NPC
-        # records here; map NPC spawning will be added only after its exact
-        # Sproto structure is verified from the APK.
         log(f"[MAP FLOW] 503 -> 504 sent for map={map_id}")
 
     except Exception:
