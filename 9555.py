@@ -31,15 +31,22 @@ def load_text_asset(file_path):
     for line in lines:
         line = line.strip()
         if not line: continue
-        parts = line.split(',')
-        if parts[0].startswith('*'):
-            header = [p.strip() for p in parts]
-            header[0] = header[0].replace('*', '')
+        parts = [p.strip() for p in line.split(',')]
+        
+        if header is None:
+            if parts[0].startswith('*'):
+                header = parts[1:] # Lock header from indices 1..N
             continue
-        if header:
-            entry = {}
-            for i in range(min(len(header), len(parts))):
-                entry[header[i]] = parts[i].strip()
+        
+        # Every line after header is data. Shift indices by 1 to match header.
+        row_data = parts[1:]
+        entry = {}
+        for i in range(min(len(header), len(row_data))):
+            if header[i]:
+                entry[header[i]] = row_data[i]
+        
+        # Validate that it's a real data record (mandatory first column check)
+        if entry.get(header[0]):
             data.append(entry)
     return data
 
