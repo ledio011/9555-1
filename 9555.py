@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import socket
 import struct
@@ -435,7 +435,9 @@ def handle_message(conn, msg, session, body):
         ])
 
     if msg == 103:
-        return character_list_response()
+        response = character_list_response()
+        log(f"[CHARACTER LIST RESPONSE] body_len={len(response)} body={response.hex()}")
+        return response
 
     if msg == 104:
         raw_character = body.get(0, b"")
@@ -636,3 +638,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
