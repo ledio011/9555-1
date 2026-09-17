@@ -413,12 +413,13 @@ def character_list_response():
             (0, char.get("level", 1)),
             (1, calculate_power(char))
         ])
-        result.append(encode_sproto([
+        entry = encode_sproto([
             (0, char["id"]),
             (1, general),
             (2, attribute),
             (4, int(time.time()))
-        ]))
+        ])
+        result.append(struct.pack("<I", len(entry)) + entry)
 
     return encode_sproto([(0, result)])
 
@@ -638,5 +639,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
 
