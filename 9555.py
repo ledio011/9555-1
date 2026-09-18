@@ -587,6 +587,7 @@ def build_attribute_overview(c):
 
 
 def build_attribute(c):
+    # Logic of attribute.cs: Tags 0-7
     return encode_sproto([
         (0, c.get("hp_max", 3000)),
         (1, c.get("exp", 0)),
@@ -600,22 +601,32 @@ def build_attribute(c):
 
 
 def build_attribute_other(c):
+    # Logic of attribute_other.cs: Tags 0-18
     return encode_sproto([
         (0, c.get("hp", 3000)),
         (1, c.get("exp", 0)),
         (2, c.get("level", 1)),
-        (3, power(c)),  # combValue
-        (7, -1)  # guildId
+        (3, power(c)),    # combValue
+        (4, 1),           # title_level
+        (5, 0),           # title_exp
+        (6, -1),          # guildId
+        (7, 0),           # guildJob
+        (8, ""),          # guildName
+        (14, 0),          # vip
+        (15, 0),          # camp
+        (16, 0),          # pkMode
+        (17, 0)           # dance_state
     ])
 
 
 def build_visual(c):
+    # Logic of characterVisual.cs: Tags 0-3 for appearance strings
     # IDs must be strings matching Bundle keys
     return encode_sproto([
-        (0, "10001"),  # weapon
-        (1, "20001"),  # head
-        (2, "30001"),  # body
-        (3, "40001")   # leg
+        (1, "10001"),  # ModeId
+        (2, "20001"),  # head
+        (3, "30001"),  # body
+        (4, "40001")   # leg
     ])
 
 
@@ -631,6 +642,7 @@ def build_property(c):
 
 
 def character_overview(c):
+    # Logic of character_overview.cs: Tags 0-5
     return encode_sproto([
         (0, c.get("id", 0)),
         (1, build_general(c)),
@@ -642,14 +654,15 @@ def character_overview(c):
 
 
 def full_character(c):
+    # Logic of character.cs authoritative tags: 0, 1, 2, 5, 6, 7, 8, 12, 13, 15, 16
     return encode_sproto([
         (0, c.get("id", 0)),
         (1, build_general(c)),
-        (2, build_attribute(c)),
-        (3, build_attribute_other(c)),
-        (4, encode_sproto([])),  # attribute_all
-        (5, build_property(c)),
-        (6, build_visual(c))
+        (2, build_attribute_other(c)),  # Tag 2
+        (5, build_property(c)),         # Tag 5
+        (6, build_visual(c)),           # Tag 6
+        (7, movement_data(c.get("pos", [0, 0, 0, 0]))),  # Tag 7
+        (15, 2)                         # download is Tag 15
     ])
 
 
@@ -1013,14 +1026,18 @@ def create_npc(map_id, definition_id):
 
 
 def npc_create_packet(npc):
-    return encode_sproto([
+    # Logic of npc_attribute.cs
+    attr = encode_sproto([
         (0, npc["id"]),
         (1, npc["definition"]),
-        (2, npc["level"]),
-        (3, npc["hp"]),
-        (4, npc["hp_max"]),
-        (5, movement_data(npc["pos"]))
+        (2, npc["hp"]),
+        (3, npc["hp_max"]),
+        (4, intval(npc.get("atk", 100))),
+        (5, intval(npc.get("def", 50))),
+        (6, movement_data(npc["pos"]))
     ])
+    # Logic of npc_create.cs: Tag 0 is npc_attribute
+    return encode_sproto([(0, attr)])
 
 
 def spawn_map_npcs(conn, map_id):
@@ -1040,9 +1057,20 @@ def spawn_map_npcs(conn, map_id):
         )
 
 
-# ============================================================
-# MAP / SCENE
-# ============================================================
+def initial_sync(conn, c):
+    # 614 sync_common_data
+    send_push(conn, 614, function_sync())
+    # 611 sync_item_pack
+    send_push(conn, 611, sync_inventory(c))
+    # 592 sync_backpack_item
+    send_push(conn, 592, encode_sproto([(0, {})]))
+    # 616 sync_fashion_backpack_item
+    send_push(conn, 616, encode_sproto([(0, {})]))
+    # 540 sync_skill_info
+    send_push(conn, 540, build_skill_sync(c))
+    # 519 sync_mission
+    send_push(conn, 519, mission_sync(c))
+
 
 def enter_map(conn, c):
     map_id = str(c.get("map_id", DEFAULT_MAP))
@@ -1056,7 +1084,7 @@ def enter_map(conn, c):
 
     save_characters()
 
-    # 503 enter_map
+    # 503 enter_map: Client will start loading scene
     send_push(
         conn,
         503,
@@ -1066,26 +1094,6 @@ def enter_map(conn, c):
             (2, 1)
         ])
     )
-
-    # 504 main_player_create
-    send_push(
-        conn,
-        504,
-        encode_sproto([
-            (0, full_character(c)),
-            (1, movement_data(c["pos"]))
-        ])
-    )
-
-    # 505 aoi_add for player
-    send_push(
-        conn,
-        505,
-        character_aoi(c)
-    )
-
-    # NPCs
-    spawn_map_npcs(conn, map_id)
 
 
 def transition_map(conn, c, map_id):
@@ -1143,57 +1151,6 @@ def function_sync():
         (13, 1),
         (14, int(time.time()))
     ])
-
-
-def initial_sync(conn, c):
-    # 614
-    send_push(
-        conn,
-        614,
-        function_sync()
-    )
-
-    # 611
-    send_push(
-        conn,
-        611,
-        sync_inventory(c)
-    )
-
-    # 592
-    send_push(
-        conn,
-        592,
-        encode_sproto([(0, {})])
-    )
-
-    # 616
-    send_push(
-        conn,
-        616,
-        encode_sproto([(0, {})])
-    )
-
-    # 510
-    send_push(
-        conn,
-        510,
-        sync_attributes(c)
-    )
-
-    # 540
-    send_push(
-        conn,
-        540,
-        build_skill_sync(c)
-    )
-
-    # 519
-    send_push(
-        conn,
-        519,
-        mission_sync(c)
-    )
 
 
 # ============================================================
@@ -1450,11 +1407,6 @@ def client_handler(conn, addr):
                     save_characters()
 
                     with ONLINE_LOCK:
-                        # 1. Tell me who else is here (Players & NPCs)
-                        for pid, pdata in ONLINE_PLAYERS.items():
-                            if str(pdata["map"]) == str(selected["map_id"]):
-                                send_push(conn, 505, character_aoi(pdata["char"]))
-
                         ONLINE_PLAYERS[
                             str(selected["id"])
                         ] = {
@@ -1465,9 +1417,6 @@ def client_handler(conn, addr):
                                 DEFAULT_MAP
                             )
                         }
-
-                    # 2. Tell others I arrived
-                    broadcast_map(selected["map_id"], 505, character_aoi(selected), exclude_conn=conn)
 
                 # Response Tag 0 is errno. 0 = success.
                 send_reply(
@@ -1484,7 +1433,7 @@ def client_handler(conn, addr):
                         selected
                     )
 
-                    # Client map loading flow.
+                    # Initial push to start enter game flow
                     send_push(
                         conn,
                         654,
@@ -1504,46 +1453,38 @@ def client_handler(conn, addr):
 
             elif msg == 100:
                 if selected:
-                    print(
-                        f"[MAP READY] "
-                        f"{selected.get('map_id')}"
-                    )
+                    print(f"[MAP READY] {selected.get('map_id')}")
 
-                    # Re-send authoritative player after
-                    # scene is ready.
+                    # 1. Authoritative player creation for local client (Tag 504 main_player_create)
+                    # Logic of main_player_create.cs: Tag 0 is character, Tag 1 is movement
                     send_push(
                         conn,
                         504,
                         encode_sproto([
-                            (
-                                0,
-                                full_character(
-                                    selected
-                                )
-                            ),
-                            (
-                                1,
-                                movement_data(
-                                    selected["pos"]
-                                )
-                            )
+                            (0, full_character(selected)),
+                            (1, movement_data(selected["pos"]))
                         ])
                     )
 
-                    send_push(
-                        conn,
-                        505,
-                        character_aoi(
-                            selected
-                        )
-                    )
+                    # 2. Tell me who else is here (Other Players)
+                    # aoi_add.request: Tag 0 is character_aoi
+                    with ONLINE_LOCK:
+                        for pid, pdata in ONLINE_PLAYERS.items():
+                            if str(pdata["map"]) == str(selected["map_id"]) and str(pid) != str(selected["id"]):
+                                send_push(conn, 505, encode_sproto([(0, character_aoi(pdata["char"]))]))
 
+                    # 3. Tell others I arrived (Tag 505 aoi_add)
+                    # aoi_add.request: Tag 0 is character_aoi
+                    broadcast_map(selected["map_id"], 505, encode_sproto([(0, character_aoi(selected))]), exclude_conn=conn)
+
+                    # 4. Spawn NPCs
+                    spawn_map_npcs(conn, selected["map_id"])
+
+                    # Final signal to enter gameplay
                     send_push(
                         conn,
                         654,
-                        encode_sproto([
-                            (0, 1)
-                        ])
+                        encode_sproto([(0, 1)])
                     )
 
             # ------------------------------------------------
@@ -1603,15 +1544,15 @@ def client_handler(conn, addr):
                 movement_raw = body.get(0)
 
                 if selected and movement_raw:
-                    movement = decode_sproto(
+                    movement_obj = decode_sproto(
                         movement_raw
                     )
 
                     pos = [
-                        intval(movement.get(0)),
-                        intval(movement.get(1)),
-                        intval(movement.get(2)),
-                        intval(movement.get(3))
+                        intval(movement_obj.get(0)),
+                        intval(movement_obj.get(1)),
+                        intval(movement_obj.get(2)),
+                        intval(movement_obj.get(3))
                     ]
 
                     selected["pos"] = pos
@@ -1631,10 +1572,13 @@ def client_handler(conn, addr):
                     )
 
                     # AOI movement (Tag 507 aoi_update_move)
-                    broadcast_map(selected["map_id"], 507, encode_sproto([
+                    # aoi_update_move.request: Tag 0 is character (type character_aoi_move)
+                    # character_aoi_move: Tag 0 is id, Tag 1 is movement
+                    char_move = encode_sproto([
                         (0, selected["id"]),
                         (1, movement_raw)
-                    ]), exclude_conn=conn)
+                    ])
+                    broadcast_map(selected["map_id"], 507, encode_sproto([(0, char_move)]), exclude_conn=conn)
 
                 else:
                     send_reply(
