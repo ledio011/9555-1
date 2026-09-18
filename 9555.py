@@ -1276,9 +1276,11 @@ def client_handler(conn, addr):
                 if picked_char and npcid != "None":
                     # Original Kill Reward Logic
                     h_m, h_m, a_m, d_m, lvl_m = get_npc_attr(npcid)
-                    # Increased base reward for generic kills
-                    exp_kill = lvl_m * 20
-                    cash_kill = lvl_m * 100
+                    # NpcData uses 9999 as a sentinel for special NPCs, not a
+                    # gameplay level. Never let that sentinel multiply rewards.
+                    reward_level = lvl_m if 1 <= lvl_m <= 200 else 1
+                    exp_kill = reward_level * 20
+                    cash_kill = reward_level * 100
                     picked_char['exp'] = picked_char.get('exp', 0) + exp_kill
                     picked_char['cash'] = picked_char.get('cash', 0) + cash_kill
 
