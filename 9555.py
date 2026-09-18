@@ -337,6 +337,17 @@ def send_reply(conn, session, body=None):
         pass
 
 
+def broadcast_map(map_id, tag, body, exclude_conn=None):
+    map_id = str(map_id)
+    with ONLINE_LOCK:
+        for pid, data in ONLINE_PLAYERS.items():
+            if str(data["map"]) == map_id and data["conn"] != exclude_conn:
+                try:
+                    data["conn"].sendall(make_packet(tag, None, body))
+                except Exception:
+                    pass
+
+
 # ============================================================
 # DATABASE
 # ============================================================
@@ -568,6 +579,26 @@ def build_general(c):
     ])
 
 
+def build_attribute_overview(c):
+    return encode_sproto([
+        (0, c.get("level", 1)),
+        (1, power(c))  # combValue
+    ])
+
+
+def build_attribute(c):
+    return encode_sproto([
+        (0, c.get("hp_max", 3000)),
+        (1, c.get("exp", 0)),
+        (2, c.get("atk", 150)),
+        (3, c.get("def", 50)),
+        (4, c.get("hit", 100)),
+        (5, c.get("eva", 50)),
+        (6, c.get("cri", 20)),
+        (7, c.get("res", 10))
+    ])
+
+
 def build_attribute_other(c):
     return encode_sproto([
         (0, c.get("hp", 3000)),
@@ -603,10 +634,10 @@ def character_overview(c):
     return encode_sproto([
         (0, c.get("id", 0)),
         (1, build_general(c)),
-        (2, build_attribute_other(c)),
+        (2, build_attribute_overview(c)),
         (3, build_visual(c)),
         (4, c.get("create_time", 0)),
-        (5, c.get("last_played", 0))
+        (5, 0)  # forbidden
     ])
 
 
@@ -614,20 +645,21 @@ def full_character(c):
     return encode_sproto([
         (0, c.get("id", 0)),
         (1, build_general(c)),
-        (2, encode_sproto([(0, c.get("hp_max", 3000))])),  # attribute (Tag 2)
+        (2, build_attribute(c)),
         (3, build_attribute_other(c)),
-        (4, build_property(c)),
-        (5, build_visual(c))
+        (4, encode_sproto([])),  # attribute_all
+        (5, build_property(c)),
+        (6, build_visual(c))
     ])
 
 
 def character_aoi(c):
     return encode_sproto([
         (0, c.get("id", 0)),
-        (1, c.get("name", "Hero")),
-        (2, c.get("prof", 0)),
-        (3, c.get("level", 1)),
-        (4, movement_data(c.get("pos", map_spawn(DEFAULT_MAP))))
+        (1, build_visual(c)),
+        (2, build_general(c)),
+        (3, build_attribute_other(c)),
+        (5, movement_data(c.get("pos", [0, 0, 0, 0])))
     ])
 
 
@@ -1418,6 +1450,11 @@ def client_handler(conn, addr):
                     save_characters()
 
                     with ONLINE_LOCK:
+                        # 1. Tell me who else is here (Players & NPCs)
+                        for pid, pdata in ONLINE_PLAYERS.items():
+                            if str(pdata["map"]) == str(selected["map_id"]):
+                                send_push(conn, 505, character_aoi(pdata["char"]))
+
                         ONLINE_PLAYERS[
                             str(selected["id"])
                         ] = {
@@ -1429,14 +1466,15 @@ def client_handler(conn, addr):
                             )
                         }
 
+                    # 2. Tell others I arrived
+                    broadcast_map(selected["map_id"], 505, character_aoi(selected), exclude_conn=conn)
+
+                # Response Tag 0 is errno. 0 = success.
                 send_reply(
                     conn,
                     session,
                     encode_sproto([
-                        (
-                            0,
-                            1 if selected else 0
-                        )
+                        (0, 0 if selected else 1)
                     ])
                 )
 
@@ -1592,15 +1630,11 @@ def client_handler(conn, addr):
                         ])
                     )
 
-                    # AOI movement.
-                    send_push(
-                        conn,
-                        506,
-                        encode_sproto([
-                            (0, selected["id"]),
-                            (1, movement_raw)
-                        ])
-                    )
+                    # AOI movement (Tag 507 aoi_update_move)
+                    broadcast_map(selected["map_id"], 507, encode_sproto([
+                        (0, selected["id"]),
+                        (1, movement_raw)
+                    ]), exclude_conn=conn)
 
                 else:
                     send_reply(
