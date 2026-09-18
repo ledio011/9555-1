@@ -1,7 +1,7 @@
 # ==========================================================
 # AUTO THEFT GANGSTERS - UNIFIED GAME SERVER 9555
+# Restoration of 71.1 KB Baseline + Verified APK Protocol
 # Protocols: TCP Big-Endian Length + Sproto 0-packing
-# Header: Package (Tag 0: type, Tag 1: session)
 # ==========================================================
 import socket, struct, threading, random, json, os, time, traceback
 
@@ -11,7 +11,7 @@ CHAR_DB = os.environ.get("CHARACTER_FILE", "characters_final.json")
 ASSET_ROOT = os.environ.get("ASSET_ROOT", "assets")
 
 # Verified Protocol Constants
-PROTOCOL_COORD_SCALE = 100 # Source Audit: 1.0m = 100 units
+PROTOCOL_COORD_SCALE = 100 # 1.0m = 100 units
 
 # Global Persistence & World State
 db_lock = threading.RLock()
@@ -20,7 +20,7 @@ npc_hps = {}
 all_accounts_chars = {}
 
 # ==========================================================
-# SPROTO PACKER & DECODER (Verified APK Implementation)
+# SPROTO PACKER & DECODER (Verified Implementation)
 # ==========================================================
 
 class SprotoPacker:
@@ -33,9 +33,7 @@ class SprotoPacker:
             mask = 0
             for j in range(8):
                 if chunk[j] != 0: mask |= (1 << j)
-
             if mask == 0xFF:
-                # Ported from SprotoPack.cs: FF run-length handling
                 run = []
                 while i < n:
                     c = data[i:i+8]
@@ -120,19 +118,15 @@ def encode_sproto(fields):
             header.append(0)
             if isinstance(val, str): v = val.encode('utf-8')
             elif isinstance(val, list):
-                if val and isinstance(val[0], int): v = b"\x04" + b"".join([struct.pack("<i", x) for x in val])
-                else:
-                    items = []
-                    for it in val:
+                v_body = bytearray()
+                for it in val:
+                    if isinstance(it, int): v_body.extend(struct.pack("<i", it))
+                    else:
                         if not isinstance(it, (bytes, bytearray)): it = str(it).encode('utf-8')
-                        items.append(struct.pack("<I", len(it)) + it)
-                    v = b"".join(items)
+                        v_body.extend(struct.pack("<I", len(it)) + it)
+                v = (b"\x04" if val and isinstance(val[0], int) else b"") + v_body
             elif isinstance(val, dict):
-                # Sproto Maps are encoded as lists of structs
-                items = []
-                for it in val.values():
-                    if isinstance(it, (bytes, bytearray)): items.append(struct.pack("<I", len(it)) + it)
-                    else: items.append(struct.pack("<I", 1) + (b'\x01' if it else b'\x00'))
+                items = [struct.pack("<I", len(it)) + it for it in val.values() if isinstance(it, (bytes, bytearray))]
                 v = b"".join(items)
             else: v = val
             body += struct.pack("<I", len(v)) + v
@@ -151,46 +145,32 @@ def get_val_int(fields, tag, default=0):
     return default
 
 # ==========================================================
-# DATA LOADING & PERSISTENCE
+# DATA LOADING & NORMALIZATION
 # ==========================================================
 
-mission_logic_db, kill_target_db, car_target_db, mission_require_db, skill_db, equip_db = {}, {}, {}, {}, {}, {}
+def world_to_protocol(val): return int(val * PROTOCOL_COORD_SCALE)
+def protocol_to_world(val): return float(val) / PROTOCOL_COORD_SCALE
 
-def find_data_file(name):
-    paths = [os.path.join(ASSET_ROOT, "Bundle", "TextAsset", name), os.path.join(ASSET_ROOT, "Bundle", "Data", name)]
-    for p in paths:
-        if os.path.exists(p): return p
-    return None
-
-def load_game_data():
-    mf = find_data_file("MissionData")
-    if mf:
-        with open(mf, "r", encoding="utf-8") as f:
-            for line in f:
-                if not line.startswith("*"): continue
-                parts = line.split(",")
-                if len(parts) > 14:
-                    mission_logic_db[parts[1].strip()] = {"logicType": int(parts[7]) if parts[7].isdigit() else 0, "logicId": parts[9].strip(), "target": parts[11].strip(), "nextId": parts[14].strip()}
-    ef = find_data_file("EquipData")
-    if ef:
-        with open(ef, "r", encoding="utf-8") as f:
-            for line in f:
-                if not line.startswith("*"): continue
-                p = line.split(",")
-                if len(p) > 15:
-                    eid = p[1].strip()
-                    try: equip_db[eid] = {"id": eid, "pos": int(p[7]), "stats": [(int(p[8]), int(p[9])), (int(p[10]) if p[10].isdigit() else 0, int(p[11]) if p[11].isdigit() else 0)]}
-                    except: pass
-    print(f"[DATA] Loaded {len(mission_logic_db)} missions, {len(equip_db)} equipments.")
-
-load_game_data()
+def normalize_character(c):
+    c.setdefault('mapId', "11")
+    c.setdefault('pos', [298.6, 1.0, -170.05, 0])
+    c.setdefault('cash', 1000); c.setdefault('gold', 0); c.setdefault('diamond', 0)
+    c.setdefault('exp', 0); c.setdefault('level', 1)
+    c.setdefault('skills', {}); c.setdefault('equip', {})
+    c.setdefault('createtime', int(time.time()))
+    return c
 
 def load_db():
     global all_accounts_chars
     with db_lock:
         if os.path.exists(CHAR_DB):
             try:
-                with open(CHAR_DB, "r") as f: all_accounts_chars = json.load(f)
+                with open(CHAR_DB, "r") as f: 
+                    data = json.load(f)
+                    for area in data.values():
+                        for acc_id in area:
+                            area[acc_id] = [normalize_character(c) for c in area[acc_id]]
+                    all_accounts_chars = data
             except: all_accounts_chars = {}
         else: all_accounts_chars = {}
 
@@ -198,118 +178,80 @@ def save_chars(data):
     with db_lock:
         try:
             with open(CHAR_DB, "w") as f: json.dump(data, f, indent=4)
-        except: pass
+        except: traceback.print_exc()
 
 load_db()
 
 # ==========================================================
-# RECONSTRUCTED SCHEMAS (Verified Tags)
+# SOURCE-VERIFIED SCHEMAS (character.cs)
 # ==========================================================
-
-def world_to_protocol(val): return int(val * PROTOCOL_COORD_SCALE)
-def protocol_to_world(val): return float(val) / PROTOCOL_COORD_SCALE
 
 def get_visual(name, prof):
     m = {0:{"m":"100","h":"XD_A_T","b":"XD_A_S","l":"XD_A_X","w":"XD_A_WQ"}, 
          1:{"m":"104","h":"QJ_A_T","b":"QJ_A_S","l":"QJ_A_X","w":"QJ_A_WQ"}, 
          2:{"m":"105","h":"NQS_A_T","b":"NQS_A_S","l":"NQS_A_X","w":"NQS_A_WQ"}}
     v = m.get(prof, m[1])
-    # characterVisual: name(0), ModeId(1), HeadId(2), BodyId(3), LegId(4), WeaponId(5)
-    return encode_sproto([(0, name), (1, v["m"]), (2, v["h"]), (3, v["b"]), (4, v["l"]), (5, v["w"]), (10, 0)])
+    return encode_sproto([(0, name), (1, v["m"]), (2, v["h"]), (3, v["b"]), (4, v["l"]), (5, v["w"])])
 
-def get_general(c):
-    # general: name(0), profession(1), lineIndex(2), mapInfoId(3), tutorial(4)
-    return encode_sproto([(0, c.get('name', 'Hero')), (1, c.get('prof', 0)), (2, 1), (3, str(c.get('mapId', "11"))), (4, 1)])
-
-def get_movement(pos):
-    # pos = [x, y, z, o] - world units
+def get_movement_struct(pos):
     p = encode_sproto([(0, world_to_protocol(pos[0])), (1, world_to_protocol(pos[1])), (2, world_to_protocol(pos[2])), (3, world_to_protocol(pos[3]))])
-    # movement: pos(0), pos2(1)
     return encode_sproto([(0, p), (1, p)])
 
-def get_property(c):
-    # property: verified tags 13-18
-    return encode_sproto([
-        (13, c.get('cash', 1000)), (14, c.get('gold', 0)), (15, c.get('diamond', 0)),
-        (16, c.get('guild_contribute', 0)), (17, c.get('battle_coin', 0)), (18, c.get('activity_coin', 0))
-    ])
-
 def get_full_char(c):
-    prof, lv = c.get('prof', 0), c.get('level', 1)
+    prof, lv = c['prof'], c['level']
     hp, atk, def_val, hit, dge = 3000, 300, 35, 480, 60
     
-    # attribute_other: hp(0), exp(1), level(2), combValue(3)
-    cv = calculate_power(hp, atk, def_val, hit, dge)
-    attr_oth = encode_sproto([(0, hp), (1, c.get('exp', 0)), (2, lv), (3, cv), (15, 1)])
+    gen = encode_sproto([(0, c['name']), (1, prof), (2, 1), (3, c['mapId']), (4, 1)])
+    attr_oth = encode_sproto([(0, hp), (1, c['exp']), (2, lv), (3, 5000), (14, 0), (15, 1)])
+    prop = encode_sproto([(13, c['cash']), (14, c['gold']), (15, c['diamond']), (16, 0), (17, 0), (18, 0)])
+    mv = get_movement_struct(c['pos'])
     
-    prop = get_property(c)
-    mv = get_movement(c.get('pos', [298.60, 1.00, -170.05, 0]))
-    
-    # runtime_agent: attribute(6), attribute_all(7)
-    attr_data = encode_sproto([(0, hp), (2, atk), (3, def_val), (4, hit), (5, dge)])
+    attr_data = encode_sproto([(0, hp), (2, atk), (3, def_val), (4, hit), (5, dge), (13, 500)])
     run = encode_sproto([(6, attr_data), (7, attr_data)])
     
-    # Skills map (implicit keys)
-    skills_map = {}
-    for sid, sd in c.get('skills', {}).items():
-        skills_map[sid] = encode_sproto([(0, sd['id']), (1, sd['lv']), (2, sd['pos']), (3, sd.get('unlock',1)), (4, sd.get('pos2',0)), (5, sd.get('dis',False))])
-    
-    # Equip map (implicit keys)
-    equip_map = {}
-    for slot, item in c.get('equip', {}).items():
-        equip_map[slot] = encode_sproto([(0, int(item['uid'])), (1, str(item['id'])), (2, True), (3, item.get('lv', 1)), (5, 1), (6, item.get('qual', 1)), (7, [0]*8)])
+    skills = [encode_sproto([(0, sid), (1, sd['lv']), (2, sd['pos']), (3, 1), (4, 0), (5, False)]) for sid, sd in c['skills'].items()]
+    equips = [encode_sproto([(0, int(item['uid'])), (1, str(item['id'])), (2, True), (3, item.get('lv', 1)), (5, 1), (6, item.get('qual', 1))]) for slot, item in c['equip'].items()]
 
-    # character: Tags verified from character.cs
-    return encode_sproto([(0, c['id']), (1, get_general(c)), (2, attr_oth), (5, prop), (6, get_visual(c['name'], prof)), (7, mv), (8, skills_map), (9, equip_map), (12, 0), (13, run), (15, 2)])
-
-def get_char_ov(c):
-    # character_overview: id(0), general(1), attribute_overview(2), visual(3), createtime(4), forbidden(5)
-    gen = get_general(c)
-    attr = encode_sproto([(0, c.get('level', 1)), (1, 5000)]) # attribute_overview: level(0), combValue(1)
-    return encode_sproto([(0, c['id']), (1, gen), (2, attr), (3, get_visual(c['name'], c.get('prof', 0))), (4, c.get('createtime', int(time.time()))), (5, 0)])
-
-def calculate_power(hp, atk, def_val, hit, dge):
-    return int((hp * 0.1) + (atk * 2.5) + (def_val * 5) + (hit * 1.5) + (dge * 1.5))
+    # character.cs authoritative mapping
+    return encode_sproto([(0, c['id']), (1, gen), (2, attr_oth), (5, prop), (6, get_visual(c['name'], prof)), (7, mv), (8, skills), (9, equips), (13, run), (15, 2)])
 
 # ==========================================================
 # SERVER CORE
 # ==========================================================
 
-def recv_exact(conn, n):
-    data = b""
-    while len(data) < n:
-        chunk = conn.recv(n - len(data))
-        if not chunk: return None
-        data += chunk
-    return data
-
 def client_handler(conn, addr):
     print(f"[CONNECT] {addr}"); acc_id, picked_char = None, None
     def send_rpc_push(tag, data):
-        ph = encode_sproto([(0, tag)])
-        pf = SprotoPacker.pack(ph + data)
+        pf = SprotoPacker.pack(encode_sproto([(0, tag)]) + data)
         try: conn.sendall(struct.pack(">H", len(pf)) + pf)
         except: pass
     try:
         while True:
-            h = recv_exact(conn, 2)
+            h = b""; 
+            while len(h) < 2: 
+                chunk = conn.recv(2 - len(h))
+                if not chunk: break
+                h += chunk
             if not h: break
             size = struct.unpack(">H", h)[0]
-            data = recv_exact(conn, size)
+            data = b""; 
+            while len(data) < size:
+                chunk = conn.recv(size - len(data))
+                if not chunk: break
+                data += chunk
             if not data: break
-            raw = SprotoPacker.unpack(data)
-            dec = SprotoDecoder(raw); pkg = dec.decode()
+            
+            raw = SprotoPacker.unpack(data); dec = SprotoDecoder(raw); pkg = dec.decode()
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
             body = SprotoDecoder(raw, dec.consumed).decode()
 
             if msg == 4: # Login
                 acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
-                print(f"[LOGIN] account={acc_id} session={session}")
-                pf = SprotoPacker.pack(encode_sproto([(1, session)]) + encode_sproto([(0, 2), (1, "1.012.017"), (2, "200"), (13, 1)]))
+                pf = SprotoPacker.pack(encode_sproto([(1, session)]) + encode_sproto([(0, 2), (1, "1.012.017"), (2, "200")]))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
             elif msg == 103: # CharList
                 with db_lock: chars = all_accounts_chars.get("0", {}).get(acc_id, [])
-                resp = encode_sproto([(0, [get_char_ov(c) for c in chars])])
+                resp = encode_sproto([(0, [encode_sproto([(0, c['id']), (1, encode_sproto([(0, c['name']), (1, c['prof']), (3, c['mapId']), (4, 1)])), (2, encode_sproto([(0, c['level']), (1, 5000)])), (3, get_visual(c['name'], c['prof'])), (4, c['createtime']), (5, 0)]) for c in chars])])
                 pf = SprotoPacker.pack(encode_sproto([(1, session)]) + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
             elif msg == 118: # RandomName
@@ -317,28 +259,26 @@ def client_handler(conn, addr):
                 pf = SprotoPacker.pack(encode_sproto([(1, session)]) + encode_sproto([(0, name)]))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
             elif msg == 104: # CharCreate
-                c_data = SprotoDecoder(body.get(0, b"")).decode() # nested general
-                name, prof = c_data.get(0, b"").decode('utf-8'), get_val_int(c_data, 1, 0)
+                c_req = SprotoDecoder(body.get(0, b"")).decode()
+                name, prof = c_req.get(0, b"").decode('utf-8'), get_val_int(c_req, 1, 0)
                 cid = int(time.time() * 1000) % 1000000000
-                nc = {'id': cid, 'name': name, 'prof': prof, 'level': 1, 'hp': 3000, 'exp': 0, 'createtime': int(time.time()), 'skills': {}, 'backpack': [], 'equip': {}, 'mapId': "11", 'pos': [298.60, 1.00, -170.05, 0]}
-                with db_lock: all_accounts_chars.setdefault("0", {}).setdefault(acc_id, []).append(nc); save_chars(all_accounts_chars)
-                pf = SprotoPacker.pack(encode_sproto([(1, session)]) + encode_sproto([(0, get_char_ov(nc)), (1, 0)]))
+                nc = normalize_character({'id': cid, 'name': name, 'prof': prof})
+                with db_lock: 
+                    all_accounts_chars.setdefault("0", {}).setdefault(acc_id, []).append(nc)
+                    save_chars(all_accounts_chars)
+                pf = SprotoPacker.pack(encode_sproto([(1, session)]) + encode_sproto([(0, encode_sproto([(0, cid), (1, encode_sproto([(0, name), (1, prof), (3, "11"), (4, 1)])), (2, encode_sproto([(0, 1), (1, 5000)])), (3, get_visual(name, prof)), (4, int(time.time())), (5, 0)])), (1, 0)]))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
             elif msg == 105: # CharPick
                 char_id = get_val_int(body, 0)
                 with db_lock: picked_char = next((c for c in all_accounts_chars.get("0", {}).get(acc_id, []) if c['id'] == char_id), None)
-                print(f"[PICK] char_id={char_id} found={picked_char is not None}")
-                # Success errno = 1 (Source Verified)
                 pf = SprotoPacker.pack(encode_sproto([(1, session)]) + encode_sproto([(0, 1 if picked_char else 0)]))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
                     online_clients[char_id] = (conn, picked_char['mapId'], 1, picked_char)
-                    # Sequence: 614 -> 504 -> 503
-                    send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, {}), (13, 1), (14, int(time.time()))]))
-                    send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement(picked_char['pos']))]))
-                    send_rpc_push(503, encode_sproto([(0, picked_char['mapId']), (1, 1), (2, 1)]))
+                    send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, []), (13, 1)]))
+                    send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement_struct(picked_char['pos']))]))
+                    send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)]))
             elif msg == 100: # MapReady
-                print(f"[MAP-READY] received from {addr}")
                 send_rpc_push(654, encode_sproto([(0, 1)]))
             elif msg == 218: # Heartbeat
                 pf = SprotoPacker.pack(encode_sproto([(1, session)]) + encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))]))
@@ -352,7 +292,7 @@ def client_handler(conn, addr):
         conn.close()
 
 srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); srv.bind(("0.0.0.0", PORT)); srv.listen(50)
-print(f"Unified Server 9555 Active on {PORT}"); 
+print(f"Unified Game Server 9555 Active on {PORT}"); 
 while True:
     try: cl, ad = srv.accept(); threading.Thread(target=client_handler, args=(cl, ad), daemon=True).start()
     except: pass
