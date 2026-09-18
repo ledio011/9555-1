@@ -6,7 +6,6 @@ server_session_counter = 8000
 GLOBAL_INST_COUNTER = 3000000
 NPC_INST_MAP = {} # inst_id -> nid (to resolve rewards)
 NPC_HP_MAP = {}   # inst_id -> current hp
-DEAD_NPC_SET = set() # duplicate death/reward prevention set
 
 # Load Mission Data
 missions_data = {}
@@ -563,7 +562,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         inst_id = GLOBAL_INST_COUNTER
         NPC_HP_MAP[inst_id] = hp_max
         NPC_INST_MAP[inst_id] = str(nid) # Resolver mapping
-
+        
         # Handle composite models like "PartA;PartB;PartC" to prevent client crashes
         final_nid = str(nid)
         if ";" in final_nid:
@@ -629,7 +628,7 @@ def sync_mission_data(picked_char):
             (3, [int(x) for x in parm])
         ])
         own_missions_list.append(m_bytes)
-
+    
     last_main = picked_char.get('last_main_mission_id', "-1")
     if last_main == "" or last_main == "None": last_main = "-1"
 
@@ -788,7 +787,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
         # Liberty City height fix: ensure player is above NavMesh
         y_coord = int(py * 100)
         if target_map_id == "101" or target_map_id == "105":
-            y_coord = 200
+            y_coord = 200 
         landing_pos = [int(px * 100), y_coord, int(pz * 100), 0]
         print(f"[TELEPORT] Transition {src_map} -> {target_map_id} using portal heuristic: {landing_pos}")
 
@@ -1192,38 +1191,38 @@ def client_handler(conn, addr):
                         # Do NOT send 508. Response will be empty.
                     else:
                         send_rpc_push(508, encode_sproto([(0, picked_char['id']), (1, tid), (2, sid), (3, alist)]))
-
+                        
                         # Authoritative Combat: Calculate and Sync Damage
                         target_nid = NPC_INST_MAP.get(tid)
                         if target_nid:
                             hp_t, hp_t_m, atk_t, def_t, lvl_t = get_npc_attr(target_nid)
                             p_stats = get_character_stats(picked_char)
-
+                            
                             # Player -> NPC Damage
                             val_dmg = p_stats['atk'] - def_t
                             dmg = val_dmg if val_dmg > 50 else 50
                             dmg = int(dmg * random.uniform(0.9, 1.1))
-
+                            
                             # Update Server State
                             if tid in NPC_HP_MAP:
                                 NPC_HP_MAP[tid] -= dmg
-
+                            
                             # Push damage info to client (Tag 111: accept_damge)
                             dmg_item = encode_sproto([(0, tid), (1, dmg), (2, sid), (4, False)])
                             send_rpc_push(111, encode_sproto([(0, [dmg_item])]))
-
+                            
                             # NPC -> Player Counter-Attack
                             val_ndmg = atk_t - p_stats['def']
                             npc_dmg = val_ndmg if val_ndmg > 10 else 10
                             npc_dmg = int(npc_dmg * random.uniform(0.8, 1.2))
-
+                            
                             new_hp = picked_char.get('hp', p_stats['hp_max']) - npc_dmg
                             picked_char['hp'] = new_hp if new_hp > 0 else 0
-
+                            
                             # Push player damage to client
                             p_dmg_item = encode_sproto([(0, picked_char['id']), (1, npc_dmg), (2, "1"), (4, False)])
                             send_rpc_push(111, encode_sproto([(0, [p_dmg_item])]))
-
+                            
                             # Sync player attributes (HP bar)
                             sync_char_attrs_rpc(conn, picked_char)
 
@@ -1245,58 +1244,28 @@ def client_handler(conn, addr):
                         elif target_id in NPC_HP_MAP:
                             NPC_HP_MAP[target_id] -= dmg
                             if NPC_HP_MAP[target_id] <= 0:
-                                # Spawn original reward drop (Cash 1001, Exp 2001) using proper nested Sproto type
+                                # Spawn original reward drop (Cash 1001, Exp 2001)
                                 global GLOBAL_INST_COUNTER
                                 GLOBAL_INST_COUNTER += 1
-                                # drop_item_info (Tag 527): serverId(0), pos_x(1), pos_z(2), type(3), item(4), ownServerId(7)
+                                # drop_item_info (527): id(0), itemid(1), count(2), x(3), z(4)
                                 pos = picked_char['pos']
-                                nested_item = encode_sproto([(0, "1001"), (1, 50), (2, 1)]) # itemId(0), itemCount(1), quality(2)
-                                drop_data = encode_sproto([
-                                    (0, GLOBAL_INST_COUNTER),
-                                    (1, int(pos[0] + 100)),
-                                    (2, int(pos[2] + 100)),
-                                    (3, 1), # Type 1
-                                    (4, nested_item),
-                                    (7, picked_char['id']) # ownServerId maps to tag 7
-                                ])
+                                drop_data = encode_sproto([(0, GLOBAL_INST_COUNTER), (1, "1001"), (2, 50), (3, pos[0]+100), (4, pos[2]+100)])
                                 send_rpc_push(527, drop_data)
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 307 or msg == 127: # local_npc_die (307) or single_copy_scene_npc_die (127)
-                raw_id = ""
-                die_type = 0
-                if msg == 307:
-                    raw_id = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
-                    die_type = get_val_int(body, 3)
-                else: # msg == 127
-                    # single_copy_scene_npc_die: characterId(0), npcdataid(1), pos_x(2), pos_z(3), type(4)
-                    raw_id = str(body.get(0)) # It passes characterId (instance ID) as field 0
-                    die_type = get_val_int(body, 4)
-
+            elif msg == 307: # local_npc_die
+                raw_id = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
+                die_type = get_val_int(body, 3)
+                
                 # Resolve Identity: Is it an Instance ID?
-                inst_id = None
                 npcid = None
                 try:
                     inst_id = int(raw_id)
                     npcid = NPC_INST_MAP.get(inst_id)
                 except: pass
-
+                
                 if not npcid: npcid = raw_id # Fallback to raw string ID
-
-                # CRITICAL DOUBLE-DEATH PROTECTION
-                is_duplicate = False
-                if inst_id is not None:
-                    if inst_id in DEAD_NPC_SET:
-                        is_duplicate = True
-                    else:
-                        DEAD_NPC_SET.add(inst_id)
-                else:
-                    # Fallback protection if no instance ID can be extracted
-                    if raw_id in DEAD_NPC_SET:
-                        is_duplicate = True
-                    else:
-                        DEAD_NPC_SET.add(raw_id)
 
                 # Cleanup HP tracking
                 try:
@@ -1304,10 +1273,10 @@ def client_handler(conn, addr):
                     for k in to_del: del NPC_HP_MAP[k]
                 except: pass
 
-                if picked_char and npcid != "None" and not is_duplicate:
-                    # Original Kill Reward Logic: No direct EXP/CASH or item drop found in metadata configs.
-                    # We preserve the legacy formula as fallback but mark the real behavior as UNKNOWN as requested.
+                if picked_char and npcid != "None":
+                    # Original Kill Reward Logic
                     h_m, h_m, a_m, d_m, lvl_m = get_npc_attr(npcid)
+                    # Increased base reward for generic kills
                     exp_kill = lvl_m * 20
                     cash_kill = lvl_m * 100
                     picked_char['exp'] = picked_char.get('exp', 0) + exp_kill
