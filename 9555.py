@@ -6,7 +6,6 @@ server_session_counter = 8000
 GLOBAL_INST_COUNTER = 3000000
 NPC_INST_MAP = {} # inst_id -> nid (to resolve rewards)
 NPC_HP_MAP = {}   # inst_id -> current hp
-NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 
 # Load Mission Data
 missions_data = {}
@@ -482,9 +481,7 @@ def get_full_char(c):
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
 
-    # The existing server flow starts with the download already complete.
-    # Do not introduce a download gate during server selection.
-    download_state = 2
+    # download tag(15) set to 2 to make IsFinishDownload = true (prevents mission blocking)
     return encode_sproto([
         (0, c['id']),
         (1, gen),
@@ -496,7 +493,7 @@ def get_full_char(c):
         (9, equip_map),
         (12, 0),
         (13, run),
-        (15, download_state)
+        (15, 2)
     ])
 
 def sync_char_attrs_rpc(conn, picked_char):
@@ -557,12 +554,6 @@ def get_npc_attr(nid):
 def spawn_map_npcs(conn, map_id, picked_char=None):
     """Spawns all NPCs, Monsters, and Traffic defined in data for the map."""
     map_str = str(map_id)
-    connection_id = id(conn)
-    spawned_maps = NPC_SPAWNED_MAPS.setdefault(connection_id, set())
-    if map_str in spawned_maps:
-        print(f"[NPC SPAWN] already sent map={map_str} to this connection")
-        return
-    spawned_maps.add(map_str)
 
     def send_npc_create(nid, name, x, z, o):
         global GLOBAL_INST_COUNTER
@@ -571,7 +562,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         inst_id = GLOBAL_INST_COUNTER
         NPC_HP_MAP[inst_id] = hp_max
         NPC_INST_MAP[inst_id] = str(nid) # Resolver mapping
-        
+
         # Handle composite models like "PartA;PartB;PartC" to prevent client crashes
         final_nid = str(nid)
         if ";" in final_nid:
@@ -600,7 +591,16 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
             send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
-    # 2. Spawn Mission targets defined by the APK data.
+    # Traffic Simulation (Random Cars) - Increased density
+    if map_str == "11" or map_str == "101" or map_str == "105":
+        car_models = ["Chevrolet", "SportsCar", "PoliceCar", "daKeChe", "jiaoChe_01", "jiaoChe_02", "chuZuChe", "xiaoKeChe"]
+        spawn_count = 35 if map_str == "11" else 20
+        for _ in range(spawn_count):
+            model = random.choice(car_models)
+            rx, rz = random.randint(-45000, 45000), random.randint(-45000, 45000)
+            send_npc_create(model, f"CityCar_{model}", rx, rz, random.randint(0, 36000))
+
+    # 3. Spawn Mission targets
     if picked_char:
         for mid, mdata in picked_char.get('active_missions', {}).items():
             if mdata['state'] == 1:
@@ -628,7 +628,7 @@ def sync_mission_data(picked_char):
             (3, [int(x) for x in parm])
         ])
         own_missions_list.append(m_bytes)
-    
+
     last_main = picked_char.get('last_main_mission_id', "-1")
     if last_main == "" or last_main == "None": last_main = "-1"
 
@@ -716,16 +716,11 @@ def accept_mission_logic(picked_char, mid):
         print(f"[accept_mission_logic] FAILED: {mid} not in missions_data")
         return False
     m = missions_data[mid]
-    pre_id = m.get('pre_id', "")
-    is_main_chain = (
-        m.get('class') == 1
-        and pre_id
-        and str(picked_char.get('last_main_mission_id', "")) == str(pre_id)
-    )
-    if picked_char.get('level', 1) < m.get('min_level', 0) and not is_main_chain:
+    if picked_char.get('level', 1) < m.get('min_level', 0):
         print(f"[accept_mission_logic] FAILED: level too low {picked_char.get('level')} < {m.get('min_level')}")
         return False
 
+    pre_id = m.get('pre_id', "")
     if pre_id:
         if m.get('class') == 1:
             if str(picked_char.get('last_main_mission_id', "")) != str(pre_id):
@@ -757,69 +752,6 @@ def accept_mission_logic(picked_char, mid):
     picked_char['active_missions'][mid] = {'state': 1, 'parm': parm, 'accept_time': int(time.time())}
     return True
 
-def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type=0, map_id=None):
-    """Apply one authoritative gameplay event to every active mission."""
-    updated = False
-    for mid, mdata in picked_char.get('active_missions', {}).items():
-        if mdata.get('state') != 1:
-            continue
-        cfg = missions_data.get(mid)
-        if not cfg:
-            continue
-
-        logic_type = cfg.get('logic_type')
-        target = str(cfg.get('target_id', ''))
-        target_value = str(target_id) if target_id is not None else ''
-        matched = False
-
-        if logic_type == 7 and event == 'level':
-            mdata['parm'][0] = max(mdata['parm'][0], int(picked_char.get('level', 1)))
-            matched = True
-        elif logic_type in [1, 4, 11, 17, 23] and event == 'kill':
-            matched = logic_type == 17 or target == target_value
-        elif logic_type == 19 and event == 'car':
-            # The client sends type 2 for a normal car robbery without an
-            # NPC/car id, so its event type is the authoritative discriminator.
-            matched = die_type == 2
-        elif logic_type == 24 and event == 'car':
-            # Target-car robbery (mission 1002) sends only type 6.  The
-            # request intentionally has no npcid, therefore comparing it to
-            # the configured MountId ("Chevrolet") can never succeed.
-            matched = die_type == 6
-        elif logic_type == 20 and event == 'impact':
-            matched = die_type == 3 and (not target or target == target_value)
-        elif logic_type in [0, 2, 6, 21] and event == 'interact':
-            matched = not target or target == target_value or str(cfg.get('logic_id', '')) == target_value
-        elif logic_type == 25 and event == 'capture':
-            matched = not target or target == target_value
-        elif logic_type == 114 and event == 'world_boss':
-            matched = True
-        elif logic_type == 7 and event == 'map':
-            matched = target == str(map_id)
-
-        if not matched:
-            continue
-
-        required = int(cfg.get('require_num') or 1)
-        if logic_type in [2, 6, 102, 103, 105, 106, 107, 108, 110, 113, 114, 117, 119, 120, 132]:
-            required = 1
-        if logic_type == 7:
-            progress = int(mdata['parm'][0])
-        else:
-            mdata['parm'][0] = min(required, int(mdata['parm'][0]) + 1)
-            progress = mdata['parm'][0]
-
-        send_rpc_push(524, encode_sproto([(0, mid), (1, 1), (2, progress)]))
-        if progress >= required:
-            mdata['state'] = 2
-            send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
-        updated = True
-
-    if updated:
-        save_chars(all_accounts_chars)
-        send_rpc_push(519, sync_mission_data(picked_char))
-    return updated
-
 def init_character_fields(c):
     fields = {
         'level': 1, 'exp': 0, 'cash': 1000,
@@ -829,8 +761,7 @@ def init_character_fields(c):
         'last_main_mission_id': "-1",
         'inventory': [],
         'pos': [29860, 100, -17005, 0],
-        'map_id': "11",
-        'download_complete': False
+        'map_id': "11"
     }
     for k, v in fields.items():
         if k not in c: c[k] = v
@@ -856,7 +787,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
         # Liberty City height fix: ensure player is above NavMesh
         y_coord = int(py * 100)
         if target_map_id == "101" or target_map_id == "105":
-            y_coord = 200 
+            y_coord = 200
         landing_pos = [int(px * 100), y_coord, int(pz * 100), 0]
         print(f"[TELEPORT] Transition {src_map} -> {target_map_id} using portal heuristic: {landing_pos}")
 
@@ -1076,13 +1007,6 @@ def client_handler(conn, addr):
 
             elif msg == 270: # download_finish
                 if picked_char:
-                    picked_char['download_complete'] = True
-                    picked_char['mount_id'] = "1001"
-                    add_to_inventory(picked_char, "9011", 10)
-                    add_to_inventory(picked_char, "9001", 20)
-                    add_to_inventory(picked_char, "5026", 5)
-                    save_chars(all_accounts_chars)
-                    send_rpc_push(611, sync_inventory_data(picked_char))
                     print("[MSG 270] Client finished download. Sending start_enter_game.")
                     send_rpc_push(654, encode_sproto([(0, 1)]))
                 if session is not None:
@@ -1131,10 +1055,6 @@ def client_handler(conn, addr):
             elif msg == 201: # enter_wild_boss
                 mid = body.get(0, b"").decode('utf-8')
                 if picked_char: start_map_transition(conn, picked_char, mid, send_rpc_push)
-                if picked_char:
-                    advance_missions(picked_char, send_rpc_push, 'world_boss')
-                    # The APK completes the activity mission from copy_scene_result.
-                    send_rpc_push(552, encode_sproto([(0, 1), (1, mid), (2, True)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -1271,38 +1191,38 @@ def client_handler(conn, addr):
                         # Do NOT send 508. Response will be empty.
                     else:
                         send_rpc_push(508, encode_sproto([(0, picked_char['id']), (1, tid), (2, sid), (3, alist)]))
-                        
+
                         # Authoritative Combat: Calculate and Sync Damage
                         target_nid = NPC_INST_MAP.get(tid)
                         if target_nid:
                             hp_t, hp_t_m, atk_t, def_t, lvl_t = get_npc_attr(target_nid)
                             p_stats = get_character_stats(picked_char)
-                            
+
                             # Player -> NPC Damage
                             val_dmg = p_stats['atk'] - def_t
                             dmg = val_dmg if val_dmg > 50 else 50
                             dmg = int(dmg * random.uniform(0.9, 1.1))
-                            
+
                             # Update Server State
                             if tid in NPC_HP_MAP:
                                 NPC_HP_MAP[tid] -= dmg
-                            
+
                             # Push damage info to client (Tag 111: accept_damge)
                             dmg_item = encode_sproto([(0, tid), (1, dmg), (2, sid), (4, False)])
                             send_rpc_push(111, encode_sproto([(0, [dmg_item])]))
-                            
+
                             # NPC -> Player Counter-Attack
                             val_ndmg = atk_t - p_stats['def']
                             npc_dmg = val_ndmg if val_ndmg > 10 else 10
                             npc_dmg = int(npc_dmg * random.uniform(0.8, 1.2))
-                            
+
                             new_hp = picked_char.get('hp', p_stats['hp_max']) - npc_dmg
                             picked_char['hp'] = new_hp if new_hp > 0 else 0
-                            
+
                             # Push player damage to client
                             p_dmg_item = encode_sproto([(0, picked_char['id']), (1, npc_dmg), (2, "1"), (4, False)])
                             send_rpc_push(111, encode_sproto([(0, [p_dmg_item])]))
-                            
+
                             # Sync player attributes (HP bar)
                             sync_char_attrs_rpc(conn, picked_char)
 
@@ -1337,14 +1257,15 @@ def client_handler(conn, addr):
             elif msg == 307: # local_npc_die
                 raw_id = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
                 die_type = get_val_int(body, 3)
-                
+                print(f"[LOCAL NPC DIE] npcid={raw_id!r} type={die_type}")
+
                 # Resolve Identity: Is it an Instance ID?
                 npcid = None
                 try:
                     inst_id = int(raw_id)
                     npcid = NPC_INST_MAP.get(inst_id)
                 except: pass
-                
+
                 if not npcid: npcid = raw_id # Fallback to raw string ID
 
                 # Cleanup HP tracking
@@ -1356,11 +1277,9 @@ def client_handler(conn, addr):
                 if picked_char and npcid != "None":
                     # Original Kill Reward Logic
                     h_m, h_m, a_m, d_m, lvl_m = get_npc_attr(npcid)
-                    # NpcData uses 9999 as a sentinel for special NPCs, not a
-                    # gameplay level. Never let that sentinel multiply rewards.
-                    reward_level = lvl_m if 1 <= lvl_m <= 200 else 1
-                    exp_kill = reward_level * 20
-                    cash_kill = reward_level * 100
+                    # Increased base reward for generic kills
+                    exp_kill = lvl_m * 20
+                    cash_kill = lvl_m * 100
                     picked_char['exp'] = picked_char.get('exp', 0) + exp_kill
                     picked_char['cash'] = picked_char.get('cash', 0) + cash_kill
 
@@ -1380,32 +1299,65 @@ def client_handler(conn, addr):
                             print(f"[LEVEL UP] CharID={picked_char['id']} NewLevel={picked_char['level']}")
                         else: break
 
-                    updated = advance_missions(
-                        picked_char, send_rpc_push, 'kill',
-                        target_id=npcid, die_type=die_type
-                    )
-                    # Car-robbery packets have no NPC ID; their type is 2
-                    # (normal robbery) or 6 (target-car robbery).
-                    updated = advance_missions(
-                        picked_char, send_rpc_push, 'car',
-                        target_id=npcid, die_type=die_type
-                    ) or updated
-                    if die_type == 3:
-                        updated = advance_missions(
-                            picked_char, send_rpc_push, 'impact',
-                            target_id=npcid, die_type=die_type
-                        ) or updated
-                    elif die_type == 4:
-                        updated = advance_missions(
-                            picked_char, send_rpc_push, 'interact',
-                            target_id=npcid, die_type=die_type
-                        ) or updated
-                    updated = advance_missions(
-                        picked_char, send_rpc_push, 'level'
-                    ) or updated
+                    updated = False
+                    for mid, mdata in picked_char.get('active_missions', {}).items():
+                        if mdata.get('state') != 1:
+                            continue
+                        m_cfg = missions_data.get(mid)
+                        if not m_cfg: continue
+
+                        ltype = m_cfg.get('logic_type')
+                        # 1: KILLMONSTER, 4: KILL_DROP, 6: INVESTIGATE, 11: COPY_KILL, 17: MASSACRE_NPC, 23: KILL_TARGET_NPC, 25: CAPTURE
+                        if ltype in [1, 4, 6, 11, 17, 23, 25]:
+                            if m_cfg.get('target_id') == npcid or ltype == 17:
+                                mdata['parm'][0] += 1
+                                print(f"[*] Mission {mid} progress: {mdata['parm'][0]}/{m_cfg.get('require_num')}")
+                                send_rpc_push(524, encode_sproto([(0, mid), (1, 1), (2, mdata['parm'][0])]))
+                                if mdata['parm'][0] >= m_cfg.get('require_num'):
+                                    mdata['state'] = 2 # COMPLETE
+                                    send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                                updated = True
+                        # 19: normal car robbery; 24: target-car robbery.
+                        # The APK sends no NPC ID for these actions.  It sends
+                        # only type 2 or 6, respectively, so that type is the
+                        # complete and correct discriminator.
+                        elif ltype == 19 and die_type == 2:
+                            mdata['parm'][0] += 1
+                            send_rpc_push(524, encode_sproto([(0, mid), (1, 1), (2, mdata['parm'][0])]))
+                            if mdata['parm'][0] >= m_cfg.get('require_num'):
+                                mdata['state'] = 2
+                                send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                            updated = True
+                        elif ltype == 24 and die_type == 6:
+                            mdata['parm'][0] += 1
+                            print(f"[MISSION CAR] mission={mid} progress={mdata['parm'][0]}/{m_cfg.get('require_num')}")
+                            send_rpc_push(524, encode_sproto([(0, mid), (1, 1), (2, mdata['parm'][0])]))
+                            if mdata['parm'][0] >= m_cfg.get('require_num'):
+                                mdata['state'] = 2
+                                send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                            updated = True
+                        # 20: IMPACT_NPC
+                        elif ltype == 20:
+                            if die_type == 3:
+                                mdata['parm'][0] += 1
+                                send_rpc_push(524, encode_sproto([(0, mid), (1, 1), (2, mdata['parm'][0])]))
+                                if mdata['parm'][0] >= m_cfg.get('require_num'):
+                                    mdata['state'] = 2
+                                    send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                                updated = True
+                        # 0: STORY, 2: SEND_MSG, 21: ARRIVE_TARGET
+                        elif ltype in [0, 2, 21]:
+                            if die_type == 4 and npcid == mid:
+                                mdata['state'] = 2
+                                send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                                updated = True
 
                     # CRITICAL: Sync attributes immediately after kill rewards
                     sync_char_attrs_rpc(conn, picked_char)
+                    if updated:
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(519, sync_mission_data(picked_char))
+
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -1421,11 +1373,9 @@ def client_handler(conn, addr):
                     for mid_act, mdata in picked_char['active_missions'].items():
                         m_cfg = missions_data.get(mid_act)
                         if m_cfg and m_cfg.get('logic_type') == 25:
-                            target = str(m_cfg.get('target_id', ''))
-                            if not target or target == did:
-                                mdata['state'] = 2
-                                send_rpc_push(523, encode_sproto([(0, mid_act), (1, 2)]))
-                                updated_missions = True
+                            mdata['state'] = 2
+                            send_rpc_push(523, encode_sproto([(0, mid_act), (1, 2)]))
+                            updated_missions = True
                     if updated_missions:
                         save_chars(all_accounts_chars)
                         send_rpc_push(519, sync_mission_data(picked_char))
@@ -1439,10 +1389,6 @@ def client_handler(conn, addr):
                     # Special logic for Mission 1003 Challenge Dialogue
                     # This triggers the client-side Yes/No box (Dialog string 102098)
                     send_rpc_push(529, encode_sproto([(0, "102098"), (1, True)]))
-                if picked_char:
-                    advance_missions(
-                        picked_char, send_rpc_push, 'interact', target_id=nid
-                    )
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
