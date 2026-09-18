@@ -11,7 +11,7 @@ CHAR_DB = os.environ.get("CHARACTER_FILE", "characters_final.json")
 ASSET_ROOT = os.environ.get("ASSET_ROOT", "assets")
 
 # Verified Protocol Constants
-PROTOCOL_COORD_SCALE = 100 # 1.0m = 100 units
+PROTOCOL_COORD_SCALE = 100 # Source Audit: 1.0m = 100 units
 
 # Global Persistence & World State
 db_lock = threading.RLock()
@@ -20,7 +20,7 @@ npc_hps = {}
 all_accounts_chars = {}
 
 # ==========================================================
-# SPROTO PACKER & DECODER (Verified Implementation)
+# SPROTO CORE (Verified APK Implementation)
 # ==========================================================
 
 class SprotoPacker:
@@ -148,9 +148,6 @@ def get_val_int(fields, tag, default=0):
 # DATA LOADING & NORMALIZATION
 # ==========================================================
 
-def world_to_protocol(val): return int(val * PROTOCOL_COORD_SCALE)
-def protocol_to_world(val): return float(val) / PROTOCOL_COORD_SCALE
-
 def normalize_character(c):
     c.setdefault('mapId', "11")
     c.setdefault('pos', [298.6, 1.0, -170.05, 0])
@@ -178,13 +175,18 @@ def save_chars(data):
     with db_lock:
         try:
             with open(CHAR_DB, "w") as f: json.dump(data, f, indent=4)
-        except: traceback.print_exc()
+        except: 
+            print("[ERROR] Database save failed")
+            traceback.print_exc()
 
 load_db()
 
 # ==========================================================
-# SOURCE-VERIFIED SCHEMAS (character.cs)
+# SOURCE-VERIFIED SCHEMAS (character.cs Mapping)
 # ==========================================================
+
+def world_to_protocol(val): return int(val * PROTOCOL_COORD_SCALE)
+def protocol_to_world(val): return float(val) / PROTOCOL_COORD_SCALE
 
 def get_visual(name, prof):
     m = {0:{"m":"100","h":"XD_A_T","b":"XD_A_S","l":"XD_A_X","w":"XD_A_WQ"}, 
@@ -212,87 +214,159 @@ def get_full_char(c):
     skills = [encode_sproto([(0, sid), (1, sd['lv']), (2, sd['pos']), (3, 1), (4, 0), (5, False)]) for sid, sd in c['skills'].items()]
     equips = [encode_sproto([(0, int(item['uid'])), (1, str(item['id'])), (2, True), (3, item.get('lv', 1)), (5, 1), (6, item.get('qual', 1))]) for slot, item in c['equip'].items()]
 
-    # character.cs authoritative mapping
     return encode_sproto([(0, c['id']), (1, gen), (2, attr_oth), (5, prop), (6, get_visual(c['name'], prof)), (7, mv), (8, skills), (9, equips), (13, run), (15, 2)])
+
+def get_char_ov(c):
+    gen = encode_sproto([(0, c['name']), (1, c['prof']), (3, c['mapId']), (4, 1)])
+    attr = encode_sproto([(0, c['level']), (1, 5000)])
+    return encode_sproto([(0, c['id']), (1, gen), (2, attr), (3, get_visual(c['name'], c['prof'])), (4, c['createtime']), (5, 0)])
 
 # ==========================================================
 # SERVER CORE
 # ==========================================================
 
+def recv_exact(conn, n):
+    data = b""
+    while len(data) < n:
+        chunk = conn.recv(n - len(data))
+        if not chunk: return None
+        data += chunk
+    return data
+
 def client_handler(conn, addr):
-    print(f"[CONNECT] {addr}"); acc_id, picked_char = None, None
-    def send_rpc_push(tag, data):
-        pf = SprotoPacker.pack(encode_sproto([(0, tag)]) + data)
-        try: conn.sendall(struct.pack(">H", len(pf)) + pf)
-        except: pass
+    print(f"[1] TCP CONNECTION: {addr} connected")
+    acc_id, picked_char = None, None
+    def send_rpc_push(tag, data, name):
+        print(f"[{name}] START")
+        if tag == 614: print(f"[PUSH-614] encoded_fields: serverTime, func_info, server_level")
+        elif tag == 504:
+            print(f"[PUSH-504] character_id={picked_char['id']} name={picked_char['name']} mapId={picked_char['mapId']}")
+            print(f"[PUSH-504] character_pos={picked_char['pos']}")
+        
+        ph = encode_sproto([(0, tag)])
+        pf = SprotoPacker.pack(ph + data)
+        print(f"[{name}] encoded_len={len(data)} packet_len={len(pf)}")
+        if tag == 504: print(f"[PUSH-504] packed_HEX={pf.hex().upper()}")
+        
+        try: 
+            conn.sendall(struct.pack(">H", len(pf)) + pf)
+            print(f"[{name}] packet sent")
+        except: print(f"[ERROR] Failed to send {name}")
+        print(f"[{name}] END")
+
     try:
         while True:
-            h = b""; 
-            while len(h) < 2: 
-                chunk = conn.recv(2 - len(h))
-                if not chunk: break
-                h += chunk
+            h = recv_exact(conn, 2)
             if not h: break
             size = struct.unpack(">H", h)[0]
-            data = b""; 
-            while len(data) < size:
-                chunk = conn.recv(size - len(data))
-                if not chunk: break
-                data += chunk
+            data = recv_exact(conn, size)
             if not data: break
             
-            raw = SprotoPacker.unpack(data); dec = SprotoDecoder(raw); pkg = dec.decode()
+            raw = SprotoPacker.unpack(data)
+            dec = SprotoDecoder(raw); pkg = dec.decode()
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
-            body = SprotoDecoder(raw, dec.consumed).decode()
+            body_dec = SprotoDecoder(raw, dec.consumed)
+            body = body_dec.decode()
+
+            print(f"[RX] len={size} packed={data.hex().upper()} unpacked_len={len(raw)} tag={msg} session={session} body_offset={dec.consumed} body_fields={list(body.keys())}")
 
             if msg == 4: # Login
+                print(f"[LOGIN] LOGIN START")
                 acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
+                print(f"[LOGIN] account_id={acc_id} version={body.get(3)} platform={body.get(4)}")
                 pf = SprotoPacker.pack(encode_sproto([(1, session)]) + encode_sproto([(0, 2), (1, "1.012.017"), (2, "200")]))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
+                print(f"[LOGIN] LOGIN RESPONSE SENT")
+                print(f"[LOGIN] LOGIN END")
             elif msg == 103: # CharList
+                print(f"[CHAR-LIST] CHAR LIST START")
                 with db_lock: chars = all_accounts_chars.get("0", {}).get(acc_id, [])
-                resp = encode_sproto([(0, [encode_sproto([(0, c['id']), (1, encode_sproto([(0, c['name']), (1, c['prof']), (3, c['mapId']), (4, 1)])), (2, encode_sproto([(0, c['level']), (1, 5000)])), (3, get_visual(c['name'], c['prof'])), (4, c['createtime']), (5, 0)]) for c in chars])])
+                print(f"[CHAR-LIST] account_id={acc_id} num_chars={len(chars)}")
+                for c in chars: print(f"[CHAR-LIST] char_id={c['id']} name={c['name']}")
+                resp = encode_sproto([(0, [get_char_ov(c) for c in chars])])
                 pf = SprotoPacker.pack(encode_sproto([(1, session)]) + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
+                print(f"[CHAR-LIST] response sent")
+                print(f"[CHAR-LIST] CHAR LIST END")
             elif msg == 118: # RandomName
+                print(f"[RANDOM-NAME] RANDOM NAME START")
+                print(f"[RANDOM-NAME] requested_type={body.get(0)}")
                 name = f"Hero{random.randint(1000, 9999)}"
+                print(f"[RANDOM-NAME] generated_name={name}")
                 pf = SprotoPacker.pack(encode_sproto([(1, session)]) + encode_sproto([(0, name)]))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
+                print(f"[RANDOM-NAME] response sent")
+                print(f"[RANDOM-NAME] RANDOM NAME END")
             elif msg == 104: # CharCreate
-                c_req = SprotoDecoder(body.get(0, b"")).decode()
+                print(f"[CREATE] CREATE START")
+                raw_nested = body.get(0, b"")
+                print(f"[CREATE] raw_nested_bytes={raw_nested.hex().upper()}")
+                c_req = SprotoDecoder(raw_nested).decode()
+                print(f"[CREATE] decoded_nested_fields={list(c_req.keys())}")
                 name, prof = c_req.get(0, b"").decode('utf-8'), get_val_int(c_req, 1, 0)
+                print(f"[CREATE] requested_name={name} profession={prof}")
                 cid = int(time.time() * 1000) % 1000000000
+                print(f"[CREATE] generated_character_id={cid}")
                 nc = normalize_character({'id': cid, 'name': name, 'prof': prof})
+                print(f"[CREATE] normalized_character_object={nc}")
+                print(f"[CREATE] database save START")
                 with db_lock: 
                     all_accounts_chars.setdefault("0", {}).setdefault(acc_id, []).append(nc)
                     save_chars(all_accounts_chars)
-                pf = SprotoPacker.pack(encode_sproto([(1, session)]) + encode_sproto([(0, encode_sproto([(0, cid), (1, encode_sproto([(0, name), (1, prof), (3, "11"), (4, 1)])), (2, encode_sproto([(0, 1), (1, 5000)])), (3, get_visual(name, prof)), (4, int(time.time())), (5, 0)])), (1, 0)]))
+                    print(f"[CREATE] database save SUCCESS")
+                pf = SprotoPacker.pack(encode_sproto([(1, session)]) + encode_sproto([(0, get_char_ov(nc)), (1, 0)]))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
+                print(f"[CREATE] response packet sent")
+                print(f"[CREATE] CREATE END")
             elif msg == 105: # CharPick
                 char_id = get_val_int(body, 0)
+                print(f"[PICK] PICK START")
+                print(f"[PICK] requested_character_id={char_id}")
                 with db_lock: picked_char = next((c for c in all_accounts_chars.get("0", {}).get(acc_id, []) if c['id'] == char_id), None)
-                pf = SprotoPacker.pack(encode_sproto([(1, session)]) + encode_sproto([(0, 1 if picked_char else 0)]))
-                conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
+                    print(f"[PICK] character found: mapId={picked_char['mapId']} pos={picked_char['pos']}")
                     online_clients[char_id] = (conn, picked_char['mapId'], 1, picked_char)
-                    send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, []), (13, 1)]))
-                    send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement_struct(picked_char['pos']))]))
-                    send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)]))
+                else: print(f"[PICK] character NOT found")
+                
+                errno_val = 1 if picked_char else 0
+                print(f"[PICK] exact_errno_being_returned={errno_val}")
+                pf = SprotoPacker.pack(encode_sproto([(1, session)]) + encode_sproto([(0, errno_val)]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+                print(f"[PICK] response sent")
+                
+                if picked_char:
+                    print(f"[PICK] PICK SUCCESS")
+                    send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, []), (13, 1)]), "PUSH-614")
+                    send_rpc_push(504, encode_sproto([(0, get_full_char(picked_char)), (1, get_movement_struct(picked_char['pos']))]), "PUSH-504")
+                    send_rpc_push(503, encode_sproto([(0, "11"), (1, 1), (2, 1)]), "PUSH-503")
             elif msg == 100: # MapReady
-                send_rpc_push(654, encode_sproto([(0, 1)]))
+                print(f"[MAP-READY] MAP READY RECEIVED")
+                print(f"[MAP-READY] session={session} body_fields={list(body.keys())}")
+                print(f"[MAP-READY] current_picked_character={picked_char['name'] if picked_char else 'NONE'}")
+                print(f"[MAP-READY] current_map={picked_char['mapId'] if picked_char else 'NONE'}")
+                print(f"[MAP-READY] MAP READY RESPONSE/PUSH START")
+                send_rpc_push(654, encode_sproto([(0, 1)]), "PUSH-654")
+                print(f"[MAP-READY] END")
+                print(f"[GAME] waiting for next client packet")
             elif msg == 218: # Heartbeat
                 pf = SprotoPacker.pack(encode_sproto([(1, session)]) + encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))]))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
-            elif session is not None:
-                pf = SprotoPacker.pack(encode_sproto([(1, session)]) + encode_sproto([]))
-                conn.sendall(struct.pack(">H", len(pf)) + pf)
-    except Exception: traceback.print_exc()
+            else:
+                print(f"[UNKNOWN] UNKNOWN TAG tag={msg} session={session} body_HEX={raw[dec.consumed:].hex().upper()}")
+                print(f"[UNKNOWN] decoded_fields={body}")
+                if session is not None:
+                    pf = SprotoPacker.pack(encode_sproto([(1, session)]) + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+    except Exception:
+        print("[ERROR]")
+        traceback.print_exc()
     finally:
         if picked_char: online_clients.pop(picked_char['id'], None)
+        print(f"[1] TCP CONNECTION: {addr} disconnected")
         conn.close()
 
 srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1); srv.bind(("0.0.0.0", PORT)); srv.listen(50)
-print(f"Unified Game Server 9555 Active on {PORT}"); 
+print(f"Unified Debug Server 9555 Active on {PORT}"); 
 while True:
     try: cl, ad = srv.accept(); threading.Thread(target=client_handler, args=(cl, ad), daemon=True).start()
     except: pass
