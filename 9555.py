@@ -752,6 +752,58 @@ def accept_mission_logic(picked_char, mid):
     picked_char['active_missions'][mid] = {'state': 1, 'parm': parm, 'accept_time': int(time.time())}
     return True
 
+def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type=0, map_id=None):
+    """Apply one authoritative gameplay event to every active mission."""
+    updated = False
+    for mid, mdata in picked_char.get('active_missions', {}).items():
+        if mdata.get('state') != 1:
+            continue
+        cfg = missions_data.get(mid)
+        if not cfg:
+            continue
+
+        logic_type = cfg.get('logic_type')
+        target = str(cfg.get('target_id', ''))
+        target_value = str(target_id) if target_id is not None else ''
+        matched = False
+
+        if logic_type == 7 and event == 'level':
+            mdata['parm'][0] = max(mdata['parm'][0], int(picked_char.get('level', 1)))
+            matched = True
+        elif logic_type in [1, 4, 11, 17, 23] and event == 'kill':
+            matched = logic_type == 17 or target == target_value
+        elif logic_type in [19, 24] and event == 'car':
+            matched = logic_type == 19 or target == target_value
+        elif logic_type == 20 and event == 'impact':
+            matched = die_type == 3 and (not target or target == target_value)
+        elif logic_type in [0, 2, 6, 21] and event == 'interact':
+            matched = not target or target == target_value or str(cfg.get('logic_id', '')) == target_value
+        elif logic_type == 25 and event == 'capture':
+            matched = not target or target == target_value
+        elif logic_type == 7 and event == 'map':
+            matched = target == str(map_id)
+
+        if not matched:
+            continue
+
+        required = int(cfg.get('require_num') or 1)
+        if logic_type == 7:
+            progress = int(mdata['parm'][0])
+        else:
+            mdata['parm'][0] = min(required, int(mdata['parm'][0]) + 1)
+            progress = mdata['parm'][0]
+
+        send_rpc_push(524, encode_sproto([(0, mid), (1, 1), (2, progress)]))
+        if progress >= required:
+            mdata['state'] = 2
+            send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+        updated = True
+
+    if updated:
+        save_chars(all_accounts_chars)
+        send_rpc_push(519, sync_mission_data(picked_char))
+    return updated
+
 def init_character_fields(c):
     fields = {
         'level': 1, 'exp': 0, 'cash': 1000,
@@ -1300,53 +1352,31 @@ def client_handler(conn, addr):
                             print(f"[LEVEL UP] CharID={picked_char['id']} NewLevel={picked_char['level']}")
                         else: break
 
-                    updated = False
-                    for mid, mdata in picked_char.get('active_missions', {}).items():
-                        m_cfg = missions_data.get(mid)
-                        if not m_cfg: continue
-
-                        ltype = m_cfg.get('logic_type')
-                        # 1: KILLMONSTER, 4: KILL_DROP, 6: INVESTIGATE, 11: COPY_KILL, 17: MASSACRE_NPC, 23: KILL_TARGET_NPC, 25: CAPTURE
-                        if ltype in [1, 4, 6, 11, 17, 23, 25]:
-                            if m_cfg.get('target_id') == npcid or ltype == 17:
-                                mdata['parm'][0] += 1
-                                print(f"[*] Mission {mid} progress: {mdata['parm'][0]}/{m_cfg.get('require_num')}")
-                                send_rpc_push(524, encode_sproto([(0, mid), (1, 1), (2, mdata['parm'][0])]))
-                                if mdata['parm'][0] >= m_cfg.get('require_num'):
-                                    mdata['state'] = 2 # COMPLETE
-                                    send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
-                                updated = True
-                        # 19: ROB_CAR, 24: TARGET_ROB_CAR
-                        elif ltype in [19, 24]:
-                            if die_type in [2, 6]:
-                                mdata['parm'][0] += 1
-                                send_rpc_push(524, encode_sproto([(0, mid), (1, 1), (2, mdata['parm'][0])]))
-                                if mdata['parm'][0] >= m_cfg.get('require_num'):
-                                    mdata['state'] = 2
-                                    send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
-                                updated = True
-                        # 20: IMPACT_NPC
-                        elif ltype == 20:
-                            if die_type == 3:
-                                mdata['parm'][0] += 1
-                                send_rpc_push(524, encode_sproto([(0, mid), (1, 1), (2, mdata['parm'][0])]))
-                                if mdata['parm'][0] >= m_cfg.get('require_num'):
-                                    mdata['state'] = 2
-                                    send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
-                                updated = True
-                        # 0: STORY, 2: SEND_MSG, 21: ARRIVE_TARGET
-                        elif ltype in [0, 2, 21]:
-                            if die_type == 4 and npcid == mid:
-                                mdata['state'] = 2
-                                send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
-                                updated = True
+                    updated = advance_missions(
+                        picked_char, send_rpc_push, 'kill',
+                        target_id=npcid, die_type=die_type
+                    )
+                    if die_type in [2, 6]:
+                        updated = advance_missions(
+                            picked_char, send_rpc_push, 'car',
+                            target_id=npcid, die_type=die_type
+                        ) or updated
+                    elif die_type == 3:
+                        updated = advance_missions(
+                            picked_char, send_rpc_push, 'impact',
+                            target_id=npcid, die_type=die_type
+                        ) or updated
+                    elif die_type == 4:
+                        updated = advance_missions(
+                            picked_char, send_rpc_push, 'interact',
+                            target_id=npcid, die_type=die_type
+                        ) or updated
+                    updated = advance_missions(
+                        picked_char, send_rpc_push, 'level'
+                    ) or updated
 
                     # CRITICAL: Sync attributes immediately after kill rewards
                     sync_char_attrs_rpc(conn, picked_char)
-                    if updated:
-                        save_chars(all_accounts_chars)
-                        send_rpc_push(519, sync_mission_data(picked_char))
-
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -1362,9 +1392,11 @@ def client_handler(conn, addr):
                     for mid_act, mdata in picked_char['active_missions'].items():
                         m_cfg = missions_data.get(mid_act)
                         if m_cfg and m_cfg.get('logic_type') == 25:
-                            mdata['state'] = 2
-                            send_rpc_push(523, encode_sproto([(0, mid_act), (1, 2)]))
-                            updated_missions = True
+                            target = str(m_cfg.get('target_id', ''))
+                            if not target or target == did:
+                                mdata['state'] = 2
+                                send_rpc_push(523, encode_sproto([(0, mid_act), (1, 2)]))
+                                updated_missions = True
                     if updated_missions:
                         save_chars(all_accounts_chars)
                         send_rpc_push(519, sync_mission_data(picked_char))
@@ -1378,6 +1410,10 @@ def client_handler(conn, addr):
                     # Special logic for Mission 1003 Challenge Dialogue
                     # This triggers the client-side Yes/No box (Dialog string 102098)
                     send_rpc_push(529, encode_sproto([(0, "102098"), (1, True)]))
+                if picked_char:
+                    advance_missions(
+                        picked_char, send_rpc_push, 'interact', target_id=nid
+                    )
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
