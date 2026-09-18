@@ -15,7 +15,7 @@ import math
 # ============================================================
 
 HOST = "0.0.0.0"
-PORT = int(os.environ.get("PORT", "9555"))
+PORT = 15678
 
 DB_FILE = os.environ.get("CHAR_DB", "characters.json")
 ACCOUNT_FILE = os.environ.get("ACCOUNT_DB", "accounts.json")
