@@ -6,6 +6,7 @@ server_session_counter = 8000
 GLOBAL_INST_COUNTER = 3000000
 NPC_INST_MAP = {} # inst_id -> nid (to resolve rewards)
 NPC_HP_MAP = {}   # inst_id -> current hp
+NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 
 # Load Mission Data
 missions_data = {}
@@ -481,7 +482,9 @@ def get_full_char(c):
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
 
-    # download tag(15) set to 2 to make IsFinishDownload = true (prevents mission blocking)
+    # The APK sets IsFinishDownload from character.download: 2 means finished.
+    # New characters must see the real download flow first.
+    download_state = 2 if c.get('download_complete', False) else 1
     return encode_sproto([
         (0, c['id']),
         (1, gen),
@@ -493,7 +496,7 @@ def get_full_char(c):
         (9, equip_map),
         (12, 0),
         (13, run),
-        (15, 2)
+        (15, download_state)
     ])
 
 def sync_char_attrs_rpc(conn, picked_char):
@@ -554,6 +557,12 @@ def get_npc_attr(nid):
 def spawn_map_npcs(conn, map_id, picked_char=None):
     """Spawns all NPCs, Monsters, and Traffic defined in data for the map."""
     map_str = str(map_id)
+    connection_id = id(conn)
+    spawned_maps = NPC_SPAWNED_MAPS.setdefault(connection_id, set())
+    if map_str in spawned_maps:
+        print(f"[NPC SPAWN] already sent map={map_str} to this connection")
+        return
+    spawned_maps.add(map_str)
 
     def send_npc_create(nid, name, x, z, o):
         global GLOBAL_INST_COUNTER
@@ -591,16 +600,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
             send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
-    # Traffic Simulation (Random Cars) - Increased density
-    if map_str == "11" or map_str == "101" or map_str == "105":
-        car_models = ["Chevrolet", "SportsCar", "PoliceCar", "daKeChe", "jiaoChe_01", "jiaoChe_02", "chuZuChe", "xiaoKeChe"]
-        spawn_count = 35 if map_str == "11" else 20
-        for _ in range(spawn_count):
-            model = random.choice(car_models)
-            rx, rz = random.randint(-45000, 45000), random.randint(-45000, 45000)
-            send_npc_create(model, f"CityCar_{model}", rx, rz, random.randint(0, 36000))
-
-    # 3. Spawn Mission targets
+    # 2. Spawn Mission targets defined by the APK data.
     if picked_char:
         for mid, mdata in picked_char.get('active_missions', {}).items():
             if mdata['state'] == 1:
@@ -716,11 +716,16 @@ def accept_mission_logic(picked_char, mid):
         print(f"[accept_mission_logic] FAILED: {mid} not in missions_data")
         return False
     m = missions_data[mid]
-    if picked_char.get('level', 1) < m.get('min_level', 0):
+    pre_id = m.get('pre_id', "")
+    is_main_chain = (
+        m.get('class') == 1
+        and pre_id
+        and str(picked_char.get('last_main_mission_id', "")) == str(pre_id)
+    )
+    if picked_char.get('level', 1) < m.get('min_level', 0) and not is_main_chain:
         print(f"[accept_mission_logic] FAILED: level too low {picked_char.get('level')} < {m.get('min_level')}")
         return False
 
-    pre_id = m.get('pre_id', "")
     if pre_id:
         if m.get('class') == 1:
             if str(picked_char.get('last_main_mission_id', "")) != str(pre_id):
@@ -780,6 +785,8 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             matched = not target or target == target_value or str(cfg.get('logic_id', '')) == target_value
         elif logic_type == 25 and event == 'capture':
             matched = not target or target == target_value
+        elif logic_type == 114 and event == 'world_boss':
+            matched = True
         elif logic_type == 7 and event == 'map':
             matched = target == str(map_id)
 
@@ -787,6 +794,8 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             continue
 
         required = int(cfg.get('require_num') or 1)
+        if logic_type in [2, 6, 102, 103, 105, 106, 107, 108, 110, 113, 114, 117, 119, 120, 132]:
+            required = 1
         if logic_type == 7:
             progress = int(mdata['parm'][0])
         else:
@@ -813,7 +822,8 @@ def init_character_fields(c):
         'last_main_mission_id': "-1",
         'inventory': [],
         'pos': [29860, 100, -17005, 0],
-        'map_id': "11"
+        'map_id': "11",
+        'download_complete': False
     }
     for k, v in fields.items():
         if k not in c: c[k] = v
@@ -1059,6 +1069,13 @@ def client_handler(conn, addr):
 
             elif msg == 270: # download_finish
                 if picked_char:
+                    picked_char['download_complete'] = True
+                    picked_char['mount_id'] = "1001"
+                    add_to_inventory(picked_char, "9011", 10)
+                    add_to_inventory(picked_char, "9001", 20)
+                    add_to_inventory(picked_char, "5026", 5)
+                    save_chars(all_accounts_chars)
+                    send_rpc_push(611, sync_inventory_data(picked_char))
                     print("[MSG 270] Client finished download. Sending start_enter_game.")
                     send_rpc_push(654, encode_sproto([(0, 1)]))
                 if session is not None:
@@ -1107,6 +1124,10 @@ def client_handler(conn, addr):
             elif msg == 201: # enter_wild_boss
                 mid = body.get(0, b"").decode('utf-8')
                 if picked_char: start_map_transition(conn, picked_char, mid, send_rpc_push)
+                if picked_char:
+                    advance_missions(picked_char, send_rpc_push, 'world_boss')
+                    # The APK completes the activity mission from copy_scene_result.
+                    send_rpc_push(552, encode_sproto([(0, 1), (1, mid), (2, True)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
