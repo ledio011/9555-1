@@ -6,187 +6,145 @@ import socket
 import struct
 import threading
 import traceback
+import math
 
-PORT = int(os.environ.get("PORT", 15678))
-DB_PATH = "db"
-DB_FILE = os.path.join(DB_PATH, "characters.json")
+============================================================
+
+ATG GAME SERVER 9555
+
+Rebuilt from available Assembly-CSharp / Sproto / TextAsset
+
+Server-side implementation only.
+
+============================================================
+
+HOST = "0.0.0.0"
+PORT = 15678
+
+DB_FILE = os.environ.get("CHAR_DB", "characters.json")
+ACCOUNT_FILE = os.environ.get("ACCOUNT_DB", "accounts.json")
 
 GAME_VERSION = "1.012.017"
 DATA_VERSION = "205"
 
-DEFAULT_MAP = "11"
-DEFAULT_POS = [29860, 100, -17005, 0]
+DEFAULT_MAP = "101"
+DEFAULT_LINE = 0
 
-os.makedirs(DB_PATH, exist_ok=True)
+DB_LOCK = threading.RLock()
+ONLINE_LOCK = threading.RLock()
 
-PLAYER_DB = {}
 ONLINE_PLAYERS = {}
+NPC_STATE = {}
+NEXT_NPC_INSTANCE = 3000000
 
-MAP_CONFIG = {
-    "11": {
-        "scene": "DSJ_GTA",
-        "map_id": "11",
-        "line": 0,
-        "line_count": 1,
-    },
-    "101": {
-        "scene": "DSJ_zhuCheng",
-        "map_id": "101",
-        "line": 0,
-        "line_count": 1,
-    },
-    "109": {
-        "scene": "PVP_GothamCity",
-        "map_id": "109",
-        "line": 0,
-        "line_count": 1,
-    },
-}
+============================================================
 
+SPROTO
 
-# ============================================================
-# DATABASE
-# ============================================================
-
-def load_db():
-    global PLAYER_DB
-
-    if not os.path.exists(DB_FILE):
-        PLAYER_DB = {}
-        return
-
-    try:
-        with open(DB_FILE, "r", encoding="utf-8") as f:
-            PLAYER_DB = json.load(f)
-    except Exception:
-        PLAYER_DB = {}
-
-
-def save_db():
-    try:
-        tmp = DB_FILE + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(PLAYER_DB, f, indent=2, ensure_ascii=False)
-
-        os.replace(tmp, DB_FILE)
-    except Exception:
-        traceback.print_exc()
-
-
-load_db()
-
-
-# ============================================================
-# SPROTO
-# ============================================================
+============================================================
 
 def encode_sproto(fields):
-    if not fields:
-        return struct.pack("<H", 0)
+if not fields:
+return struct.pack("<H", 0)
 
-    fields = sorted(fields, key=lambda x: x[0])
+fields = sorted(fields, key=lambda x: x[0])
 
-    header = []
-    body = bytearray()
-    last_tag = -1
+header = []
+body = bytearray()
+last_tag = -1
 
-    for tag, value in fields:
+for tag, value in fields:
+    skip = tag - last_tag - 1
 
-        skip = tag - last_tag - 1
+    if skip > 0:
+        header.append(2 * (skip - 1) + 1)
 
-        if skip > 0:
-            header.append(2 * (skip - 1) + 1)
+    if value is None:
+        header.append(1)
 
-        if value is None:
-            header.append(1)
+    elif isinstance(value, bool):
+        header.append(4 if value else 2)
 
-        elif isinstance(value, bool):
-            header.append(4 if value else 2)
-
-        elif isinstance(value, int):
-            if 0 <= value <= 32766:
-                header.append((value + 1) * 2)
-            else:
-                header.append(0)
-
-                if -2147483648 <= value <= 2147483647:
-                    body += struct.pack("<I", 4)
-                    body += struct.pack("<i", value)
-                else:
-                    body += struct.pack("<I", 8)
-                    body += struct.pack("<q", value)
-
-        elif isinstance(value, str):
-            payload = value.encode("utf-8")
-            header.append(0)
-            body += struct.pack("<I", len(payload))
-            body += payload
-
-        elif isinstance(value, (bytes, bytearray)):
-            payload = bytes(value)
-            header.append(0)
-            body += struct.pack("<I", len(payload))
-            body += payload
-
-        elif isinstance(value, list):
-            payload = bytearray()
-
-            for item in value:
-                if isinstance(item, (bytes, bytearray)):
-                    payload += struct.pack("<I", len(item))
-                    payload += item
-                elif isinstance(item, str):
-                    x = item.encode("utf-8")
-                    payload += struct.pack("<I", len(x))
-                    payload += x
-                else:
-                    x = encode_sproto(item) if isinstance(item, list) else str(item).encode()
-                    payload += struct.pack("<I", len(x))
-                    payload += x
-
-            header.append(0)
-            body += struct.pack("<I", len(payload))
-            body += payload
-
-        elif isinstance(value, dict):
-            payload = bytearray()
-
-            for k, v in value.items():
-                entry = encode_sproto([
-                    (0, str(k)),
-                    (1, v if isinstance(v, int) else 1)
-                ])
-
-                payload += struct.pack("<I", len(entry))
-                payload += entry
-
-            header.append(0)
-            body += struct.pack("<I", len(payload))
-            body += payload
-
+    elif isinstance(value, int):
+        if 0 <= value <= 32766:
+            header.append((value + 1) * 2)
         else:
-            payload = str(value).encode("utf-8")
             header.append(0)
-            body += struct.pack("<I", len(payload))
-            body += payload
+            if -2147483648 <= value <= 2147483647:
+                body.extend(struct.pack("<I", 4))
+                body.extend(struct.pack("<i", value))
+            else:
+                body.extend(struct.pack("<I", 8))
+                body.extend(struct.pack("<q", value))
 
-        last_tag = tag
+    elif isinstance(value, float):
+        header.append(0)
+        payload = struct.pack("<f", value)
+        body.extend(struct.pack("<I", len(payload)))
+        body.extend(payload)
 
-    result = bytearray()
-    result += struct.pack("<H", len(header))
+    elif isinstance(value, str):
+        header.append(0)
+        payload = value.encode("utf-8")
+        body.extend(struct.pack("<I", len(payload)))
+        body.extend(payload)
 
-    for h in header:
-        result += struct.pack("<H", h)
+    elif isinstance(value, (bytes, bytearray)):
+        header.append(0)
+        payload = bytes(value)
+        body.extend(struct.pack("<I", len(payload)))
+        body.extend(payload)
 
-    result += body
+    elif isinstance(value, list):
+        header.append(0)
 
-    return bytes(result)
+        payload = bytearray()
 
+        for item in value:
+            if isinstance(item, bytes):
+                payload.extend(struct.pack("<I", len(item)))
+                payload.extend(item)
+            elif isinstance(item, bytearray):
+                item = bytes(item)
+                payload.extend(struct.pack("<I", len(item)))
+                payload.extend(item)
+            elif isinstance(item, str):
+                b = item.encode()
+                payload.extend(struct.pack("<I", len(b)))
+                payload.extend(b)
+
+        body.extend(struct.pack("<I", len(payload)))
+        body.extend(payload)
+
+    elif isinstance(value, dict):
+        header.append(0)
+        payload = json.dumps(value, separators=(",", ":")).encode()
+        body.extend(struct.pack("<I", len(payload)))
+        body.extend(payload)
+
+    else:
+        header.append(0)
+        payload = str(value).encode()
+        body.extend(struct.pack("<I", len(payload)))
+        body.extend(payload)
+
+    last_tag = tag
+
+out = bytearray()
+out.extend(struct.pack("<H", len(header)))
+
+for h in header:
+    out.extend(struct.pack("<H", h))
+
+out.extend(body)
+
+return bytes(out)
 
 def decode_sproto(data, offset=0):
-    if offset + 2 > len(data):
-        return {}
+if not data or len(data) < offset + 2:
+return {}
 
+try:
     fn = struct.unpack_from("<H", data, offset)[0]
 
     header_start = offset + 2
@@ -195,1307 +153,2329 @@ def decode_sproto(data, offset=0):
     if body_start > len(data):
         return {}
 
-    fields = {}
+    result = {}
     tag = -1
     body_pos = body_start
 
     for i in range(fn):
+        h = struct.unpack_from(
+            "<H",
+            data,
+            header_start + i * 2
+        )[0]
 
-        p = header_start + i * 2
-
-        if p + 2 > len(data):
-            break
-
-        value = struct.unpack_from("<H", data, p)[0]
-
-        if value == 0:
-
+        if h == 0:
             tag += 1
 
             if body_pos + 4 > len(data):
-                fields[tag] = b""
+                result[tag] = b""
                 continue
 
-            length = struct.unpack_from("<I", data, body_pos)[0]
+            length = struct.unpack_from(
+                "<I",
+                data,
+                body_pos
+            )[0]
+
             body_pos += 4
 
-            if body_pos + length > len(data):
-                length = max(0, len(data) - body_pos)
+            end = min(body_pos + length, len(data))
+            result[tag] = data[body_pos:end]
+            body_pos = end
 
-            fields[tag] = data[body_pos:body_pos + length]
-            body_pos += length
-
-        elif value == 1:
+        elif h == 1:
             tag += 1
 
-        elif value & 1:
-            tag += (value >> 1) + 1
+        elif h & 1:
+            tag += (h >> 1) + 1
 
         else:
             tag += 1
-            fields[tag] = (value >> 1) - 1
-
-    return fields
-
-
-def get_int(fields, tag, default=0):
-    value = fields.get(tag)
-
-    if value is None:
-        return default
-
-    if isinstance(value, int):
-        return value
-
-    if isinstance(value, bytes):
-
-        if len(value) == 1:
-            return value[0]
-
-        if len(value) == 4:
-            try:
-                return struct.unpack("<i", value)[0]
-            except Exception:
-                pass
-
-        if len(value) == 8:
-            try:
-                return struct.unpack("<q", value)[0]
-            except Exception:
-                pass
-
-    return default
-
-
-def get_string(fields, tag, default=""):
-    value = fields.get(tag)
-
-    if value is None:
-        return default
-
-    if isinstance(value, str):
-        return value
-
-    if isinstance(value, bytes):
-        try:
-            return value.decode("utf-8")
-        except Exception:
-            return default
-
-    return str(value)
-
-
-def sproto_pack(data):
-    result = bytearray()
-
-    for pos in range(0, len(data), 8):
-
-        chunk = data[pos:pos + 8]
-
-        if len(chunk) < 8:
-            chunk += b"\x00" * (8 - len(chunk))
-
-        mask = 0
-
-        for i in range(8):
-            if chunk[i] != 0:
-                mask |= 1 << i
-
-        if mask == 0xFF:
-            result.append(0xFF)
-            result.append(0)
-            result += chunk
-        else:
-            result.append(mask)
-
-            for i in range(8):
-                if mask & (1 << i):
-                    result.append(chunk[i])
-
-    return bytes(result)
-
-
-def sproto_unpack(data):
-    result = bytearray()
-    pos = 0
-
-    while pos < len(data):
-
-        mask = data[pos]
-        pos += 1
-
-        if mask == 0xFF:
-
-            if pos >= len(data):
-                break
-
-            count = (data[pos] + 1) * 8
-            pos += 1
-
-            result += data[pos:pos + count]
-            pos += count
-
-        else:
-
-            for bit in range(8):
-
-                if mask & (1 << bit):
-
-                    if pos < len(data):
-                        result.append(data[pos])
-                        pos += 1
-
-                else:
-                    result.append(0)
-
-    return bytes(result)
-
-
-# ============================================================
-# NETWORK
-# ============================================================
-
-def send_frame(conn, payload):
-    packed = sproto_pack(payload)
-
-    if len(packed) > 65535:
-        return
-
-    conn.sendall(struct.pack(">H", len(packed)) + packed)
-
-
-def send_response(conn, session, body):
-    packet = encode_sproto([
-        (1, session)
-    ]) + body
-
-    send_frame(conn, packet)
-
-
-def send_push(conn, tag, body):
-    packet = encode_sproto([
-        (0, tag)
-    ]) + body
-
-    send_frame(conn, packet)
-
-    print(
-        "[TX] PUSH TAG=%s SIZE=%s"
-        % (tag, len(body))
-    )
-
-
-# ============================================================
-# PLAYER
-# ============================================================
-
-def new_character(char_id, name, profession):
-    return {
-        "id": int(char_id),
-        "name": name,
-        "prof": int(profession),
-
-        "level": 1,
-        "exp": 0,
-
-        "cash": 1000,
-        "gold": 0,
-        "diamond": 0,
-
-        "hp": 3000,
-        "hp_max": 3000,
-
-        "atk": 150,
-        "def": 50,
-        "hit": 100,
-        "eva": 50,
-        "cri": 20,
-        "res": 10,
-
-        "map_id": DEFAULT_MAP,
-        "pos": DEFAULT_POS[:],
-
-        "active_missions": {},
-        "completed_missions": [],
-
-        "last_main_mission_id": "-1",
-
-        "is_finish_download": 2,
-        "tutorial_finished": 0,
-
-        "inventory": {},
-        "skills": {},
-        "fashion": {},
-
-        "cars": [],
-        "friends": [],
-        "mail": [],
-        "team_id": 0,
-        "guild_id": 0,
-
-        "pk_mode": 0,
-    }
-
-
-def get_player(account_id, char_id=None):
-
-    candidates = []
-
-    for key, char in PLAYER_DB.items():
-
-        if char.get("account_id") == str(account_id):
-            candidates.append(char)
-
-        elif char_id is not None and str(char.get("id")) == str(char_id):
-            candidates.append(char)
-
-    if not candidates:
-        return None
-
-    return candidates[0]
-
-
-def character_list(account_id):
-
-    result = []
-
-    for char in PLAYER_DB.values():
-
-        if char.get("account_id") != str(account_id):
-            continue
-
-        result.append(
-            encode_sproto([
-                (0, char["id"]),
-                (1, char["name"]),
-                (2, char.get("prof", 0)),
-                (3, str(char.get("map_id", DEFAULT_MAP))),
-                (4, char.get("level", 1)),
-            ])
-        )
+            result[tag] = (h >> 1) - 1
 
     return result
 
+except Exception:
+    return {}
 
-def full_character(char):
+def sproto_pack(data):
+out = bytearray()
 
-    return encode_sproto([
-        (0, char["id"]),
-        (1, char["name"]),
-        (2, char.get("prof", 0)),
-        (3, char.get("level", 1)),
-        (4, char.get("exp", 0)),
-        (5, char.get("cash", 0)),
-        (6, char.get("gold", 0)),
-        (7, char.get("diamond", 0)),
-        (8, char.get("hp", 3000)),
-        (9, char.get("hp_max", 3000)),
-        (10, char.get("atk", 150)),
-        (11, char.get("def", 50)),
-        (12, char.get("hit", 100)),
-        (13, char.get("eva", 50)),
-        (14, char.get("cri", 20)),
-        (15, char.get("res", 10)),
-        (16, str(char.get("map_id", DEFAULT_MAP))),
-        (17, 2),
+for i in range(0, len(data), 8):
+    chunk = data[i:i + 8]
+
+    if len(chunk) < 8:
+        chunk += b"\x00" * (8 - len(chunk))
+
+    mask = 0
+
+    for j in range(8):
+        if chunk[j] != 0:
+            mask |= 1 << j
+
+    if mask == 0xff:
+        out.append(0xff)
+        out.append(0)
+        out.extend(chunk)
+    else:
+        out.append(mask)
+
+        for j in range(8):
+            if mask & (1 << j):
+                out.append(chunk[j])
+
+return bytes(out)
+
+def sproto_unpack(data):
+out = bytearray()
+pos = 0
+
+while pos < len(data):
+    mask = data[pos]
+    pos += 1
+
+    if mask == 0xff:
+        if pos >= len(data):
+            break
+
+        count = (data[pos] + 1) * 8
+        pos += 1
+
+        out.extend(data[pos:pos + count])
+        pos += count
+        continue
+
+    for bit in range(8):
+        if mask & (1 << bit):
+            if pos < len(data):
+                out.append(data[pos])
+                pos += 1
+        else:
+            out.append(0)
+
+return bytes(out)
+
+def intval(v, default=0):
+if v is None:
+return default
+
+if isinstance(v, bool):
+    return int(v)
+
+if isinstance(v, int):
+    return v
+
+if isinstance(v, bytes):
+    try:
+        return int(v.decode())
+    except Exception:
+        try:
+            return struct.unpack("<i", v[:4])[0]
+        except Exception:
+            return default
+
+try:
+    return int(v)
+except Exception:
+    return default
+
+def textval(v, default=""):
+if v is None:
+return default
+
+if isinstance(v, bytes):
+    try:
+        return v.decode("utf-8")
+    except Exception:
+        return ""
+
+return str(v)
+
+============================================================
+
+FRAME / RPC
+
+============================================================
+
+def make_packet(tag, session=None, body=None):
+if body is None:
+body = encode_sproto([])
+
+header = encode_sproto([(0, tag)])
+
+if session is not None:
+    header = encode_sproto([
+        (0, tag),
+        (1, session)
     ])
 
+packed = sproto_pack(header + body)
 
-def movement_data(char):
+return struct.pack(">H", len(packed)) + packed
 
-    pos = char.get("pos", DEFAULT_POS)
+def make_response(session, body=None):
+if body is None:
+body = encode_sproto([])
 
-    while len(pos) < 4:
-        pos.append(0)
+packet = encode_sproto([(1, session)]) + body
+packed = sproto_pack(packet)
 
-    return encode_sproto([
-        (0, int(pos[0])),
-        (1, int(pos[1])),
-        (2, int(pos[2])),
-        (3, int(pos[3])),
-    ])
+return struct.pack(">H", len(packed)) + packed
 
+def send_push(conn, tag, body):
+try:
+conn.sendall(make_packet(tag, None, body))
+print(f"[PUSH] Tag {tag}")
+except Exception:
+pass
 
-# ============================================================
-# MISSIONS
-# ============================================================
+def send_reply(conn, session, body=None):
+try:
+conn.sendall(make_response(session, body))
+except Exception:
+pass
 
-def mission_packet(mid, mission):
+============================================================
 
-    return encode_sproto([
-        (0, str(mid)),
-        (1, mission.get("state", 1)),
-        (2, mission.get("quality", 0)),
-        (3, mission.get("parm", [0] * 8)),
-    ])
+DATABASE
 
+============================================================
 
-def mission_sync(char):
+def load_json(path, default):
+if not os.path.exists(path):
+return default
 
-    missions = []
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+except Exception:
+    return default
 
-    for mid, mission in char.get(
-        "active_missions", {}
-    ).items():
+def save_json(path, data):
+tmp = path + ".tmp"
 
-        missions.append(
-            mission_packet(mid, mission)
+try:
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+    os.replace(tmp, path)
+
+except Exception as e:
+    print("[DB ERROR]", e)
+
+accounts = load_json(ACCOUNT_FILE, {})
+characters_db = load_json(DB_FILE, {})
+
+def save_characters():
+with DB_LOCK:
+save_json(DB_FILE, characters_db)
+
+============================================================
+
+CHARACTER DATABASE
+
+============================================================
+
+def character_bucket(account_id):
+account_id = str(account_id)
+
+with DB_LOCK:
+    if account_id not in characters_db:
+        characters_db[account_id] = []
+
+    return characters_db[account_id]
+
+def generate_character_id():
+with DB_LOCK:
+used = set()
+
+    for chars in characters_db.values():
+        for c in chars:
+            try:
+                used.add(int(c.get("id")))
+            except Exception:
+                pass
+
+    while True:
+        # Numeric 13-17 digit character ID.
+        cid = random.randint(
+            1000000000000,
+            99999999999999999
         )
 
-    return encode_sproto([
-        (0, missions),
-        (1, str(
-            char.get(
-                "last_main_mission_id",
-                "-1"
-            )
-        )),
-    ])
+        if cid not in used:
+            return cid
 
+def init_character(c):
+now = int(time.time())
 
-def ensure_first_mission(char):
+defaults = {
+    "id": generate_character_id(),
+    "name": "Hero",
+    "prof": 0,
 
-    if char.get("active_missions"):
+    "level": 1,
+    "exp": 0,
+
+    "cash": 1000,
+    "gold": 0,
+    "diamond": 0,
+    "battle_coin": 0,
+
+    "hp": 3000,
+    "hp_max": 3000,
+
+    "atk": 150,
+    "def": 50,
+    "hit": 100,
+    "eva": 50,
+    "cri": 20,
+    "res": 10,
+
+    "crd": 15000,
+    "crr": 0,
+    "exd": 0,
+    "exr": 0,
+
+    "map_id": DEFAULT_MAP,
+    "line_index": DEFAULT_LINE,
+
+    "pos": [6600, 200, -2371, 0],
+
+    "skill_levels": {},
+    "inventory": [],
+    "mount_id": "",
+
+    "active_missions": {},
+    "completed_side_missions": [],
+    "last_main_mission_id": "-1",
+
+    "friends": [],
+    "foes": [],
+    "mail": [],
+
+    "last_played": now,
+    "create_time": now
+}
+
+for k, v in defaults.items():
+    if k not in c:
+        c[k] = v
+
+return c
+
+============================================================
+
+MAP DATA
+
+============================================================
+
+MAPS = {
+"11": {
+"scene": "DSJ_GTA",
+"name": "Tutorial",
+"birth": [29860, 100, -17005, 0]
+},
+
+"101": {
+    "scene": "DSJ_zhuCheng",
+    "name": "Main City",
+    "birth": [6600, 200, -2371, 0]
+},
+
+"102": {
+    "scene": "DSJ_pinMinKu_1",
+    "name": "Slum",
+    "birth": [2800, 100, 5000, 0]
+},
+
+"104": {
+    "scene": "DSJ_duCheng_1",
+    "name": "Casino",
+    "birth": [700, 100, -2100, 0]
+},
+
+"105": {
+    "scene": "DSJ_shangYeZhongXin_1",
+    "name": "Commercial Center",
+    "birth": [1000, 200, -1000, 0]
+},
+
+"106": {
+    "scene": "DSJ_haiBian_1",
+    "name": "Seaside",
+    "birth": [1000, 100, 1000, 0]
+},
+
+"107": {
+    "scene": "DSJ_zhongGuoCheng_1",
+    "name": "Chinatown",
+    "birth": [-4200, 100, -3400, 0]
+},
+
+"108": {
+    "scene": "DSJ_fuRenQu_1",
+    "name": "Rich Area",
+    "birth": [0, 100, 0, 0]
+},
+
+"109": {
+    "scene": "DSJ_pkWanFa_1",
+    "name": "PVP",
+    "birth": [0, 100, 0, 0]
+}
+
+}
+
+def map_spawn(map_id):
+map_id = str(map_id)
+
+cfg = MAPS.get(map_id)
+
+if cfg:
+    return list(cfg["birth"])
+
+return [6600, 200, -2371, 0]
+
+def movement_data(pos):
+x = intval(pos[0])
+y = intval(pos[1])
+z = intval(pos[2])
+r = intval(pos[3])
+
+return encode_sproto([
+    (0, x),
+    (1, y),
+    (2, z),
+    (3, r)
+])
+
+============================================================
+
+CHARACTER SPROTO
+
+============================================================
+
+def character_overview(c):
+return encode_sproto([
+(0, c.get("id", 0)),
+(1, c.get("name", "Hero")),
+(2, c.get("prof", 0)),
+(3, c.get("level", 1)),
+(4, c.get("create_time", 0)),
+(5, c.get("last_played", 0))
+])
+
+def full_character(c):
+return encode_sproto([
+(0, c.get("id", 0)),
+(1, c.get("name", "Hero")),
+(2, c.get("prof", 0)),
+(3, c.get("level", 1)),
+(4, c.get("exp", 0)),
+(5, c.get("cash", 0)),
+(6, c.get("gold", 0)),
+(7, c.get("diamond", 0)),
+(8, c.get("hp", 0)),
+(9, c.get("hp_max", 0)),
+(10, c.get("atk", 0)),
+(11, c.get("def", 0)),
+(12, c.get("hit", 0)),
+(13, c.get("eva", 0)),
+(14, c.get("cri", 0)),
+(15, c.get("res", 0)),
+(16, c.get("mount_id", "")),
+(17, c.get("map_id", DEFAULT_MAP))
+])
+
+def character_aoi(c):
+return encode_sproto([
+(0, c.get("id", 0)),
+(1, c.get("name", "Hero")),
+(2, c.get("prof", 0)),
+(3, c.get("level", 1)),
+(4, movement_data(c.get("pos", map_spawn(DEFAULT_MAP))))
+])
+
+============================================================
+
+ATTRIBUTES
+
+============================================================
+
+def sync_attributes(c):
+return encode_sproto([
+(0, c.get("hp", 0)),
+(1, c.get("hp_max", 0)),
+(2, c.get("atk", 0)),
+(3, c.get("def", 0)),
+(4, c.get("hit", 0)),
+(5, c.get("eva", 0)),
+(6, c.get("cri", 0)),
+(7, c.get("res", 0)),
+(8, c.get("crd", 15000)),
+(9, c.get("crr", 0)),
+(10, c.get("exd", 0)),
+(11, c.get("exr", 0))
+])
+
+def power(c):
+return int(
+c.get("atk", 100) * 16 +
+c.get("hp_max", 1000) +
+c.get("def", 50) * 11 +
+c.get("hit", 100) * 2 +
+c.get("eva", 50) * 5.5 +
+c.get("cri", 20) * 10 +
+c.get("res", 10) * 10
+)
+
+============================================================
+
+INVENTORY
+
+============================================================
+
+def inventory_add(c, item_id, count):
+item_id = str(item_id)
+count = int(count)
+
+for item in c.setdefault("inventory", []):
+    if str(item.get("id")) == item_id:
+        item["count"] = int(item.get("count", 0)) + count
         return
 
-    char["active_missions"]["1001"] = {
-        "state": 1,
-        "quality": 0,
-        "parm": [0] * 8,
+c["inventory"].append({
+    "id": item_id,
+    "count": count,
+    "state": 1
+})
+
+def inventory_remove(c, item_id, count):
+item_id = str(item_id)
+count = int(count)
+
+for item in c.get("inventory", []):
+    if str(item.get("id")) == item_id:
+        current = int(item.get("count", 0))
+
+        if current < count:
+            return False
+
+        item["count"] = current - count
+
+        if item["count"] <= 0:
+            c["inventory"].remove(item)
+
+        return True
+
+return False
+
+def sync_inventory(c):
+entries = []
+
+for item in c.get("inventory", []):
+    entries.append(
+        encode_sproto([
+            (0, str(item.get("id", ""))),
+            (1, int(item.get("count", 0))),
+            (2, int(item.get("state", 1)))
+        ])
+    )
+
+return encode_sproto([
+    (0, entries)
+])
+
+============================================================
+
+SKILLS
+
+============================================================
+
+PROF_SKILLS = {
+0: ["1001", "1002", "1003", "1004"],
+1: ["2001", "2002", "2003", "2004"],
+2: ["3001", "3002", "3003", "3004"]
+}
+
+SKILL_UNLOCK_LEVELS = [1, 5, 10, 15]
+
+def build_skill_sync(c):
+prof = int(c.get("prof", 0))
+levels = c.get("skill_levels", {})
+
+skills = PROF_SKILLS.get(prof, PROF_SKILLS[0])
+result = []
+
+for i, sid in enumerate(skills):
+    required = SKILL_UNLOCK_LEVELS[
+        min(i, len(SKILL_UNLOCK_LEVELS) - 1)
+    ]
+
+    level = int(levels.get(sid, 1))
+
+    result.append(
+        encode_sproto([
+            (0, sid),
+            (1, level),
+            (2, 1 if c.get("level", 1) >= required else 0)
+        ])
+    )
+
+return encode_sproto([
+    (0, result),
+    (1, False)
+])
+
+============================================================
+
+MISSION ENGINE
+
+============================================================
+
+MISSIONS = {
+"1001": {
+"class": 1,
+"logic_type": 0,
+"require_num": 1,
+"next_id": "1002"
+},
+
+"1002": {
+    "class": 1,
+    "logic_type": 1,
+    "target_id": "1101",
+    "require_num": 1,
+    "next_id": "1003"
+},
+
+"1003": {
+    "class": 1,
+    "logic_type": 25,
+    "require_num": 1,
+    "next_id": ""
+}
+
+}
+
+def accept_mission(c, mission_id):
+mission_id = str(mission_id)
+
+cfg = MISSIONS.get(mission_id)
+
+if not cfg:
+    return False
+
+active = c.setdefault("active_missions", {})
+
+if mission_id in active:
+    return False
+
+active[mission_id] = {
+    "state": 1,
+    "parm": [0] * 8,
+    "accept_time": int(time.time())
+}
+
+return True
+
+def mission_sync(c):
+entries = []
+
+for mid, m in c.get("active_missions", {}).items():
+    parm = m.get("parm", [0] * 8)
+
+    entries.append(
+        encode_sproto([
+            (0, str(mid)),
+            (1, int(m.get("state", 1))),
+            (2, parm[0] if parm else 0),
+            (3, int(m.get("accept_time", 0)))
+        ])
+    )
+
+return encode_sproto([
+    (0, entries)
+])
+
+def mission_progress(c, npc_id=None, die_type=0):
+changed = False
+
+for mid, mission in list(
+    c.get("active_missions", {}).items()
+):
+    cfg = MISSIONS.get(str(mid))
+
+    if not cfg:
+        continue
+
+    logic = cfg.get("logic_type")
+
+    valid = False
+
+    if logic in (1, 4, 11, 17, 23):
+        if logic == 17:
+            valid = True
+        elif str(cfg.get("target_id")) == str(npc_id):
+            valid = True
+
+    elif logic == 25:
+        valid = True
+
+    elif logic in (19, 24):
+        valid = die_type in (2, 6)
+
+    elif logic == 20:
+        valid = die_type == 3
+
+    if not valid:
+        continue
+
+    parm = mission.setdefault("parm", [0] * 8)
+
+    parm[0] += 1
+
+    required = int(cfg.get("require_num", 1))
+
+    if parm[0] >= required:
+        mission["state"] = 2
+
+    changed = True
+
+return changed
+
+def complete_mission(c, mid):
+mid = str(mid)
+
+mission = c.get("active_missions", {}).get(mid)
+
+if not mission:
+    return False
+
+if int(mission.get("state", 0)) != 2:
+    return False
+
+cfg = MISSIONS.get(mid)
+
+if not cfg:
+    return False
+
+c["exp"] = int(c.get("exp", 0)) + 100
+c["cash"] = int(c.get("cash", 0)) + 500
+
+if cfg.get("class") == 1:
+    c["last_main_mission_id"] = mid
+
+    next_id = cfg.get("next_id")
+
+    if next_id:
+        accept_mission(c, next_id)
+
+else:
+    try:
+        c.setdefault(
+            "completed_side_missions", []
+        ).append(int(mid))
+    except Exception:
+        pass
+
+del c["active_missions"][mid]
+
+return True
+
+============================================================
+
+NPC SYSTEM
+
+============================================================
+
+NPC_DEFINITIONS = {
+"1101": {
+"name": "Mission NPC",
+"level": 1,
+"hp": 1000,
+"atk": 100,
+"def": 50,
+"pos": [6700, 200, -2400, 0]
+},
+
+"1105": {
+    "name": "Mission Character",
+    "level": 1,
+    "hp": 1500,
+    "atk": 100,
+    "def": 50,
+    "pos": [6800, 200, -2400, 0]
+},
+
+"9909": {
+    "name": "Police",
+    "level": 1,
+    "hp": 1200,
+    "atk": 120,
+    "def": 60,
+    "pos": [7000, 200, -2300, 0]
+}
+
+}
+
+def create_npc(map_id, definition_id):
+global NEXT_NPC_INSTANCE
+
+cfg = NPC_DEFINITIONS.get(
+    str(definition_id),
+    NPC_DEFINITIONS["1101"]
+)
+
+with ONLINE_LOCK:
+    NEXT_NPC_INSTANCE += 1
+    instance_id = NEXT_NPC_INSTANCE
+
+    NPC_STATE[instance_id] = {
+        "id": instance_id,
+        "definition": str(definition_id),
+        "map_id": str(map_id),
+        "hp": int(cfg["hp"]),
+        "hp_max": int(cfg["hp"]),
+        "level": int(cfg["level"]),
+        "pos": list(cfg["pos"])
     }
 
+return NPC_STATE[instance_id]
 
-# ============================================================
-# MAP
-# ============================================================
+def npc_create_packet(npc):
+return encode_sproto([
+(0, npc["id"]),
+(1, npc["definition"]),
+(2, npc["level"]),
+(3, npc["hp"]),
+(4, npc["hp_max"]),
+(5, movement_data(npc["pos"]))
+])
 
-def map_info(map_id):
+def spawn_map_npcs(conn, map_id):
+# Core mission / city NPC set.
+definitions = [
+"1101",
+"1105"
+]
 
-    map_id = str(map_id)
-
-    return MAP_CONFIG.get(
-        map_id,
-        {
-            "scene": "DSJ_GTA",
-            "map_id": map_id,
-            "line": 0,
-            "line_count": 1,
-        }
-    )
-
-
-def send_enter_map(conn, char):
-
-    mid = str(char.get("map_id", DEFAULT_MAP))
-    cfg = map_info(mid)
-
-    print(
-        "[MAP] ENTER map=%s scene=%s"
-        % (mid, cfg["scene"])
-    )
+for definition_id in definitions:
+    npc = create_npc(map_id, definition_id)
 
     send_push(
         conn,
-        503,
-        encode_sproto([
-            (0, mid),
-            (1, cfg["line"]),
-            (2, cfg["line_count"]),
-        ])
+        509,
+        npc_create_packet(npc)
     )
 
+============================================================
 
-def send_main_player(conn, char):
+MAP / SCENE
 
-    send_push(
-        conn,
-        504,
-        encode_sproto([
-            (0, full_character(char)),
-            (1, movement_data(char)),
-        ])
-    )
+============================================================
 
+def enter_map(conn, c):
+map_id = str(c.get("map_id", DEFAULT_MAP))
 
-def send_aoi_player(conn, char):
+if map_id not in MAPS:
+    map_id = DEFAULT_MAP
+    c["map_id"] = map_id
 
-    send_push(
-        conn,
-        505,
-        encode_sproto([
-            (0, full_character(char)),
-            (1, movement_data(char)),
-        ])
-    )
+if not c.get("pos"):
+    c["pos"] = map_spawn(map_id)
 
+save_characters()
 
-def send_time_sync(conn):
-
-    now = int(time.time())
-
-    functions = {}
-
-    for fid in [
-        "4026",
-        "4061",
-        "4064",
-        "4081",
-        "4084",
-    ]:
-        functions[fid] = encode_sproto([
-            (0, int(fid)),
-            (1, 1),
-        ])
-
-    send_push(
-        conn,
-        614,
-        encode_sproto([
-            (0, now),
-            (2, 0),
-            (9, functions),
-            (13, 1),
-            (14, now),
-        ])
-    )
-
-
-def send_inventory(conn, char):
-
-    inventory = char.get("inventory", {})
-
-    send_push(
-        conn,
-        611,
-        encode_sproto([
-            (0, inventory),
-        ])
-    )
-
-    send_push(
-        conn,
-        592,
-        encode_sproto([
-            (0, {}),
-        ])
-    )
-
-    send_push(
-        conn,
-        616,
-        encode_sproto([
-            (0, char.get("fashion", {})),
-        ])
-    )
-
-
-def send_skills(conn, char):
-
-    skills = char.get("skills", {})
-
-    send_push(
-        conn,
-        540,
-        encode_sproto([
-            (0, skills),
-            (1, False),
-        ])
-    )
-
-
-def send_attributes(conn, char):
-
-    send_push(
-        conn,
-        510,
-        encode_sproto([
-            (0, char.get("hp_max", 3000)),
-            (1, char.get("atk", 150)),
-            (2, char.get("def", 50)),
-            (3, char.get("hit", 100)),
-            (4, char.get("eva", 50)),
-            (5, char.get("cri", 20)),
-            (6, char.get("res", 10)),
-        ])
-    )
-
-
-def send_initial_world(conn, char):
-
-    # common data
-    send_time_sync(conn)
-
-    # inventory
-    send_inventory(conn, char)
-
-    # skills
-    send_skills(conn, char)
-
-    # attributes
-    send_attributes(conn, char)
-
-    # map FIRST
-    send_enter_map(conn, char)
-
-    # player AFTER map
-    send_main_player(conn, char)
-
-    # AOI representation
-    send_aoi_player(conn, char)
-
-
-def finish_map_loading(conn, char):
-
-    print(
-        "[MAP READY] map=%s"
-        % char.get("map_id", DEFAULT_MAP)
-    )
-
-    # Client has now initialized RunningMapIdStr.
-    # Mission synchronization belongs after map initialization.
-    send_push(
-        conn,
-        519,
-        mission_sync(char)
-    )
-
-    # Start enter-game only after player/map are ready.
-    send_push(
-        conn,
-        654,
-        encode_sproto([
-            (0, 1),
-        ])
-    )
-
-    print("[WORLD] ENTER GAME COMPLETE")
-
-
-# ============================================================
-# NPC / AOI
-# ============================================================
-
-def send_npc(conn, npc_id, x, y, z):
-
-    npc_char = encode_sproto([
-        (0, npc_id),
-        (1, 0),
-        (2, 1),
-        (3, 1000),
+# 503 enter_map
+send_push(
+    conn,
+    503,
+    encode_sproto([
+        (0, map_id),
+        (1, int(c.get("line_index", 0))),
+        (2, 1)
     ])
+)
 
-    movement = encode_sproto([
-        (0, x),
-        (1, y),
-        (2, z),
-        (3, 0),
+# 504 main_player_create
+send_push(
+    conn,
+    504,
+    encode_sproto([
+        (0, full_character(c)),
+        (1, movement_data(c["pos"]))
     ])
+)
 
-    send_push(
-        conn,
-        505,
+# 505 aoi_add for player
+send_push(
+    conn,
+    505,
+    character_aoi(c)
+)
+
+# NPCs
+spawn_map_npcs(conn, map_id)
+
+def transition_map(conn, c, map_id):
+map_id = str(map_id)
+
+if map_id not in MAPS:
+    map_id = DEFAULT_MAP
+
+c["map_id"] = map_id
+c["line_index"] = 0
+c["pos"] = map_spawn(map_id)
+
+save_characters()
+
+enter_map(conn, c)
+
+============================================================
+
+WORLD SYNC
+
+============================================================
+
+def function_sync():
+ids = [
+"100",
+"107",
+"108",
+"3001",
+"3010",
+"3013",
+"3014",
+"3015",
+"3030",
+"4014",
+"4026",
+"4061",
+"4064",
+"4081",
+"4084"
+]
+
+functions = []
+
+for fid in ids:
+    functions.append(
         encode_sproto([
-            (0, npc_char),
-            (1, movement),
+            (0, fid),
+            (1, 1)
         ])
     )
 
+return encode_sproto([
+    (0, int(time.time())),
+    (2, 0),
+    (9, functions),
+    (13, 1),
+    (14, int(time.time()))
+])
 
-def spawn_initial_npcs(conn, char):
+def initial_sync(conn, c):
+# 614
+send_push(
+conn,
+614,
+function_sync()
+)
 
-    mid = str(char.get("map_id", DEFAULT_MAP))
+# 611
+send_push(
+    conn,
+    611,
+    sync_inventory(c)
+)
 
-    if mid != "11":
-        return
+# 592
+send_push(
+    conn,
+    592,
+    encode_sproto([(0, {})])
+)
 
-    # Initial safe world NPC set.
-    npc_positions = [
-        (9901, 29800, 100, -17000),
-        (9902, 30000, 100, -17100),
-        (9903, 30200, 100, -17200),
-    ]
+# 616
+send_push(
+    conn,
+    616,
+    encode_sproto([(0, {})])
+)
 
-    for npc_id, x, y, z in npc_positions:
-        send_npc(
-            conn,
-            npc_id,
-            x,
-            y,
-            z
-        )
+# 510
+send_push(
+    conn,
+    510,
+    sync_attributes(c)
+)
 
+# 540
+send_push(
+    conn,
+    540,
+    build_skill_sync(c)
+)
 
-# ============================================================
-# GAME ACTIONS
-# ============================================================
+# 519
+send_push(
+    conn,
+    519,
+    mission_sync(c)
+)
 
-def handle_move(char, body):
+============================================================
 
-    raw = body.get(0)
+LOGIN / SESSION
 
-    if not raw:
-        return
+============================================================
 
-    movement = decode_sproto(raw)
+def resolve_account(body):
+candidates = [
+body.get(1),
+body.get(0),
+body.get(2),
+body.get(5)
+]
 
-    x = get_int(movement, 0, char["pos"][0])
-    y = get_int(movement, 1, char["pos"][1])
-    z = get_int(movement, 2, char["pos"][2])
-    r = get_int(movement, 3, char["pos"][3])
+for value in candidates:
+    if value is None:
+        continue
 
-    char["pos"] = [
-        x,
-        y,
-        z,
-        r,
-    ]
+    value = textval(value)
 
+    if value:
+        return value
 
-def handle_skill(char, body):
+return ""
 
-    if char is None:
-        return
+============================================================
 
-    skill_id = get_int(body, 0, 0)
+CHARACTER HANDLERS
 
-    if skill_id:
-        char["last_skill"] = skill_id
+============================================================
 
+def handle_character_list(conn, session, account_id):
+chars = character_bucket(account_id)
 
-def handle_attack(char, body):
+chars.sort(
+    key=lambda c: int(c.get("last_played", 0)),
+    reverse=True
+)
 
-    if char is None:
-        return
+overview = [
+    character_overview(c)
+    for c in chars
+]
 
-    target = get_int(body, 0, 0)
+send_reply(
+    conn,
+    session,
+    encode_sproto([
+        (0, overview)
+    ])
+)
 
-    if target:
-        char["last_target"] = target
+def handle_character_create(
+conn,
+session,
+account_id,
+body
+):
+raw = body.get(0)
 
+if raw:
+    data = decode_sproto(raw)
 
-def handle_change_map(conn, char, body):
-
-    if char is None:
-        return
-
-    target = get_string(
-        body,
-        0,
-        DEFAULT_MAP
+    name = textval(
+        data.get(0),
+        f"Hero_{random.randint(100,999)}"
     )
 
-    if target not in MAP_CONFIG:
-        target = DEFAULT_MAP
+    prof = intval(
+        data.get(1),
+        0
+    )
+else:
+    name = f"Hero_{random.randint(100,999)}"
+    prof = 0
 
-    char["map_id"] = target
-    char["pos"] = DEFAULT_POS[:]
+chars = character_bucket(account_id)
 
-    save_db()
-
-    send_enter_map(
+if len(chars) >= 3:
+    send_reply(
         conn,
-        char
+        session,
+        encode_sproto([
+            (1, 1)
+        ])
     )
+    return
 
-    send_main_player(
-        conn,
-        char
-    )
+c = {
+    "id": generate_character_id(),
+    "name": name[:24],
+    "prof": prof
+}
 
+init_character(c)
 
-# ============================================================
-# CLIENT HANDLER
-# ============================================================
+chars.append(c)
+
+save_characters()
+
+send_reply(
+    conn,
+    session,
+    encode_sproto([
+        (0, character_overview(c)),
+        (1, 0)
+    ])
+)
+
+def find_character(account_id, char_id):
+chars = character_bucket(account_id)
+
+for c in chars:
+    if intval(c.get("id")) == intval(char_id):
+        return c
+
+return None
+
+============================================================
+
+GAME CLIENT
+
+============================================================
 
 def client_handler(conn, addr):
+print(f"[+] GAME CONNECTION {addr}")
 
-    print(
-        "[+] GAME CONNECTION %s"
-        % (addr,)
-    )
+account_id = ""
+selected = None
+session_last = None
 
-    account_id = "0"
-    picked_char = None
+try:
+    conn.settimeout(120)
 
-    try:
+    while True:
+        header = recv_exact(conn, 2)
 
-        while True:
+        if not header:
+            break
 
-            header = conn.recv(2)
+        size = struct.unpack(">H", header)[0]
 
-            if not header:
-                break
+        if size <= 0:
+            continue
 
-            while len(header) < 2:
-                part = conn.recv(2 - len(header))
+        packed = recv_exact(conn, size)
 
-                if not part:
-                    return
+        if not packed:
+            break
 
-                header += part
+        raw = sproto_unpack(packed)
 
-            size = struct.unpack(
-                ">H",
-                header
-            )[0]
+        packet = decode_sproto(raw)
 
-            packet = bytearray()
+        msg = intval(packet.get(0), -1)
+        session = packet.get(1)
 
-            while len(packet) < size:
+        session_last = session
 
-                chunk = conn.recv(
-                    size - len(packet)
-                )
+        offset = 2
 
-                if not chunk:
-                    return
-
-                packet += chunk
-
-            raw = sproto_unpack(
-                bytes(packet)
-            )
-
-            if len(raw) < 2:
-                continue
-
-            package = decode_sproto(
+        if len(raw) >= 2:
+            fn = struct.unpack_from(
+                "<H",
                 raw,
                 0
-            )
-
-            msg = get_int(
-                package,
-                0,
-                -1
-            )
-
-            session = package.get(1)
-
-            print(
-                "[RX] TAG=%s SESSION=%s"
-                % (msg, session)
-            )
-
-            header_len = struct.unpack(
-                "<H",
-                raw[:2]
             )[0]
 
-            body_offset = 2 + header_len * 2
+            offset = 2 + fn * 2
 
-            body = decode_sproto(
-                raw,
-                body_offset
-            )
+        body = decode_sproto(
+            raw,
+            offset
+        )
 
-            response = encode_sproto([])
+        print(
+            f"[RX] TAG={msg} SESSION={session}"
+        )
 
-            # ------------------------------------------------
-            # LOGIN
-            # ------------------------------------------------
+        # ------------------------------------------------
+        # 4 LOGIN
+        # ------------------------------------------------
 
-            if msg == 4:
+        if msg == 4:
+            account_id = resolve_account(body)
 
-                account_id = get_string(
-                    body,
-                    1,
-                    "0"
-                )
-
-                print(
-                    "[LOGIN] account=%s"
-                    % account_id
-                )
-
-                response = encode_sproto([
+            send_reply(
+                conn,
+                session,
+                encode_sproto([
                     (0, 2),
                     (1, GAME_VERSION),
                     (2, DATA_VERSION),
-                    (3, 1),
+                    (3, 1)
                 ])
+            )
 
-            # ------------------------------------------------
-            # CHARACTER LIST
-            # ------------------------------------------------
+            print(
+                f"[LOGIN] account={account_id}"
+            )
 
-            elif msg == 103:
+        # ------------------------------------------------
+        # 103 CHARACTER LIST
+        # ------------------------------------------------
 
-                chars = character_list(
-                    account_id
+        elif msg == 103:
+            handle_character_list(
+                conn,
+                session,
+                account_id
+            )
+
+        # ------------------------------------------------
+        # 104 CHARACTER CREATE
+        # ------------------------------------------------
+
+        elif msg == 104:
+            handle_character_create(
+                conn,
+                session,
+                account_id,
+                body
+            )
+
+        # ------------------------------------------------
+        # 105 CHARACTER PICK
+        # ------------------------------------------------
+
+        elif msg == 105:
+            char_id = intval(
+                body.get(0)
+            )
+
+            selected = find_character(
+                account_id,
+                char_id
+            )
+
+            if selected:
+                init_character(selected)
+
+                selected["last_played"] = int(
+                    time.time()
                 )
 
-                response = encode_sproto([
-                    (0, chars),
-                ])
-
-            # ------------------------------------------------
-            # CHARACTER CREATE
-            # ------------------------------------------------
-
-            elif msg == 104:
-
-                char_data = body.get(0)
-
-                if char_data:
-                    create_data = decode_sproto(
-                        char_data
-                    )
-                else:
-                    create_data = {}
-
-                name = get_string(
-                    create_data,
-                    0,
-                    "Player"
-                )
-
-                profession = get_int(
-                    create_data,
-                    1,
-                    0
-                )
-
-                char_id = int(
-                    time.time() * 1000
-                )
-
-                while str(char_id) in PLAYER_DB:
-                    char_id += 1
-
-                char = new_character(
-                    char_id,
-                    name,
-                    profession
-                )
-
-                char["account_id"] = str(
-                    account_id
-                )
-
-                ensure_first_mission(
-                    char
-                )
-
-                PLAYER_DB[str(char_id)] = char
-
-                save_db()
-
-                print(
-                    "[CREATE] char=%s name=%s"
-                    % (
-                        char_id,
-                        name
-                    )
-                )
-
-                response = encode_sproto([
-                    (0, None),
-                    (1, 0),
-                ])
-
-            # ------------------------------------------------
-            # CHARACTER PICK
-            # ------------------------------------------------
-
-            elif msg == 105:
-
-                char_id = get_int(
-                    body,
-                    0,
-                    0
-                )
-
-                picked_char = PLAYER_DB.get(
-                    str(char_id)
-                )
-
-                if picked_char is None:
-
-                    response = encode_sproto([
-                        (0, 0),
-                    ])
-
-                else:
-
-                    picked_char["account_id"] = str(
-                        picked_char.get(
-                            "account_id",
-                            account_id
-                        )
+                if not selected.get(
+                    "active_missions"
+                ):
+                    accept_mission(
+                        selected,
+                        "1001"
                     )
 
-                    ensure_first_mission(
-                        picked_char
-                    )
+                save_characters()
 
+                with ONLINE_LOCK:
                     ONLINE_PLAYERS[
-                        str(char_id)
-                    ] = conn
-
-                    print(
-                        "[PICK] char=%s map=%s"
-                        % (
-                            char_id,
-                            picked_char.get(
-                                "map_id",
-                                DEFAULT_MAP
-                            )
+                        str(selected["id"])
+                    ] = {
+                        "conn": conn,
+                        "char": selected,
+                        "map": selected.get(
+                            "map_id",
+                            DEFAULT_MAP
                         )
+                    }
+
+            send_reply(
+                conn,
+                session,
+                encode_sproto([
+                    (
+                        0,
+                        1 if selected else 0
                     )
+                ])
+            )
 
-                    response = encode_sproto([
-                        (0, 1),
-                    ])
-
-                    # Do NOT send mission sync before map.
-                    send_initial_world(
-                        conn,
-                        picked_char
-                    )
-
-                    spawn_initial_npcs(
-                        conn,
-                        picked_char
-                    )
-
-            # ------------------------------------------------
-            # MAP READY
-            # ------------------------------------------------
-
-            elif msg == 100:
-
-                if picked_char:
-
-                    finish_map_loading(
-                        conn,
-                        picked_char
-                    )
-
-                    save_db()
-
-            # ------------------------------------------------
-            # MOVE
-            # ------------------------------------------------
-
-            elif msg == 101:
-
-                handle_move(
-                    picked_char,
-                    body
+            if selected:
+                initial_sync(
+                    conn,
+                    selected
                 )
 
-                save_db()
+                # Client map loading flow.
+                send_push(
+                    conn,
+                    654,
+                    encode_sproto([
+                        (0, 1)
+                    ])
+                )
 
-                response = encode_sproto([
-                    (0, body.get(0, b"")),
-                ])
+                enter_map(
+                    conn,
+                    selected
+                )
 
-            # ------------------------------------------------
-            # CHARACTER CREATE / RELATED
-            # ------------------------------------------------
+        # ------------------------------------------------
+        # 100 MAP READY
+        # ------------------------------------------------
 
-            elif msg == 106:
+        elif msg == 100:
+            if selected:
+                print(
+                    f"[MAP READY] "
+                    f"{selected.get('map_id')}"
+                )
 
-                if picked_char:
-
-                    handle_change_map(
-                        conn,
-                        picked_char,
-                        body
-                    )
-
-            # ------------------------------------------------
-            # ACCEPT MISSION
-            # ------------------------------------------------
-
-            elif msg == 112:
-
-                if picked_char:
-
-                    mid = get_string(
-                        body,
-                        0,
-                        ""
-                    )
-
-                    if mid:
-
-                        picked_char.setdefault(
-                            "active_missions",
-                            {}
-                        )
-
-                        if mid not in picked_char[
-                            "active_missions"
-                        ]:
-
-                            picked_char[
-                                "active_missions"
-                            ][mid] = {
-                                "state": 1,
-                                "quality": 0,
-                                "parm": [0] * 8,
-                            }
-
-                            send_push(
-                                conn,
-                                519,
-                                mission_sync(
-                                    picked_char
-                                )
+                # Re-send authoritative player after
+                # scene is ready.
+                send_push(
+                    conn,
+                    504,
+                    encode_sproto([
+                        (
+                            0,
+                            full_character(
+                                selected
                             )
+                        ),
+                        (
+                            1,
+                            movement_data(
+                                selected["pos"]
+                            )
+                        )
+                    ])
+                )
 
-                            save_db()
+                send_push(
+                    conn,
+                    505,
+                    character_aoi(
+                        selected
+                    )
+                )
 
-            # ------------------------------------------------
-            # COMPLETE MISSION
-            # ------------------------------------------------
+                send_push(
+                    conn,
+                    654,
+                    encode_sproto([
+                        (0, 1)
+                    ])
+                )
 
-            elif msg == 113:
+        # ------------------------------------------------
+        # 270 DOWNLOAD FINISH
+        # ------------------------------------------------
 
-                if picked_char:
+        elif msg == 270:
+            if selected:
+                inventory_add(
+                    selected,
+                    "9011",
+                    10
+                )
 
-                    mid = get_string(
-                        body,
-                        0,
-                        ""
+                inventory_add(
+                    selected,
+                    "9001",
+                    20
+                )
+
+                inventory_add(
+                    selected,
+                    "5026",
+                    5
+                )
+
+                selected["mount_id"] = "1001"
+
+                save_characters()
+
+                send_push(
+                    conn,
+                    611,
+                    sync_inventory(
+                        selected
+                    )
+                )
+
+                send_push(
+                    conn,
+                    654,
+                    encode_sproto([
+                        (0, 1)
+                    ])
+                )
+
+            send_reply(
+                conn,
+                session
+            )
+
+        # ------------------------------------------------
+        # 101 MOVE
+        # ------------------------------------------------
+
+        elif msg == 101:
+            movement_raw = body.get(0)
+
+            if selected and movement_raw:
+                movement = decode_sproto(
+                    movement_raw
+                )
+
+                pos = [
+                    intval(movement.get(0)),
+                    intval(movement.get(1)),
+                    intval(movement.get(2)),
+                    intval(movement.get(3))
+                ]
+
+                selected["pos"] = pos
+                selected["last_played"] = int(
+                    time.time()
+                )
+
+                save_characters()
+
+                # Echo movement.
+                send_reply(
+                    conn,
+                    session,
+                    encode_sproto([
+                        (0, movement_raw)
+                    ])
+                )
+
+                # AOI movement.
+                send_push(
+                    conn,
+                    506,
+                    encode_sproto([
+                        (0, selected["id"]),
+                        (1, movement_raw)
+                    ])
+                )
+
+            else:
+                send_reply(
+                    conn,
+                    session
+                )
+
+        # ------------------------------------------------
+        # 218 HEARTBEAT
+        # ------------------------------------------------
+
+        elif msg == 218:
+            client_time = intval(
+                body.get(0),
+                0
+            )
+
+            send_reply(
+                conn,
+                session,
+                encode_sproto([
+                    (0, client_time),
+                    (1, int(time.time()))
+                ])
+            )
+
+        # ------------------------------------------------
+        # 118 RANDOM NAME
+        # ------------------------------------------------
+
+        elif msg == 118:
+            names = [
+                "John",
+                "Mary",
+                "William",
+                "Michael",
+                "James",
+                "David",
+                "Chris",
+                "Lisa",
+                "Robert",
+                "Alex"
+            ]
+
+            name = (
+                random.choice(names)
+                + "_"
+                + str(random.randint(100, 999))
+            )
+
+            send_reply(
+                conn,
+                session,
+                encode_sproto([
+                    (0, name)
+                ])
+            )
+
+        # ------------------------------------------------
+        # 112 ACCEPT MISSION
+        # ------------------------------------------------
+
+        elif msg == 112:
+            mid = textval(
+                body.get(0)
+            )
+
+            result = 0
+
+            if selected:
+                result = 1 if accept_mission(
+                    selected,
+                    mid
+                ) else 0
+
+                save_characters()
+
+                send_push(
+                    conn,
+                    519,
+                    mission_sync(
+                        selected
+                    )
+                )
+
+            send_reply(
+                conn,
+                session,
+                encode_sproto([
+                    (0, result)
+                ])
+            )
+
+        # ------------------------------------------------
+        # 113 COMPLETE MISSION
+        # ------------------------------------------------
+
+        elif msg == 113:
+            mid = textval(
+                body.get(0)
+            )
+
+            result = 0
+
+            if selected:
+                result = 1 if complete_mission(
+                    selected,
+                    mid
+                ) else 0
+
+                save_characters()
+
+                send_push(
+                    conn,
+                    519,
+                    mission_sync(
+                        selected
+                    )
+                )
+
+                send_push(
+                    conn,
+                    510,
+                    sync_attributes(
+                        selected
+                    )
+                )
+
+                send_push(
+                    conn,
+                    611,
+                    sync_inventory(
+                        selected
+                    )
+                )
+
+            send_reply(
+                conn,
+                session,
+                encode_sproto([
+                    (0, result)
+                ])
+            )
+
+        # ------------------------------------------------
+        # 523 SET MISSION STATE
+        # ------------------------------------------------
+
+        elif msg == 523:
+            mid = textval(
+                body.get(0)
+            )
+
+            state = intval(
+                body.get(1),
+                1
+            )
+
+            if selected:
+                mission = selected.get(
+                    "active_missions",
+                    {}
+                ).get(mid)
+
+                if mission:
+                    mission["state"] = state
+                    save_characters()
+
+                    send_push(
+                        conn,
+                        519,
+                        mission_sync(
+                            selected
+                        )
                     )
 
-                    mission = picked_char.get(
-                        "active_missions",
-                        {}
-                    ).get(mid)
+            send_reply(
+                conn,
+                session
+            )
 
-                    if mission:
+        # ------------------------------------------------
+        # 524 SET MISSION PARAM
+        # ------------------------------------------------
 
-                        mission["state"] = 3
+        elif msg == 524:
+            mid = textval(
+                body.get(0)
+            )
 
-                        picked_char.setdefault(
-                            "completed_missions",
-                            []
-                        ).append(
-                            int(mid)
-                            if mid.isdigit()
-                            else mid
+            index = intval(
+                body.get(1),
+                1
+            )
+
+            value = intval(
+                body.get(2),
+                0
+            )
+
+            if selected:
+                mission = selected.get(
+                    "active_missions",
+                    {}
+                ).get(mid)
+
+                if mission:
+                    parm = mission.setdefault(
+                        "parm",
+                        [0] * 8
+                    )
+
+                    idx = max(
+                        0,
+                        min(
+                            len(parm) - 1,
+                            index - 1
                         )
+                    )
 
-                        del picked_char[
-                            "active_missions"
-                        ][mid]
+                    parm[idx] = value
+
+                    save_characters()
+
+                    send_push(
+                        conn,
+                        519,
+                        mission_sync(
+                            selected
+                        )
+                    )
+
+            send_reply(
+                conn,
+                session
+            )
+
+        # ------------------------------------------------
+        # 130 SKILL LEVEL UP
+        # ------------------------------------------------
+
+        elif msg == 130:
+            sid = textval(
+                body.get(0)
+            )
+
+            requested_level = intval(
+                body.get(1),
+                0
+            )
+
+            result = 0
+
+            if selected:
+                cost = (
+                    requested_level + 1
+                ) * 100
+
+                if (
+                    selected.get("cash", 0)
+                    >= cost
+                ):
+                    selected["cash"] -= cost
+
+                    selected.setdefault(
+                        "skill_levels",
+                        {}
+                    )[sid] = (
+                        requested_level + 1
+                    )
+
+                    result = 1
+
+                    save_characters()
+
+                    send_push(
+                        conn,
+                        540,
+                        build_skill_sync(
+                            selected
+                        )
+                    )
+
+                    send_push(
+                        conn,
+                        510,
+                        sync_attributes(
+                            selected
+                        )
+                    )
+
+            send_reply(
+                conn,
+                session,
+                encode_sproto([
+                    (0, result)
+                ])
+            )
+
+        # ------------------------------------------------
+        # 102 SKILL USE
+        # ------------------------------------------------
+
+        elif msg == 102:
+            sid = textval(
+                body.get(1)
+            )
+
+            target = intval(
+                body.get(0)
+            )
+
+            actions = body.get(3)
+
+            if selected:
+                send_push(
+                    conn,
+                    508,
+                    encode_sproto([
+                        (0, selected["id"]),
+                        (1, target),
+                        (2, sid),
+                        (3, actions)
+                    ])
+                )
+
+            send_reply(
+                conn,
+                session
+            )
+
+        # ------------------------------------------------
+        # 111 ACCEPT DAMAGE
+        # ------------------------------------------------
+
+        elif msg == 111:
+            damage_list = body.get(0)
+
+            if selected and isinstance(
+                damage_list,
+                list
+            ):
+                for raw_damage in damage_list:
+                    if not isinstance(
+                        raw_damage,
+                        bytes
+                    ):
+                        continue
+
+                    damage = decode_sproto(
+                        raw_damage
+                    )
+
+                    target_id = intval(
+                        damage.get(0)
+                    )
+
+                    amount = max(
+                        0,
+                        intval(
+                            damage.get(1)
+                        )
+                    )
+
+                    # Player damage.
+                    if target_id == intval(
+                        selected["id"]
+                    ):
+                        selected["hp"] = max(
+                            0,
+                            selected.get(
+                                "hp",
+                                selected.get(
+                                    "hp_max",
+                                    3000
+                                )
+                            ) - amount
+                        )
 
                         send_push(
                             conn,
-                            519,
-                            mission_sync(
-                                picked_char
+                            510,
+                            sync_attributes(
+                                selected
                             )
                         )
 
-                        save_db()
+                    # NPC damage.
+                    elif target_id in NPC_STATE:
+                        npc = NPC_STATE[
+                            target_id
+                        ]
 
-            # ------------------------------------------------
-            # SKILL USE
-            # ------------------------------------------------
+                        npc["hp"] = max(
+                            0,
+                            npc["hp"] - amount
+                        )
 
-            elif msg == 102:
+                        if npc["hp"] <= 0:
+                            send_push(
+                                conn,
+                                507,
+                                encode_sproto([
+                                    (
+                                        0,
+                                        target_id
+                                    )
+                                ])
+                            )
 
-                handle_skill(
-                    picked_char,
-                    body
+            save_characters()
+
+            send_reply(
+                conn,
+                session
+            )
+
+        # ------------------------------------------------
+        # 307 LOCAL NPC DIE
+        # ------------------------------------------------
+
+        elif msg == 307:
+            npc_id = textval(
+                body.get(0)
+            )
+
+            die_type = intval(
+                body.get(3),
+                0
+            )
+
+            if selected:
+                level = int(
+                    selected.get(
+                        "level",
+                        1
+                    )
                 )
 
-            # ------------------------------------------------
-            # HEARTBEAT
-            # ------------------------------------------------
+                exp_reward = level * 20
+                cash_reward = level * 100
 
-            elif msg == 218:
-
-                t1 = get_int(
-                    body,
-                    0,
-                    0
+                selected["exp"] = (
+                    selected.get("exp", 0)
+                    + exp_reward
                 )
 
-                response = encode_sproto([
-                    (0, t1),
-                    (1, int(time.time())),
+                selected["cash"] = (
+                    selected.get("cash", 0)
+                    + cash_reward
+                )
+
+                mission_progress(
+                    selected,
+                    npc_id,
+                    die_type
+                )
+
+                send_push(
+                    conn,
+                    638,
+                    encode_sproto([
+                        (
+                            0,
+                            [
+                                encode_sproto([
+                                    (0, "2001"),
+                                    (1, exp_reward),
+                                    (2, 0)
+                                ]),
+                                encode_sproto([
+                                    (0, "1001"),
+                                    (1, cash_reward),
+                                    (2, 0)
+                                ])
+                            ]
+                        )
+                    ])
+                )
+
+                send_push(
+                    conn,
+                    519,
+                    mission_sync(
+                        selected
+                    )
+                )
+
+                send_push(
+                    conn,
+                    510,
+                    sync_attributes(
+                        selected
+                    )
+                )
+
+                save_characters()
+
+            send_reply(
+                conn,
+                session
+            )
+
+        # ------------------------------------------------
+        # 298 IMPACT NPC
+        # ------------------------------------------------
+
+        elif msg == 298:
+            npc_id = textval(
+                body.get(0)
+            )
+
+            print(
+                f"[NPC INTERACT] {npc_id}"
+            )
+
+            if selected and npc_id == "1105":
+                send_push(
+                    conn,
+                    529,
+                    encode_sproto([
+                        (0, "102098"),
+                        (1, True)
+                    ])
+                )
+
+            send_reply(
+                conn,
+                session
+            )
+
+        # ------------------------------------------------
+        # 106 ENTER NEW MAP
+        # ------------------------------------------------
+
+        elif msg == 106:
+            map_id = textval(
+                body.get(0)
+            )
+
+            if selected:
+                transition_map(
+                    conn,
+                    selected,
+                    map_id
+                )
+
+            send_reply(
+                conn,
+                session
+            )
+
+        # ------------------------------------------------
+        # 107 ENTER COPY SCENE
+        # ------------------------------------------------
+
+        elif msg == 107:
+            map_id = textval(
+                body.get(0)
+            )
+
+            if selected:
+                transition_map(
+                    conn,
+                    selected,
+                    map_id
+                )
+
+            send_reply(
+                conn,
+                session
+            )
+
+        # ------------------------------------------------
+        # 246 SURVIVE
+        # ------------------------------------------------
+
+        elif msg == 246:
+            map_id = textval(
+                body.get(0),
+                DEFAULT_MAP
+            )
+
+            if selected:
+                transition_map(
+                    conn,
+                    selected,
+                    map_id
+                )
+
+            send_reply(
+                conn,
+                session
+            )
+
+        # ------------------------------------------------
+        # 273 SCUFFLE
+        # ------------------------------------------------
+
+        elif msg == 273:
+            map_id = textval(
+                body.get(0),
+                DEFAULT_MAP
+            )
+
+            if selected:
+                transition_map(
+                    conn,
+                    selected,
+                    map_id
+                )
+
+            send_reply(
+                conn,
+                session
+            )
+
+        # ------------------------------------------------
+        # 207 BAR FIGHT
+        # ------------------------------------------------
+
+        elif msg == 207:
+            map_id = textval(
+                body.get(0),
+                DEFAULT_MAP
+            )
+
+            if selected:
+                transition_map(
+                    conn,
+                    selected,
+                    map_id
+                )
+
+            send_reply(
+                conn,
+                session
+            )
+
+        # ------------------------------------------------
+        # 201 WILD BOSS
+        # ------------------------------------------------
+
+        elif msg == 201:
+            map_id = textval(
+                body.get(0),
+                DEFAULT_MAP
+            )
+
+            if selected:
+                transition_map(
+                    conn,
+                    selected,
+                    map_id
+                )
+
+            send_reply(
+                conn,
+                session
+            )
+
+        # ------------------------------------------------
+        # 322 GUILD CITY
+        # ------------------------------------------------
+
+        elif msg == 322:
+            map_id = textval(
+                body.get(0),
+                DEFAULT_MAP
+            )
+
+            if selected:
+                transition_map(
+                    conn,
+                    selected,
+                    map_id
+                )
+
+            send_reply(
+                conn,
+                session
+            )
+
+        # ------------------------------------------------
+        # 311 DOMIN PK
+        # ------------------------------------------------
+
+        elif msg == 311:
+            send_push(
+                conn,
+                552,
+                encode_sproto([
+                    (0, 1)
                 ])
+            )
 
-            # ------------------------------------------------
-            # ENTER MAP
-            # ------------------------------------------------
-
-            elif msg == 503:
-
-                if picked_char:
-
-                    send_enter_map(
-                        conn,
-                        picked_char
+            if selected:
+                for mid, mission in selected.get(
+                    "active_missions",
+                    {}
+                ).items():
+                    cfg = MISSIONS.get(
+                        str(mid)
                     )
 
-            # ------------------------------------------------
-            # START ENTER GAME
-            # ------------------------------------------------
+                    if cfg and cfg.get(
+                        "logic_type"
+                    ) == 25:
+                        mission["state"] = 2
 
-            elif msg == 654:
+                save_characters()
 
-                if picked_char:
-
-                    send_push(
-                        conn,
-                        654,
-                        encode_sproto([
-                            (0, 1),
-                        ])
+                send_push(
+                    conn,
+                    519,
+                    mission_sync(
+                        selected
                     )
-
-            # ------------------------------------------------
-            # DOWNLOAD FINISH
-            # ------------------------------------------------
-
-            elif msg == 270:
-
-                if picked_char:
-
-                    picked_char[
-                        "is_finish_download"
-                    ] = 2
-
-                    save_db()
-
-                    send_push(
-                        conn,
-                        654,
-                        encode_sproto([
-                            (0, 1),
-                        ])
-                    )
-
-            # ------------------------------------------------
-            # NPC / COMBAT
-            # ------------------------------------------------
-
-            elif msg in (
-                200,
-                201,
-                202,
-                203,
-                204,
-                205,
-                210,
-                225,
-                235,
-                242,
-                252,
-                257,
-                258,
-                261,
-                278,
-                296,
-                299,
-                310,
-                313,
-                319,
-            ):
-
-                handle_attack(
-                    picked_char,
-                    body
                 )
 
-            # ------------------------------------------------
-            # GENERIC RESPONSE
-            # ------------------------------------------------
+            send_reply(
+                conn,
+                session
+            )
+
+        # ------------------------------------------------
+        # 7 UPDATE GAME SERVER
+        # ------------------------------------------------
+
+        elif msg == 7:
+            server_entry = encode_sproto([
+                (0, 302),
+                (1, "EU-001"),
+                (2, "s16.serv00.com"),
+                (3, 15678),
+                (4, 1),
+                (5, 1),
+                (6, 1),
+                (7, 0),
+                (8, 1),
+                (9, 1)
+            ])
+
+            send_reply(
+                conn,
+                session,
+                encode_sproto([
+                    (0, [server_entry])
+                ])
+            )
+
+        # ------------------------------------------------
+        # COMMON ACKS
+        # ------------------------------------------------
+
+        elif msg in (
+            145,
+            225,
+            258,
+            261,
+            278,
+            296,
+            299,
+            310,
+            313,
+            319
+        ):
+            send_reply(
+                conn,
+                session
+            )
+
+        # ------------------------------------------------
+        # UNKNOWN REQUEST
+        # ------------------------------------------------
+
+        else:
+            print(
+                f"[UNHANDLED] TAG={msg}"
+            )
 
             if session is not None:
-
-                send_response(
+                send_reply(
                     conn,
-                    get_int(
-                        {1: session},
-                        1,
-                        0
-                    ),
-                    response
+                    session
                 )
 
-    except Exception:
+except socket.timeout:
+    print(
+        f"[-] TIMEOUT {addr}"
+    )
 
-        traceback.print_exc()
+except ConnectionResetError:
+    print(
+        f"[-] RESET {addr}"
+    )
 
-    finally:
+except Exception:
+    traceback.print_exc()
 
-        if picked_char:
-
-            save_db()
-
-            cid = str(
-                picked_char.get(
-                    "id",
-                    ""
-                )
-            )
-
-            ONLINE_PLAYERS.pop(
-                cid,
-                None
-            )
-
+finally:
+    if selected:
         try:
-            conn.close()
+            selected["last_played"] = int(
+                time.time()
+            )
+
+            save_characters()
+
+            with ONLINE_LOCK:
+                ONLINE_PLAYERS.pop(
+                    str(selected.get("id")),
+                    None
+                )
         except Exception:
             pass
 
-        print(
-            "[-] GAME CONNECTION CLOSED %s"
-            % (addr,)
-        )
+    try:
+        conn.close()
+    except Exception:
+        pass
 
+    print(
+        f"[-] GAME CONNECTION CLOSED {addr}"
+    )
 
-# ============================================================
-# SERVER
-# ============================================================
+============================================================
+
+SOCKET HELPERS
+
+============================================================
+
+def recv_exact(conn, size):
+data = bytearray()
+
+while len(data) < size:
+    chunk = conn.recv(
+        size - len(data)
+    )
+
+    if not chunk:
+        return None
+
+    data.extend(chunk)
+
+return bytes(data)
+
+============================================================
+
+PERIODIC SAVE
+
+============================================================
+
+def save_loop():
+while True:
+time.sleep(15)
+
+    try:
+        save_characters()
+    except Exception:
+        traceback.print_exc()
+
+============================================================
+
+SERVER
+
+============================================================
 
 def start_server():
+print("========================================")
+print(" ATG GAME SERVER")
+print(" PORT:", PORT)
+print(" VERSION:", GAME_VERSION)
+print(" DATA:", DATA_VERSION)
+print(" MAP:", DEFAULT_MAP)
+print("========================================")
 
-    server = socket.socket(
-        socket.AF_INET,
-        socket.SOCK_STREAM
-    )
+threading.Thread(
+    target=save_loop,
+    daemon=True
+).start()
 
-    server.setsockopt(
-        socket.SOL_SOCKET,
-        socket.SO_REUSEADDR,
-        1
-    )
+server = socket.socket(
+    socket.AF_INET,
+    socket.SOCK_STREAM
+)
 
-    server.bind(
-        ("0.0.0.0", PORT)
-    )
+server.setsockopt(
+    socket.SOL_SOCKET,
+    socket.SO_REUSEADDR,
+    1
+)
 
-    server.listen(50)
+server.bind(
+    (HOST, PORT)
+)
 
-    print("========================================")
-    print(" ATG GAME SERVER")
-    print(" PORT:", PORT)
-    print(" VERSION:", GAME_VERSION)
-    print(" DATA:", DATA_VERSION)
-    print(" MAP:", DEFAULT_MAP)
-    print("========================================")
-    print("[READY] GAME SERVER 9555 LISTENING")
+server.listen(50)
 
-    while True:
+print(
+    f"[READY] GAME SERVER 9555 LISTENING"
+)
 
-        conn, addr = server.accept()
+while True:
+    conn, addr = server.accept()
 
-        threading.Thread(
-            target=client_handler,
-            args=(conn, addr),
-            daemon=True
-        ).start()
+    threading.Thread(
+        target=client_handler,
+        args=(conn, addr),
+        daemon=True
+    ).start()
 
-
-if __name__ == "__main__":
-    start_server()
+if name == "main":
+start_server()
