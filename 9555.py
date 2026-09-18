@@ -559,12 +559,52 @@ def movement_data(pos):
 # CHARACTER SPROTO
 # ============================================================
 
+def build_general(c):
+    return encode_sproto([
+        (0, c.get("name", "Hero")),
+        (1, c.get("prof", 0)),
+        (3, c.get("map_id", "101")),
+        (4, 1)  # tutorial finish
+    ])
+
+
+def build_attribute_other(c):
+    return encode_sproto([
+        (0, c.get("hp", 3000)),
+        (1, c.get("exp", 0)),
+        (2, c.get("level", 1)),
+        (3, power(c)),  # combValue
+        (7, -1)  # guildId
+    ])
+
+
+def build_visual(c):
+    # IDs must be strings matching Bundle keys
+    return encode_sproto([
+        (0, "10001"),  # weapon
+        (1, "20001"),  # head
+        (2, "30001"),  # body
+        (3, "40001")   # leg
+    ])
+
+
+def build_property(c):
+    return encode_sproto([
+        (0, c.get("cash", 0)),
+        (1, c.get("gold", 0)),
+        (2, c.get("diamond", 0)),
+        (3, c.get("battle_coin", 0)),
+        (4, 0),
+        (5, 0)
+    ])
+
+
 def character_overview(c):
     return encode_sproto([
         (0, c.get("id", 0)),
-        (1, c.get("name", "Hero")),
-        (2, c.get("prof", 0)),
-        (3, c.get("level", 1)),
+        (1, build_general(c)),
+        (2, build_attribute_other(c)),
+        (3, build_visual(c)),
         (4, c.get("create_time", 0)),
         (5, c.get("last_played", 0))
     ])
@@ -573,23 +613,11 @@ def character_overview(c):
 def full_character(c):
     return encode_sproto([
         (0, c.get("id", 0)),
-        (1, c.get("name", "Hero")),
-        (2, c.get("prof", 0)),
-        (3, c.get("level", 1)),
-        (4, c.get("exp", 0)),
-        (5, c.get("cash", 0)),
-        (6, c.get("gold", 0)),
-        (7, c.get("diamond", 0)),
-        (8, c.get("hp", 0)),
-        (9, c.get("hp_max", 0)),
-        (10, c.get("atk", 0)),
-        (11, c.get("def", 0)),
-        (12, c.get("hit", 0)),
-        (13, c.get("eva", 0)),
-        (14, c.get("cri", 0)),
-        (15, c.get("res", 0)),
-        (16, c.get("mount_id", "")),
-        (17, c.get("map_id", DEFAULT_MAP))
+        (1, build_general(c)),
+        (2, encode_sproto([(0, c.get("hp_max", 3000))])),  # attribute (Tag 2)
+        (3, build_attribute_other(c)),
+        (4, build_property(c)),
+        (5, build_visual(c))
     ])
 
 
@@ -810,7 +838,7 @@ def mission_progress(c, npc_id=None, die_type=0):
     changed = False
 
     for mid, mission in list(
-        c.get("active_missions", {}).items()
+            c.get("active_missions", {}).items()
     ):
         cfg = MISSIONS.get(str(mid))
 
@@ -1187,10 +1215,10 @@ def handle_character_list(conn, session, account_id):
 
 
 def handle_character_create(
-    conn,
-    session,
-    account_id,
-    body
+        conn,
+        session,
+        account_id,
+        body
 ):
     raw = body.get(0)
 
@@ -1380,7 +1408,7 @@ def client_handler(conn, addr):
                     )
 
                     if not selected.get(
-                        "active_missions"
+                            "active_missions"
                     ):
                         accept_mission(
                             selected,
@@ -1618,9 +1646,9 @@ def client_handler(conn, addr):
                 ]
 
                 name = (
-                    random.choice(names)
-                    + "_"
-                    + str(random.randint(100, 999))
+                        random.choice(names)
+                        + "_"
+                        + str(random.randint(100, 999))
                 )
 
                 send_reply(
@@ -1828,12 +1856,12 @@ def client_handler(conn, addr):
 
                 if selected:
                     cost = (
-                        requested_level + 1
-                    ) * 100
+                                   requested_level + 1
+                           ) * 100
 
                     if (
-                        selected.get("cash", 0)
-                        >= cost
+                            selected.get("cash", 0)
+                            >= cost
                     ):
                         selected["cash"] -= cost
 
@@ -1841,7 +1869,7 @@ def client_handler(conn, addr):
                             "skill_levels",
                             {}
                         )[sid] = (
-                            requested_level + 1
+                                requested_level + 1
                         )
 
                         result = 1
@@ -1912,13 +1940,13 @@ def client_handler(conn, addr):
                 damage_list = body.get(0)
 
                 if selected and isinstance(
-                    damage_list,
-                    list
+                        damage_list,
+                        list
                 ):
                     for raw_damage in damage_list:
                         if not isinstance(
-                            raw_damage,
-                            bytes
+                                raw_damage,
+                                bytes
                         ):
                             continue
 
@@ -1939,7 +1967,7 @@ def client_handler(conn, addr):
 
                         # Player damage.
                         if target_id == intval(
-                            selected["id"]
+                                selected["id"]
                         ):
                             selected["hp"] = max(
                                 0,
@@ -2016,13 +2044,13 @@ def client_handler(conn, addr):
                     cash_reward = level * 100
 
                     selected["exp"] = (
-                        selected.get("exp", 0)
-                        + exp_reward
+                            selected.get("exp", 0)
+                            + exp_reward
                     )
 
                     selected["cash"] = (
-                        selected.get("cash", 0)
-                        + cash_reward
+                            selected.get("cash", 0)
+                            + cash_reward
                     )
 
                     mission_progress(
@@ -2271,15 +2299,15 @@ def client_handler(conn, addr):
 
                 if selected:
                     for mid, mission in selected.get(
-                        "active_missions",
-                        {}
+                            "active_missions",
+                            {}
                     ).items():
                         cfg = MISSIONS.get(
                             str(mid)
                         )
 
                         if cfg and cfg.get(
-                            "logic_type"
+                                "logic_type"
                         ) == 25:
                             mission["state"] = 2
 
@@ -2329,16 +2357,16 @@ def client_handler(conn, addr):
             # ------------------------------------------------
 
             elif msg in (
-                145,
-                225,
-                258,
-                261,
-                278,
-                296,
-                299,
-                310,
-                313,
-                319
+                    145,
+                    225,
+                    258,
+                    261,
+                    278,
+                    296,
+                    299,
+                    310,
+                    313,
+                    319
             ):
                 send_reply(
                     conn,
