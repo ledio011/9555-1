@@ -482,9 +482,9 @@ def get_full_char(c):
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
 
-    # The APK sets IsFinishDownload from character.download: 2 means finished.
-    # New characters must see the real download flow first.
-    download_state = 2 if c.get('download_complete', False) else 1
+    # The existing server flow starts with the download already complete.
+    # Do not introduce a download gate during server selection.
+    download_state = 2
     return encode_sproto([
         (0, c['id']),
         (1, gen),
@@ -777,8 +777,15 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             matched = True
         elif logic_type in [1, 4, 11, 17, 23] and event == 'kill':
             matched = logic_type == 17 or target == target_value
-        elif logic_type in [19, 24] and event == 'car':
-            matched = logic_type == 19 or target == target_value
+        elif logic_type == 19 and event == 'car':
+            # The client sends type 2 for a normal car robbery without an
+            # NPC/car id, so its event type is the authoritative discriminator.
+            matched = die_type == 2
+        elif logic_type == 24 and event == 'car':
+            # Target-car robbery (mission 1002) sends only type 6.  The
+            # request intentionally has no npcid, therefore comparing it to
+            # the configured MountId ("Chevrolet") can never succeed.
+            matched = die_type == 6
         elif logic_type == 20 and event == 'impact':
             matched = die_type == 3 and (not target or target == target_value)
         elif logic_type in [0, 2, 6, 21] and event == 'interact':
@@ -1377,12 +1384,13 @@ def client_handler(conn, addr):
                         picked_char, send_rpc_push, 'kill',
                         target_id=npcid, die_type=die_type
                     )
-                    if die_type in [2, 6]:
-                        updated = advance_missions(
-                            picked_char, send_rpc_push, 'car',
-                            target_id=npcid, die_type=die_type
-                        ) or updated
-                    elif die_type == 3:
+                    # Car-robbery packets have no NPC ID; their type is 2
+                    # (normal robbery) or 6 (target-car robbery).
+                    updated = advance_missions(
+                        picked_char, send_rpc_push, 'car',
+                        target_id=npcid, die_type=die_type
+                    ) or updated
+                    if die_type == 3:
                         updated = advance_missions(
                             picked_char, send_rpc_push, 'impact',
                             target_id=npcid, die_type=die_type
