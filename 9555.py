@@ -887,7 +887,8 @@ def init_character_fields(c):
         'map_id': "11",
         'download_complete': False,
         'active_domin_id': None,
-        'boss_inst_id': None
+        'boss_inst_id': None,
+        'pre_arena_pos': None
     }
     for k, v in fields.items():
         if k not in c: c[k] = v
@@ -899,15 +900,15 @@ def init_character_fields(c):
         ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1, {'hp': [3000,3000,3000]}))
         c['hp'] = ld['hp'][prof] if prof < len(ld['hp']) else ld['hp'][0]
 
-def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
+def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, override_pos=None):
     src_map = picked_char.get('map_id', '11')
     target_map_id = str(target_map_id)
     picked_char['map_id'] = target_map_id
     scene_name = "Unknown"
 
     # Update position
-    landing_pos = None
-    if target_map_id == "502":
+    landing_pos = override_pos
+    if not landing_pos and target_map_id == "502":
         # Lord Battle: Attacker spawns at -4,1.2,0. facing 90 deg.
         landing_pos = [-400, 120, 0, 9000]
         print(f"[TELEPORT] Lord Battle Map 502 start pos={landing_pos}")
@@ -976,7 +977,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
             picked_char['boss_inst_id'] = boss_inst_id
             
             boss_char = get_boss_char(boss_inst_id, did)
-            send_rpc_push(544, boss_char) # rank_pvp_create_zombie_user
+            send_rpc_push(544, encode_sproto([(0, boss_char)])) # rank_pvp_create_zombie_user
             
             NPC_HP_MAP[boss_inst_id] = 10000 # Boss Max HP
             NPC_INST_MAP[boss_inst_id] = "BOSS_" + did
@@ -994,8 +995,6 @@ def is_skill_locked(sid, level, prof):
         if level < SKILL_UNLOCK_LVS[idx]:
             return True, SKILL_UNLOCK_LVS[idx]
     return False, 0
-
-NPC_HP_MAP = {} # server-id -> current_hp
 
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
@@ -1462,6 +1461,8 @@ def client_handler(conn, addr):
                 did = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
                 print(f"[M1003 DEBUG] RX 311 domin_id={did}")
                 if picked_char:
+                    # SAVE POSITION EXACTLY
+                    picked_char['pre_arena_pos'] = list(picked_char.get('pos', [34611, 100, -49480, 8632]))
                     picked_char['active_domin_id'] = did
                     start_map_transition(conn, picked_char, "502", send_rpc_push)
                 if session is not None:
@@ -1608,9 +1609,10 @@ def client_handler(conn, addr):
 
             elif msg == 108: # leave_copy_scene
                 if picked_char:
-                    # Return to Map 11 near NPC 1105
-                    picked_char['pos'] = [34611, 100, -49480, 8632]
-                    start_map_transition(conn, picked_char, "11", send_rpc_push)
+                    # Return to the exact pre-arena position on Map 11
+                    saved_pos = picked_char.get('pre_arena_pos')
+                    picked_char['pre_arena_pos'] = None # Clear after use
+                    start_map_transition(conn, picked_char, "11", send_rpc_push, override_pos=saved_pos)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
