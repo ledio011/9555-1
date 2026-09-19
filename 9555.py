@@ -1149,16 +1149,21 @@ def client_handler(conn, addr):
                 if picked_char:
                     mid = picked_char.get('map_id', '11')
                     print(f"[MAP READY RECEIVED] map_id={mid}")
-                    send_rpc_push(654, encode_sproto([(0, 1)]))
+                    send_rpc_push(654, encode_sproto([(0, 1)])) # start_enter_game
+                    if mid == "502":
+                        # Tag 547: rank_pvp_start - Closes VS screen and starts battle
+                        send_rpc_push(547, encode_sproto([]))
                     send_rpc_push(519, sync_mission_data(picked_char))
 
             elif msg == 101: # move
+                p_raw = body.get(0)
+                if p_raw and picked_char:
+                    pd = decode_sproto(p_raw)
+                    picked_char['pos'] = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
+                    # Persistent save for safety
+                    save_chars(all_accounts_chars)
+                
                 if session is not None:
-                    p_raw = body.get(0)
-                    if p_raw and picked_char:
-                        pd = decode_sproto(p_raw)
-                        picked_char['pos'] = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
-                        save_chars(all_accounts_chars)
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, p_raw)]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
@@ -1461,8 +1466,10 @@ def client_handler(conn, addr):
                 did = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
                 print(f"[M1003 DEBUG] RX 311 domin_id={did}")
                 if picked_char:
-                    # SAVE POSITION EXACTLY
-                    picked_char['pre_arena_pos'] = list(picked_char.get('pos', [34611, 100, -49480, 8632]))
+                    # SAVE LATEST POSITION EXACTLY (Ensure list copy)
+                    latest_pos = picked_char.get('pos', [34611, 100, -49480, 8632])
+                    picked_char['pre_arena_pos'] = list(latest_pos)
+                    print(f"[M1003 DEBUG] Saved pre-arena pos: {picked_char['pre_arena_pos']}")
                     picked_char['active_domin_id'] = did
                     start_map_transition(conn, picked_char, "502", send_rpc_push)
                 if session is not None:
