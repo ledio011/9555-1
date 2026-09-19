@@ -1295,41 +1295,47 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 307 or msg == 127: # local_npc_die (307) or single_copy_scene_npc_die (127)
-                raw_val = body.get(0)
-                if isinstance(raw_val, bytes): raw_id = raw_val.decode('utf-8')
-                elif raw_val is not None: raw_id = str(raw_val)
-                else: raw_id = ""
-
-                die_type = 0
-                if msg == 307:
-                    die_type = get_val_int(body, 3)
-                else: # msg == 127
-                    # single_copy_scene_npc_die: characterId(0), npcdataid(1), pos_x(2), pos_z(3), type(4)
-                    raw_id = str(body.get(0)) # instance ID
-                    die_type = get_val_int(body, 4)
-
-                # Resolve Identity
-                inst_id = None
                 npcid = None
-                if raw_id:
+                inst_id = None
+                die_type = 0
+
+                if msg == 307:
+                    # local_npc_die: npcid(0), x(1), z(2), type(3)
+                    val0 = body.get(0)
+                    if isinstance(val0, bytes): s_val0 = val0.decode('utf-8')
+                    elif val0 is not None: s_val0 = str(val0)
+                    else: s_val0 = ""
+                    
+                    die_type = get_val_int(body, 3)
                     try:
-                        inst_id = int(raw_id)
+                        inst_id = int(s_val0)
                         npcid = NPC_INST_MAP.get(inst_id)
                     except: pass
-                    if not npcid: npcid = raw_id
+                    if not npcid: npcid = s_val0
+                else:
+                    # single_copy_scene_npc_die: characterId(0), npcdataid(1), pos_x(2), pos_z(3), type(4)
+                    val0 = body.get(0)
+                    if isinstance(val0, int): inst_id = val0
+                    elif isinstance(val0, (bytes, bytearray)):
+                        if len(val0) == 8: inst_id = struct.unpack("<q", val0)[0]
+                        elif len(val0) == 4: inst_id = struct.unpack("<i", val0)[0]
+                    
+                    val1 = body.get(1)
+                    if isinstance(val1, bytes): npcid = val1.decode('utf-8')
+                    elif val1 is not None: npcid = str(val1)
+                    
+                    die_type = get_val_int(body, 4)
+                    if not npcid and inst_id:
+                        npcid = NPC_INST_MAP.get(inst_id)
 
                 # CRITICAL DOUBLE-DEATH PROTECTION
                 is_duplicate = False
                 if inst_id is not None and inst_id > 1000000: # Only deduplicate server-side instances
                     if inst_id in DEAD_NPC_SET: is_duplicate = True
                     else: DEAD_NPC_SET.add(inst_id)
-                # Note: We do NOT deduplicate template IDs like "9901" as multiple exist.
 
                 # Cleanup HP tracking
-                try:
-                    to_del = [k for k in NPC_HP_MAP if str(k) == raw_id]
-                    for k in to_del: del NPC_HP_MAP[k]
-                except: pass
+                if inst_id and inst_id in NPC_HP_MAP: del NPC_HP_MAP[inst_id]
 
                 if picked_char and not is_duplicate:
                     # Car-robbery packets (type 2/6) usually have no NPC ID.
@@ -1371,6 +1377,7 @@ def client_handler(conn, addr):
 
                     advance_missions(picked_char, send_rpc_push, 'level')
                     sync_char_attrs_rpc(conn, picked_char)
+                    save_chars(all_accounts_chars)
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
