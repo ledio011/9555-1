@@ -908,6 +908,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
         data = encode_sproto([(0, target_map_id), (1, 0), (2, 1)])
         pf_p = sproto_pack(ph_p + data)
         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+        print(f"[M1003 DEBUG] TX 503 map_id={target_map_id}")
         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
         print(f"[MAP ENTER SEND] map_id={target_map_id} scene={scene_name} pos={picked_char['pos']}")
 
@@ -1066,6 +1067,7 @@ def client_handler(conn, addr):
                         data = encode_sproto([(0, mid), (1, 0), (2, 1)])
                         pf_p = sproto_pack(ph_p + data)
                         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+                        print(f"[M1003 DEBUG] TX 503 map_id={mid}")
                         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
                         print(f"[MAP ENTER SEND] map_id={mid} scene={scene_name} pos={picked_char['pos']}")
 
@@ -1259,6 +1261,7 @@ def client_handler(conn, addr):
                     for d in dlist:
                         target_id = d.get(0)
                         dmg = d.get(1)
+                        print(f"[M1003 DEBUG] RX 111 target_id={target_id} damage={dmg}")
                         if target_id == picked_char['id']:
                             # Ensure NPCs deal enough damage to be a threat
                             final_dmg = dmg if dmg > 10 else 10
@@ -1386,9 +1389,11 @@ def client_handler(conn, addr):
             elif msg == 311: # enter_domin_pk_scene
                 did = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
                 print(f"[*] Entering PK scene for Domin ID={did}")
-                send_rpc_push(552, encode_sproto([(0, 1)])) # result=1 (Win)
                 if picked_char:
+                    print(f"[M1003 DEBUG] RX 311 domin_id={did}")
+                    print(f"[M1003 DEBUG] BEFORE 311 map_id={picked_char.get('map_id')}")
                     advance_missions(picked_char, send_rpc_push, 'capture', target_id=did)
+                send_rpc_push(552, encode_sproto([(0, 1)])) # result=1 (Win)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -1398,6 +1403,8 @@ def client_handler(conn, addr):
                 print(f"[*] Interaction with NPC ID={nid}")
                 if picked_char:
                     if nid == "1105": # Mission 1003 challenge
+                        print("[M1003 DEBUG] RX 298 NPC=1105")
+                        print("[M1003 DEBUG] TX 529 dialog=102098 NPC=1105")
                         send_rpc_push(529, encode_sproto([(0, "102098"), (1, True)]))
                     advance_missions(picked_char, send_rpc_push, 'interact', target_id=nid)
                 if session is not None:
@@ -1446,14 +1453,61 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg in [118, 218, 145, 225, 258, 261, 278, 296, 299, 310, 313, 319]:
+            elif msg in [118, 218, 145, 225, 258, 261, 278, 296, 299, 313, 319]:
                 resp_data = encode_sproto([])
                 if msg == 118: resp_data = encode_sproto([(0, f"User_{random.randint(100,999)}")])
                 elif msg == 218: resp_data = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp_data)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
-                if msg == 310: send_rpc_push(684, encode_sproto([]))
-                elif msg == 145: send_rpc_push(555, encode_sproto([(0, [])]))
+                if msg == 145: send_rpc_push(555, encode_sproto([(0, [])]))
+
+            elif msg == 310:  # request_domin_info
+                print("[M1003 DEBUG] RX 310 request_domin_info")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+                v_p = encode_sproto([
+                    (0, "System Guard"),
+                    (1, "100"),
+                    (2, "XD_A_T"),
+                    (3, "XD_A_S"),
+                    (4, "XD_A_X"),
+                    (5, "XD_A_WQ"),
+                    (10, 0)
+                ])
+
+                g_p = encode_sproto([
+                    (0, "System Guard"),
+                    (1, 0)
+                ])
+
+                ao_p = encode_sproto([
+                    (2, 1),
+                    (3, 6000),
+                    (15, 5)
+                ])
+
+                cl_p = encode_sproto([
+                    (0, 0),
+                    (1, g_p),
+                    (3, ao_p),
+                    (4, v_p)
+                ])
+
+                di_p = encode_sproto([
+                    (0, "1"),
+                    (8, 0),
+                    (9, 0)
+                ])
+
+                resp_p = encode_sproto([
+                    (0, [di_p]),
+                    (1, [cl_p])
+                ])
+
+                print("[M1003 DEBUG] TX 684 ret_domin_info domin_id=1 state=0")
+                send_rpc_push(684, resp_p)
 
             elif msg == 178: # update_misison_parm
                 mid = body.get(0, b"").decode('utf-8')
