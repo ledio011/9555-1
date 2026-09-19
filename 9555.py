@@ -7,6 +7,7 @@ GLOBAL_INST_COUNTER = 3000000
 NPC_INST_MAP = {} # inst_id -> nid (to resolve rewards)
 NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
+DEAD_NPC_SET = set() # duplicate death/reward prevention set
 
 # Load Mission Data
 missions_data = {}
@@ -482,9 +483,9 @@ def get_full_char(c):
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
 
-    # The existing server flow starts with the download already complete.
-    # Do not introduce a download gate during server selection.
-    download_state = 2
+    # The download_state field (Tag 15) informs the client if the expanded resource
+    # bundle has been finalized. 1=Incomplete/Start prompt, 2=Finalized.
+    download_state = 2 if c.get('download_complete') else 1
     return encode_sproto([
         (0, c['id']),
         (1, gen),
@@ -571,7 +572,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         inst_id = GLOBAL_INST_COUNTER
         NPC_HP_MAP[inst_id] = hp_max
         NPC_INST_MAP[inst_id] = str(nid) # Resolver mapping
-        
+
         # Handle composite models like "PartA;PartB;PartC" to prevent client crashes
         final_nid = str(nid)
         if ";" in final_nid:
@@ -601,15 +602,18 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
     # 2. Spawn Mission targets defined by the APK data.
-    if picked_char:
+    # Map 11 (TUTORIAL_CAR) spawns targets LOCALLY. Server spawning causes duplicates/crashes.
+    if picked_char and map_str != "11":
         for mid, mdata in picked_char.get('active_missions', {}).items():
             if mdata['state'] == 1:
-                if mid in KILL_TARGET_SPAWNS:
-                    for s in KILL_TARGET_SPAWNS[mid]:
+                cfg = missions_data.get(mid)
+                logic_id = cfg.get('logic_id') if cfg else mid
+                if logic_id in KILL_TARGET_SPAWNS:
+                    for s in KILL_TARGET_SPAWNS[logic_id]:
                         if str(s['map']) == map_str:
                             for _ in range(s['num']): send_npc_create(s['nid'], f"Quest_{s['nid']}", s['x'], s['z'], 0)
-                if mid in TARGET_CAR_SPAWNS:
-                    for s in TARGET_CAR_SPAWNS[mid]:
+                if logic_id in TARGET_CAR_SPAWNS:
+                    for s in TARGET_CAR_SPAWNS[logic_id]:
                         if str(s['map']) == map_str:
                             send_npc_create(s['car_id'], f"QuestCar_{s['car_id']}", s['x'], s['z'], 0)
 
@@ -628,7 +632,7 @@ def sync_mission_data(picked_char):
             (3, [int(x) for x in parm])
         ])
         own_missions_list.append(m_bytes)
-    
+
     last_main = picked_char.get('last_main_mission_id', "-1")
     if last_main == "" or last_main == "None": last_main = "-1"
 
@@ -691,9 +695,10 @@ def give_mission_rewards(picked_char, mid, send_rpc_push):
             else: break
 
         # Send original reward popup (Tag 638)
+        # item schema: itemId(0), itemCount(1), quality(3)
         popup_items = [
-            encode_sproto([(0, "2001"), (1, added_exp), (2, 0)]),
-            encode_sproto([(0, "1001"), (1, added_cash), (2, 0)])
+            encode_sproto([(0, "2001"), (1, added_exp), (3, 0)]),
+            encode_sproto([(0, "1001"), (1, added_cash), (3, 0)])
         ]
 
         items, amts = reward.get('items', []), reward.get('item_amounts', [])
@@ -701,7 +706,7 @@ def give_mission_rewards(picked_char, mid, send_rpc_push):
         for i in range(len(items)):
             if items[i]:
                 amt = amts[i] if i < len(amts) else 1
-                popup_items.append(encode_sproto([(0, items[i]), (1, amt), (2, 0)]))
+                popup_items.append(encode_sproto([(0, items[i]), (1, amt), (3, 0)]))
                 add_to_inventory(picked_char, items[i], amt)
                 granted_items.append((items[i], amt))
 
@@ -718,9 +723,9 @@ def accept_mission_logic(picked_char, mid):
     m = missions_data[mid]
     pre_id = m.get('pre_id', "")
     is_main_chain = (
-        m.get('class') == 1
-        and pre_id
-        and str(picked_char.get('last_main_mission_id', "")) == str(pre_id)
+            m.get('class') == 1
+            and pre_id
+            and str(picked_char.get('last_main_mission_id', "")) == str(pre_id)
     )
     if picked_char.get('level', 1) < m.get('min_level', 0) and not is_main_chain:
         print(f"[accept_mission_logic] FAILED: level too low {picked_char.get('level')} < {m.get('min_level')}")
@@ -783,15 +788,25 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             matched = die_type == 2
         elif logic_type == 24 and event == 'car':
             # Target-car robbery (mission 1002) sends only type 6.  The
-            # request intentionally has no npcid, therefore comparing it to
-            # the configured MountId ("Chevrolet") can never succeed.
+            # request intentionally has no npcid, therefore we match on type.
             matched = die_type == 6
         elif logic_type == 20 and event == 'impact':
             matched = die_type == 3 and (not target or target == target_value)
         elif logic_type in [0, 2, 6, 21] and event == 'interact':
-            matched = not target or target == target_value or str(cfg.get('logic_id', '')) == target_value
+            if logic_type == 21 and die_type == 4:
+                # Arrive Target sends missionId as target_id
+                matched = (target_value == mid)
+            else:
+                matched = not target or target == target_value or str(cfg.get('logic_id', '')) == target_value
+        elif logic_type in [3, 4] and event == 'pickup':
+            # Collect Item / Monster Drop matches on logic_id (item ID)
+            matched = str(cfg.get('logic_id')) == target_value
         elif logic_type == 25 and event == 'capture':
-            matched = not target or target == target_value
+            # LogicType 25 (Capture) matches activity ID or NPC target
+            matched = not target or target == target_value or str(cfg.get('logic_id', '')) == target_value
+        elif logic_type in [102, 103, 105, 106, 107, 108, 110, 113, 114, 117, 119, 120, 132] and event == 'interact':
+            # Dungeon/Guide entry missions advance on interaction/entry
+            matched = str(cfg.get('logic_id')) == str(target_id)
         elif logic_type == 114 and event == 'world_boss':
             matched = True
         elif logic_type == 7 and event == 'map':
@@ -856,7 +871,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
         # Liberty City height fix: ensure player is above NavMesh
         y_coord = int(py * 100)
         if target_map_id == "101" or target_map_id == "105":
-            y_coord = 200 
+            y_coord = 200
         landing_pos = [int(px * 100), y_coord, int(pz * 100), 0]
         print(f"[TELEPORT] Transition {src_map} -> {target_map_id} using portal heuristic: {landing_pos}")
 
@@ -953,7 +968,8 @@ def client_handler(conn, addr):
             if msg == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
                 sid = get_val_int(body, 5, 1); cur_areaId = get_area_id(sid)
-                resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "200"), (3, 1)])
+                # DataVersion 205 triggers expansion download banner if client is 200
+                resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "205"), (3, 1)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
@@ -1065,7 +1081,6 @@ def client_handler(conn, addr):
                         print("[!] FAILED TO SEND INITIAL MAP ENTER")
                         traceback.print_exc()
                     print("[DEBUG] AFTER MAP ENTER")
-                    # Initial main_player_create handled by map_ready (MSG 100)
 
             elif msg == 100: # map_ready
                 if picked_char:
@@ -1073,79 +1088,6 @@ def client_handler(conn, addr):
                     print(f"[MAP READY RECEIVED] map_id={mid}")
                     send_rpc_push(654, encode_sproto([(0, 1)]))
                     send_rpc_push(519, sync_mission_data(picked_char))
-
-            elif msg == 270: # download_finish
-                if picked_char:
-                    picked_char['download_complete'] = True
-                    picked_char['mount_id'] = "1001"
-                    add_to_inventory(picked_char, "9011", 10)
-                    add_to_inventory(picked_char, "9001", 20)
-                    add_to_inventory(picked_char, "5026", 5)
-                    save_chars(all_accounts_chars)
-                    send_rpc_push(611, sync_inventory_data(picked_char))
-                    print("[MSG 270] Client finished download. Sending start_enter_game.")
-                    send_rpc_push(654, encode_sproto([(0, 1)]))
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-            elif msg == 106: # enter_new_map
-                mid = body.get(0, b"").decode('utf-8')
-                print(f"[RX] enter_new_map: {mid}")
-                if picked_char:
-                    start_map_transition(conn, picked_char, mid, send_rpc_push)
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-            elif msg == 107: # enter_copy_scene
-                mid = body.get(0, b"").decode('utf-8')
-                print(f"[RX] enter_copy_scene: {mid}")
-                if picked_char:
-                    start_map_transition(conn, picked_char, mid, send_rpc_push)
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-            elif msg == 246: # enter_survive_batttle
-                mid = body.get(0, b"").decode('utf-8')
-                if picked_char: start_map_transition(conn, picked_char, mid, send_rpc_push)
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-            elif msg == 273: # enter_scuffle_batttle
-                mid = body.get(0, b"").decode('utf-8')
-                if picked_char: start_map_transition(conn, picked_char, mid, send_rpc_push)
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-            elif msg == 207: # enter_bar_fight
-                mid = body.get(0, b"").decode('utf-8')
-                if picked_char: start_map_transition(conn, picked_char, mid, send_rpc_push)
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-            elif msg == 201: # enter_wild_boss
-                mid = body.get(0, b"").decode('utf-8')
-                if picked_char: start_map_transition(conn, picked_char, mid, send_rpc_push)
-                if picked_char:
-                    advance_missions(picked_char, send_rpc_push, 'world_boss')
-                    # The APK completes the activity mission from copy_scene_result.
-                    send_rpc_push(552, encode_sproto([(0, 1), (1, mid), (2, True)]))
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-            elif msg == 322: # enter_guild_city_scene
-                did = body.get(0, b"").decode('utf-8')
-                mid = GUILD_CAPTURE_DATA.get(did, did)
-                if picked_char: start_map_transition(conn, picked_char, mid, send_rpc_push)
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 101: # move
                 if session is not None:
@@ -1271,38 +1213,38 @@ def client_handler(conn, addr):
                         # Do NOT send 508. Response will be empty.
                     else:
                         send_rpc_push(508, encode_sproto([(0, picked_char['id']), (1, tid), (2, sid), (3, alist)]))
-                        
+
                         # Authoritative Combat: Calculate and Sync Damage
                         target_nid = NPC_INST_MAP.get(tid)
                         if target_nid:
                             hp_t, hp_t_m, atk_t, def_t, lvl_t = get_npc_attr(target_nid)
                             p_stats = get_character_stats(picked_char)
-                            
+
                             # Player -> NPC Damage
                             val_dmg = p_stats['atk'] - def_t
                             dmg = val_dmg if val_dmg > 50 else 50
                             dmg = int(dmg * random.uniform(0.9, 1.1))
-                            
+
                             # Update Server State
                             if tid in NPC_HP_MAP:
                                 NPC_HP_MAP[tid] -= dmg
-                            
+
                             # Push damage info to client (Tag 111: accept_damge)
                             dmg_item = encode_sproto([(0, tid), (1, dmg), (2, sid), (4, False)])
                             send_rpc_push(111, encode_sproto([(0, [dmg_item])]))
-                            
+
                             # NPC -> Player Counter-Attack
                             val_ndmg = atk_t - p_stats['def']
                             npc_dmg = val_ndmg if val_ndmg > 10 else 10
                             npc_dmg = int(npc_dmg * random.uniform(0.8, 1.2))
-                            
+
                             new_hp = picked_char.get('hp', p_stats['hp_max']) - npc_dmg
                             picked_char['hp'] = new_hp if new_hp > 0 else 0
-                            
+
                             # Push player damage to client
                             p_dmg_item = encode_sproto([(0, picked_char['id']), (1, npc_dmg), (2, "1"), (4, False)])
                             send_rpc_push(111, encode_sproto([(0, [p_dmg_item])]))
-                            
+
                             # Sync player attributes (HP bar)
                             sync_char_attrs_rpc(conn, picked_char)
 
@@ -1321,31 +1263,65 @@ def client_handler(conn, addr):
                             new_hp = picked_char.get('hp', 0) - final_dmg
                             picked_char['hp'] = new_hp if new_hp > 0 else 0
                             sync_char_attrs_rpc(conn, picked_char)
-                        elif target_id in NPC_HP_MAP:
-                            NPC_HP_MAP[target_id] -= dmg
                             if NPC_HP_MAP[target_id] <= 0:
-                                # Spawn original reward drop (Cash 1001, Exp 2001)
+                                # Ensure death is processed exactly once
+                                if target_id in DEAD_NPC_SET:
+                                    continue
+                                DEAD_NPC_SET.add(target_id)
+
+                                # Spawn original reward drop (Cash 1001, Exp 2001) using proper nested Sproto type
                                 global GLOBAL_INST_COUNTER
                                 GLOBAL_INST_COUNTER += 1
-                                # drop_item_info (527): id(0), itemid(1), count(2), x(3), z(4)
+                                # drop_item_info (Tag 527): serverId(0), pos_x(1), pos_z(2), type(3), item(4), ownServerId(7)
                                 pos = picked_char['pos']
-                                drop_data = encode_sproto([(0, GLOBAL_INST_COUNTER), (1, "1001"), (2, 50), (3, pos[0]+100), (4, pos[2]+100)])
+                                nested_item = encode_sproto([(0, "1001"), (1, 50), (3, 1)]) # itemId(0), itemCount(1), quality(3)
+                                drop_data = encode_sproto([
+                                    (0, GLOBAL_INST_COUNTER),
+                                    (1, int(pos[0] + 100)),
+                                    (2, int(pos[2] + 100)),
+                                    (3, 1), # Type 1
+                                    (4, nested_item),
+                                    (7, picked_char['id']) # ownServerId maps to tag 7
+                                ])
                                 send_rpc_push(527, drop_data)
+                                
+                                # Process missions for server-simulated NPCs
+                                target_nid = NPC_INST_MAP.get(target_id)
+                                if target_nid:
+                                    advance_missions(picked_char, send_rpc_push, 'kill', target_id=target_nid)
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 307: # local_npc_die
-                raw_id = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
-                die_type = get_val_int(body, 3)
-                
-                # Resolve Identity: Is it an Instance ID?
+            elif msg == 307 or msg == 127: # local_npc_die (307) or single_copy_scene_npc_die (127)
+                raw_val = body.get(0)
+                if isinstance(raw_val, bytes): raw_id = raw_val.decode('utf-8')
+                elif raw_val is not None: raw_id = str(raw_val)
+                else: raw_id = ""
+
+                die_type = 0
+                if msg == 307:
+                    die_type = get_val_int(body, 3)
+                else: # msg == 127
+                    # single_copy_scene_npc_die: characterId(0), npcdataid(1), pos_x(2), pos_z(3), type(4)
+                    raw_id = str(body.get(0)) # instance ID
+                    die_type = get_val_int(body, 4)
+
+                # Resolve Identity
+                inst_id = None
                 npcid = None
-                try:
-                    inst_id = int(raw_id)
-                    npcid = NPC_INST_MAP.get(inst_id)
-                except: pass
-                
-                if not npcid: npcid = raw_id # Fallback to raw string ID
+                if raw_id:
+                    try:
+                        inst_id = int(raw_id)
+                        npcid = NPC_INST_MAP.get(inst_id)
+                    except: pass
+                    if not npcid: npcid = raw_id
+
+                # CRITICAL DOUBLE-DEATH PROTECTION
+                is_duplicate = False
+                if inst_id is not None and inst_id > 1000000: # Only deduplicate server-side instances
+                    if inst_id in DEAD_NPC_SET: is_duplicate = True
+                    else: DEAD_NPC_SET.add(inst_id)
+                # Note: We do NOT deduplicate template IDs like "9901" as multiple exist.
 
                 # Cleanup HP tracking
                 try:
@@ -1353,59 +1329,25 @@ def client_handler(conn, addr):
                     for k in to_del: del NPC_HP_MAP[k]
                 except: pass
 
-                if picked_char and npcid != "None":
-                    # Original Kill Reward Logic
-                    h_m, h_m, a_m, d_m, lvl_m = get_npc_attr(npcid)
-                    # NpcData uses 9999 as a sentinel for special NPCs, not a
-                    # gameplay level. Never let that sentinel multiply rewards.
-                    reward_level = lvl_m if 1 <= lvl_m <= 200 else 1
-                    exp_kill = reward_level * 20
-                    cash_kill = reward_level * 100
-                    picked_char['exp'] = picked_char.get('exp', 0) + exp_kill
-                    picked_char['cash'] = picked_char.get('cash', 0) + cash_kill
+                if picked_char and not is_duplicate:
+                    # Car-robbery packets (type 2/6) usually have no NPC ID.
+                    if die_type in [2, 6]:
+                        advance_missions(picked_char, send_rpc_push, 'car', die_type=die_type)
 
-                    # Send reward tip (Tag 638)
-                    send_rpc_push(638, encode_sproto([(0, [
-                        encode_sproto([(0, "2001"), (1, exp_kill), (2, 0)]),
-                        encode_sproto([(0, "1001"), (1, cash_kill), (2, 0)])
-                    ])]))
+                    if npcid and npcid != "None":
+                        # Original Kill Reward Logic: Handled by drop_item_info (527) in accept_damge.
+                        # We do NOT use level-based formulas in local_npc_die.
+                        advance_missions(picked_char, send_rpc_push, 'kill', target_id=npcid)
 
-                    # Level up loop
-                    while True:
-                        lv = picked_char.get('level', 1)
-                        rd = LEVEL_DATA.get(lv)
-                        if rd and picked_char['exp'] >= rd['exp']:
-                            picked_char['exp'] -= rd['exp']
-                            picked_char['level'] = lv + 1
-                            print(f"[LEVEL UP] CharID={picked_char['id']} NewLevel={picked_char['level']}")
-                        else: break
-
-                    updated = advance_missions(
-                        picked_char, send_rpc_push, 'kill',
-                        target_id=npcid, die_type=die_type
-                    )
-                    # Car-robbery packets have no NPC ID; their type is 2
-                    # (normal robbery) or 6 (target-car robbery).
-                    updated = advance_missions(
-                        picked_char, send_rpc_push, 'car',
-                        target_id=npcid, die_type=die_type
-                    ) or updated
                     if die_type == 3:
-                        updated = advance_missions(
-                            picked_char, send_rpc_push, 'impact',
-                            target_id=npcid, die_type=die_type
-                        ) or updated
+                        advance_missions(picked_char, send_rpc_push, 'impact', target_id=npcid)
                     elif die_type == 4:
-                        updated = advance_missions(
-                            picked_char, send_rpc_push, 'interact',
-                            target_id=npcid, die_type=die_type
-                        ) or updated
-                    updated = advance_missions(
-                        picked_char, send_rpc_push, 'level'
-                    ) or updated
+                        # For ARRIVE_TARGET, npcid field is the mission ID.
+                        advance_missions(picked_char, send_rpc_push, 'interact', target_id=npcid, die_type=die_type)
 
-                    # CRITICAL: Sync attributes immediately after kill rewards
+                    advance_missions(picked_char, send_rpc_push, 'level')
                     sync_char_attrs_rpc(conn, picked_char)
+
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -1413,92 +1355,62 @@ def client_handler(conn, addr):
             elif msg == 311: # enter_domin_pk_scene
                 did = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
                 print(f"[*] Entering PK scene for Domin ID={did}")
-                # copy_scene_result (552): result(0)=1 (Win)
-                send_rpc_push(552, encode_sproto([(0, 1)]))
-                # Trigger capture_success logic (LogicType 25)
+                send_rpc_push(552, encode_sproto([(0, 1)])) # result=1 (Win)
                 if picked_char:
-                    updated_missions = False
-                    for mid_act, mdata in picked_char['active_missions'].items():
-                        m_cfg = missions_data.get(mid_act)
-                        if m_cfg and m_cfg.get('logic_type') == 25:
-                            target = str(m_cfg.get('target_id', ''))
-                            if not target or target == did:
-                                mdata['state'] = 2
-                                send_rpc_push(523, encode_sproto([(0, mid_act), (1, 2)]))
-                                updated_missions = True
-                    if updated_missions:
-                        save_chars(all_accounts_chars)
-                        send_rpc_push(519, sync_mission_data(picked_char))
-                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    advance_missions(picked_char, send_rpc_push, 'capture', target_id=did)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 298: # impact_npc
+            elif msg == 298: # impact_npc (Interaction)
                 nid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
                 print(f"[*] Interaction with NPC ID={nid}")
-                if picked_char and nid == "1105":
-                    # Special logic for Mission 1003 Challenge Dialogue
-                    # This triggers the client-side Yes/No box (Dialog string 102098)
-                    send_rpc_push(529, encode_sproto([(0, "102098"), (1, True)]))
                 if picked_char:
-                    advance_missions(
-                        picked_char, send_rpc_push, 'interact', target_id=nid
-                    )
+                    if nid == "1105": # Mission 1003 challenge
+                        send_rpc_push(529, encode_sproto([(0, "102098"), (1, True)]))
+                    advance_missions(picked_char, send_rpc_push, 'interact', target_id=nid)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif msg in [107, 106, 246, 273, 207, 201, 322]:
+                # Scene/Dungeon Entry
+                mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
+                print(f"[RX] Scene Entry: {mid} (MSG={msg})")
+                if picked_char:
+                    start_map_transition(conn, picked_char, mid, send_rpc_push)
+                    advance_missions(picked_char, send_rpc_push, 'interact', target_id=mid)
+                    if msg == 201: # world_boss
+                        advance_missions(picked_char, send_rpc_push, 'world_boss')
+                        send_rpc_push(552, encode_sproto([(0, 1), (1, mid), (2, True)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 7: # update_game_server
-                servers = [encode_sproto([(0, 302), (1, "EU-001"), (2, "s16.serv00.com"), (3, 15678), (4, 1), (5, 1), (6, 1), (7, 0), (8, 1), (9, 1)])]
-                resp = encode_sproto([(0, servers)])
+                # Tag 2 in response is the game_server list.
+                # Tag 5 in game_server is serverPlayerState (-4=Normal).
+                # Tag 10 in game_server is newServer (0=Old).
+                server = encode_sproto([
+                    (0, 302), (1, "EU-001"), (2, "s16.serv00.com"), (3, 15678),
+                    (4, 1), (5, -4), (6, 1), (7, 1), (8, 1), (9, 1), (10, 0)
+                ])
+                resp = encode_sproto([(2, [server])])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 270: # download_finish - Give free car and items
+            elif msg == 270: # download_finish
                 if picked_char:
-                    picked_char['mount_id'] = "1001" # DJ_Car_01
+                    picked_char['download_complete'] = True
+                    # Expansion Rewards: Mount 9301 (Chevrolet), 9011 (10), 9001 (20), 5026 (5)
+                    picked_char['mount_id'] = "9301"
+                    add_to_inventory(picked_char, "9301", 1)
                     add_to_inventory(picked_char, "9011", 10)
                     add_to_inventory(picked_char, "9001", 20)
                     add_to_inventory(picked_char, "5026", 5)
                     save_chars(all_accounts_chars)
                     send_rpc_push(611, sync_inventory_data(picked_char))
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-                    # Special logic for Mission 1003 Challenge Dialogue
-                    # This triggers the client-side Yes/No box (Dialog string 102098)
-                    send_rpc_push(529, encode_sproto([(0, "102098"), (1, True)]))
-
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-            elif msg == 298: # impact_npc
-                nid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
-                print(f"[*] Interaction with NPC ID={nid}")
-                if picked_char and nid == "1105":
-                    # Special logic for Mission 1003 Challenge Dialogue
-                    # This triggers the client-side Yes/No box (Dialog string 102098)
-                    send_rpc_push(529, encode_sproto([(0, "102098"), (1, True)]))
-
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-            elif msg == 7: # update_game_server
-                servers = [encode_sproto([(0, 302), (1, "EU-001"), (2, "s16.serv00.com"), (3, 15678), (4, 1), (5, 1), (6, 1), (7, 0), (8, 1), (9, 1)])]
-                resp = encode_sproto([(0, servers)])
-                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
-                conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-            elif msg == 270: # download_finish - Give free car and items
-                if picked_char:
-                    picked_char['mount_id'] = "1001" # DJ_Car_01
-                    add_to_inventory(picked_char, "9011", 10)
-                    add_to_inventory(picked_char, "9001", 20)
-                    add_to_inventory(picked_char, "5026", 5)
-                    save_chars(all_accounts_chars)
-                    send_rpc_push(611, sync_inventory_data(picked_char))
+                    send_rpc_push(654, encode_sproto([(0, 1)])) # start_enter_game
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -1511,6 +1423,28 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if msg == 310: send_rpc_push(684, encode_sproto([]))
                 elif msg == 145: send_rpc_push(555, encode_sproto([(0, [])]))
+
+            elif msg == 178: # update_misison_parm
+                mid = body.get(0, b"").decode('utf-8')
+                if picked_char:
+                    # Survey interaction sends msg 178
+                    advance_missions(picked_char, send_rpc_push, 'interact', target_id=mid)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 119: # ask_pickup_item
+                iid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
+                if picked_char:
+                    # Item pickup can advance Logic 3/4 missions
+                    advance_missions(picked_char, send_rpc_push, 'pickup', target_id=iid)
+                    add_to_inventory(picked_char, iid, 1)
+                    send_rpc_push(611, sync_inventory_data(picked_char))
+                if session is not None:
+                    # Response: ret(0)=0 (Success)
+                    resp = encode_sproto([(0, 0)])
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif session is not None:
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
