@@ -591,15 +591,17 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         return inst_id
 
     # 1. Spawn Static NPCs & Monsters
-    if map_str in STATIC_NPC_DATA:
-        for m in STATIC_NPC_DATA[map_str]:
-            cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}"})
-            send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
+    # Map 11 (TUTORIAL_CAR) handles spawning locally on client.
+    if map_str != "11":
+        if map_str in STATIC_NPC_DATA:
+            for m in STATIC_NPC_DATA[map_str]:
+                cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}"})
+                send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
-    if map_str in MONSTER_DATA:
-        for i, m in enumerate(MONSTER_DATA[map_str]):
-            cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
-            send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
+        if map_str in MONSTER_DATA:
+            for i, m in enumerate(MONSTER_DATA[map_str]):
+                cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
+                send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
     # 2. Spawn Mission targets defined by the APK data.
     # Map 11 (TUTORIAL_CAR) spawns targets LOCALLY. Server spawning causes duplicates/crashes.
@@ -1335,8 +1337,30 @@ def client_handler(conn, addr):
                         advance_missions(picked_char, send_rpc_push, 'car', die_type=die_type)
 
                     if npcid and npcid != "None":
-                        # Original Kill Reward Logic: Handled by drop_item_info (527) in accept_damge.
-                        # We do NOT use level-based formulas in local_npc_die.
+                        # NPC Kill Rewards (EXP: level*20, CASH: level*100)
+                        h_m, h_m_m, a_m, d_m, lvl_m = get_npc_attr(npcid)
+                        reward_level = lvl_m if 1 <= lvl_m <= 200 else 1
+                        exp_kill = reward_level * 20
+                        cash_kill = reward_level * 100
+                        picked_char['exp'] += exp_kill
+                        picked_char['cash'] += cash_kill
+
+                        # Send reward tip (Tag 638)
+                        send_rpc_push(638, encode_sproto([(0, [
+                            encode_sproto([(0, "2001"), (1, exp_kill), (3, 0)]),
+                            encode_sproto([(0, "1001"), (1, cash_kill), (3, 0)])
+                        ])]))
+
+                        # Level up loop
+                        while True:
+                            lv = picked_char.get('level', 1)
+                            rd = LEVEL_DATA.get(lv)
+                            if rd and picked_char['exp'] >= rd['exp']:
+                                picked_char['exp'] -= rd['exp']
+                                picked_char['level'] = lv + 1
+                                print(f"[LEVEL UP] CharID={picked_char['id']} NewLevel={picked_char['level']}")
+                            else: break
+
                         advance_missions(picked_char, send_rpc_push, 'kill', target_id=npcid)
 
                     if die_type == 3:
