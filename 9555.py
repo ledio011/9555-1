@@ -346,6 +346,44 @@ def get_visual(name, prof):
     v = m.get(prof, m[1])
     return encode_sproto([(0, name), (1, v["m"]), (2, v["h"]), (3, v["b"]), (4, v["l"]), (5, v["w"]), (10, 0)])
 
+def get_boss_char(inst_id, did):
+    # Domin 1 boss stats and visual (XD profession)
+    name = "街区占领NPC"
+    prof = 0
+    lv = 1
+    power = 6000
+    hp_max = 10000
+    
+    # Visual
+    v = get_visual(name, prof)
+    
+    # attr_oth: hp(0), exp(1), level(2), power(3), camp(15)
+    attr_oth = encode_sproto([
+        (0, hp_max), (1, 0), (2, lv), (3, power), (15, 2)
+    ])
+    
+    # Movement: Pos (4, 1.2, 0) -> (400, 120, 0, -9000)
+    pos_data = encode_sproto([(0, 400), (1, 120), (2, 0), (3, -9000)])
+    mv = encode_sproto([(0, pos_data), (1, pos_data)])
+    
+    # Skills
+    skills_map = build_skills_map(prof, lv)
+    
+    # Runtime: attribute(6), attribute_all(7)
+    attr_run = encode_sproto([(0, hp_max), (2, 50), (3, 5)])
+    attr_all = encode_sproto([(0, hp_max), (2, 50), (3, 5), (4, 100), (5, 100), (6, 100), (7, 100), (13, 500)])
+    run = encode_sproto([(6, attr_run), (7, attr_all)])
+    
+    return encode_sproto([
+        (0, inst_id),
+        (1, encode_sproto([(0, name), (1, prof), (2, 1), (3, "502"), (4, 1)])), # general
+        (2, attr_oth),
+        (6, v),
+        (7, mv),
+        (8, skills_map),
+        (13, run)
+    ])
+
 # Skill System Constants
 PROF_SKILLS = {
     0: {"atk": "101", "dodge": "104", "actives": ["105", "106", "107", "108", "109", "110"]},
@@ -847,7 +885,9 @@ def init_character_fields(c):
         'inventory': [],
         'pos': [29860, 100, -17005, 0],
         'map_id': "11",
-        'download_complete': False
+        'download_complete': False,
+        'active_domin_id': None,
+        'boss_inst_id': None
     }
     for k, v in fields.items():
         if k not in c: c[k] = v
@@ -867,8 +907,13 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
 
     # Update position
     landing_pos = None
+    if target_map_id == "502":
+        # Lord Battle: Attacker spawns at -4,1.2,0. facing 90 deg.
+        landing_pos = [-400, 120, 0, 9000]
+        print(f"[TELEPORT] Lord Battle Map 502 start pos={landing_pos}")
+    
     # 1. Try teleport portal heuristic
-    if (target_map_id, src_map) in MAP_CONNECT_DATA:
+    if not landing_pos and (target_map_id, src_map) in MAP_CONNECT_DATA:
         px, py, pz = MAP_CONNECT_DATA[(target_map_id, src_map)]
         # Liberty City height fix: ensure player is above NavMesh
         y_coord = int(py * 100)
@@ -921,6 +966,21 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push):
 
         # TAG 505: aoi_add (NPCs)
         spawn_map_npcs(conn, target_map_id, picked_char)
+
+        # BOSS SPAWN for Dominance Map 502
+        if target_map_id == "502":
+            did = picked_char.get('active_domin_id', '1')
+            global GLOBAL_INST_COUNTER
+            GLOBAL_INST_COUNTER += 1
+            boss_inst_id = GLOBAL_INST_COUNTER
+            picked_char['boss_inst_id'] = boss_inst_id
+            
+            boss_char = get_boss_char(boss_inst_id, did)
+            send_rpc_push(544, boss_char) # rank_pvp_create_zombie_user
+            
+            NPC_HP_MAP[boss_inst_id] = 10000 # Boss Max HP
+            NPC_INST_MAP[boss_inst_id] = "BOSS_" + did
+            print(f"[M1003 DEBUG] Spawned Boss did={did} inst={boss_inst_id}")
 
     except Exception:
         print("[!] FAILED TO SEND MAP ENTER TRANSITION")
@@ -1232,6 +1292,18 @@ def client_handler(conn, addr):
                             # Update Server State
                             if tid in NPC_HP_MAP:
                                 NPC_HP_MAP[tid] -= dmg
+                                
+                                # BOSS DEATH HANDLING
+                                if NPC_HP_MAP[tid] <= 0:
+                                    if tid == picked_char.get('boss_inst_id'):
+                                        did = picked_char.get('active_domin_id', '1')
+                                        print(f"[M1003 DEBUG] Boss {tid} died. Winning did={did}")
+                                        # Tag 552: copy_scene_result (subType=26, id=did, win=True)
+                                        win_data = encode_sproto([(0, 26), (1, did), (2, True)])
+                                        send_rpc_push(552, win_data)
+                                        advance_missions(picked_char, send_rpc_push, 'capture', target_id=did)
+                                        picked_char['boss_inst_id'] = None
+                                        DEAD_NPC_SET.add(tid)
 
                             # Push damage info to client (Tag 111: accept_damge)
                             dmg_item = encode_sproto([(0, tid), (1, dmg), (2, sid), (4, False)])
@@ -1388,12 +1460,10 @@ def client_handler(conn, addr):
 
             elif msg == 311: # enter_domin_pk_scene
                 did = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
-                print(f"[*] Entering PK scene for Domin ID={did}")
+                print(f"[M1003 DEBUG] RX 311 domin_id={did}")
                 if picked_char:
-                    print(f"[M1003 DEBUG] RX 311 domin_id={did}")
-                    print(f"[M1003 DEBUG] BEFORE 311 map_id={picked_char.get('map_id')}")
-                    advance_missions(picked_char, send_rpc_push, 'capture', target_id=did)
-                send_rpc_push(552, encode_sproto([(0, 1)])) # result=1 (Win)
+                    picked_char['active_domin_id'] = did
+                    start_map_transition(conn, picked_char, "502", send_rpc_push)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -1534,6 +1604,15 @@ def client_handler(conn, addr):
                     # Response: ret(0)=0 (Success)
                     resp = encode_sproto([(0, 0)])
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 108: # leave_copy_scene
+                if picked_char:
+                    # Return to Map 11 near NPC 1105
+                    picked_char['pos'] = [34611, 100, -49480, 8632]
+                    start_map_transition(conn, picked_char, "11", send_rpc_push)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif session is not None:
