@@ -1438,17 +1438,22 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 270: # download_finish
-                if picked_char:
+                if picked_char and not picked_char.get('download_complete'):
                     picked_char['download_complete'] = True
-                    # Expansion Rewards: Mount 9301 (Chevrolet), 9011 (10), 9001 (20), 5026 (5)
-                    picked_char['mount_id'] = "9301"
+                    # Expansion Rewards: Mount 9301 (Chevrolet voucher), 9011 (10), 9001 (20), 5026 (5)
                     add_to_inventory(picked_char, "9301", 1)
                     add_to_inventory(picked_char, "9011", 10)
                     add_to_inventory(picked_char, "9001", 20)
                     add_to_inventory(picked_char, "5026", 5)
                     save_chars(all_accounts_chars)
+                    
+                    # Sync items and finalize client state
                     send_rpc_push(611, sync_inventory_data(picked_char))
-                    send_rpc_push(654, encode_sproto([(0, 1)])) # start_enter_game
+                    send_rpc_push(654, encode_sproto([(0, 1)])) # start_enter_game state=1
+                    print(f"[REWARD] Expansion finalized and rewards granted for player {picked_char['id']}")
+                elif picked_char:
+                    print(f"[REWARD] Player {picked_char['id']} already claimed expansion rewards.")
+
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
