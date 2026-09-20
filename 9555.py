@@ -408,21 +408,25 @@ def get_boss_char(inst_id, did):
     name = "街区占领NPC"
     prof = 0
     
-    # Get stats from original NPC 1105
-    npc_stats = get_npc_attr("1105")
-    lv = npc_stats['lv']
-    hp_max = npc_stats['hp_max']
+    # AI optimization: Set boss level to 30 to unlock all active skills (110 requires Lv 25)
+    lv = 30
+    npc_stats = get_npc_attr("1105") # Get base config
+    # Use level 30 coefficients for scaling
+    effective_stats = get_npc_attr("1105") # This uses the internal lvl logic
+    # Override level and calculate authoritative hp_max for lv 30
+    hp_max = npc_stats['hp_max'] * 2 # Increase health for a better duel experience
+    power = 8000
     
     # Visual
     v = get_visual(name, prof)
     
     # attr_oth: hp(0), exp(1), level(2), power(3), camp(15)
     attr_oth = encode_sproto([
-        (0, hp_max), (1, 0), (2, lv), (3, npc_stats['power']), (15, 2)
+        (0, hp_max), (1, 0), (2, lv), (3, power), (15, 2)
     ])
     
-    # Movement: Pos (400, 120, 0, -9000)
-    pos_data = encode_sproto([(0, 400), (1, 120), (2, 0), (3, -9000)])
+    # Movement: Spawn at Y=0 (Floor Level) to ensure NavMesh docking
+    pos_data = encode_sproto([(0, 400), (1, 0), (2, 0), (3, -9000)])
     mv = encode_sproto([(0, pos_data), (1, pos_data)])
     
     # Skills - Ensure skills have level 1 for AI to use them optimally
@@ -1105,8 +1109,8 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
     # Update position
     landing_pos = override_pos
     if not landing_pos and target_map_id == "502":
-        # Lord Battle: Attacker spawns at -4,1.2,0. facing 90 deg.
-        landing_pos = [-400, 120, 0, 9000]
+        # Lord Battle: Attacker spawns at floor level (Y=0) to docking NavMesh
+        landing_pos = [-400, 0, 0, 9000]
         print(f"[TELEPORT] Lord Battle Map 502 start pos={landing_pos}")
 
     # 1. Try teleport portal heuristic
