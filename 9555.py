@@ -160,6 +160,10 @@ try:
                         'atk_coe': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 10000,
                         'hp_coe': int(parts[27]) if len(parts) > 27 and parts[27].isdigit() else 10000,
                         'def_coe': int(parts[28]) if len(parts) > 28 and parts[28].isdigit() else 10000,
+                        'hit_coe': int(parts[29]) if len(parts) > 29 and parts[29].isdigit() else 10000,
+                        'eva_coe': int(parts[30]) if len(parts) > 30 and parts[30].isdigit() else 10000,
+                        'cri_coe': int(parts[31]) if len(parts) > 31 and parts[31].isdigit() else 10000,
+                        'res_coe': int(parts[32]) if len(parts) > 32 and parts[32].isdigit() else 10000,
                         'atk_abs': int(parts[44]) if is_abs and len(parts) > 44 and parts[44].isdigit() else 0,
                         'hp_abs': int(parts[45]) if is_abs and len(parts) > 45 and parts[45].isdigit() else 0,
                         'def_abs': int(parts[46]) if is_abs and len(parts) > 46 and parts[46].isdigit() else 0
@@ -396,7 +400,6 @@ def get_boss_char(inst_id, did):
     name = "街区占领NPC"
     prof = 0
     
-    # Get stats from Dominance config or fallback to Level 1
     # matchpower = 6000 is used as power attribute
     npc_stats = get_npc_attr("1105")
     lv = npc_stats['lv']
@@ -423,7 +426,7 @@ def get_boss_char(inst_id, did):
     attr_all_data = [
         (0, hp_max), (2, npc_stats['atk']), (3, npc_stats['def']),
         (4, npc_stats['hit']), (5, npc_stats['eva']), (6, npc_stats['cri']), (7, npc_stats['res']),
-        (8, 0), (9, 0), (10, 5000), (11, 0),
+        (8, npc_stats['exd']), (9, npc_stats['exr']), (10, npc_stats['crd']), (11, npc_stats['crr']),
         (12, npc_stats['defa']), (13, 500), (17, npc_stats['dgea']), (18, npc_stats['resa']), (19, npc_stats['hita']), (20, npc_stats['cria'])
     ]
     attr_all = encode_sproto(attr_all_data)
@@ -567,7 +570,7 @@ def get_full_char(c):
     attr_all_data = [
         (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
         (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
-        (8, 0), (9, 0), (10, 5000), (11, 0),
+        (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
         (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
     ]
     attr_all = encode_sproto(attr_all_data)
@@ -614,7 +617,7 @@ def sync_char_attrs_rpc(conn, picked_char):
     attr_all = encode_sproto([
         (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
         (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
-        (8, 0), (9, 0), (10, 5000), (11, 0),
+        (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
         (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
     ])
 
@@ -633,7 +636,7 @@ def sync_char_attrs_rpc(conn, picked_char):
 
 def get_npc_attr(nid):
     cfg = NPC_CONFIG.get(nid)
-    if not cfg: return {'hp': 10000, 'atk': 100, 'def': 10, 'hit': 100, 'eva': 10, 'cri': 10, 'res': 10, 'lv': 1}
+    if not cfg: return {'hp_max': 10000, 'atk': 100, 'def': 10, 'hit': 100, 'eva': 10, 'cri': 10, 'res': 10, 'lv': 1, 'defa': 3000, 'dgea': 6000, 'resa': 3000, 'hita': 300, 'cria': 3000, 'exd': 0, 'exr': 0, 'crd': 5000, 'crr': 0}
 
     lvl = cfg.get('level', 1)
     ld = LEVEL_DATA.get(lvl, LEVEL_DATA.get(1))
@@ -654,7 +657,10 @@ def get_npc_attr(nid):
     # NPCs use Level 1 coefficients as default fallback if not specified elsewhere
     return {
         'hp_max': hp, 'atk': atk, 'def': df, 
-        'hit': ld['hit'][0], 'eva': ld['eva'][0], 'cri': ld['cri'][0], 'res': ld['res'][0],
+        'hit': (ld['hit'][0] * cfg.get('hit_coe', 10000)) // 10000,
+        'eva': (ld['eva'][0] * cfg.get('eva_coe', 10000)) // 10000,
+        'cri': (ld['cri'][0] * cfg.get('cri_coe', 10000)) // 10000,
+        'res': (ld['res'][0] * cfg.get('res_coe', 10000)) // 10000,
         'lv': lvl, 'defa': ld['defa'], 'dgea': ld['dgea'], 'resa': ld['resa'], 'hita': ld['hita'], 'cria': ld['cria'],
         'exd': 0, 'exr': 0, 'crd': 5000, 'crr': 0
     }
