@@ -1,4 +1,4 @@
-import socket, struct, threading, random, json, os, time, traceback
+import socket, struct, threading, random, json, os, time, traceback, math
 
 PORT = int(os.environ.get("PORT", 15678))
 CHAR_DB = "characters_final.json"
@@ -507,6 +507,38 @@ def get_movement(x, y, z, o=0):
     pos = encode_sproto([(0, x), (1, y), (2, z), (3, o)])
     return encode_sproto([(0, pos), (1, pos)])
 
+def send_domin_boss_move(picked_char, send_rpc_push):
+    """Move the arena zombie through the APK's aoi_update_move (tag 507)."""
+    boss_id = picked_char.get('boss_inst_id')
+    if (picked_char.get('map_id') != '502' or not boss_id
+            or boss_id not in NPC_HP_MAP or NPC_HP_MAP[boss_id] <= 0):
+        return False
+
+    # Coordinates in movement packets are hundredths of a world unit.
+    boss_pos = picked_char.setdefault('boss_pos', [400, 120, 0, -9000])
+    player_pos = picked_char.get('pos', [-400, 120, 0, 9000])
+    dx = player_pos[0] - boss_pos[0]
+    dz = player_pos[2] - boss_pos[2]
+    distance = math.hypot(dx, dz)
+    if distance <= 120:
+        return False
+
+    # Advance toward the player without overlapping them, then let the client
+    # animate that path point through ObjOtherPlayer.AutoMoveLogic.
+    step = min(180, max(0, distance - 120))
+    boss_pos[0] += int(round(dx / distance * step))
+    boss_pos[2] += int(round(dz / distance * step))
+    boss_pos[3] = int(round(math.degrees(math.atan2(dx, dz)) * 100))
+
+    position = encode_sproto([
+        (0, boss_pos[0]), (1, boss_pos[1]), (2, boss_pos[2]), (3, boss_pos[3])
+    ])
+    movement = encode_sproto([(0, position), (1, position)])
+    character_move = encode_sproto([(0, boss_id), (1, movement), (2, False)])
+    send_rpc_push(507, encode_sproto([(0, character_move)]))
+    print(f"[M1003 AI] boss={boss_id} move=({boss_pos[0]},{boss_pos[2]})")
+    return True
+
 def get_character_stats(c):
     """Calculates all character attributes and Power based on profession and level."""
     lv = c.get('level', 1)
@@ -600,9 +632,9 @@ def get_full_char(c):
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
 
-    # The download_state field (Tag 15) informs the client if the expanded resource
-    # bundle has been finalized. 1=Incomplete/Start prompt, 2=Finalized.
-    download_state = 2 if c.get('download_complete') else 1
+    # Keep the optional-resource flow disabled for this local server.  A value
+    # of 1 reopens the client download prompt even when login-server flag 7 is 0.
+    download_state = 2
     return encode_sproto([
         (0, c['id']),
         (1, gen),
@@ -1176,6 +1208,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
             GLOBAL_INST_COUNTER += 1
             boss_inst_id = GLOBAL_INST_COUNTER
             picked_char['boss_inst_id'] = boss_inst_id
+            picked_char['boss_pos'] = [400, 120, 0, -9000]
 
             boss_stats = get_npc_attr("1105")
             boss_char = get_boss_char(boss_inst_id, did)
@@ -1364,6 +1397,9 @@ def client_handler(conn, addr):
                     if mid == "502":
                         # Tag 547: rank_pvp_start - Closes VS screen and starts battle
                         send_rpc_push(547, encode_sproto([]))
+                        # The arena opponent has no client-side AI. Send its
+                        # first APK-compatible AOI movement path point.
+                        send_domin_boss_move(picked_char, send_rpc_push)
                     send_rpc_push(519, sync_mission_data(picked_char))
 
             elif msg == 101: # move
@@ -1373,6 +1409,8 @@ def client_handler(conn, addr):
                     picked_char['pos'] = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
                     # Persistent save for safety
                     save_chars(all_accounts_chars)
+                    # Continue the opponent's approach as the player moves.
+                    send_domin_boss_move(picked_char, send_rpc_push)
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, p_raw)]))
@@ -1401,6 +1439,7 @@ def client_handler(conn, addr):
                         if m_cfg:
                             print(f"[MISSION CHAIN] completed={mid} last_main_before={picked_char.get('last_main_mission_id')}")
                             exp_add, cash_add, items_add = give_mission_rewards(picked_char, mid, send_rpc_push)
+                            print(f"[MISSION REWARD] mission={mid} exp={exp_add} cash={cash_add} items={items_add}")
 
                             # Mission Chain and Unlocking logic
                             is_chained = False
@@ -1724,6 +1763,29 @@ def client_handler(conn, addr):
                     sync_char_attrs_rpc(conn, picked_char)
                     save_chars(all_accounts_chars)
 
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 137: # rank_pvp_other_player_die
+                # RankPVPLocalSceneManager sends this after the APK's zombie
+                # opponent has died locally. Treat it as an idempotent arena
+                # win fallback; normal damage processing may already have
+                # completed the same battle.
+                if picked_char and picked_char.get('map_id') == '502':
+                    boss_id = picked_char.get('boss_inst_id')
+                    if boss_id and boss_id in NPC_HP_MAP and NPC_HP_MAP[boss_id] > 0:
+                        NPC_HP_MAP[boss_id] = 0
+                        boss_stats = get_npc_attr('1105')
+                        sync_npc_attrs_rpc(conn, boss_id, boss_stats, 0)
+                        did = picked_char.get('active_domin_id', '1')
+                        print(f"[M1003 DEBUG] RX 137 zombie died; winning did={did}")
+                        send_rpc_push(552, encode_sproto([(0, 26), (1, did), (2, True)]))
+                        advance_missions(picked_char, send_rpc_push, 'capture', target_id=did)
+                        picked_char['boss_inst_id'] = None
+                        DEAD_NPC_SET.add(boss_id)
+                    else:
+                        print('[M1003 DEBUG] RX 137 ignored; arena win was already processed')
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
