@@ -425,8 +425,10 @@ def get_boss_char(inst_id, did):
     pos_data = encode_sproto([(0, 400), (1, 120), (2, 0), (3, -9000)])
     mv = encode_sproto([(0, pos_data), (1, pos_data)])
     
-    # Skills
-    skills_map = build_skills_map(prof, lv)
+    # Skills - Ensure skills have level 1 for AI to use them optimally
+    skill_levels = {sid: 1 for sid in PROF_SKILLS[prof]['actives']}
+    skill_levels[PROF_SKILLS[prof]['atk']] = 1
+    skills_map = build_skills_map(prof, lv, skill_levels)
     
     # Runtime: attribute(6), attribute_all(7)
     attr_run = encode_sproto([(0, hp_max), (2, npc_stats['atk']), (3, npc_stats['def'])])
@@ -735,8 +737,13 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     
     hit_prob = 1.0 + hit_p - dge_p + skill_shit
     roll_hit = random.random()
+    
+    if is_area:
+        print(f"{prefix} HIT CHECK: roll={roll_hit:.3f} prob={hit_prob:.3f} (hit_p={hit_p:.3f}, dge_p={dge_p:.3f}, skill={skill_shit:.3f})")
+        print(f"{prefix} STATS: AtkHIT={attacker_stats['hit']} AtkHITA={attacker_stats['hita']} DefEVA={defender_stats['eva']} DefDGEA={defender_stats['dgea']}")
+
     if roll_hit > hit_prob:
-        if is_area: print(f"{prefix} MISS: roll={roll_hit:.3f} prob={hit_prob:.3f} (hit_p={hit_p:.3f}, dge_p={dge_p:.3f}, skill={skill_shit:.3f})")
+        if is_area: print(f"{prefix} RESULT: MISS")
         return 0, False, False # MISS
         
     # 3. Check Crit
@@ -762,14 +769,13 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     # 6. Final Formula with Random Variance [0.95, 1.05]
     rand_var = random.randint(0, 1000) / 1000.0 + 0.95
     
-    # skillEXD = 3003
     skill_sexd = eff_cfg['adds'].get(3003, 0) / 10000.0
     exd_factor = 1.0 + (attacker_stats['exd'] - defender_stats['exr']) / 10000.0 + skill_sexd
     
     final_dmg = crit_mult * base_dmg * rand_var * (1.0 - def_red) * exd_factor
     
     if is_area:
-        print(f"{prefix} HIT: dmg={int(final_dmg)} base={base_dmg:.1f} red={def_red:.3f} crit={crit_mult:.2f} exd={exd_factor:.2f} var={rand_var:.3f}")
+        print(f"{prefix} RESULT: HIT dmg={int(final_dmg)} base={base_dmg:.1f} red={def_red:.3f} crit={crit_mult:.2f} exd={exd_factor:.2f} var={rand_var:.3f}")
         
     return int(max(1, final_dmg)), True, is_cri
 
@@ -1566,11 +1572,25 @@ def client_handler(conn, addr):
                         if target_id == picked_char['id']:
                             # Damage to player
                             new_hp = picked_char.get('hp', 0) - dmg
-                            picked_char['hp'] = new_hp if new_hp > 0 else 0
+                            picked_char['hp'] = max(0, new_hp)
                             sync_char_attrs_rpc(conn, picked_char)
                         elif target_id in NPC_HP_MAP:
                             # Damage to NPC/Monster/Boss
                             NPC_HP_MAP[target_id] -= dmg
+                            
+                            # Synchronization of target HP to ensure bar update
+                            target_nid = NPC_INST_MAP.get(target_id)
+                            defender_stats = None
+                            if target_nid:
+                                # Resolve stats for syncing (Boss uses "1105", NPCs use nid)
+                                nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
+                                defender_stats = get_npc_attr(nid_str)
+                                
+                                # Send attribute update (Tag 510)
+                                a_oth = encode_sproto([(0, max(0, NPC_HP_MAP[target_id])), (2, defender_stats['lv'])])
+                                a_base = encode_sproto([(0, defender_stats['hp_max'])])
+                                aoi_attr = encode_sproto([(0, target_id), (1, a_oth), (2, a_base)])
+                                send_rpc_push(510, encode_sproto([(0, aoi_attr)]))
 
                             if NPC_HP_MAP[target_id] <= 0:
                                 # Ensure death is processed exactly once
@@ -1578,8 +1598,14 @@ def client_handler(conn, addr):
                                     continue
                                 DEAD_NPC_SET.add(target_id)
 
-                                # BOSS DEATH HANDLING (if client calculated it)
+                                # BOSS DEATH HANDLING
                                 if target_id == picked_char.get('boss_inst_id'):
+                                    # Send final HP=0 sync before ending scene to trigger client animation
+                                    if defender_stats:
+                                        a_oth = encode_sproto([(0, 0), (2, defender_stats['lv'])])
+                                        aoi_attr = encode_sproto([(0, target_id), (1, a_oth)])
+                                        send_rpc_push(510, encode_sproto([(0, aoi_attr)]))
+                                    
                                     did = picked_char.get('active_domin_id', '1')
                                     print(f"[M1003 DEBUG] Boss {target_id} killed by client dmg. Winning did={did}")
                                     win_data = encode_sproto([(0, 26), (1, did), (2, True)])
@@ -1598,7 +1624,6 @@ def client_handler(conn, addr):
                                     ])
                                     send_rpc_push(527, drop_data)
 
-                                    target_nid = NPC_INST_MAP.get(target_id)
                                     if target_nid:
                                         advance_missions(picked_char, send_rpc_push, 'kill', target_id=target_nid)
 
