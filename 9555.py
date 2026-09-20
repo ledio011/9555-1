@@ -1,4 +1,4 @@
-import socket, struct, threading, random, json, os, time, traceback, math
+import socket, struct, threading, random, json, os, time, traceback
 
 PORT = int(os.environ.get("PORT", 15678))
 CHAR_DB = "characters_final.json"
@@ -506,38 +506,6 @@ def get_general(c):
 def get_movement(x, y, z, o=0):
     pos = encode_sproto([(0, x), (1, y), (2, z), (3, o)])
     return encode_sproto([(0, pos), (1, pos)])
-
-def send_domin_boss_move(picked_char, send_rpc_push):
-    """Move the arena zombie through the APK's aoi_update_move (tag 507)."""
-    boss_id = picked_char.get('boss_inst_id')
-    if (picked_char.get('map_id') != '502' or not boss_id
-            or boss_id not in NPC_HP_MAP or NPC_HP_MAP[boss_id] <= 0):
-        return False
-
-    # Coordinates in movement packets are hundredths of a world unit.
-    boss_pos = picked_char.setdefault('boss_pos', [400, 120, 0, -9000])
-    player_pos = picked_char.get('pos', [-400, 120, 0, 9000])
-    dx = player_pos[0] - boss_pos[0]
-    dz = player_pos[2] - boss_pos[2]
-    distance = math.hypot(dx, dz)
-    if distance <= 120:
-        return False
-
-    # Advance toward the player without overlapping them, then let the client
-    # animate that path point through ObjOtherPlayer.AutoMoveLogic.
-    step = min(180, max(0, distance - 120))
-    boss_pos[0] += int(round(dx / distance * step))
-    boss_pos[2] += int(round(dz / distance * step))
-    boss_pos[3] = int(round(math.degrees(math.atan2(dx, dz)) * 100))
-
-    position = encode_sproto([
-        (0, boss_pos[0]), (1, boss_pos[1]), (2, boss_pos[2]), (3, boss_pos[3])
-    ])
-    movement = encode_sproto([(0, position), (1, position)])
-    character_move = encode_sproto([(0, boss_id), (1, movement), (2, False)])
-    send_rpc_push(507, encode_sproto([(0, character_move)]))
-    print(f"[M1003 AI] boss={boss_id} move=({boss_pos[0]},{boss_pos[2]})")
-    return True
 
 def get_character_stats(c):
     """Calculates all character attributes and Power based on profession and level."""
@@ -1211,15 +1179,12 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
             picked_char['boss_pos'] = [400, 120, 0, -9000]
 
             boss_stats = get_npc_attr("1105")
-            boss_char = get_boss_char(boss_inst_id, did)
-            send_rpc_push(544, encode_sproto([(0, boss_char)])) # rank_pvp_create_zombie_user
-
             NPC_HP_MAP[boss_inst_id] = boss_stats['hp_max']
             NPC_INST_MAP[boss_inst_id] = "BOSS_" + did
-            print(f"[M1003 DEBUG] Spawned Boss did={did} inst={boss_inst_id} max_hp={boss_stats['hp_max']}")
-            
-            # Sync Boss stats immediately to ensure HP bar is visible
-            sync_npc_attrs_rpc(conn, boss_inst_id, boss_stats, boss_stats['hp_max'])
+            # The APK cannot create the zombie player (or the VS panel) until
+            # map_ready.  Remember it here; MSG 100 sends the actual tag 544.
+            picked_char['boss_waiting_for_map_ready'] = True
+            print(f"[M1003 DEBUG] Prepared Boss did={did} inst={boss_inst_id} max_hp={boss_stats['hp_max']} (awaiting map_ready)")
 
     except Exception:
         print("[!] FAILED TO SEND MAP ENTER TRANSITION")
@@ -1237,12 +1202,16 @@ def is_skill_locked(sid, level, prof):
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
     global server_session_counter
+    send_lock = threading.Lock()
 
     def send_rpc_push(tag, data):
         try:
             ph_p = encode_sproto([(0, tag)])
             pf_p = sproto_pack(ph_p + data)
-            conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+            # The arena start is delayed so the client can show its VS panel.
+            # Serialise writes because that delay runs in a timer thread.
+            with send_lock:
+                conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
             print(f"[TX] PUSH TAG={tag} SIZE={len(data)}")
         except Exception:
             print(f"[!] FAILED TO SEND PUSH TAG={tag}")
@@ -1395,11 +1364,27 @@ def client_handler(conn, addr):
                     print(f"[MAP READY RECEIVED] map_id={mid}")
                     send_rpc_push(654, encode_sproto([(0, 1)])) # start_enter_game
                     if mid == "502":
-                        # Tag 547: rank_pvp_start - Closes VS screen and starts battle
-                        send_rpc_push(547, encode_sproto([]))
-                        # The arena opponent has no client-side AI. Send its
-                        # first APK-compatible AOI movement path point.
-                        send_domin_boss_move(picked_char, send_rpc_push)
+                        boss_id = picked_char.get('boss_inst_id')
+                        if boss_id and picked_char.pop('boss_waiting_for_map_ready', False):
+                            did = picked_char.get('active_domin_id', '1')
+                            boss_stats = get_npc_attr("1105")
+                            # Tag 544 creates ObjZombiePlayer and opens the VS UI.
+                            send_rpc_push(544, encode_sproto([(0, get_boss_char(boss_id, did))]))
+                            sync_npc_attrs_rpc(conn, boss_id, boss_stats, NPC_HP_MAP.get(boss_id, boss_stats['hp_max']))
+                            print(f"[M1003 DEBUG] Spawned Boss did={did} inst={boss_id} after map_ready")
+
+                            # Tag 547 closes the VS UI and activates the APK's
+                            # built-in zombie auto-fight.  Sending it immediately
+                            # makes the VS UI invisible, so keep it on screen first.
+                            def start_domin_battle(expected_boss_id=boss_id):
+                                if (picked_char.get('map_id') == '502'
+                                        and picked_char.get('boss_inst_id') == expected_boss_id
+                                        and NPC_HP_MAP.get(expected_boss_id, 0) > 0):
+                                    send_rpc_push(547, encode_sproto([]))
+                                    print(f"[M1003 DEBUG] Arena started boss={expected_boss_id}; APK zombie AI enabled")
+                            arena_timer = threading.Timer(2.5, start_domin_battle)
+                            arena_timer.daemon = True
+                            arena_timer.start()
                     send_rpc_push(519, sync_mission_data(picked_char))
 
             elif msg == 101: # move
@@ -1409,8 +1394,6 @@ def client_handler(conn, addr):
                     picked_char['pos'] = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
                     # Persistent save for safety
                     save_chars(all_accounts_chars)
-                    # Continue the opponent's approach as the player moves.
-                    send_domin_boss_move(picked_char, send_rpc_push)
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, p_raw)]))
