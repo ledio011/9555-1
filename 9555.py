@@ -90,6 +90,10 @@ try:
                             'eva': [int(parts[8]), int(parts[15]), int(parts[22])],
                             'cri': [int(parts[9]), int(parts[16]), int(parts[23])],
                             'res': [int(parts[10]), int(parts[17]), int(parts[24])],
+                            'exd': [int(parts[25]), int(parts[25]), int(parts[25])],
+                            'exr': [int(parts[26]), int(parts[26]), int(parts[26])],
+                            'crd': [int(parts[27]), int(parts[27]), int(parts[27])],
+                            'crr': [int(parts[28]), int(parts[28]), int(parts[28])],
                             'defa': int(parts[31]), 'dgea': int(parts[32]), 'resa': int(parts[33]),
                             'hita': int(parts[34]), 'cria': int(parts[35])
                         }
@@ -164,6 +168,10 @@ try:
                         'eva_coe': int(parts[30]) if len(parts) > 30 and parts[30].isdigit() else 10000,
                         'cri_coe': int(parts[31]) if len(parts) > 31 and parts[31].isdigit() else 10000,
                         'res_coe': int(parts[32]) if len(parts) > 32 and parts[32].isdigit() else 10000,
+                        'exd_coe': int(parts[33]) if len(parts) > 33 and parts[33].isdigit() else 10000,
+                        'exr_coe': int(parts[34]) if len(parts) > 34 and parts[34].isdigit() else 10000,
+                        'crd_coe': int(parts[35]) if len(parts) > 35 and parts[35].isdigit() else 10000,
+                        'crr_coe': int(parts[36]) if len(parts) > 36 and parts[36].isdigit() else 10000,
                         'atk_abs': int(parts[44]) if is_abs and len(parts) > 44 and parts[44].isdigit() else 0,
                         'hp_abs': int(parts[45]) if is_abs and len(parts) > 45 and parts[45].isdigit() else 0,
                         'def_abs': int(parts[46]) if is_abs and len(parts) > 46 and parts[46].isdigit() else 0
@@ -399,28 +407,27 @@ def get_boss_char(inst_id, did):
     # Domin 1 boss stats and visual (XD profession)
     name = "街区占领NPC"
     prof = 0
-
-    # matchpower = 6000 is used as power attribute
+    
+    # Get stats from original NPC 1105
     npc_stats = get_npc_attr("1105")
     lv = npc_stats['lv']
     hp_max = npc_stats['hp_max']
-    power = 6000
-
+    
     # Visual
     v = get_visual(name, prof)
-
+    
     # attr_oth: hp(0), exp(1), level(2), power(3), camp(15)
     attr_oth = encode_sproto([
-        (0, hp_max), (1, 0), (2, lv), (3, power), (15, 2)
+        (0, hp_max), (1, 0), (2, lv), (3, npc_stats['power']), (15, 2)
     ])
-
+    
     # Movement: Pos (400, 120, 0, -9000)
     pos_data = encode_sproto([(0, 400), (1, 120), (2, 0), (3, -9000)])
     mv = encode_sproto([(0, pos_data), (1, pos_data)])
-
+    
     # Skills
     skills_map = build_skills_map(prof, lv)
-
+    
     # Runtime: attribute(6), attribute_all(7)
     attr_run = encode_sproto([(0, hp_max), (2, npc_stats['atk']), (3, npc_stats['def'])])
     attr_all_data = [
@@ -431,7 +438,7 @@ def get_boss_char(inst_id, did):
     ]
     attr_all = encode_sproto(attr_all_data)
     run = encode_sproto([(6, attr_run), (7, attr_all)])
-
+    
     return encode_sproto([
         (0, inst_id),
         (1, encode_sproto([(0, name), (1, prof), (2, 1), (3, "502"), (4, 1)])), # general
@@ -507,6 +514,9 @@ def get_character_stats(c):
     eva = ld['eva'][prof]
     cri = ld['cri'][prof]
     res = ld['res'][prof]
+    
+    # Add Weapon ATK (Level 1 weapon 10001/20001/30001 gives 180 ATK)
+    atk += 180
 
     # Profession-specific coefficients from GameDefine.cs
     # XD (0), QJ (1), NQS (2)
@@ -528,7 +538,7 @@ def get_character_stats(c):
         'power': power, 'lv': lv, 'exp': c.get('exp', 0),
         'defa': ld['defa'], 'dgea': ld['dgea'], 'resa': ld['resa'],
         'hita': ld['hita'], 'cria': ld['cria'],
-        'exd': 0, 'exr': 0, 'crd': 5000, 'crr': 0
+        'exd': ld['exd'][prof], 'exr': ld['exr'][prof], 'crd': ld['crd'][prof], 'crr': ld['crr'][prof]
     }
 
 def get_char_ov(c, sort_index=None):
@@ -639,7 +649,10 @@ def get_npc_attr(nid):
     if not cfg: return {'hp_max': 10000, 'atk': 100, 'def': 10, 'hit': 100, 'eva': 10, 'cri': 10, 'res': 10, 'lv': 1, 'defa': 3000, 'dgea': 6000, 'resa': 3000, 'hita': 300, 'cria': 3000, 'exd': 0, 'exr': 0, 'crd': 5000, 'crr': 0}
 
     lvl = cfg.get('level', 1)
-    ld = LEVEL_DATA.get(lvl, LEVEL_DATA.get(1))
+    # Use highest available level stats if level exceeds 80
+    max_lv = max(LEVEL_DATA.keys())
+    effective_lv = min(lvl, max_lv)
+    ld = LEVEL_DATA.get(effective_lv)
 
     if cfg.get('is_abs'):
         hp = cfg.get('hp_abs', 10000)
@@ -654,72 +667,110 @@ def get_npc_attr(nid):
     if cfg.get('hp_abs', 0) > hp: hp = cfg['hp_abs']
     if cfg.get('atk_abs', 0) > atk: atk = cfg['atk_abs']
 
+    # Ratings scaling
+    def scale_rating(base_val, coe):
+        return (base_val * coe) // 10000
+    
+    # Calculate Power for NPC
+    prof_coeffs = {"atk":16, "hp":1, "def":11, "hit":2, "eva":5.5, "cri":10, "res":10}
+    raw_power = (atk * prof_coeffs['atk'] + hp * prof_coeffs['hp'] + df * prof_coeffs['def']) # Simplified for NPC
+    power = int(raw_power * 3.0)
+
     # NPCs use Level 1 coefficients as default fallback if not specified elsewhere
     return {
-        'hp_max': hp, 'atk': atk, 'def': df,
-        'hit': (ld['hit'][0] * cfg.get('hit_coe', 10000)) // 10000,
-        'eva': (ld['eva'][0] * cfg.get('eva_coe', 10000)) // 10000,
-        'cri': (ld['cri'][0] * cfg.get('cri_coe', 10000)) // 10000,
-        'res': (ld['res'][0] * cfg.get('res_coe', 10000)) // 10000,
+        'hp_max': hp, 'atk': atk + 180, 'def': df, 
+        'hit': scale_rating(ld['hit'][0], cfg.get('hit_coe', 10000)),
+        'eva': scale_rating(ld['eva'][0], cfg.get('eva_coe', 10000)),
+        'cri': scale_rating(ld['cri'][0], cfg.get('cri_coe', 10000)),
+        'res': scale_rating(ld['res'][0], cfg.get('res_coe', 10000)),
         'lv': lvl, 'defa': ld['defa'], 'dgea': ld['dgea'], 'resa': ld['resa'], 'hita': ld['hita'], 'cria': ld['cria'],
-        'exd': 0, 'exr': 0, 'crd': 5000, 'crr': 0
+        'exd': scale_rating(ld['exd'][0], cfg.get('exd_coe', 10000)),
+        'exr': scale_rating(ld['exr'][0], cfg.get('exr_coe', 10000)),
+        'crd': scale_rating(ld['crd'][0], cfg.get('crd_coe', 10000)),
+        'crr': scale_rating(ld['crr'][0], cfg.get('crr_coe', 10000)),
+        'power': power
     }
 
-def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv):
+def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
+    """Sends TAG 510 to sync NPC stats."""
+    attr_oth = encode_sproto([(0, hp_cur), (2, stats['lv'])])
+    attr_base = encode_sproto([(0, stats['hp_max'])])
+    attr_all_data = [
+        (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
+        (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
+        (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
+        (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
+    ]
+    attr_all = encode_sproto(attr_all_data)
+    aoi_attr = encode_sproto([(0, inst_id), (1, attr_oth), (2, attr_base), (3, attr_all)])
+    try:
+        ph_p = encode_sproto([(0, 510)])
+        pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_attr)]))
+        conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+    except: pass
+
+def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_area=False, pvp_scale=1.0):
     """Original Damage calculation reproduced from CharacterAttributeData.cs"""
+    prefix = "[AREA DAMAGE]" if is_area else "[COMBAT]"
+    
     # 1. Get Skill Multipliers from EffInfoData
     skill_cfg = SKILL_CONFIG.get(skill_id, {})
     eff_id = skill_cfg.get('eff0', "10000") # Default to NormalAttack if not found
     eff_cfg = EFF_CONFIG.get(eff_id, {
         'dmg_fixed': 0, 'dmg_fixed_add': 0, 'dmg_multi': 10000, 'dmg_multi_add': 0, 'adds': {}
     })
-
+    
     skill_damage = eff_cfg['dmg_fixed'] + eff_cfg['dmg_fixed_add'] * skill_lv
-    skill_scale = (eff_cfg['dmg_multi'] + eff_cfg['dmg_multi_add'] * skill_lv) / 10000.0
-
+    skill_scale = (eff_cfg['dmg_multi'] + (eff_cfg['dmg_multi_add'] or 0) * skill_lv) / 10000.0
+    
+    # PvP Scale handling (num3 in CharacterAttributeData.cs)
+    pvp_mult = pvp_scale
+    if attacker_stats.get('power', 0) > defender_stats.get('power', 0):
+        pvp_mult += 0.05
+    
     # 2. Check Hit/Dodge
-    # hit_p = Min((attacker.HIT + 1) / (attacker.HITA + attacker.HIT + 1), 1.0)
-    # dge_p = Min((defender.DGE + 1) / (defender.DGE + defender.DGEA + 1), 0.5)
-    # add = SHIT / 10000.0
     skill_shit = eff_cfg['adds'].get(3001, 0) / 10000.0
     hit_p = min((attacker_stats['hit'] + 1.0) / (attacker_stats['hita'] + attacker_stats['hit'] + 1.0), 1.0)
     dge_p = min((defender_stats['eva'] + 1.0) / (defender_stats['dgea'] + defender_stats['eva'] + 1.0), 0.5)
-
+    
     hit_prob = 1.0 + hit_p - dge_p + skill_shit
-    if random.random() > hit_prob:
+    roll_hit = random.random()
+    if roll_hit > hit_prob:
+        if is_area: print(f"{prefix} MISS: roll={roll_hit:.3f} prob={hit_prob:.3f} (hit_p={hit_p:.3f}, dge_p={dge_p:.3f}, skill={skill_shit:.3f})")
         return 0, False, False # MISS
-
+        
     # 3. Check Crit
-    # cri_p = Min((attacker.CRI + 1) / (attacker.CRI + attacker.CRIA + 1), 0.9)
-    # res_p = Min((defender.RES + 1) / (defender.RES + defender.RESA + 1), 0.8)
     skill_scri = eff_cfg['adds'].get(3002, 0) / 10000.0
     cri_p = min((attacker_stats['cri'] + 1.0) / (attacker_stats['cri'] + attacker_stats['cria'] + 1.0), 0.9)
     res_p = min((defender_stats['res'] + 1.0) / (defender_stats['res'] + defender_stats['resa'] + 1.0), 0.8)
-
+    
     cri_prob = cri_p - res_p + skill_scri
     is_cri = random.random() < cri_prob
-
+    
     # 4. Calculate Damage
-    # baseDamage = attacker.CurATK * skillScale + skillDamage
-    # defReduction = Min((defender.CurDEF + 1f) / (defender.CurDEF + attacker.CurDEFA), 0.5f)
-    base_dmg = attacker_stats['atk'] * skill_scale + skill_damage
+    scaled_damage = skill_damage * pvp_mult
+    scaled_scale = skill_scale * pvp_mult
+    
+    base_dmg = attacker_stats['atk'] * scaled_scale + scaled_damage
     def_red = min((defender_stats['def'] + 1.0) / (defender_stats['def'] + attacker_stats['defa']), 0.5)
-
+    
     # 5. Handling Critical Multiplier
     crit_mult = 1.0
     if is_cri:
-        # critMult = Max(1f, Min(1f + (attacker.CurCRD - defender.CurCRR), 2f))
         crit_mult = max(1.0, min(1.0 + (attacker_stats['crd'] - defender_stats['crr']) / 10000.0, 2.0))
-
+        
     # 6. Final Formula with Random Variance [0.95, 1.05]
-    # num4 = random(0, 1000) / 1000f + 0.95f
     rand_var = random.randint(0, 1000) / 1000.0 + 0.95
-
-    # finalDamage = critMult * baseDamage * randVar * (1f - defReduction) * (1f + (attacker.CurEXD - defender.CurEXR + skillEXD))
+    
+    # skillEXD = 3003
     skill_sexd = eff_cfg['adds'].get(3003, 0) / 10000.0
     exd_factor = 1.0 + (attacker_stats['exd'] - defender_stats['exr']) / 10000.0 + skill_sexd
-
+    
     final_dmg = crit_mult * base_dmg * rand_var * (1.0 - def_red) * exd_factor
+    
+    if is_area:
+        print(f"{prefix} HIT: dmg={int(final_dmg)} base={base_dmg:.1f} red={def_red:.3f} crit={crit_mult:.2f} exd={exd_factor:.2f} var={rand_var:.3f}")
+        
     return int(max(1, final_dmg)), True, is_cri
 
 def spawn_map_npcs(conn, map_id, picked_char=None):
@@ -1115,12 +1166,16 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
             boss_inst_id = GLOBAL_INST_COUNTER
             picked_char['boss_inst_id'] = boss_inst_id
 
+            boss_stats = get_npc_attr("1105")
             boss_char = get_boss_char(boss_inst_id, did)
             send_rpc_push(544, encode_sproto([(0, boss_char)])) # rank_pvp_create_zombie_user
 
-            NPC_HP_MAP[boss_inst_id] = 10000 # Boss Max HP
+            NPC_HP_MAP[boss_inst_id] = boss_stats['hp_max']
             NPC_INST_MAP[boss_inst_id] = "BOSS_" + did
-            print(f"[M1003 DEBUG] Spawned Boss did={did} inst={boss_inst_id}")
+            print(f"[M1003 DEBUG] Spawned Boss did={did} inst={boss_inst_id} max_hp={boss_stats['hp_max']}")
+            
+            # Sync Boss stats immediately to ensure HP bar is visible
+            sync_npc_attrs_rpc(conn, boss_inst_id, boss_stats, boss_stats['hp_max'])
 
     except Exception:
         print("[!] FAILED TO SEND MAP ENTER TRANSITION")
@@ -1169,8 +1224,12 @@ def client_handler(conn, addr):
             if msg == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
                 sid = get_val_int(body, 5, 1); cur_areaId = get_area_id(sid)
-                # DataVersion 205 triggers expansion download banner if client is 200
-                resp = encode_sproto([(0, 2), (1, "1.012.017"), (2, "205"), (3, 1)])
+                # sync_common_data: serverTime(0), time_offset(2), func_info(9), pvp_scale(4), seed(12), server_level(13), start_time(14)
+                resp = encode_sproto([
+                    (0, 2), (1, "1.012.017"), (2, "205"), (3, 1),
+                    # pvp_scale = 1.0 (10000), seed = random
+                    (4, 10000), (12, random.randint(1, 10000))
+                ])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
@@ -1227,10 +1286,12 @@ def client_handler(conn, addr):
 
                     # Correct Sequence: 614 -> 611 -> 540 -> 519 -> 503
 
-                    # 614: function_sync
+                    # 614: sync_common_data
                     fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
-                    send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (9, funcs), (13, 1), (14, int(time.time()))]))
+                    send_rpc_push(614, encode_sproto([
+                        (0, int(time.time())), (2, 0), (4, 10000), (9, funcs), (12, random.randint(1, 10000)), (13, 1), (14, int(time.time()))
+                    ]))
 
                     # 611: inventory_sync
                     send_rpc_push(611, sync_inventory_data(picked_char))
@@ -1428,13 +1489,15 @@ def client_handler(conn, addr):
                             attacker_stats = get_character_stats(picked_char)
                             skill_lv = picked_char.get('skill_levels', {}).get(sid, 0)
 
+                            is_area = (picked_char.get('map_id') == "502")
+                            
                             # Player -> NPC Damage
-                            dmg, is_hit, is_cri = get_combat_damage(attacker_stats, defender_stats, sid, skill_lv)
+                            dmg, is_hit, is_cri = get_combat_damage(attacker_stats, defender_stats, sid, skill_lv, is_area=is_area, pvp_scale=1.0)
 
                             # Update Server State
                             if is_hit and tid in NPC_HP_MAP:
                                 NPC_HP_MAP[tid] -= dmg
-
+                                
                                 # BOSS DEATH HANDLING
                                 if NPC_HP_MAP[tid] <= 0:
                                     if tid == picked_char.get('boss_inst_id'):
@@ -1451,21 +1514,18 @@ def client_handler(conn, addr):
                             # dmg_item: id(0), damage(1), skillId(2), isCrit(4)
                             dmg_item = encode_sproto([(0, tid), (1, dmg), (2, sid), (4, is_cri)])
                             send_rpc_push(111, encode_sproto([(0, [dmg_item])]))
+                            
+                            # Synchronization of target HP to ensure bar update
+                            if tid in NPC_HP_MAP:
+                                # attribute_other (Tag 1): hp(0), level(2)
+                                # attribute (Tag 2): max_hp(0)
+                                a_oth = encode_sproto([(0, max(0, NPC_HP_MAP[tid])), (2, defender_stats['lv'])])
+                                a_base = encode_sproto([(0, defender_stats['hp_max'])])
+                                aoi_attr = encode_sproto([(0, tid), (1, a_oth), (2, a_base)])
+                                send_rpc_push(510, encode_sproto([(0, aoi_attr)]))
 
-                            # NPC -> Player Counter-Attack
-                            # NPCs use "Normal Attack" (10000) for now
-                            npc_dmg, n_hit, n_cri = get_combat_damage(defender_stats, attacker_stats, "10000", 0)
-
-                            if n_hit:
-                                new_hp = picked_char.get('hp', attacker_stats['hp_max']) - npc_dmg
-                                picked_char['hp'] = new_hp if new_hp > 0 else 0
-
-                                # Push player damage to client
-                                p_dmg_item = encode_sproto([(0, picked_char['id']), (1, npc_dmg), (2, "1"), (4, n_cri)])
-                                send_rpc_push(111, encode_sproto([(0, [p_dmg_item])]))
-
-                                # Sync player attributes (HP bar)
-                                sync_char_attrs_rpc(conn, picked_char)
+                            # Server-side counter-attack logic removed since client sends msg 128
+                            # Only sync player attrs if damaged by local client logic
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -1616,7 +1676,10 @@ def client_handler(conn, addr):
                             if rd and picked_char['exp'] >= rd['exp']:
                                 picked_char['exp'] -= rd['exp']
                                 picked_char['level'] = lv + 1
-                                print(f"[LEVEL UP] CharID={picked_char['id']} NewLevel={picked_char['level']}")
+                                # Level Up: Fully Restore HP
+                                new_stats = get_character_stats(picked_char)
+                                picked_char['hp'] = new_stats['hp_max']
+                                print(f"[LEVEL UP] CharID={picked_char['id']} NewLevel={picked_char['level']} HP Restored to {picked_char['hp']}")
                             else: break
 
                         advance_missions(picked_char, send_rpc_push, 'kill', target_id=npcid)
@@ -1639,6 +1702,8 @@ def client_handler(conn, addr):
                 did = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
                 print(f"[M1003 DEBUG] RX 311 domin_id={did}")
                 if picked_char:
+                    # RESET HP TO MAX FOR AREA DUEL
+                    picked_char['hp'] = get_character_stats(picked_char)['hp_max']
                     # SAVE LATEST POSITION EXACTLY (Ensure list copy)
                     latest_pos = picked_char.get('pos', [34611, 100, -49480, 8632])
                     picked_char['pre_arena_pos'] = list(latest_pos)
