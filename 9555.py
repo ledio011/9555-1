@@ -21,6 +21,8 @@ MAP_CONNECT_DATA = {} # (src_id, target_id) -> PosX, PosY, PosZ
 GUILD_CAPTURE_DATA = {} # id -> mapId
 KILL_TARGET_SPAWNS = {} # missionId -> list of spawns
 TARGET_CAR_SPAWNS = {}  # missionId -> list of car spawns
+EFF_CONFIG = {}   # effId -> effect info template
+SKILL_CONFIG = {} # skillId -> skill info template
 
 try:
     script_dir = os.path.dirname(__file__)
@@ -32,6 +34,47 @@ try:
         with open(rd_path, "r", encoding='utf-8') as f: rewards_data = json.load(f)
 
     def is_data(line): return line.startswith("*,") or ("," in line and line.split(",")[1].isdigit())
+
+    # Load EffInfoData
+    eff_path = os.path.join(script_dir, "assets/Bundle/TextAsset/EffInfoData")
+    if os.path.exists(eff_path):
+        with open(eff_path, "r", encoding='utf-8') as f:
+            for line in f:
+                if line.startswith("*,") or ("," in line and line.split(",")[1].isdigit()):
+                    parts = line.strip().split(",")
+                    if len(parts) > 30:
+                        eid = parts[1]
+                        # Columns: 3:Damage, 4:DamageAdd, 5:DamageMulti, 6:DamageMultiAdd
+                        # Add types: 22, 24, 26, 28 (indices 22, 24, 26, 28)
+                        # Add values: 23, 25, 27, 29 (indices 23, 25, 27, 29)
+                        adds = {}
+                        for i in [22, 24, 26, 28]:
+                            if i+1 < len(parts) and parts[i].isdigit():
+                                adds[int(parts[i])] = int(parts[i+1])
+                        EFF_CONFIG[eid] = {
+                            'dmg_fixed': int(parts[3]) if parts[3].isdigit() else 0,
+                            'dmg_fixed_add': int(parts[4]) if parts[4].isdigit() else 0,
+                            'dmg_multi': int(parts[5]) if parts[5].isdigit() else 0,
+                            'dmg_multi_add': int(parts[6]) if parts[6].isdigit() else 0,
+                            'adds': adds
+                        }
+        print(f"[EFF CONFIG LOADED] count={len(EFF_CONFIG)}")
+
+    # Load SkillData
+    skill_path = os.path.join(script_dir, "assets/Bundle/TextAsset/SkillData")
+    if os.path.exists(skill_path):
+        with open(skill_path, "r", encoding='utf-8') as f:
+            for line in f:
+                if line.startswith("*,") or ("," in line and line.split(",")[1].isdigit()):
+                    parts = line.strip().split(",")
+                    if len(parts) > 25:
+                        sid = parts[1]
+                        SKILL_CONFIG[sid] = {
+                            'eff0': parts[24],
+                            'eff1': parts[26] if len(parts) > 26 else "",
+                            'eff2': parts[28] if len(parts) > 28 else ""
+                        }
+        print(f"[SKILL CONFIG LOADED] count={len(SKILL_CONFIG)}")
 
     # Load BaseLvData for EXP requirements and stats
     lv_path = os.path.join(script_dir, "assets/Bundle/TextAsset/BaseLvData")
@@ -51,7 +94,10 @@ try:
                             'hit': [int(parts[7]), int(parts[14]), int(parts[21])],
                             'eva': [int(parts[8]), int(parts[15]), int(parts[22])],
                             'cri': [int(parts[9]), int(parts[16]), int(parts[23])],
-                            'res': [int(parts[10]), int(parts[17]), int(parts[24])]
+                            'res': [int(parts[10]), int(parts[17]), int(parts[24])],
+                            # Damage Coefficients (Tags 12, 17, 18, 19, 20 in attribute Sproto)
+                            'defa': int(parts[31]), 'dgea': int(parts[32]), 'resa': int(parts[33]),
+                            'hita': int(parts[34]), 'cria': int(parts[35])
                         }
         print(f"[LEVEL TABLE LOADED] levels={len(LEVEL_DATA)}")
 
@@ -350,9 +396,13 @@ def get_boss_char(inst_id, did):
     # Domin 1 boss stats and visual (XD profession)
     name = "街区占领NPC"
     prof = 0
-    lv = 1
+    
+    # Get stats from Dominance config or fallback to Level 1
+    # matchpower = 6000 is used as power attribute
+    npc_stats = get_npc_attr("1105")
+    lv = npc_stats['lv']
+    hp_max = npc_stats['hp_max']
     power = 6000
-    hp_max = 10000
     
     # Visual
     v = get_visual(name, prof)
@@ -362,7 +412,7 @@ def get_boss_char(inst_id, did):
         (0, hp_max), (1, 0), (2, lv), (3, power), (15, 2)
     ])
     
-    # Movement: Pos (4, 1.2, 0) -> (400, 120, 0, -9000)
+    # Movement: Pos (400, 120, 0, -9000)
     pos_data = encode_sproto([(0, 400), (1, 120), (2, 0), (3, -9000)])
     mv = encode_sproto([(0, pos_data), (1, pos_data)])
     
@@ -370,8 +420,14 @@ def get_boss_char(inst_id, did):
     skills_map = build_skills_map(prof, lv)
     
     # Runtime: attribute(6), attribute_all(7)
-    attr_run = encode_sproto([(0, hp_max), (2, 50), (3, 5)])
-    attr_all = encode_sproto([(0, hp_max), (2, 50), (3, 5), (4, 100), (5, 100), (6, 100), (7, 100), (13, 500)])
+    attr_run = encode_sproto([(0, hp_max), (2, npc_stats['atk']), (3, npc_stats['def'])])
+    attr_all_data = [
+        (0, hp_max), (2, npc_stats['atk']), (3, npc_stats['def']),
+        (4, npc_stats['hit']), (5, npc_stats['eva']), (6, npc_stats['cri']), (7, npc_stats['res']),
+        (8, 0), (9, 0), (10, 5000), (11, 0),
+        (12, npc_stats['defa']), (13, 500), (17, npc_stats['dgea']), (18, npc_stats['resa']), (19, npc_stats['hita']), (20, npc_stats['cria'])
+    ]
+    attr_all = encode_sproto(attr_all_data)
     run = encode_sproto([(6, attr_run), (7, attr_all)])
     
     return encode_sproto([
@@ -467,7 +523,10 @@ def get_character_stats(c):
     return {
         'atk': atk, 'hp_max': hp_max, 'def': df,
         'hit': hit, 'eva': eva, 'cri': cri, 'res': res,
-        'power': power, 'lv': lv, 'exp': c.get('exp', 0)
+        'power': power, 'lv': lv, 'exp': c.get('exp', 0),
+        'defa': ld['defa'], 'dgea': ld['dgea'], 'resa': ld['resa'],
+        'hita': ld['hita'], 'cria': ld['cria'],
+        'exd': 0, 'exr': 0, 'crd': 5000, 'crr': 0
     }
 
 def get_char_ov(c, sort_index=None):
@@ -505,11 +564,12 @@ def get_full_char(c):
     mv = get_movement(pos[0], pos[1], pos[2], pos[3])
 
     attr_run = encode_sproto([(0, stats['hp_max']), (2, stats['atk']), (3, stats['def'])])
-    # attr_all tags (attribute.cs): 0:max_hp, 2:atk, 3:def, 4:hit, 5:eva, 6:cri, 7:res, 13:mov
+    # attr_all tags (attribute.cs): 0:max_hp, 2:atk, 3:def, 4:hit, 5:eva, 6:cri, 7:res, 8:exd, 9:exr, 10:crd, 11:crr, 12:defa, 13:mov, 17:dgea, 18:resa, 19:hita, 20:cria
     attr_all_data = [
         (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
         (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
-        (13, 500)
+        (8, 0), (9, 0), (10, 5000), (11, 0),
+        (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
     ]
     attr_all = encode_sproto(attr_all_data)
     run = encode_sproto([(6, attr_run), (7, attr_all)])
@@ -555,7 +615,8 @@ def sync_char_attrs_rpc(conn, picked_char):
     attr_all = encode_sproto([
         (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
         (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
-        (13, 500)
+        (8, 0), (9, 0), (10, 5000), (11, 0),
+        (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
     ])
 
     prop = encode_sproto([(13, picked_char.get('cash', 0))])
@@ -573,7 +634,7 @@ def sync_char_attrs_rpc(conn, picked_char):
 
 def get_npc_attr(nid):
     cfg = NPC_CONFIG.get(nid)
-    if not cfg: return 10000, 10000, 100, 10, 1 # Default fallback
+    if not cfg: return {'hp': 10000, 'atk': 100, 'def': 10, 'hit': 100, 'eva': 10, 'cri': 10, 'res': 10, 'lv': 1}
 
     lvl = cfg.get('level', 1)
     ld = LEVEL_DATA.get(lvl, LEVEL_DATA.get(1))
@@ -591,7 +652,70 @@ def get_npc_attr(nid):
     if cfg.get('hp_abs', 0) > hp: hp = cfg['hp_abs']
     if cfg.get('atk_abs', 0) > atk: atk = cfg['atk_abs']
 
-    return hp, hp, atk, df, lvl
+    # NPCs use Level 1 coefficients as default fallback if not specified elsewhere
+    return {
+        'hp_max': hp, 'atk': atk, 'def': df, 
+        'hit': ld['hit'][0], 'eva': ld['eva'][0], 'cri': ld['cri'][0], 'res': ld['res'][0],
+        'lv': lvl, 'defa': ld['defa'], 'dgea': ld['dgea'], 'resa': ld['resa'], 'hita': ld['hita'], 'cria': ld['cria'],
+        'exd': 0, 'exr': 0, 'crd': 5000, 'crr': 0
+    }
+
+def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv):
+    """Original Damage calculation reproduced from CharacterAttributeData.cs"""
+    # 1. Get Skill Multipliers from EffInfoData
+    skill_cfg = SKILL_CONFIG.get(skill_id, {})
+    eff_id = skill_cfg.get('eff0', "10000") # Default to NormalAttack if not found
+    eff_cfg = EFF_CONFIG.get(eff_id, {
+        'dmg_fixed': 0, 'dmg_fixed_add': 0, 'dmg_multi': 10000, 'dmg_multi_add': 0, 'adds': {}
+    })
+    
+    skill_damage = eff_cfg['dmg_fixed'] + eff_cfg['dmg_fixed_add'] * skill_lv
+    skill_scale = (eff_cfg['dmg_multi'] + eff_cfg['dmg_multi_add'] * skill_lv) / 10000.0
+    
+    # 2. Check Hit/Dodge
+    # hit_p = Min((attacker.HIT + 1) / (attacker.HITA + attacker.HIT + 1), 1.0)
+    # dge_p = Min((defender.DGE + 1) / (defender.DGE + defender.DGEA + 1), 0.5)
+    # add = SHIT / 10000.0
+    skill_shit = eff_cfg['adds'].get(3001, 0) / 10000.0
+    hit_p = min((attacker_stats['hit'] + 1.0) / (attacker_stats['hita'] + attacker_stats['hit'] + 1.0), 1.0)
+    dge_p = min((defender_stats['eva'] + 1.0) / (defender_stats['dgea'] + defender_stats['eva'] + 1.0), 0.5)
+    
+    hit_prob = 1.0 + hit_p - dge_p + skill_shit
+    if random.random() > hit_prob:
+        return 0, False, False # MISS
+        
+    # 3. Check Crit
+    # cri_p = Min((attacker.CRI + 1) / (attacker.CRI + attacker.CRIA + 1), 0.9)
+    # res_p = Min((defender.RES + 1) / (defender.RES + defender.RESA + 1), 0.8)
+    skill_scri = eff_cfg['adds'].get(3002, 0) / 10000.0
+    cri_p = min((attacker_stats['cri'] + 1.0) / (attacker_stats['cri'] + attacker_stats['cria'] + 1.0), 0.9)
+    res_p = min((defender_stats['res'] + 1.0) / (defender_stats['res'] + defender_stats['resa'] + 1.0), 0.8)
+    
+    cri_prob = cri_p - res_p + skill_scri
+    is_cri = random.random() < cri_prob
+    
+    # 4. Calculate Damage
+    # baseDamage = attacker.CurATK * skillScale + skillDamage
+    # defReduction = Min((defender.CurDEF + 1f) / (defender.CurDEF + attacker.CurDEFA), 0.5f)
+    base_dmg = attacker_stats['atk'] * skill_scale + skill_damage
+    def_red = min((defender_stats['def'] + 1.0) / (defender_stats['def'] + attacker_stats['defa']), 0.5)
+    
+    # 5. Handling Critical Multiplier
+    crit_mult = 1.0
+    if is_cri:
+        # critMult = Max(1f, Min(1f + (attacker.CurCRD - defender.CurCRR), 2f))
+        crit_mult = max(1.0, min(1.0 + (attacker_stats['crd'] - defender_stats['crr']) / 10000.0, 2.0))
+        
+    # 6. Final Formula with Random Variance [0.95, 1.05]
+    # num4 = random(0, 1000) / 1000f + 0.95f
+    rand_var = random.randint(0, 1000) / 1000.0 + 0.95
+    
+    # finalDamage = critMult * baseDamage * randVar * (1f - defReduction) * (1f + (attacker.CurEXD - defender.CurEXR + skillEXD))
+    skill_sexd = eff_cfg['adds'].get(3003, 0) / 10000.0
+    exd_factor = 1.0 + (attacker_stats['exd'] - defender_stats['exr']) / 10000.0 + skill_sexd
+    
+    final_dmg = crit_mult * base_dmg * rand_var * (1.0 - def_red) * exd_factor
+    return int(max(1, final_dmg)), True, is_cri
 
 def spawn_map_npcs(conn, map_id, picked_char=None):
     """Spawns all NPCs, Monsters, and Traffic defined in data for the map."""
@@ -605,7 +729,13 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
 
     def send_npc_create(nid, name, x, z, o):
         global GLOBAL_INST_COUNTER
-        hp_cur, hp_max, atk, df, lvl = get_npc_attr(nid)
+        npc_stats = get_npc_attr(nid)
+        hp_cur = npc_stats['hp_max']
+        hp_max = npc_stats['hp_max']
+        atk = npc_stats['atk']
+        df = npc_stats['def']
+        lvl = npc_stats['lv']
+        
         GLOBAL_INST_COUNTER += 1
         inst_id = GLOBAL_INST_COUNTER
         NPC_HP_MAP[inst_id] = hp_max
@@ -1285,16 +1415,15 @@ def client_handler(conn, addr):
                         # Authoritative Combat: Calculate and Sync Damage
                         target_nid = NPC_INST_MAP.get(tid)
                         if target_nid:
-                            hp_t, hp_t_m, atk_t, def_t, lvl_t = get_npc_attr(target_nid)
-                            p_stats = get_character_stats(picked_char)
+                            defender_stats = get_npc_attr(target_nid)
+                            attacker_stats = get_character_stats(picked_char)
+                            skill_lv = picked_char.get('skill_levels', {}).get(sid, 0)
 
                             # Player -> NPC Damage
-                            val_dmg = p_stats['atk'] - def_t
-                            dmg = val_dmg if val_dmg > 50 else 50
-                            dmg = int(dmg * random.uniform(0.9, 1.1))
+                            dmg, is_hit, is_cri = get_combat_damage(attacker_stats, defender_stats, sid, skill_lv)
 
                             # Update Server State
-                            if tid in NPC_HP_MAP:
+                            if is_hit and tid in NPC_HP_MAP:
                                 NPC_HP_MAP[tid] -= dmg
                                 
                                 # BOSS DEATH HANDLING
@@ -1310,68 +1439,80 @@ def client_handler(conn, addr):
                                         DEAD_NPC_SET.add(tid)
 
                             # Push damage info to client (Tag 111: accept_damge)
-                            dmg_item = encode_sproto([(0, tid), (1, dmg), (2, sid), (4, False)])
+                            # dmg_item: id(0), damage(1), skillId(2), isCrit(4)
+                            dmg_item = encode_sproto([(0, tid), (1, dmg), (2, sid), (4, is_cri)])
                             send_rpc_push(111, encode_sproto([(0, [dmg_item])]))
 
                             # NPC -> Player Counter-Attack
-                            val_ndmg = atk_t - p_stats['def']
-                            npc_dmg = val_ndmg if val_ndmg > 10 else 10
-                            npc_dmg = int(npc_dmg * random.uniform(0.8, 1.2))
+                            # NPCs use "Normal Attack" (10000) for now
+                            npc_dmg, n_hit, n_cri = get_combat_damage(defender_stats, attacker_stats, "10000", 0)
 
-                            new_hp = picked_char.get('hp', p_stats['hp_max']) - npc_dmg
-                            picked_char['hp'] = new_hp if new_hp > 0 else 0
+                            if n_hit:
+                                new_hp = picked_char.get('hp', attacker_stats['hp_max']) - npc_dmg
+                                picked_char['hp'] = new_hp if new_hp > 0 else 0
 
-                            # Push player damage to client
-                            p_dmg_item = encode_sproto([(0, picked_char['id']), (1, npc_dmg), (2, "1"), (4, False)])
-                            send_rpc_push(111, encode_sproto([(0, [p_dmg_item])]))
+                                # Push player damage to client
+                                p_dmg_item = encode_sproto([(0, picked_char['id']), (1, npc_dmg), (2, "1"), (4, n_cri)])
+                                send_rpc_push(111, encode_sproto([(0, [p_dmg_item])]))
 
-                            # Sync player attributes (HP bar)
-                            sync_char_attrs_rpc(conn, picked_char)
+                                # Sync player attributes (HP bar)
+                                sync_char_attrs_rpc(conn, picked_char)
 
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 111: # accept_damge
-                if picked_char and session is not None:
+                if picked_char:
                     dlist = body.get(0, [])
                     for d in dlist:
                         target_id = d.get(0)
                         dmg = d.get(1)
-                        print(f"[M1003 DEBUG] RX 111 target_id={target_id} damage={dmg}")
+                        is_cri = d.get(2) # actually Tag 2 is skillId in acceptdamge? No, check Sproto
+                        
+                        print(f"[COMBAT] accept_damge target={target_id} dmg={dmg}")
+                        
                         if target_id == picked_char['id']:
-                            # Ensure NPCs deal enough damage to be a threat
-                            final_dmg = dmg if dmg > 10 else 10
-                            new_hp = picked_char.get('hp', 0) - final_dmg
+                            # Damage to player
+                            new_hp = picked_char.get('hp', 0) - dmg
                             picked_char['hp'] = new_hp if new_hp > 0 else 0
                             sync_char_attrs_rpc(conn, picked_char)
+                        elif target_id in NPC_HP_MAP:
+                            # Damage to NPC/Monster/Boss
+                            NPC_HP_MAP[target_id] -= dmg
+                            
                             if NPC_HP_MAP[target_id] <= 0:
                                 # Ensure death is processed exactly once
                                 if target_id in DEAD_NPC_SET:
                                     continue
                                 DEAD_NPC_SET.add(target_id)
 
-                                # Spawn original reward drop (Cash 1001, Exp 2001) using proper nested Sproto type
-                                global GLOBAL_INST_COUNTER
-                                GLOBAL_INST_COUNTER += 1
-                                # drop_item_info (Tag 527): serverId(0), pos_x(1), pos_z(2), type(3), item(4), ownServerId(7)
-                                pos = picked_char['pos']
-                                nested_item = encode_sproto([(0, "1001"), (1, 50), (3, 1)]) # itemId(0), itemCount(1), quality(3)
-                                drop_data = encode_sproto([
-                                    (0, GLOBAL_INST_COUNTER),
-                                    (1, int(pos[0] + 100)),
-                                    (2, int(pos[2] + 100)),
-                                    (3, 1), # Type 1
-                                    (4, nested_item),
-                                    (7, picked_char['id']) # ownServerId maps to tag 7
-                                ])
-                                send_rpc_push(527, drop_data)
-                                
-                                # Process missions for server-simulated NPCs
-                                target_nid = NPC_INST_MAP.get(target_id)
-                                if target_nid:
-                                    advance_missions(picked_char, send_rpc_push, 'kill', target_id=target_nid)
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+                                # BOSS DEATH HANDLING (if client calculated it)
+                                if target_id == picked_char.get('boss_inst_id'):
+                                    did = picked_char.get('active_domin_id', '1')
+                                    print(f"[M1003 DEBUG] Boss {target_id} killed by client dmg. Winning did={did}")
+                                    win_data = encode_sproto([(0, 26), (1, did), (2, True)])
+                                    send_rpc_push(552, win_data)
+                                    advance_missions(picked_char, send_rpc_push, 'capture', target_id=did)
+                                    picked_char['boss_inst_id'] = None
+                                else:
+                                    # Regular NPC/Monster drop
+                                    global GLOBAL_INST_COUNTER
+                                    GLOBAL_INST_COUNTER += 1
+                                    pos = picked_char['pos']
+                                    nested_item = encode_sproto([(0, "1001"), (1, 50), (3, 1)])
+                                    drop_data = encode_sproto([
+                                        (0, GLOBAL_INST_COUNTER), (1, int(pos[0] + 100)), (2, int(pos[2] + 100)),
+                                        (3, 1), (4, nested_item), (7, picked_char['id'])
+                                    ])
+                                    send_rpc_push(527, drop_data)
+                                    
+                                    target_nid = NPC_INST_MAP.get(target_id)
+                                    if target_nid:
+                                        advance_missions(picked_char, send_rpc_push, 'kill', target_id=target_nid)
+                    
+                    if session is not None:
+                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                        conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 307 or msg == 127: # local_npc_die (307) or single_copy_scene_npc_die (127)
                 npcid = None
@@ -1423,8 +1564,8 @@ def client_handler(conn, addr):
 
                     if npcid and npcid != "None":
                         # NPC Kill Rewards (EXP: level*20, CASH: level*100)
-                        h_m, h_m_m, a_m, d_m, lvl_m = get_npc_attr(npcid)
-                        reward_level = lvl_m if 1 <= lvl_m <= 200 else 1
+                        npc_stats = get_npc_attr(npcid)
+                        reward_level = npc_stats['lv'] if 1 <= npc_stats['lv'] <= 200 else 1
                         exp_kill = reward_level * 20
                         cash_kill = reward_level * 100
                         picked_char['exp'] += exp_kill
