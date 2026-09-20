@@ -40,24 +40,20 @@ try:
     if os.path.exists(eff_path):
         with open(eff_path, "r", encoding='utf-8') as f:
             for line in f:
-                if line.startswith("*,") or ("," in line and line.split(",")[1].isdigit()):
-                    parts = line.strip().split(",")
-                    if len(parts) > 30:
-                        eid = parts[1]
-                        # Columns: 3:Damage, 4:DamageAdd, 5:DamageMulti, 6:DamageMultiAdd
-                        # Add types: 22, 24, 26, 28 (indices 22, 24, 26, 28)
-                        # Add values: 23, 25, 27, 29 (indices 23, 25, 27, 29)
-                        adds = {}
-                        for i in [22, 24, 26, 28]:
-                            if i+1 < len(parts) and parts[i].isdigit():
-                                adds[int(parts[i])] = int(parts[i+1])
-                        EFF_CONFIG[eid] = {
-                            'dmg_fixed': int(parts[3]) if parts[3].isdigit() else 0,
-                            'dmg_fixed_add': int(parts[4]) if parts[4].isdigit() else 0,
-                            'dmg_multi': int(parts[5]) if parts[5].isdigit() else 0,
-                            'dmg_multi_add': int(parts[6]) if parts[6].isdigit() else 0,
-                            'adds': adds
-                        }
+                parts = line.strip().split(",")
+                if len(parts) > 30 and parts[1].isdigit():
+                    eid = parts[1]
+                    adds = {}
+                    for i in [22, 24, 26, 28]:
+                        if i+1 < len(parts) and parts[i].isdigit():
+                            adds[int(parts[i])] = int(parts[i+1])
+                    EFF_CONFIG[eid] = {
+                        'dmg_fixed': int(parts[3]) if parts[3].isdigit() else 0,
+                        'dmg_fixed_add': int(parts[4]) if parts[4].isdigit() else 0,
+                        'dmg_multi': int(parts[5]) if parts[5].isdigit() else 0,
+                        'dmg_multi_add': int(parts[6]) if parts[6].isdigit() else 0,
+                        'adds': adds
+                    }
         print(f"[EFF CONFIG LOADED] count={len(EFF_CONFIG)}")
 
     # Load SkillData
@@ -65,15 +61,14 @@ try:
     if os.path.exists(skill_path):
         with open(skill_path, "r", encoding='utf-8') as f:
             for line in f:
-                if line.startswith("*,") or ("," in line and line.split(",")[1].isdigit()):
-                    parts = line.strip().split(",")
-                    if len(parts) > 25:
-                        sid = parts[1]
-                        SKILL_CONFIG[sid] = {
-                            'eff0': parts[24],
-                            'eff1': parts[26] if len(parts) > 26 else "",
-                            'eff2': parts[28] if len(parts) > 28 else ""
-                        }
+                parts = line.strip().split(",")
+                if len(parts) > 25 and parts[1].isdigit():
+                    sid = parts[1]
+                    SKILL_CONFIG[sid] = {
+                        'eff0': parts[24],
+                        'eff1': parts[26] if len(parts) > 26 else "",
+                        'eff2': parts[28] if len(parts) > 28 else ""
+                    }
         print(f"[SKILL CONFIG LOADED] count={len(SKILL_CONFIG)}")
 
     # Load BaseLvData for EXP requirements and stats
@@ -95,7 +90,6 @@ try:
                             'eva': [int(parts[8]), int(parts[15]), int(parts[22])],
                             'cri': [int(parts[9]), int(parts[16]), int(parts[23])],
                             'res': [int(parts[10]), int(parts[17]), int(parts[24])],
-                            # Damage Coefficients (Tags 12, 17, 18, 19, 20 in attribute Sproto)
                             'defa': int(parts[31]), 'dgea': int(parts[32]), 'resa': int(parts[33]),
                             'hita': int(parts[34]), 'cria': int(parts[35])
                         }
@@ -106,20 +100,19 @@ try:
     if os.path.exists(map_info_path):
         with open(map_info_path, "r", encoding='utf-8') as f:
             for line in f:
-                if line.startswith("*,") or line.startswith(","):
-                    parts = line.strip().split(",")
-                    if len(parts) > 8:
-                        mid = parts[1]
-                        MAP_CONFIG[mid] = {
-                            'name': parts[2],
-                            'scene': parts[3],
-                            'type': int(parts[4]) if parts[4].isdigit() else 0,
-                            'width': int(parts[6]) if parts[6].isdigit() else 0,
-                            'height': int(parts[7]) if parts[7].isdigit() else 0,
-                            'birth': parts[8],
-                            'teleport_pos': parts[10] if len(parts) > 10 else "",
-                            'open_lv': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 0
-                        }
+                parts = line.strip().split(",")
+                if len(parts) > 8 and parts[1].isdigit():
+                    mid = parts[1]
+                    MAP_CONFIG[mid] = {
+                        'name': parts[2],
+                        'scene': parts[3],
+                        'type': int(parts[4]) if parts[4].isdigit() else 0,
+                        'width': int(parts[6]) if parts[6].isdigit() else 0,
+                        'height': int(parts[7]) if parts[7].isdigit() else 0,
+                        'birth': parts[8],
+                        'teleport_pos': parts[10] if len(parts) > 10 else "",
+                        'open_lv': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 0
+                    }
         print(f"[MAP CONFIG LOADED] count={len(MAP_CONFIG)}")
 
     # Load MapConnectInfoData
@@ -127,17 +120,16 @@ try:
     if os.path.exists(conn_path):
         with open(conn_path, "r", encoding='utf-8') as f:
             for line in f:
-                if line.startswith("*,") or line.startswith(","):
-                    parts = line.strip().split(",")
-                    if len(parts) > 6:
-                        src = parts[2]
-                        dst = parts[3]
-                        try:
-                            px = float(parts[4])
-                            py = float(parts[5]) if parts[5] else 0.0
-                            pz = float(parts[6])
-                            MAP_CONNECT_DATA[(src, dst)] = (px, py, pz)
-                        except: pass
+                parts = line.strip().split(",")
+                if len(parts) > 6 and parts[1].isdigit():
+                    src = parts[2]
+                    dst = parts[3]
+                    try:
+                        px = float(parts[4])
+                        py = float(parts[5]) if parts[5] else 0.0
+                        pz = float(parts[6])
+                        MAP_CONNECT_DATA[(src, dst)] = (px, py, pz)
+                    except: pass
         print(f"[MAP CONNECT DATA LOADED] count={len(MAP_CONNECT_DATA)}")
 
     # Load GuildCaptureData
@@ -145,10 +137,9 @@ try:
     if os.path.exists(gc_path):
         with open(gc_path, "r", encoding='utf-8') as f:
             for line in f:
-                if line.startswith("*,"):
-                    parts = line.strip().split(",")
-                    if len(parts) > 2:
-                        GUILD_CAPTURE_DATA[parts[1]] = parts[2]
+                parts = line.strip().split(",")
+                if len(parts) > 2 and parts[1].isdigit():
+                    GUILD_CAPTURE_DATA[parts[1]] = parts[2]
         print(f"[GUILD CAPTURE DATA LOADED] count={len(GUILD_CAPTURE_DATA)}")
 
     # Load NpcData
@@ -156,24 +147,23 @@ try:
     if os.path.exists(npc_path):
         with open(npc_path, "r", encoding='utf-8') as f:
             for line in f:
-                if line.startswith("*,") or line.startswith(","):
-                    parts = line.strip().split(",")
-                    if len(parts) > 60:
-                        nid = parts[1]
-                        lvl = int(parts[9]) if parts[9].isdigit() else 1
-                        is_abs = "绝对值" in parts[12]
-                        NPC_CONFIG[nid] = {
-                            'name': parts[2],
-                            'model': parts[4],
-                            'level': lvl,
-                            'is_abs': is_abs,
-                            'atk_coe': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 10000,
-                            'hp_coe': int(parts[27]) if len(parts) > 27 and parts[27].isdigit() else 10000,
-                            'def_coe': int(parts[28]) if len(parts) > 28 and parts[28].isdigit() else 10000,
-                            'atk_abs': int(parts[44]) if is_abs and len(parts) > 44 and parts[44].isdigit() else 0,
-                            'hp_abs': int(parts[45]) if is_abs and len(parts) > 45 and parts[45].isdigit() else 0,
-                            'def_abs': int(parts[46]) if is_abs and len(parts) > 46 and parts[46].isdigit() else 0
-                        }
+                parts = line.strip().split(",")
+                if len(parts) > 60 and parts[1].isdigit():
+                    nid = parts[1]
+                    lvl = int(parts[9]) if parts[9].isdigit() else 1
+                    is_abs = "绝对值" in parts[12]
+                    NPC_CONFIG[nid] = {
+                        'name': parts[2],
+                        'model': parts[4],
+                        'level': lvl,
+                        'is_abs': is_abs,
+                        'atk_coe': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 10000,
+                        'hp_coe': int(parts[27]) if len(parts) > 27 and parts[27].isdigit() else 10000,
+                        'def_coe': int(parts[28]) if len(parts) > 28 and parts[28].isdigit() else 10000,
+                        'atk_abs': int(parts[44]) if is_abs and len(parts) > 44 and parts[44].isdigit() else 0,
+                        'hp_abs': int(parts[45]) if is_abs and len(parts) > 45 and parts[45].isdigit() else 0,
+                        'def_abs': int(parts[46]) if is_abs and len(parts) > 46 and parts[46].isdigit() else 0
+                    }
         print(f"[NPC CONFIG LOADED] count={len(NPC_CONFIG)}")
 
     # Load MonsterData (and split into Monster vs Static NPC)
@@ -181,24 +171,23 @@ try:
     if os.path.exists(mon_path):
         with open(mon_path, "r", encoding='utf-8') as f:
             for line in f:
-                if line.startswith("*,") or line.startswith(","):
-                    parts = line.strip().split(",")
-                    if len(parts) > 6 and parts[1].isdigit():
-                        mid = parts[1]
-                        group = int(parts[2]) if parts[2].isdigit() else 0
-                        nid = parts[3]
-                        entry = {
-                            'nid': nid,
-                            'x': int(parts[4]),
-                            'z': int(parts[5]),
-                            'o': int(parts[6])
-                        }
-                        if group == 9999:
-                            if mid not in STATIC_NPC_DATA: STATIC_NPC_DATA[mid] = []
-                            STATIC_NPC_DATA[mid].append(entry)
-                        else:
-                            if mid not in MONSTER_DATA: MONSTER_DATA[mid] = []
-                            MONSTER_DATA[mid].append(entry)
+                parts = line.strip().split(",")
+                if len(parts) > 6 and parts[1].isdigit():
+                    mid = parts[1]
+                    group = int(parts[2]) if parts[2].isdigit() else 0
+                    nid = parts[3]
+                    entry = {
+                        'nid': nid,
+                        'x': int(parts[4]),
+                        'z': int(parts[5]),
+                        'o': int(parts[6])
+                    }
+                    if group == 9999:
+                        if mid not in STATIC_NPC_DATA: STATIC_NPC_DATA[mid] = []
+                        STATIC_NPC_DATA[mid].append(entry)
+                    else:
+                        if mid not in MONSTER_DATA: MONSTER_DATA[mid] = []
+                        MONSTER_DATA[mid].append(entry)
         print(f"[MONSTER DATA LOADED] monsters_map={len(MONSTER_DATA)} static_npcs_map={len(STATIC_NPC_DATA)}")
 
     # Load KillTargetMissionData (Mission Spawns)
@@ -206,19 +195,18 @@ try:
     if os.path.exists(kt_path):
         with open(kt_path, "r", encoding='utf-8') as f:
             for line in f:
-                if line.startswith("*,") or line.startswith(","):
-                    parts = line.strip().split(",")
-                    if len(parts) > 7 and parts[1].isdigit():
-                        mid = parts[1]
-                        if mid not in KILL_TARGET_SPAWNS: KILL_TARGET_SPAWNS[mid] = []
-                        KILL_TARGET_SPAWNS[mid].append({
-                            'map': parts[2],
-                            'x': int(parts[3]),
-                            'z': int(parts[4]),
-                            'o': int(parts[5]) if parts[5] else 0,
-                            'nid': parts[6],
-                            'num': int(parts[7]) if parts[7] else 1
-                        })
+                parts = line.strip().split(",")
+                if len(parts) > 7 and parts[1].isdigit():
+                    mid = parts[1]
+                    if mid not in KILL_TARGET_SPAWNS: KILL_TARGET_SPAWNS[mid] = []
+                    KILL_TARGET_SPAWNS[mid].append({
+                        'map': parts[2],
+                        'x': int(parts[3]),
+                        'z': int(parts[4]),
+                        'o': int(parts[5]) if parts[5] else 0,
+                        'nid': parts[6],
+                        'num': int(parts[7]) if parts[7] else 1
+                    })
         print(f"[KILL TARGET DATA LOADED] count={len(KILL_TARGET_SPAWNS)}")
 
     # Load TargetCarMissionData
@@ -226,17 +214,16 @@ try:
     if os.path.exists(tc_path):
         with open(tc_path, "r", encoding='utf-8') as f:
             for line in f:
-                if line.startswith("*,") or ("," in line and line.split(",")[1].isdigit()):
-                    parts = line.strip().split(",")
-                    if len(parts) > 6:
-                        mid = parts[1]
-                        if mid not in TARGET_CAR_SPAWNS: TARGET_CAR_SPAWNS[mid] = []
-                        TARGET_CAR_SPAWNS[mid].append({
-                            'map': parts[2],
-                            'x': int(float(parts[3])),
-                            'z': int(float(parts[4])),
-                            'car_id': parts[6] # e.g. "Chevrolet"
-                        })
+                parts = line.strip().split(",")
+                if len(parts) > 6 and parts[1].isdigit():
+                    mid = parts[1]
+                    if mid not in TARGET_CAR_SPAWNS: TARGET_CAR_SPAWNS[mid] = []
+                    TARGET_CAR_SPAWNS[mid].append({
+                        'map': parts[2],
+                        'x': int(float(parts[3])),
+                        'z': int(float(parts[4])),
+                        'car_id': parts[6] # e.g. "Chevrolet"
+                    })
         print(f"[TARGET CAR DATA LOADED] count={len(TARGET_CAR_SPAWNS)}")
 except: traceback.print_exc()
 
@@ -384,6 +371,18 @@ def decode_sproto(data, offset=0):
             curr_tag += 1
             fields[curr_tag] = (v >> 1) - 1
     return fields
+
+def decode_sproto_list(data):
+    """Decodes a Sproto array of objects from raw bytes."""
+    if not data: return []
+    res = []
+    ptr = 0
+    while ptr < len(data):
+        if ptr + 4 > len(data): break
+        l = struct.unpack("<I", data[ptr:ptr+4])[0]
+        res.append(data[ptr+4 : ptr+4+l])
+        ptr += 4 + l
+    return res
 
 def get_visual(name, prof):
     m = {0:{"m":"100","h":"XD_A_T","b":"XD_A_S","l":"XD_A_X","w":"XD_A_WQ"},
@@ -862,6 +861,7 @@ def give_mission_rewards(picked_char, mid, send_rpc_push):
             if picked_char['exp'] >= req_data['exp']:
                 picked_char['exp'] -= req_data['exp']
                 picked_char['level'] = lv + 1
+                print(f"[LEVEL UP] CharID={picked_char['id']} NewLevel={picked_char['level']}")
             else: break
 
         # Send original reward popup (Tag 638)
@@ -1458,18 +1458,23 @@ def client_handler(conn, addr):
                                 # Sync player attributes (HP bar)
                                 sync_char_attrs_rpc(conn, picked_char)
 
-                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                conn.sendall(struct.pack(">H", len(pf)) + pf)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 111: # accept_damge
                 if picked_char:
-                    dlist = body.get(0, [])
-                    for d in dlist:
-                        target_id = d.get(0)
-                        dmg = d.get(1)
-                        is_cri = d.get(2) # actually Tag 2 is skillId in acceptdamge? No, check Sproto
+                    dlist_raw = body.get(0, b"")
+                    dlist = decode_sproto_list(dlist_raw)
+                    print(f"[COMBAT] RX 111 count={len(dlist)}")
+                    for d_bytes in dlist:
+                        d = decode_sproto(d_bytes)
+                        target_id = get_val_int(d, 0)
+                        dmg = get_val_int(d, 1)
+                        # Tag 4 is bool cri. Sproto bool is encoded as int in header.
+                        is_cri = get_val_int(d, 4, 0) == 1
                         
-                        print(f"[COMBAT] accept_damge target={target_id} dmg={dmg}")
+                        print(f"[COMBAT] accept_damge target={target_id} dmg={dmg} cri={is_cri}")
                         
                         if target_id == picked_char['id']:
                             # Damage to player
