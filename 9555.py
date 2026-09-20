@@ -408,14 +408,12 @@ def get_boss_char(inst_id, did):
     name = "街区占领NPC"
     prof = 0
     
-    # AI optimization: Set boss level to 30 to unlock all active skills (110 requires Lv 25)
-    lv = 30
-    npc_stats = get_npc_attr("1105") # Get base config
-    # Use level 30 coefficients for scaling
-    effective_stats = get_npc_attr("1105") # This uses the internal lvl logic
-    # Override level and calculate authoritative hp_max for lv 30
-    hp_max = npc_stats['hp_max'] * 2 # Increase health for a better duel experience
-    power = 8000
+    # VERIFIED ORIGINAL BOSS DATA: Level 3
+    lv = 3
+    hp_max = 9560
+    power = 6000
+    atk = 660
+    df = 60
     
     # Visual
     v = get_visual(name, prof)
@@ -425,22 +423,25 @@ def get_boss_char(inst_id, did):
         (0, hp_max), (1, 0), (2, lv), (3, power), (15, 2)
     ])
     
-    # Movement: Spawn at Y=0 (Floor Level) to ensure NavMesh docking
-    pos_data = encode_sproto([(0, 400), (1, 0), (2, 0), (3, -9000)])
+    # Movement: Restore Y=120. Client docking raycasts from Y=150 down.
+    pos_data = encode_sproto([(0, 400), (1, 120), (2, 0), (3, -9000)])
     mv = encode_sproto([(0, pos_data), (1, pos_data)])
     
-    # Skills - Ensure skills have level 1 for AI to use them optimally
-    skill_levels = {sid: 1 for sid in PROF_SKILLS[prof]['actives']}
-    skill_levels[PROF_SKILLS[prof]['atk']] = 1
-    skills_map = build_skills_map(prof, lv, skill_levels)
+    # Skills - Verified Boss AI uses ONLY active skills at indices 4, 5, 6
+    # 105 (4), 106 (5), 107 (6). All level 1.
+    boss_skill_levels = {"105": 1, "106": 1, "107": 1}
+    skills_map = build_skills_map(prof, lv, boss_skill_levels)
     
     # Runtime: attribute(6), attribute_all(7)
-    attr_run = encode_sproto([(0, hp_max), (2, npc_stats['atk']), (3, npc_stats['def'])])
+    attr_run = encode_sproto([(0, hp_max), (2, atk), (3, df)])
+    
+    # Load level 3 coefficients for Boss
+    ld = LEVEL_DATA.get(3, LEVEL_DATA.get(1))
     attr_all_data = [
-        (0, hp_max), (2, npc_stats['atk']), (3, npc_stats['def']),
-        (4, npc_stats['hit']), (5, npc_stats['eva']), (6, npc_stats['cri']), (7, npc_stats['res']),
-        (8, npc_stats['exd']), (9, npc_stats['exr']), (10, npc_stats['crd']), (11, npc_stats['crr']),
-        (12, npc_stats['defa']), (13, 500), (17, npc_stats['dgea']), (18, npc_stats['resa']), (19, npc_stats['hita']), (20, npc_stats['cria'])
+        (0, hp_max), (2, atk), (3, df),
+        (4, ld['hit'][0]), (5, ld['eva'][0]), (6, ld['cri'][0]), (7, ld['res'][0]),
+        (8, ld['exd'][0]), (9, ld['exr'][0]), (10, ld['crd'][0]), (11, ld['crr'][0]),
+        (12, ld['defa']), (13, 500), (17, ld['dgea']), (18, ld['resa']), (19, ld['hita']), (20, ld['cria'])
     ]
     attr_all = encode_sproto(attr_all_data)
     run = encode_sproto([(6, attr_run), (7, attr_all)])
@@ -1109,8 +1110,8 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
     # Update position
     landing_pos = override_pos
     if not landing_pos and target_map_id == "502":
-        # Lord Battle: Attacker spawns at floor level (Y=0) to docking NavMesh
-        landing_pos = [-400, 0, 0, 9000]
+        # Lord Battle: Restore verified MapInfo coordinates (Y=120)
+        landing_pos = [-400, 120, 0, 9000]
         print(f"[TELEPORT] Lord Battle Map 502 start pos={landing_pos}")
 
     # 1. Try teleport portal heuristic
