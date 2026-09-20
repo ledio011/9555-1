@@ -427,10 +427,15 @@ def get_boss_char(inst_id, did):
     pos_data = encode_sproto([(0, 400), (1, 120), (2, 0), (3, -9000)])
     mv = encode_sproto([(0, pos_data), (1, pos_data)])
     
-    # Skills - Verified Boss AI uses ONLY active skills at indices 4, 5, 6
-    # 105 (4), 106 (5), 107 (6). All level 1.
-    boss_skill_levels = {"105": 1, "106": 1, "107": 1}
-    skills_map = build_skills_map(prof, lv, boss_skill_levels)
+    # ObjZombiePlayer removes a skill from its automatic list after using it.
+    # Supplying the complete XD combat set gives it valid fallbacks to chase
+    # and attack instead of becoming idle when the first skill is unavailable.
+    boss_skill_levels = {
+        "101": 1,
+        "105": 1, "106": 1, "107": 1,
+        "108": 1, "109": 1, "110": 1,
+    }
+    skills_map = build_skills_map(prof, 25, boss_skill_levels)
     
     # Runtime: attribute(6), attribute_all(7)
     attr_run = encode_sproto([(0, hp_max), (2, atk), (3, df)])
@@ -441,7 +446,8 @@ def get_boss_char(inst_id, did):
         (0, hp_max), (2, atk), (3, df),
         (4, ld['hit'][0]), (5, ld['eva'][0]), (6, ld['cri'][0]), (7, ld['res'][0]),
         (8, ld['exd'][0]), (9, ld['exr'][0]), (10, ld['crd'][0]), (11, ld['crr'][0]),
-        (12, ld['defa']), (13, 500), (17, ld['dgea']), (18, ld['resa']), (19, ld['hita']), (20, ld['cria'])
+        (12, ld['defa']), (13, 700), (14, 100),
+        (17, ld['dgea']), (18, ld['resa']), (19, ld['hita']), (20, ld['cria'])
     ]
     attr_all = encode_sproto(attr_all_data)
     run = encode_sproto([(6, attr_run), (7, attr_all)])
