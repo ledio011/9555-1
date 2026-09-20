@@ -405,7 +405,8 @@ def get_visual(name, prof):
 
 def get_boss_char(inst_id, did):
     # Domin 1 boss stats and visual (XD profession)
-    name = "街区占领NPC"
+    # These names are server placeholders, not names supplied by the APK data.
+    name = "XK7NQ2VJ"
     prof = 0
     
     # VERIFIED ORIGINAL BOSS DATA: Level 3
@@ -706,7 +707,13 @@ def get_npc_attr(nid):
 
 def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
     """Sends TAG 510 to sync NPC stats."""
-    attr_oth = encode_sproto([(0, hp_cur), (2, stats['lv'])])
+    # The dominance zombie is initially added to camp 2 by tag 544.  Omitting
+    # camp here makes the APK decode it as camp 0 and move it out of
+    # DominSceneManager's CampList[2], so rank_pvp_start never enables its AI.
+    attr_other_fields = [(0, hp_cur), (2, stats['lv'])]
+    if NPC_INST_MAP.get(inst_id, '').startswith('BOSS_'):
+        attr_other_fields.append((15, 2))
+    attr_oth = encode_sproto(attr_other_fields)
     attr_base = encode_sproto([(0, stats['hp_max'])])
     attr_all_data = [
         (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
@@ -1370,6 +1377,8 @@ def client_handler(conn, addr):
                     print(f"[MAP READY RECEIVED] map_id={mid}")
                     send_rpc_push(654, encode_sproto([(0, 1)])) # start_enter_game
                     if mid == "502":
+                        # Map 502 exposes its timer only through this APK tag.
+                        send_rpc_push(629, encode_sproto([(0, int(time.time()) + 300), (1, 0)]))
                         boss_id = picked_char.get('boss_inst_id')
                         if boss_id and picked_char.pop('boss_waiting_for_map_ready', False):
                             did = picked_char.get('active_domin_id', '1')
@@ -1870,7 +1879,7 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
                 v_p = encode_sproto([
-                    (0, "System Guard"),
+                    (0, "Q7MZK4RP"),
                     (1, "100"),
                     (2, "XD_A_T"),
                     (3, "XD_A_S"),
@@ -1880,7 +1889,7 @@ def client_handler(conn, addr):
                 ])
 
                 g_p = encode_sproto([
-                    (0, "System Guard"),
+                    (0, "Ash Viper"),
                     (1, 0)
                 ])
 
