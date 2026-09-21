@@ -1993,6 +1993,8 @@ def client_handler(conn, addr):
 
             elif msg == 270: # download_finish
                 if picked_char and not picked_char.get('download_complete'):
+            elif msg == 270: # download_finish
+                if picked_char and not picked_char.get('download_complete'):
                     picked_char['download_complete'] = True
                     # Expansion Rewards: Mount 9301 (Chevrolet voucher), 9011 (10), 9001 (20), 5026 (5)
                     add_to_inventory(picked_char, "9301", 1)
@@ -2008,6 +2010,19 @@ def client_handler(conn, addr):
                 elif picked_char:
                     print(f"[REWARD] Player {picked_char['id']} already claimed expansion rewards.")
 
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg in [118, 218, 145, 225, 258, 261, 278, 296, 299, 313, 319]:
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 306: # tutorial_finish
+                # The APK sends this before scheduling its optional-download tip.
+                # It is an RPC request, so it must receive an empty success reply.
+                print("[TUTORIAL] tutorial_finish acknowledged")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
