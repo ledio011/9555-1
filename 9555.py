@@ -2,6 +2,7 @@ import socket, struct, threading, random, json, os, time, traceback
 
 PORT = int(os.environ.get("PORT", 15678))
 CHAR_DB = "characters_final.json"
+RESOURCE_ROOT = os.path.join(os.path.dirname(__file__), "assets")
 server_session_counter = 8000
 GLOBAL_INST_COUNTER = 3000000
 NPC_INST_MAP = {} # inst_id -> nid (to resolve rewards)
@@ -1219,6 +1220,60 @@ def is_skill_locked(sid, level, prof):
             return True, SKILL_UNLOCK_LVS[idx]
     return False, 0
 
+def serve_resource_http(conn, initial_data):
+    """Serve APK updater files on the game-server port.
+
+    The updater requests /RES_205/... over HTTP.  Restrict this handler to
+    versioned resource paths below assets so an HTTP request cannot read game
+    data or arbitrary server files.
+    """
+    try:
+        request = initial_data
+        while b"\r\n\r\n" not in request and len(request) < 16384:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            request += chunk
+        first_line = request.split(b"\r\n", 1)[0].decode("ascii", "ignore")
+        parts = first_line.split()
+        if len(parts) < 2 or parts[0] not in ("GET", "HEAD"):
+            conn.sendall(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+            return
+        relative_path = parts[1].split("?", 1)[0].lstrip("/")
+        normalized = os.path.normpath(relative_path).replace("\\", "/")
+        if not normalized.startswith("RES_") or normalized.startswith("../"):
+            conn.sendall(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+            return
+        local_path = os.path.abspath(os.path.join(RESOURCE_ROOT, normalized))
+        resource_root = os.path.abspath(RESOURCE_ROOT) + os.sep
+        if not local_path.startswith(resource_root) or not os.path.isfile(local_path):
+            print(f"[HTTP 9555] 404 {normalized}")
+            conn.sendall(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+            return
+        size = os.path.getsize(local_path)
+        headers = (
+            b"HTTP/1.1 200 OK\r\n"
+            + b"Content-Length: " + str(size).encode("ascii") + b"\r\n"
+            + b"Content-Type: application/octet-stream\r\n"
+            + b"Connection: close\r\n\r\n"
+        )
+        conn.sendall(headers)
+        if parts[0] == "GET":
+            with open(local_path, "rb") as resource_file:
+                while True:
+                    block = resource_file.read(65536)
+                    if not block:
+                        break
+                    conn.sendall(block)
+        print(f"[HTTP 9555] 200 {normalized} ({size} bytes)")
+    except Exception as exc:
+        print(f"[HTTP 9555] failed: {exc}")
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
     global server_session_counter
@@ -1277,6 +1332,12 @@ def client_handler(conn, addr):
         leave_after_notice(5)
 
     try:
+        # HTTP updater traffic begins with GET/HEAD; game packets begin with a
+        # two-byte big-endian Sproto frame length.  Peek without consuming it.
+        initial = conn.recv(4, socket.MSG_PEEK)
+        if initial.startswith(b"GET ") or initial.startswith(b"HEAD"):
+            serve_resource_http(conn, b"")
+            return
         while True:
             h_bytes = conn.recv(2)
             if not h_bytes: break
