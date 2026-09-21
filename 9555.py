@@ -1506,7 +1506,9 @@ def client_handler(conn, addr):
                 if picked_char:
                     mid = picked_char.get('map_id', '11')
                     print(f"[MAP READY RECEIVED] map_id={mid}")
-                    send_rpc_push(654, encode_sproto([(0, 1)])) # start_enter_game
+                    # Tag 654 is start_enter_game.  The APK interprets state=1
+                    # as completion of the optional resource download, so it
+                    # must only be sent after the client's MSG 270 request.
                     if mid == "502":
                         # Map 502 exposes its match timer only through this APK tag.
                         send_rpc_push(629, encode_sproto([(0, int(time.time()) + 60), (1, 0)]))
