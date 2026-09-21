@@ -419,9 +419,11 @@ def get_boss_char(inst_id, did):
     # Visual
     v = get_visual(name, prof)
     
-    # attr_oth: hp(0), exp(1), level(2), power(3), camp(15)
+    # attribute_other fields are decoded by ObjZombiePlayer. A non-zero
+    # title_level (4) makes PlayerHeadInfoLogic render the overhead title.
+    # TitleData defines level 1 as a valid title.
     attr_oth = encode_sproto([
-        (0, hp_max), (1, 0), (2, lv), (3, power), (15, 2)
+        (0, hp_max), (1, 0), (2, lv), (3, power), (4, 1), (15, 2)
     ])
     
     # Movement: Restore Y=120. Client docking raycasts from Y=150 down.
@@ -1230,6 +1232,40 @@ def client_handler(conn, addr):
             print(f"[!] FAILED TO SEND PUSH TAG={tag}")
             traceback.print_exc()
 
+    def schedule_domin_return():
+        """Return after the Capture mission's APK-localized five-second exit notice."""
+        if not picked_char or picked_char.get('domin_return_scheduled'):
+            return
+        picked_char['domin_return_scheduled'] = True
+
+        def leave_after_notice(seconds_left):
+            if not picked_char or picked_char.get('map_id') != '502':
+                return
+            if seconds_left > 0:
+                # Localization 200302: "You will leave the scene after {0} seconds".
+                send_rpc_push(529, encode_sproto([
+                    (0, f"You will leave the scene after {seconds_left} seconds"),
+                    (1, True)
+                ]))
+                timer = threading.Timer(1.0, leave_after_notice, args=(seconds_left - 1,))
+                timer.daemon = True
+                timer.start()
+                return
+
+            return_pos = picked_char.get('pre_arena_pos')
+            picked_char['boss_inst_id'] = None
+            picked_char['active_domin_id'] = None
+            picked_char['pre_arena_pos'] = None
+            picked_char['domin_return_scheduled'] = False
+            # The APK has no dedicated "close arena timer" packet. Its
+            # notify_copy_start_info handler closes the timer immediately for
+            # an elapsed end_time, before the map transition begins.
+            send_rpc_push(629, encode_sproto([(0, int(time.time())), (1, 2)]))
+            start_map_transition(conn, picked_char, '11', send_rpc_push, override_pos=return_pos)
+            print('[M1003 DEBUG] Arena exit countdown finished; returned to saved city position')
+
+        leave_after_notice(5)
+
     try:
         while True:
             h_bytes = conn.recv(2)
@@ -1377,8 +1413,8 @@ def client_handler(conn, addr):
                     print(f"[MAP READY RECEIVED] map_id={mid}")
                     send_rpc_push(654, encode_sproto([(0, 1)])) # start_enter_game
                     if mid == "502":
-                        # Map 502 exposes its timer only through this APK tag.
-                        send_rpc_push(629, encode_sproto([(0, int(time.time()) + 300), (1, 0)]))
+                        # Map 502 exposes its match timer only through this APK tag.
+                        send_rpc_push(629, encode_sproto([(0, int(time.time()) + 60), (1, 0)]))
                         boss_id = picked_char.get('boss_inst_id')
                         if boss_id and picked_char.pop('boss_waiting_for_map_ready', False):
                             did = picked_char.get('active_domin_id', '1')
@@ -1472,6 +1508,10 @@ def client_handler(conn, addr):
                             send_rpc_push(519, sync_mission_data(picked_char))   # Mission UI update
                             if items_add:
                                 send_rpc_push(611, sync_inventory_data(picked_char)) # Inventory sync
+                            if mid == '1003' and picked_char.get('map_id') == '502':
+                                # Tag 521 invokes the APK's MissionPassShowRoot path. Start
+                                # the exit sequence only after that response has been pushed.
+                                schedule_domin_return()
                         else:
                             if session is not None:
                                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -1551,9 +1591,8 @@ def client_handler(conn, addr):
                                     if tid == picked_char.get('boss_inst_id'):
                                         did = picked_char.get('active_domin_id', '1')
                                         print(f"[M1003 DEBUG] Boss {tid} died. Winning did={did}")
-                                        # Tag 552: copy_scene_result (subType=26, id=did, win=True)
-                                        win_data = encode_sproto([(0, 26), (1, did), (2, True)])
-                                        send_rpc_push(552, win_data)
+                                        # Capture is not a generic copy. Tag 552 would open the
+                                        # Star Reward page instead of the normal mission reward UI.
                                         advance_missions(picked_char, send_rpc_push, 'capture', target_id=did)
                                         picked_char['boss_inst_id'] = None
                                         DEAD_NPC_SET.add(tid)
@@ -1650,8 +1689,7 @@ def client_handler(conn, addr):
                                     
                                     did = picked_char.get('active_domin_id', '1')
                                     print(f"[M1003 DEBUG] Boss {target_id} killed by client dmg. Winning did={did}")
-                                    win_data = encode_sproto([(0, 26), (1, did), (2, True)])
-                                    send_rpc_push(552, win_data)
+                                    # Do not send generic copy_scene_result (552) for Capture.
                                     advance_missions(picked_char, send_rpc_push, 'capture', target_id=did)
                                     picked_char['boss_inst_id'] = None
                                 else:
@@ -1778,7 +1816,7 @@ def client_handler(conn, addr):
                         sync_npc_attrs_rpc(conn, boss_id, boss_stats, 0)
                         did = picked_char.get('active_domin_id', '1')
                         print(f"[M1003 DEBUG] RX 137 zombie died; winning did={did}")
-                        send_rpc_push(552, encode_sproto([(0, 26), (1, did), (2, True)]))
+                        # Capture wins update mission progress, not copy_scene_result (552).
                         advance_missions(picked_char, send_rpc_push, 'capture', target_id=did)
                         picked_char['boss_inst_id'] = None
                         DEAD_NPC_SET.add(boss_id)
