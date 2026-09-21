@@ -1232,11 +1232,12 @@ def client_handler(conn, addr):
             print(f"[!] FAILED TO SEND PUSH TAG={tag}")
             traceback.print_exc()
 
-    def schedule_domin_return():
+    def schedule_domin_return(restore_hp=False):
         """Return after the Capture mission's APK-localized five-second exit notice."""
         if not picked_char or picked_char.get('domin_return_scheduled'):
             return
         picked_char['domin_return_scheduled'] = True
+        picked_char['domin_return_restore_hp'] = restore_hp
 
         def leave_after_notice(seconds_left):
             if not picked_char or picked_char.get('map_id') != '502':
@@ -1253,6 +1254,10 @@ def client_handler(conn, addr):
                 return
 
             return_pos = picked_char.get('pre_arena_pos')
+            if picked_char.pop('domin_return_restore_hp', False):
+                # A map transition recreates the main player with this value.
+                # Restore only after the exit countdown, never in the arena.
+                picked_char['hp'] = get_character_stats(picked_char)['hp_max']
             picked_char['boss_inst_id'] = None
             picked_char['active_domin_id'] = None
             picked_char['pre_arena_pos'] = None
@@ -1631,6 +1636,9 @@ def client_handler(conn, addr):
                     new_hp = picked_char.get('hp', 0) - dmg
                     picked_char['hp'] = max(0, new_hp)
                     sync_char_attrs_rpc(conn, picked_char)
+                    if picked_char['hp'] == 0 and picked_char.get('map_id') == '502':
+                        print('[M1003 DEBUG] Player died in arena; scheduling loss return')
+                        schedule_domin_return(restore_hp=True)
                 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -1655,6 +1663,9 @@ def client_handler(conn, addr):
                             new_hp = picked_char.get('hp', 0) - dmg
                             picked_char['hp'] = max(0, new_hp)
                             sync_char_attrs_rpc(conn, picked_char)
+                            if picked_char['hp'] == 0 and picked_char.get('map_id') == '502':
+                                print('[M1003 DEBUG] Player died in arena; scheduling loss return')
+                                schedule_domin_return(restore_hp=True)
                         elif target_id in NPC_HP_MAP:
                             # Damage to NPC/Monster/Boss
                             NPC_HP_MAP[target_id] -= dmg
