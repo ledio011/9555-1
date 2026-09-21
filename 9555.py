@@ -1563,6 +1563,43 @@ def client_handler(conn, addr):
 
         leave_after_notice(5)
 
+    def schedule_street_race_return():
+        """Apply CopySceneData.EndTime (five seconds) after a race result."""
+        if not picked_char or picked_char.get('street_race_return_scheduled'):
+            return
+        copy_id = str(picked_char.get('active_copy_id') or '')
+        cfg = COPY_SCENE_CONFIG.get(copy_id)
+        if not cfg or cfg.get('subtype') != 7:
+            return
+        picked_char['street_race_return_scheduled'] = True
+        delay = int(cfg.get('end_time') or 5)
+
+        def leave_after_notice(seconds_left):
+            if not picked_char or picked_char.get('active_copy_id') != copy_id:
+                return
+            if seconds_left > 0:
+                # This follows the CopySceneData EndTime=5 for every Street
+                # Race route and uses the same APK dialog notification path
+                # as the other local copy exits.
+                send_rpc_push(529, encode_sproto([
+                    (0, f"You will leave the scene after {seconds_left} seconds"),
+                    (1, True)
+                ]))
+                timer = threading.Timer(1.0, leave_after_notice, args=(seconds_left - 1,))
+                timer.daemon = True
+                timer.start()
+                return
+
+            return_pos = picked_char.get('pre_copy_pos')
+            picked_char['pre_copy_pos'] = None
+            picked_char['active_copy_id'] = None
+            picked_char['street_race_return_scheduled'] = False
+            save_chars(all_accounts_chars)
+            start_map_transition(conn, picked_char, '11', send_rpc_push, override_pos=return_pos)
+            print(f"[STREET RACE] exit countdown finished; returned after copy={copy_id}")
+
+        leave_after_notice(delay)
+
     try:
         # HTTP updater traffic begins with GET/HEAD; game packets begin with a
         # two-byte big-endian Sproto frame length.  Peek without consuming it.
@@ -2315,6 +2352,7 @@ def client_handler(conn, addr):
                         state = ensure_daily_copy_state(picked_char)
                         state['remaining'][copy_id] = remaining - 1
                         picked_char['active_copy_id'] = copy_id
+                        picked_char['street_race_return_scheduled'] = False
                         save_chars(all_accounts_chars)
                         start_map_transition(conn, picked_char, cfg['map_id'], send_rpc_push)
                         # The client decreases its local counter immediately;
@@ -2359,8 +2397,14 @@ def client_handler(conn, addr):
                         (4, elapsed), (5, 1 if new_record else 0), (6, active_copy_id)
                     ]))
                     if won:
+                        # Mission 1004 is LogicType 102 / LogicID 102.  The
+                        # APK considers a successfully completed Street Race
+                        # the qualifying dungeon event; entering or failing
+                        # the race must not advance it.
+                        advance_missions(picked_char, send_rpc_push, 'interact', target_id='102')
                         send_rpc_push(611, sync_inventory_data(picked_char))
                     send_rpc_push(555, sync_copy_scenes(picked_char))
+                    schedule_street_race_return()
                     print(f"[STREET RACE] result id={active_copy_id} win={won} time={elapsed} rewards={rewards}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -2520,6 +2564,7 @@ def client_handler(conn, addr):
                         saved_pos = picked_char.get('pre_copy_pos')
                         picked_char['pre_copy_pos'] = None
                         picked_char['active_copy_id'] = None
+                        picked_char['street_race_return_scheduled'] = False
                     else:
                         saved_pos = picked_char.get('pre_arena_pos')
                         picked_char['pre_arena_pos'] = None
