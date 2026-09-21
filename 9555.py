@@ -609,9 +609,11 @@ def get_full_char(c):
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
 
-    # Keep the optional-resource flow disabled for this local server.  A value
-    # of 1 reopens the client download prompt even when login-server flag 7 is 0.
-    download_state = 2
+    # Tell the APK that the optional resource package is not yet installed.
+    # After the player enters the city/tutorial finishes, the client displays
+    # its native "Download / Complete / With New Car" notification.  The APK
+    # still fetches the versioned bundles from its separate HTTP updater (9777).
+    download_state = 1
     return encode_sproto([
         (0, c['id']),
         (1, gen),
