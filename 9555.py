@@ -438,12 +438,49 @@ def decode_sproto_list(data):
         ptr += 4 + l
     return res
 
-def get_visual(name, prof):
+def get_visual(name, prof, mount_id='', mount_color='', mount_state=0):
     m = {0:{"m":"100","h":"XD_A_T","b":"XD_A_S","l":"XD_A_X","w":"XD_A_WQ"},
          1:{"m":"104","h":"QJ_A_T","b":"QJ_A_S","l":"QJ_A_X","w":"QJ_A_WQ"},
          2:{"m":"105","h":"NQS_A_T","b":"NQS_A_S","l":"NQS_A_X","w":"NQS_A_WQ"}}
     v = m.get(prof, m[1])
-    return encode_sproto([(0, name), (1, v["m"]), (2, v["h"]), (3, v["b"]), (4, v["l"]), (5, v["w"]), (10, 0)])
+    fields = [(0, name), (1, v["m"]), (2, v["h"]), (3, v["b"]),
+              (4, v["l"]), (5, v["w"]), (10, 0)]
+    # characterVisual uses protocol tags 12-14 for the selected vehicle.
+    # MountId is required by the Street Race UI even while the player is not
+    # currently driving in the city (mount_state == 0).
+    if mount_id:
+        fields.extend([(12, str(mount_id)), (13, int(mount_state)),
+                       (14, str(mount_color or ''))])
+    return encode_sproto(fields)
+
+def get_equipped_mount(c):
+    """Return the APK garage vehicle currently equipped by this character."""
+    mounts = c.get('mounts', {})
+    preferred = str(c.get('equipped_mount_id', ''))
+    if preferred and int(mounts.get(preferred, {}).get('state', 0)) == 2:
+        mount_id = preferred
+    else:
+        mount_id = next((str(mid) for mid, state in mounts.items()
+                         if int(state.get('state', 0)) == 2), '')
+    if not mount_id:
+        return '', '', 0
+    cfg = MOUNT_CONFIG.get(mount_id, {})
+    saved = mounts.get(mount_id, {})
+    color = str(saved.get('select') or cfg.get('default_color', ''))
+    return mount_id, color, 1 if c.get('mount_riding', False) else 0
+
+def build_main_player_visual(c):
+    mount_id, mount_color, mount_state = get_equipped_mount(c)
+    return get_visual(c.get('name', 'Hero'), c.get('prof', 0),
+                      mount_id, mount_color, mount_state)
+
+def sync_main_player_visual(picked_char, send_rpc_push):
+    """Push the normal APK AOI visual update after a garage change."""
+    character = encode_sproto([
+        (0, int(picked_char['id'])),
+        (4, build_main_player_visual(picked_char))
+    ])
+    send_rpc_push(510, encode_sproto([(0, character)]))
 
 def get_boss_char(inst_id, did):
     # Domin 1 boss stats and visual (XD profession)
@@ -677,7 +714,7 @@ def get_full_char(c):
         (1, gen),
         (2, attr_oth),
         (5, prop),
-        (6, get_visual(c.get('name', 'Hero'), c.get('prof', 0))),
+        (6, build_main_player_visual(c)),
         (7, mv),
         (8, skills_map),
         (9, equip_map),
@@ -1019,10 +1056,24 @@ def field_text(fields, tag, default=''):
 def sync_copy_scenes(picked_char):
     """Build TAG 555 from the APK's CopySceneData definitions."""
     level = int(picked_char.get('level', 1))
-    copies = {}
+    # CopySceneData contains the level variants for each daily activity.  The
+    # client expects one current copy per subtype, not every future/parallel
+    # Street Race row.  Select the highest unlocked level bracket; ties use
+    # the first configured ID (e.g. Street Race 211 at level 4).
+    selected = {}
     for copy_id, cfg in COPY_SCENE_CONFIG.items():
         if level < cfg['min_level']:
             continue
+        try:
+            numeric_id = int(copy_id)
+        except (TypeError, ValueError):
+            numeric_id = 0
+        rank = (int(cfg['min_level']), -numeric_id)
+        subtype = cfg['subtype']
+        if subtype not in selected or rank > selected[subtype][0]:
+            selected[subtype] = (rank, copy_id, cfg)
+    copies = {}
+    for _, copy_id, cfg in selected.values():
         # copyscene_info: ID, CurNum, BestGrade, Type, str, enable, state, Type2.
         # Type=1 marks a daily copy.  The client finds the Street Race entry
         # through CopySceneData.SubType == 7, rather than a server-made ID.
@@ -1218,6 +1269,8 @@ def init_character_fields(c):
         'tutorial': 0,
         'download_complete': False,
         'mounts': {},
+        'equipped_mount_id': '',
+        'mount_riding': False,
         'active_domin_id': None,
         'boss_inst_id': None,
         'pre_arena_pos': None
@@ -1827,10 +1880,18 @@ def client_handler(conn, addr):
                                 if int(state.get('state', 0)) == 2:
                                     state['state'] = 1
                             target['state'] = 2
+                            picked_char['equipped_mount_id'] = mount_id
                         else:
                             target['state'] = 1
+                            if str(picked_char.get('equipped_mount_id', '')) == mount_id:
+                                picked_char['equipped_mount_id'] = ''
                         save_chars(all_accounts_chars)
                         send_rpc_push(631, encode_sproto([(0, build_mount_info(picked_char)), (1, mount_id)]))
+                        # The normal city garage response updates only the
+                        # garage panel.  The APK's Street Race gate reads
+                        # MainPlayer.MountId, so mirror the equipped vehicle
+                        # into the live player visual immediately.
+                        sync_main_player_visual(picked_char, send_rpc_push)
                         print(f"[MOUNT] {'equipped' if msg == 236 else 'unequipped'} id={mount_id}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -1855,6 +1916,7 @@ def client_handler(conn, addr):
                         send_rpc_push(632, encode_sproto([
                             (0, build_mount_info(picked_char)), (1, mount_id), (2, color_id)
                         ]))
+                        sync_main_player_visual(picked_char, send_rpc_push)
                         print(f"[MOUNT] colour selected id={mount_id} color={color_id}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
