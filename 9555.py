@@ -517,11 +517,27 @@ def get_movement(x, y, z, o=0):
     pos = encode_sproto([(0, x), (1, y), (2, z), (3, o)])
     return encode_sproto([(0, pos), (1, pos)])
 
+def get_level_data(level):
+    """Return a valid BaseLvData row, even if a saved character has a bad level."""
+    try:
+        level = int(level)
+    except (TypeError, ValueError):
+        level = 1
+
+    row = LEVEL_DATA.get(level)
+    if isinstance(row, dict):
+        return row
+
+    valid_levels = [key for key, value in LEVEL_DATA.items() if isinstance(value, dict)]
+    if not valid_levels:
+        raise RuntimeError("BaseLvData has no valid level rows")
+    return LEVEL_DATA[min(valid_levels, key=lambda key: abs(key - level))]
+
 def get_character_stats(c):
     """Calculates all character attributes and Power based on profession and level."""
     lv = c.get('level', 1)
     prof = c.get('prof', 0)
-    ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1))
+    ld = get_level_data(lv)
 
     # Base attributes from BaseLvData
     atk = ld['atk'][prof]
