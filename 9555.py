@@ -1960,6 +1960,9 @@ def client_handler(conn, addr):
                 ao_p = encode_sproto([
                     (2, 1),
                     (3, 6000),
+                    # CitySimController creates the Dominance zombie from
+                    # ret_domin_info.character_look and reads title_level.
+                    (4, 1),
                     (15, 5)
                 ])
 
