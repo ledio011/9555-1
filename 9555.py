@@ -1836,6 +1836,15 @@ def client_handler(conn, addr):
                                 except: pass
 
                             del picked_char['active_missions'][mid]
+                            # Main-chain level goals may be accepted after the
+                            # preceding mission's reward has already raised
+                            # the player.  Re-evaluate the newly accepted
+                            # level mission immediately, otherwise mission
+                            # 1005 can remain at 0/5 until a later NPC event.
+                            if is_chained and next_mid and str(next_mid) in missions_data:
+                                next_cfg = missions_data[str(next_mid)]
+                                if next_cfg.get('logic_type') == 7:
+                                    advance_missions(picked_char, send_rpc_push, 'level')
                             save_chars(all_accounts_chars)
                             print(f"[MISSION COMPLETE] mission_id={mid} chained={is_chained}")
 
