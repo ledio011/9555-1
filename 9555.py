@@ -24,6 +24,7 @@ KILL_TARGET_SPAWNS = {} # missionId -> list of spawns
 TARGET_CAR_SPAWNS = {}  # missionId -> list of car spawns
 EFF_CONFIG = {}   # effId -> effect info template
 SKILL_CONFIG = {} # skillId -> skill info template
+MOUNT_CONFIG = {} # garage vehicle id -> client MountData definition
 
 try:
     script_dir = os.path.dirname(__file__)
@@ -244,6 +245,24 @@ try:
                         'car_id': parts[6] # e.g. "Chevrolet"
                     })
         print(f"[TARGET CAR DATA LOADED] count={len(TARGET_CAR_SPAWNS)}")
+
+    # Load the actual garage vehicle definitions.  Only rows marked NeedShow
+    # are player vehicles; GTA traffic rows deliberately remain server-side
+    # scene objects and are not sent to the garage.
+    mount_path = os.path.join(text_asset_root, "MountData")
+    if os.path.exists(mount_path):
+        with open(mount_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 36 and parts[0] == "*" and parts[1]:
+                    if parts[36] == "1":
+                        colors = [x for x in parts[28].split("#") if x]
+                        MOUNT_CONFIG[parts[1]] = {
+                            'colors': colors,
+                            'default_color': parts[29] if parts[29] else (colors[0] if colors else "1"),
+                            'item_id': parts[4]
+                        }
+        print(f"[MOUNT CONFIG LOADED] garage_vehicles={len(MOUNT_CONFIG)}")
 except: traceback.print_exc()
 
 def load_chars():
@@ -946,6 +965,41 @@ def add_to_inventory(picked_char, item_id, amount):
             return
     picked_char['inventory'].append({'id': item_id, 'amount': amount})
 
+def build_mount_info(picked_char):
+    """Build the exact mount map consumed by the APK garage handlers.
+
+    Vehicle meshes, icons and colour shaders remain APK/resource-bundle data;
+    this state only records whether a garage vehicle is owned/equipped and
+    which of the MountData colours have been unlocked/selected.
+    """
+    mount_state = picked_char.setdefault('mounts', {})
+    result = {}
+    for mount_id, cfg in MOUNT_CONFIG.items():
+        saved = mount_state.setdefault(mount_id, {})
+        state = int(saved.get('state', 0))
+        selected = str(saved.get('select') or cfg['default_color'])
+        if selected not in cfg['colors']:
+            selected = cfg['default_color']
+        unlocked = set(str(x) for x in saved.get('unlocked_colors', [cfg['default_color']]))
+        unlocked.add(cfg['default_color'])
+        colors = {}
+        for color_id in cfg['colors']:
+            colors[color_id] = encode_sproto([(0, color_id), (1, 1 if color_id in unlocked else 0)])
+        result[mount_id] = encode_sproto([(0, mount_id), (1, state), (2, colors), (3, selected)])
+    return result
+
+def mount_id_from_voucher(item_id):
+    for mount_id, cfg in MOUNT_CONFIG.items():
+        if cfg.get('item_id') == str(item_id):
+            return mount_id
+    return None
+
+def field_text(fields, tag, default=''):
+    value = fields.get(tag, default)
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode('utf-8', errors='replace')
+    return str(value) if value is not None else default
+
 def give_mission_rewards(picked_char, mid):
     """Resolves rewards by profession and calculates level ups using BaseLvData."""
     try:
@@ -1132,6 +1186,7 @@ def init_character_fields(c):
         'map_id': "11",
         'tutorial': 0,
         'download_complete': False,
+        'mounts': {},
         'active_domin_id': None,
         'boss_inst_id': None,
         'pre_arena_pos': None
@@ -1716,6 +1771,121 @@ def client_handler(conn, addr):
                             # Server-side counter-attack logic removed since client sends msg 128
                             # Only sync player attrs if damaged by local client logic
 
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 235: # request_mount_info
+                if picked_char:
+                    # ret_mount_info.mount_info(0): every garage vehicle with
+                    # its configured colour list, ownership and selected colour.
+                    send_rpc_push(630, encode_sproto([(0, build_mount_info(picked_char))]))
+                    print(f"[MOUNT] sent garage state vehicles={len(MOUNT_CONFIG)}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg in (236, 237): # mount_equip / mount_unequip
+                mount_id = field_text(body, 0)
+                if picked_char and mount_id in MOUNT_CONFIG:
+                    mounts = picked_char.setdefault('mounts', {})
+                    target = mounts.setdefault(mount_id, {})
+                    if int(target.get('state', 0)) > 0:
+                        if msg == 236:
+                            for state in mounts.values():
+                                if int(state.get('state', 0)) == 2:
+                                    state['state'] = 1
+                            target['state'] = 2
+                        else:
+                            target['state'] = 1
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(631, encode_sproto([(0, build_mount_info(picked_char)), (1, mount_id)]))
+                        print(f"[MOUNT] {'equipped' if msg == 236 else 'unequipped'} id={mount_id}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 241: # mount_use_color / colour purchase or selection
+                mount_id = field_text(body, 0)
+                color_id = field_text(body, 1)
+                if picked_char and mount_id in MOUNT_CONFIG and color_id in MOUNT_CONFIG[mount_id]['colors']:
+                    mounts = picked_char.setdefault('mounts', {})
+                    mount = mounts.setdefault(mount_id, {})
+                    if int(mount.get('state', 0)) == 2:
+                        unlocked = set(str(x) for x in mount.get('unlocked_colors', []))
+                        unlocked.add(MOUNT_CONFIG[mount_id]['default_color'])
+                        unlocked.add(color_id)
+                        mount['unlocked_colors'] = sorted(unlocked, key=lambda x: (len(x), x))
+                        mount['select'] = color_id
+                        save_chars(all_accounts_chars)
+                        # ret_mount_use_color needs the full map as well as the
+                        # selected vehicle/colour; omitting the map is the cause
+                        # of PlayerCarRootLogic's null-reference crash.
+                        send_rpc_push(632, encode_sproto([
+                            (0, build_mount_info(picked_char)), (1, mount_id), (2, color_id)
+                        ]))
+                        print(f"[MOUNT] colour selected id={mount_id} color={color_id}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 267: # change_mount_state (refresh an existing vehicle state)
+                mount_id = field_text(body, 0)
+                if picked_char and mount_id in MOUNT_CONFIG:
+                    mount = picked_char.setdefault('mounts', {}).setdefault(mount_id, {})
+                    if int(mount.get('state', 0)) == 3:
+                        mount['state'] = 1
+                        save_chars(all_accounts_chars)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 323: # buy_car_shop
+                mount_id = field_text(body, 0)
+                if picked_char and mount_id in MOUNT_CONFIG:
+                    mount = picked_char.setdefault('mounts', {}).setdefault(mount_id, {})
+                    if int(mount.get('state', 0)) == 0:
+                        mount['state'] = 1
+                        mount.setdefault('select', MOUNT_CONFIG[mount_id]['default_color'])
+                        mount.setdefault('unlocked_colors', [MOUNT_CONFIG[mount_id]['default_color']])
+                        save_chars(all_accounts_chars)
+                    # ret_buy_car_shop.mountId(0), state(1)
+                    send_rpc_push(691, encode_sproto([(0, mount_id), (1, int(mount.get('state', 1)))]))
+                    print(f"[MOUNT] garage purchase id={mount_id}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 115: # use_item, including vehicle exchange vouchers
+                index_id = get_val_int(body, 0, -1)
+                success = 0
+                if picked_char:
+                    inventory = picked_char.get('inventory', [])
+                    item_index = index_id - 10000
+                    if 0 <= item_index < len(inventory):
+                        item = inventory[item_index]
+                        mount_id = mount_id_from_voucher(item.get('id'))
+                        if mount_id:
+                            mount = picked_char.setdefault('mounts', {}).setdefault(mount_id, {})
+                            mount['state'] = max(1, int(mount.get('state', 0)))
+                            mount.setdefault('select', MOUNT_CONFIG[mount_id]['default_color'])
+                            mount.setdefault('unlocked_colors', [MOUNT_CONFIG[mount_id]['default_color']])
+                            item['amount'] -= 1
+                            if item['amount'] < 1:
+                                inventory.pop(item_index)
+                            success = 1
+                            save_chars(all_accounts_chars)
+                            send_rpc_push(611, sync_inventory_data(picked_char))
+                            send_rpc_push(630, encode_sproto([(0, build_mount_info(picked_char))]))
+                            print(f"[MOUNT] voucher redeemed item={item.get('id')} vehicle={mount_id}")
+                send_rpc_push(526, encode_sproto([(0, success), (1, index_id)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg in (238, 239): # use_mount / unuse_mount
+                # The APK applies the visual mount/dismount locally.  Persist
+                # the packet acknowledgement so it never stalls on a request.
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
