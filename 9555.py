@@ -610,9 +610,8 @@ def get_full_char(c):
     equip_map = {5: w1}
 
     # Tell the APK that the optional resource package is not yet installed.
-    # After the player enters the city/tutorial finishes, the client displays
-    # its native "Download / Complete / With New Car" notification.  The APK
-    # still fetches the versioned bundles from its separate HTTP updater (9777).
+    # This makes its native "Download / Complete / With New Car" notification
+    # appear after entry to the city; the APK fetches bundles from 9777.
     download_state = 1
     return encode_sproto([
         (0, c['id']),
