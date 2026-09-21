@@ -516,7 +516,8 @@ def get_general(c):
         (1, c.get('prof', 0)),
         (2, 1),
         (3, str(c.get('map_id', '11'))),
-        (4, 1)
+        # general.tutorial: 0 runs the APK's first tutorial; 1 means finished.
+        (4, c.get('tutorial', 0))
     ])
 
 def get_movement(x, y, z, o=0):
@@ -1129,6 +1130,7 @@ def init_character_fields(c):
         'inventory': [],
         'pos': [29860, 100, -17005, 0],
         'map_id': "11",
+        'tutorial': 0,
         'download_complete': False,
         'active_domin_id': None,
         'boss_inst_id': None,
@@ -2015,6 +2017,9 @@ def client_handler(conn, addr):
             elif msg == 306: # tutorial_finish
                 # The APK sends this before scheduling its optional-download tip.
                 # It is an RPC request, so it must receive an empty success reply.
+                if picked_char:
+                    picked_char['tutorial'] = 1
+                    save_chars(all_accounts_chars)
                 print("[TUTORIAL] tutorial_finish acknowledged")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
