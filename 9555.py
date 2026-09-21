@@ -714,7 +714,9 @@ def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
     # DominSceneManager's CampList[2], so rank_pvp_start never enables its AI.
     attr_other_fields = [(0, hp_cur), (2, stats['lv'])]
     if NPC_INST_MAP.get(inst_id, '').startswith('BOSS_'):
-        attr_other_fields.append((15, 2))
+        # TAG 510 arrives immediately after TAG 544.  Preserve the title
+        # assigned in get_boss_char or the APK resets it to level 0.
+        attr_other_fields.extend([(4, 1), (15, 2)])
     attr_oth = encode_sproto(attr_other_fields)
     attr_base = encode_sproto([(0, stats['hp_max'])])
     attr_all_data = [
@@ -919,17 +921,17 @@ def add_to_inventory(picked_char, item_id, amount):
             return
     picked_char['inventory'].append({'id': item_id, 'amount': amount})
 
-def give_mission_rewards(picked_char, mid, send_rpc_push):
+def give_mission_rewards(picked_char, mid):
     """Resolves rewards by profession and calculates level ups using BaseLvData."""
     try:
         m = missions_data.get(mid)
-        if not m or not m.get('reward_ids'): return 0, 0, []
+        if not m or not m.get('reward_ids'): return 0, 0, [], []
 
         prof = picked_char.get('prof', 0)
         rids = m['reward_ids']
         rid = rids[prof] if prof < len(rids) else rids[0]
         reward = rewards_data.get(rid)
-        if not reward: return 0, 0, []
+        if not reward: return 0, 0, [], []
 
         added_exp = reward.get('exp', 0)
         added_cash = reward.get('cash', 0)
@@ -966,11 +968,13 @@ def give_mission_rewards(picked_char, mid, send_rpc_push):
                 add_to_inventory(picked_char, items[i], amt)
                 granted_items.append((items[i], amt))
 
-        send_rpc_push(638, encode_sproto([(0, popup_items)]))
-        return added_exp, added_cash, granted_items
+        # The caller sends TAG 638 after ret_complete_mission (521).  The APK
+        # opens MissionPassShowRoot from 521; sending the reward first lets
+        # that UI cover the SimpleRewardRoot popup.
+        return added_exp, added_cash, granted_items, popup_items
     except:
         traceback.print_exc()
-        return 0, 0, []
+        return 0, 0, [], []
 
 def accept_mission_logic(picked_char, mid):
     if mid not in missions_data:
@@ -1477,7 +1481,7 @@ def client_handler(conn, addr):
                         m_cfg = missions_data.get(mid)
                         if m_cfg:
                             print(f"[MISSION CHAIN] completed={mid} last_main_before={picked_char.get('last_main_mission_id')}")
-                            exp_add, cash_add, items_add = give_mission_rewards(picked_char, mid, send_rpc_push)
+                            exp_add, cash_add, items_add, popup_items = give_mission_rewards(picked_char, mid)
                             print(f"[MISSION REWARD] mission={mid} exp={exp_add} cash={cash_add} items={items_add}")
 
                             # Mission Chain and Unlocking logic
@@ -1511,6 +1515,8 @@ def client_handler(conn, addr):
                             send_rpc_push(521, encode_sproto([(0, mid), (1, 1)])) # Success feedback
                             sync_char_attrs_rpc(conn, picked_char)               # Stats update
                             send_rpc_push(519, sync_mission_data(picked_char))   # Mission UI update
+                            if popup_items:
+                                send_rpc_push(638, encode_sproto([(0, popup_items)]))
                             if items_add:
                                 send_rpc_push(611, sync_inventory_data(picked_char)) # Inventory sync
                             if mid == '1003' and picked_char.get('map_id') == '502':
@@ -1611,7 +1617,10 @@ def client_handler(conn, addr):
                             if tid in NPC_HP_MAP:
                                 # attribute_other (Tag 1): hp(0), level(2)
                                 # attribute (Tag 2): max_hp(0)
-                                a_oth = encode_sproto([(0, max(0, NPC_HP_MAP[tid])), (2, defender_stats['lv'])])
+                                a_oth_fields = [(0, max(0, NPC_HP_MAP[tid])), (2, defender_stats['lv'])]
+                                if NPC_INST_MAP.get(tid, '').startswith('BOSS_'):
+                                    a_oth_fields.extend([(4, 1), (15, 2)])
+                                a_oth = encode_sproto(a_oth_fields)
                                 a_base = encode_sproto([(0, defender_stats['hp_max'])])
                                 aoi_attr = encode_sproto([(0, tid), (1, a_oth), (2, a_base)])
                                 send_rpc_push(510, encode_sproto([(0, aoi_attr)]))
@@ -1679,7 +1688,10 @@ def client_handler(conn, addr):
                                 defender_stats = get_npc_attr(nid_str)
                                 
                                 # Send attribute update (Tag 510)
-                                a_oth = encode_sproto([(0, max(0, NPC_HP_MAP[target_id])), (2, defender_stats['lv'])])
+                                a_oth_fields = [(0, max(0, NPC_HP_MAP[target_id])), (2, defender_stats['lv'])]
+                                if NPC_INST_MAP.get(target_id, '').startswith('BOSS_'):
+                                    a_oth_fields.extend([(4, 1), (15, 2)])
+                                a_oth = encode_sproto(a_oth_fields)
                                 a_base = encode_sproto([(0, defender_stats['hp_max'])])
                                 aoi_attr = encode_sproto([(0, target_id), (1, a_oth), (2, a_base)])
                                 send_rpc_push(510, encode_sproto([(0, aoi_attr)]))
@@ -1694,7 +1706,10 @@ def client_handler(conn, addr):
                                 if target_id == picked_char.get('boss_inst_id'):
                                     # Send final HP=0 sync before ending scene to trigger client animation
                                     if defender_stats:
-                                        a_oth = encode_sproto([(0, 0), (2, defender_stats['lv'])])
+                                        a_oth_fields = [(0, 0), (2, defender_stats['lv'])]
+                                        if NPC_INST_MAP.get(target_id, '').startswith('BOSS_'):
+                                            a_oth_fields.extend([(4, 1), (15, 2)])
+                                        a_oth = encode_sproto(a_oth_fields)
                                         aoi_attr = encode_sproto([(0, target_id), (1, a_oth)])
                                         send_rpc_push(510, encode_sproto([(0, aoi_attr)]))
                                     
