@@ -36,8 +36,14 @@ try:
 
     def is_data(line): return line.startswith("*,") or ("," in line and line.split(",")[1].isdigit())
 
+    # Accept both the original folder name and the plural name used by the
+    # deployed resource tree.
+    text_asset_root = os.path.join(script_dir, "assets", "Bundle", "TextAsset")
+    if not os.path.isdir(text_asset_root):
+        text_asset_root = os.path.join(script_dir, "assets", "Bundle", "TextAssets")
+
     # Load EffInfoData
-    eff_path = os.path.join(script_dir, "assets", "Bundle", "TextAsset", "EffInfoData")
+    eff_path = os.path.join(text_asset_root, "EffInfoData")
     if os.path.exists(eff_path):
         with open(eff_path, "r", encoding='utf-8') as f:
             for line in f:
@@ -58,7 +64,7 @@ try:
         print(f"[EFF CONFIG LOADED] count={len(EFF_CONFIG)}")
 
     # Load SkillData
-    skill_path = os.path.join(script_dir, "assets", "Bundle", "TextAsset", "SkillData")
+    skill_path = os.path.join(text_asset_root, "SkillData")
     if os.path.exists(skill_path):
         with open(skill_path, "r", encoding='utf-8') as f:
             for line in f:
@@ -73,7 +79,7 @@ try:
         print(f"[SKILL CONFIG LOADED] count={len(SKILL_CONFIG)}")
 
     # Load BaseLvData for EXP requirements and stats
-    lv_path = os.path.join(script_dir, "assets", "Bundle", "TextAsset", "BaseLvData")
+    lv_path = os.path.join(text_asset_root, "BaseLvData")
     if os.path.exists(lv_path):
         with open(lv_path, "r", encoding='utf-8') as f:
             for line in f:
@@ -101,7 +107,7 @@ try:
         print(f"[LEVEL TABLE LOADED] levels={len(LEVEL_DATA)}")
 
     # Load MapInfoData
-    map_info_path = os.path.join(script_dir, "assets", "Bundle", "TextAsset", "MapInfoData")
+    map_info_path = os.path.join(text_asset_root, "MapInfoData")
     if os.path.exists(map_info_path):
         with open(map_info_path, "r", encoding='utf-8') as f:
             for line in f:
@@ -121,7 +127,7 @@ try:
         print(f"[MAP CONFIG LOADED] count={len(MAP_CONFIG)}")
 
     # Load MapConnectInfoData
-    conn_path = os.path.join(script_dir, "assets", "Bundle", "TextAsset", "MapConnectInfoData")
+    conn_path = os.path.join(text_asset_root, "MapConnectInfoData")
     if os.path.exists(conn_path):
         with open(conn_path, "r", encoding='utf-8') as f:
             for line in f:
@@ -138,7 +144,7 @@ try:
         print(f"[MAP CONNECT DATA LOADED] count={len(MAP_CONNECT_DATA)}")
 
     # Load GuildCaptureData
-    gc_path = os.path.join(script_dir, "assets", "Bundle", "TextAsset", "GuildCaptureData")
+    gc_path = os.path.join(text_asset_root, "GuildCaptureData")
     if os.path.exists(gc_path):
         with open(gc_path, "r", encoding='utf-8') as f:
             for line in f:
@@ -148,7 +154,7 @@ try:
         print(f"[GUILD CAPTURE DATA LOADED] count={len(GUILD_CAPTURE_DATA)}")
 
     # Load NpcData
-    npc_path = os.path.join(script_dir, "assets", "Bundle", "TextAsset", "NpcData")
+    npc_path = os.path.join(text_asset_root, "NpcData")
     if os.path.exists(npc_path):
         with open(npc_path, "r", encoding='utf-8') as f:
             for line in f:
@@ -180,7 +186,7 @@ try:
         print(f"[NPC CONFIG LOADED] count={len(NPC_CONFIG)}")
 
     # Load MonsterData (and split into Monster vs Static NPC)
-    mon_path = os.path.join(script_dir, "assets", "Bundle", "TextAsset", "MonsterData")
+    mon_path = os.path.join(text_asset_root, "MonsterData")
     if os.path.exists(mon_path):
         with open(mon_path, "r", encoding='utf-8') as f:
             for line in f:
@@ -204,7 +210,7 @@ try:
         print(f"[MONSTER DATA LOADED] monsters_map={len(MONSTER_DATA)} static_npcs_map={len(STATIC_NPC_DATA)}")
 
     # Load KillTargetMissionData (Mission Spawns)
-    kt_path = os.path.join(script_dir, "assets", "Bundle", "TextAsset", "KillTargetMissionData")
+    kt_path = os.path.join(text_asset_root, "KillTargetMissionData")
     if os.path.exists(kt_path):
         with open(kt_path, "r", encoding='utf-8') as f:
             for line in f:
@@ -223,7 +229,7 @@ try:
         print(f"[KILL TARGET DATA LOADED] count={len(KILL_TARGET_SPAWNS)}")
 
     # Load TargetCarMissionData
-    tc_path = os.path.join(script_dir, "assets", "Bundle", "TextAsset", "TargetCarMissionData")
+    tc_path = os.path.join(text_asset_root, "TargetCarMissionData")
     if os.path.exists(tc_path):
         with open(tc_path, "r", encoding='utf-8') as f:
             for line in f:
