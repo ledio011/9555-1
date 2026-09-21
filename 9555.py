@@ -25,6 +25,7 @@ TARGET_CAR_SPAWNS = {}  # missionId -> list of car spawns
 EFF_CONFIG = {}   # effId -> effect info template
 SKILL_CONFIG = {} # skillId -> skill info template
 MOUNT_CONFIG = {} # garage vehicle id -> client MountData definition
+COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
 
 try:
     script_dir = os.path.dirname(__file__)
@@ -263,6 +264,21 @@ try:
                             'item_id': parts[4]
                         }
         print(f"[MOUNT CONFIG LOADED] garage_vehicles={len(MOUNT_CONFIG)}")
+
+    # Daily-copy UI receives its state from TAG 555.  Keep the IDs/types in
+    # lockstep with CopySceneData so client tutorials can locate their target.
+    copy_path = os.path.join(text_asset_root, "CopySceneData")
+    if os.path.exists(copy_path):
+        with open(copy_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 19 and parts[0] == "*" and parts[1].isdigit() and parts[11] == "1":
+                    COPY_SCENE_CONFIG[parts[1]] = {
+                        'subtype': int(parts[12]) if parts[12].isdigit() else 0,
+                        'max_plays': int(parts[18]) if parts[18].isdigit() else 0,
+                        'min_level': int(parts[19]) if parts[19].isdigit() else 1
+                    }
+        print(f"[COPY SCENE CONFIG LOADED] daily_copies={len(COPY_SCENE_CONFIG)}")
 except: traceback.print_exc()
 
 def load_chars():
@@ -999,6 +1015,21 @@ def field_text(fields, tag, default=''):
     if isinstance(value, (bytes, bytearray)):
         return value.decode('utf-8', errors='replace')
     return str(value) if value is not None else default
+
+def sync_copy_scenes(picked_char):
+    """Build TAG 555 from the APK's CopySceneData definitions."""
+    level = int(picked_char.get('level', 1))
+    copies = {}
+    for copy_id, cfg in COPY_SCENE_CONFIG.items():
+        if level < cfg['min_level']:
+            continue
+        # copyscene_info: ID, CurNum, BestGrade, Type, str, enable, state, Type2.
+        # Type=1 marks a daily copy.  The client finds the Street Race entry
+        # through CopySceneData.SubType == 7, rather than a server-made ID.
+        copies[copy_id] = encode_sproto([
+            (0, copy_id), (1, cfg['max_plays']), (3, 1), (5, True), (6, 0), (7, cfg['subtype'])
+        ])
+    return encode_sproto([(0, copies)])
 
 def give_mission_rewards(picked_char, mid):
     """Resolves rewards by profession and calculates level ups using BaseLvData."""
@@ -2206,7 +2237,9 @@ def client_handler(conn, addr):
                 elif msg == 218: resp_data = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp_data)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
-                if msg == 145: send_rpc_push(555, encode_sproto([(0, [])]))
+                if msg == 145 and picked_char:
+                    send_rpc_push(555, sync_copy_scenes(picked_char))
+                    print(f"[COPY] sent daily copy state level={picked_char.get('level', 1)}")
 
             elif msg == 310:  # request_domin_info
                 print("[M1003 DEBUG] RX 310 request_domin_info")
