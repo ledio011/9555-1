@@ -652,10 +652,10 @@ def get_full_char(c):
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
 
-    # Tell the APK that the optional resource package is not yet installed.
-    # This makes its native "Download / Complete / With New Car" notification
-    # appear after entry to the city; the APK fetches bundles from 9777.
-    download_state = 1
+    # character.download: the APK treats 2 as completed.  Sending 1 again on
+    # reconnect would reopen the optional download/reward UI forever, even
+    # though MSG 270 was already persisted for this character.
+    download_state = 2 if c.get('download_complete') else 1
     return encode_sproto([
         (0, c['id']),
         (1, gen),
@@ -2181,6 +2181,9 @@ def client_handler(conn, addr):
                     print(f"[REWARD] Expansion finalized and rewards granted for player {picked_char['id']}")
                 elif picked_char:
                     print(f"[REWARD] Player {picked_char['id']} already claimed expansion rewards.")
+                    # Keep the current client session consistent with the
+                    # persisted completion state if it repeats MSG 270.
+                    send_rpc_push(654, encode_sproto([(0, 1)]))
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
