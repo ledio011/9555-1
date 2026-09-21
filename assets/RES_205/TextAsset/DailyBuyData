@@ -1,0 +1,4 @@
+*,ID,ItemID1,ItemCount1,Quality1,ItemID2,ItemCount2,Quality2,ItemID3,ItemCount3,Quality3,ItemID4,ItemCount4,Quality4,ProductId,Dollor,Value
+*,1,1002,150,3,1001,100000,2,4001,25,3,9603,3,3,daily_buy_99,0.99,2
+*,2,1002,300,3,1001,200000,2,4001,60,3,9603,6,3,daily_buy_199,1.99,4
+*,3,1002,750,3,1001,500000,2,4001,187,3,9603,20,3,daily_buy_499,4.99,13

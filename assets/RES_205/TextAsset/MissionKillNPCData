@@ -1,0 +1,5 @@
+,ID,任务名，表格方便看,怪物名，表格方便看,怪物ID,杀怪数
+,STRING,STRING,STRING,STRING,INT
+*,ID,MissionName,NPCName,NPCID,KillNum
+*,1,Kill 3 RepaireMan,RepaireMan,10001,3
+*,2,Kill the Boss,Hulk,201,1

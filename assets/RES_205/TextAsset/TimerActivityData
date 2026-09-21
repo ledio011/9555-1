@@ -1,0 +1,4 @@
+,活动ID,活动名称,活动说明,活动类型,,,,,,,,,
+,STRING,,,,STRING,STRING,,,,,,,
+*,ID,EventName,EventDialog,EventType,StartTime,EndTime,,,,,,,
+*,1,Battle Event,,1,2017-12-17-10-00-00,2030-12-28-14-59-59,,,,,,,

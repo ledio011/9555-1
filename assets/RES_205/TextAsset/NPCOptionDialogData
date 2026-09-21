@@ -1,0 +1,12 @@
+,ID,表格方便看,对话框中间内容,选项1内容,选项2内容,选项事件,选项事件参数,事件不满足对话,不满足按钮
+,STRING,STRING,STRING,STRING,STRING,INT,STRING,STRING,STRING
+*,ID,NPCName,CenterDialog,Option1,Option2,OptionType,OptionParam,OptionFailDialog,FailOption
+*,1,storage,open storage or not,open,close,1,,,
+*,2,WeaponShop,Buy a weapon?,buy,thanks,2,,,
+*,3,CopyEntry,Want to be a hero?,Yes,No,3,,,
+*,4,SexMiniMan,#{90202},Yes,No,4,1301,#{90204},Leave
+*,5,SexMiniWomen,#{90201},Yes,No,5,1301,#{90204},Leave
+*,6,5: 道具,#{20096},buy,thanks,6,,"Not Now, Guy",thanks
+*,7,6: 装备,#{20097},buy,thanks,6,,"Not Now, Guy",thanks
+*,8,7: 特卖,#{20098},buy,thanks,6,,"Not Now, Guy",thanks
+*,9,8: 帮派,#{20099},buy,thanks,6,,"Not Now, Guy",thanks

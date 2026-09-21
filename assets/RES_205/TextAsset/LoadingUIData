@@ -1,0 +1,7 @@
+,编号,名称,是否出现,最小等级（包括）,最大等级（不包括）,,
+,STRING,STRING,INT,INT,INT,STRING,STRING
+*,ID,Name,ShowFlag,MinLevel,MaxLevel,StartTime,EndTime
+*,1,loading_1,1,0,99,,
+*,2,loading_2,1,0,99,,
+*,3,loading_3,1,0,99,,
+,4,loading_4,1,0,99,2017-12-07-15-00-00,2017-12-28-14-59-59
