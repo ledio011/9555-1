@@ -26,6 +26,8 @@ EFF_CONFIG = {}   # effId -> effect info template
 SKILL_CONFIG = {} # skillId -> skill info template
 MOUNT_CONFIG = {} # garage vehicle id -> client MountData definition
 COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
+SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
+STREET_RACE_REWARD_BY_LEVEL = {} # level -> AdaptData _drop_bc ShowRewardData id
 
 try:
     script_dir = os.path.dirname(__file__)
@@ -274,11 +276,47 @@ try:
                 parts = line.strip().split(",")
                 if len(parts) > 19 and parts[0] == "*" and parts[1].isdigit() and parts[11] == "1":
                     COPY_SCENE_CONFIG[parts[1]] = {
+                        'map_id': parts[5],
                         'subtype': int(parts[12]) if parts[12].isdigit() else 0,
+                        'exist_time': int(parts[13]) if parts[13].isdigit() else 0,
+                        'end_time': int(parts[10]) if parts[10].isdigit() else 0,
                         'max_plays': int(parts[18]) if parts[18].isdigit() else 0,
                         'min_level': int(parts[19]) if parts[19].isdigit() else 1
                     }
         print(f"[COPY SCENE CONFIG LOADED] daily_copies={len(COPY_SCENE_CONFIG)}")
+
+    # Street Race's actual reward preview is resolved by AdaptData's
+    # _drop_bc key, then ShowRewardData.  Read those client tables rather
+    # than inventing rewards in the server.
+    show_reward_path = os.path.join(text_asset_root, "ShowRewardData")
+    if os.path.exists(show_reward_path):
+        with open(show_reward_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(',')
+                if len(parts) >= 5 and parts[0] == '*' and parts[1].isdigit():
+                    rewards = []
+                    for index in range(3, len(parts) - 2, 3):
+                        item_id = parts[index]
+                        if not item_id:
+                            continue
+                        quality = int(parts[index + 1]) if parts[index + 1].isdigit() else 0
+                        count = int(parts[index + 2]) if parts[index + 2].isdigit() else 1
+                        rewards.append((item_id, quality, count))
+                    SHOW_REWARD_CONFIG[parts[1]] = rewards
+
+    adapt_path = os.path.join(text_asset_root, "AdaptData")
+    if os.path.exists(adapt_path):
+        with open(adapt_path, "r", encoding='utf-8') as f:
+            rows = [line.strip().split(',') for line in f if line.strip()]
+        header = next((row for row in rows if len(row) > 1 and row[0] == '*' and row[1] == 'ID'), [])
+        try:
+            street_reward_index = header.index('_drop_bc')
+        except ValueError:
+            street_reward_index = -1
+        if street_reward_index >= 0:
+            for parts in rows:
+                if len(parts) > street_reward_index and parts[0] == '*' and parts[1].isdigit():
+                    STREET_RACE_REWARD_BY_LEVEL[int(parts[1])] = parts[street_reward_index]
 except: traceback.print_exc()
 
 def load_chars():
@@ -1053,6 +1091,33 @@ def field_text(fields, tag, default=''):
         return value.decode('utf-8', errors='replace')
     return str(value) if value is not None else default
 
+def current_daily_stamp():
+    """The server's daily-copy reset key (UTC calendar day)."""
+    return time.strftime('%Y-%m-%d', time.gmtime())
+
+def ensure_daily_copy_state(picked_char):
+    """Reset the APK-configured daily attempts once per calendar day."""
+    state = picked_char.setdefault('daily_copy_state', {})
+    stamp = current_daily_stamp()
+    if state.get('day') != stamp:
+        state['day'] = stamp
+        state['remaining'] = {}
+    return state
+
+def copy_attempts_remaining(picked_char, copy_id, cfg):
+    state = ensure_daily_copy_state(picked_char)
+    remaining = state.setdefault('remaining', {})
+    if copy_id not in remaining:
+        remaining[copy_id] = int(cfg['max_plays'])
+    return max(0, int(remaining[copy_id]))
+
+def street_race_rewards(level):
+    """Return exactly the level-resolved _drop_bc ShowRewardData items."""
+    level = int(level)
+    eligible = [lv for lv in STREET_RACE_REWARD_BY_LEVEL if lv <= level]
+    reward_id = STREET_RACE_REWARD_BY_LEVEL[max(eligible)] if eligible else ''
+    return SHOW_REWARD_CONFIG.get(reward_id, [])
+
 def sync_copy_scenes(picked_char):
     """Build TAG 555 from the APK's CopySceneData definitions."""
     level = int(picked_char.get('level', 1))
@@ -1078,7 +1143,8 @@ def sync_copy_scenes(picked_char):
         # Type=1 marks a daily copy.  The client finds the Street Race entry
         # through CopySceneData.SubType == 7, rather than a server-made ID.
         copies[copy_id] = encode_sproto([
-            (0, copy_id), (1, cfg['max_plays']), (3, 1), (5, True), (6, 0), (7, cfg['subtype'])
+            (0, copy_id), (1, copy_attempts_remaining(picked_char, copy_id, cfg)),
+            (3, 1), (5, True), (6, 0), (7, cfg['subtype'])
         ])
     return encode_sproto([(0, copies)])
 
@@ -1271,6 +1337,9 @@ def init_character_fields(c):
         'mounts': {},
         'equipped_mount_id': '',
         'mount_riding': False,
+        'daily_copy_state': {},
+        'active_copy_id': None,
+        'pre_copy_pos': None,
         'active_domin_id': None,
         'boss_inst_id': None,
         'pre_arena_pos': None
@@ -2232,7 +2301,72 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg in [107, 106, 246, 273, 207, 201, 322]:
+            elif msg == 107: # enter_copy_scene
+                copy_id = field_text(body, 0)
+                cfg = COPY_SCENE_CONFIG.get(copy_id)
+                if picked_char and cfg and cfg['subtype'] == 7:
+                    remaining = copy_attempts_remaining(picked_char, copy_id, cfg)
+                    if remaining > 0:
+                        # CarRewardPageRootLogic's Repeat button sends this
+                        # same request.  Keep the original city position so
+                        # Continue/Exit always returns the player to city.
+                        if picked_char.get('pre_copy_pos') is None:
+                            picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                        state = ensure_daily_copy_state(picked_char)
+                        state['remaining'][copy_id] = remaining - 1
+                        picked_char['active_copy_id'] = copy_id
+                        save_chars(all_accounts_chars)
+                        start_map_transition(conn, picked_char, cfg['map_id'], send_rpc_push)
+                        # The client decreases its local counter immediately;
+                        # TAG 555 makes the authoritative remaining count
+                        # survive a reconnect or a Retry.
+                        send_rpc_push(555, sync_copy_scenes(picked_char))
+                        print(f"[STREET RACE] entered id={copy_id} remaining={remaining - 1}/{cfg['max_plays']}")
+                    else:
+                        print(f"[STREET RACE] denied id={copy_id}; daily attempts exhausted")
+                elif picked_char:
+                    # Other copy subtypes retain the server's existing map
+                    # transition behavior until their individual flows are
+                    # implemented and verified.
+                    start_map_transition(conn, picked_char, copy_id, send_rpc_push)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 193: # car_chase_result
+                active_copy_id = str(picked_char.get('active_copy_id') or '') if picked_char else ''
+                cfg = COPY_SCENE_CONFIG.get(active_copy_id)
+                won = get_val_int(body, 0, 0) == 1
+                elapsed = get_val_int(body, 1, 0)
+                if picked_char and cfg and cfg['subtype'] == 7:
+                    state = ensure_daily_copy_state(picked_char)
+                    best_times = state.setdefault('best_times', {})
+                    old_time = best_times.get(active_copy_id)
+                    new_record = won and (old_time is None or elapsed < int(old_time))
+                    if won:
+                        best_times[active_copy_id] = elapsed if new_record else int(old_time)
+                    rewards = street_race_rewards(picked_char.get('level', 1)) if won else []
+                    for item_id, _, amount in rewards:
+                        add_to_inventory(picked_char, item_id, amount)
+                    save_chars(all_accounts_chars)
+                    result_items = [encode_sproto([(0, item_id), (1, amount), (3, quality)])
+                                    for item_id, quality, amount in rewards]
+                    # car_copy_result (TAG 608) is the dedicated APK Street
+                    # Race result panel.  It supplies reward icons, time,
+                    # rank placeholders, Continue/Exit and Repeat.
+                    send_rpc_push(608, encode_sproto([
+                        (0, won), (1, result_items), (2, -1), (3, -1),
+                        (4, elapsed), (5, 1 if new_record else 0), (6, active_copy_id)
+                    ]))
+                    if won:
+                        send_rpc_push(611, sync_inventory_data(picked_char))
+                    send_rpc_push(555, sync_copy_scenes(picked_char))
+                    print(f"[STREET RACE] result id={active_copy_id} win={won} time={elapsed} rewards={rewards}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg in [106, 246, 273, 207, 201, 322]:
                 # Scene/Dungeon Entry
                 mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
                 print(f"[RX] Scene Entry: {mid} (MSG={msg})")
@@ -2378,10 +2512,19 @@ def client_handler(conn, addr):
 
             elif msg == 108: # leave_copy_scene
                 if picked_char:
-                    # Return to the exact pre-arena position on Map 11
-                    saved_pos = picked_char.get('pre_arena_pos')
-                    picked_char['pre_arena_pos'] = None # Clear after use
+                    # Street Race has its own Continue/Exit button.  Unlike
+                    # the Capture arena it does not auto-return after five
+                    # seconds, and it must restore the city position saved
+                    # when the race was entered.
+                    if picked_char.get('active_copy_id'):
+                        saved_pos = picked_char.get('pre_copy_pos')
+                        picked_char['pre_copy_pos'] = None
+                        picked_char['active_copy_id'] = None
+                    else:
+                        saved_pos = picked_char.get('pre_arena_pos')
+                        picked_char['pre_arena_pos'] = None
                     start_map_transition(conn, picked_char, "11", send_rpc_push, override_pos=saved_pos)
+                    save_chars(all_accounts_chars)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
