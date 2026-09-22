@@ -1369,8 +1369,8 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 dz = pz - mz
                 dist = math.sqrt(dx * dx + dz * dz)
 
-                if dist > 1.8:
-                    step = min(1.5, dist - 1.2)
+                if dist > 2.2:
+                    step = min(4.5, dist - 1.5)
                     new_mx = mx + (dx / dist) * step
                     new_mz = mz + (dz / dist) * step
                     exp_state['monster_pos'][inst_id] = [new_mx, new_mz]
@@ -1409,11 +1409,11 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                             return
 
             if exp_state.get('ai_active') and picked_char.get('map_id') == map_str:
-                timer = threading.Timer(1.0, run_exp_monster_ai)
+                timer = threading.Timer(0.8, run_exp_monster_ai)
                 timer.daemon = True
                 timer.start()
 
-        ai_timer = threading.Timer(1.0, run_exp_monster_ai)
+        ai_timer = threading.Timer(0.8, run_exp_monster_ai)
         ai_timer.daemon = True
         ai_timer.start()
         return
