@@ -1090,11 +1090,9 @@ def spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state
     exp_state['wave_kills'] = 0
     exp_state['active_monsters'] = []
 
-    monsters_list = exp_cfg.get('monsters', [])
-    wave_idx = min(exp_state['cur_wave'] - 1, len(monsters_list) - 1)
-    mon_group_id = monsters_list[wave_idx] if (wave_idx >= 0 and wave_idx < len(monsters_list)) else (exp_state['copy_id'] + "1")
-
+    mon_group_id = str(exp_state['copy_id']) + "1"
     mon_entries = MONSTER_DATA.get(mon_group_id, [])
+
     subwave_spawns = [m for m in mon_entries if m.get('group') == subwave]
     if not subwave_spawns:
         subwave_spawns = [m for m in mon_entries if m.get('group') == ((subwave - 1) % 28) + 1]
