@@ -927,9 +927,9 @@ def sync_common_data_rpc(picked_char):
 def sync_dance_state_rpc(picked_char=None):
     """Build Sproto Tag 686 (sync_dance_state_info) for Single Dance & Guild Dance."""
     now = int(time.time())
-    dance_info = encode_sproto([
-        (0, 1001),                   # uuid
-        (1, "1001"),                 # ID (CityDanceData 1001)
+    dance_info_obj = encode_sproto([
+        (0, 101),                   # uuid = 101
+        (1, "101"),                 # ID = "101" (matches CityDanceData.csv ID 101)
         (2, now),                    # start_time
         (3, now + 1800),             # end_time
         (4, 1),                      # state = 1 (open/active)
@@ -937,7 +937,7 @@ def sync_dance_state_rpc(picked_char=None):
         (6, 1800),                   # duration = 1800s (30 minutes)
         (7, now + 86400)             # reset_time
     ])
-    dance_map = {1001: dance_info}
+    dance_map = {101: dance_info_obj}
     return encode_sproto([
         (0, 1),        # state = 1
         (1, 1),        # open = 1
@@ -3068,21 +3068,38 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 227: # request_dance_info
-                # Return list of unlocked dance moves
-                # danceinfo: ID(0), name(1), modelId(2), animationName(3)
-                d1 = encode_sproto([(0, "1001"), (3, "attack_1")])
-                d2 = encode_sproto([(0, "1002"), (3, "attack_2")])
-                send_rpc_push(623, encode_sproto([(0, [d1, d2])]))
+                # Return map of unlocked dance moves (matches DanceData.csv IDs 10001 & 10002)
+                now = int(time.time())
+                d1 = encode_sproto([(0, "10001"), (1, True), (2, 0), (3, now + 86400)])
+                d2 = encode_sproto([(0, "10002"), (1, True), (2, 0), (3, now + 86400)])
+                dance_map = {
+                    "10001": d1,
+                    "10002": d2
+                }
+                # ret_request_dance_info (TAG 623): curUse(0), dance_info(1), type(2)
+                send_rpc_push(623, encode_sproto([(0, "10001"), (1, dance_map), (2, 0)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 229: # use_dance (Start dancing)
-                did = body.get(0, b"").decode('utf-8')
-                # start_participate_dance: curUse(0), endTime(1)
-                send_rpc_push(624, encode_sproto([(0, did), (1, int(time.time()) + 1800)]))
+                did = field_text(body, 0, "10001")
+                if not did or did == "None":
+                    did = "10001"
+                now = int(time.time())
+                d1 = encode_sproto([(0, "10001"), (1, True), (2, 0), (3, now + 86400)])
+                d2 = encode_sproto([(0, "10002"), (1, True), (2, 0), (3, now + 86400)])
+                dance_map = {
+                    "10001": d1,
+                    "10002": d2
+                }
+                # start_participate_dance (TAG 624): curUse(0), dance_info(1)
+                send_rpc_push(624, encode_sproto([(0, did), (1, dance_map)]))
                 if picked_char:
                     advance_missions(picked_char, send_rpc_push, 'dance')
+                    advance_missions(picked_char, send_rpc_push, 'interact', target_id='1009')
+                    advance_missions(picked_char, send_rpc_push, 'interact', target_id='132')
+                    send_rpc_push(519, sync_mission_data(picked_char))
                     # Sync AOI so others see us dancing
                     social_dance = encode_sproto([(0, picked_char['id']), (1, did), (2, True)])
                     send_rpc_push(657, encode_sproto([(0, social_dance)]))
