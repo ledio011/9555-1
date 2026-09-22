@@ -714,9 +714,9 @@ def get_boss_char(inst_id, did):
 
 # Skill System Constants
 PROF_SKILLS = {
-    0: {"atk": "101", "dodge": "104", "actives": ["105", "106", "107", "108", "109", "110"]},
-    1: {"atk": "201", "dodge": "204", "actives": ["205", "206", "207", "208", "209", "210"]},
-    2: {"atk": "301", "dodge": "304", "actives": ["305", "306", "307", "308", "309", "310"]}
+    0: {"atk": ["101", "102", "103"], "dodge": "104", "actives": ["105", "106", "107", "108", "109", "110"]},
+    1: {"atk": ["201", "202", "203"], "dodge": "204", "actives": ["205", "206", "207", "208", "209", "210"]},
+    2: {"atk": ["301", "302", "303"], "dodge": "304", "actives": ["305", "306", "307", "308", "309", "310"]}
 }
 SKILL_UNLOCK_LVS = [1, 5, 10, 15, 20, 25]
 
@@ -734,8 +734,16 @@ def build_skills_map(prof, char_level, skill_levels=None):
     if skill_levels is None: skill_levels = {}
     p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
     smap = {}
-    smap[p["atk"]] = encode_sproto([(0, p["atk"]), (1, skill_levels.get(p["atk"], 0)), (2, 0), (3, 1), (4, 0), (5, False)])
+
+    # Include all basic attack combo chain skills (101, 102, 103 / 201, 202, 203 / 301, 302, 303)
+    atk_skills = p["atk"] if isinstance(p["atk"], list) else [p["atk"]]
+    for sid in atk_skills:
+        smap[sid] = encode_sproto([(0, sid), (1, skill_levels.get(sid, 0)), (2, 0), (3, 1), (4, 0), (5, False)])
+
+    # Dodge / Roll (104 / 204 / 304)
     smap[p["dodge"]] = encode_sproto([(0, p["dodge"]), (1, skill_levels.get(p["dodge"], 0)), (2, 3), (3, 1), (4, 1), (5, False)])
+
+    # Active Skills
     for i in range(len(p["actives"])):
         sid = p["actives"][i]
         unlock_lv = SKILL_UNLOCK_LVS[i]
@@ -2467,7 +2475,9 @@ def client_handler(conn, addr):
                         print(f"[SKILL LOCKED] sid={sid} req={req_lv}")
                         send_rpc_push(529, encode_sproto([(0, "#{100681}"), (1, True)]))
                     else:
-                        send_rpc_push(508, encode_sproto([(0, picked_char['id']), (1, tid), (2, sid), (3, alist)]))
+                        # Do not echo Tag 508 back to the casting player.
+                        # The casting player executes skill effects locally on client.
+                        pass
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
