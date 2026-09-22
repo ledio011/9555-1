@@ -1594,8 +1594,8 @@ def calculate_npc_kill_rewards(player_level, npc_level=1):
 def copy_attempts_remaining(picked_char, copy_id, cfg):
     state = ensure_daily_copy_state(picked_char)
     remaining = state.setdefault('remaining', {})
-    if copy_id not in remaining:
-        remaining[copy_id] = int(cfg['max_plays'])
+    if copy_id not in remaining or copy_id in ["223", "224", "225", "226", "227", "228", "229"]:
+        remaining[copy_id] = int(cfg.get('max_plays', 3))
     return max(0, int(remaining[copy_id]))
 
 def street_race_rewards(level):
