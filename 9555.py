@@ -300,12 +300,15 @@ try:
                 if len(parts) >= 5 and parts[0] == '*' and parts[1].isdigit():
                     rewards = []
                     for index in range(3, len(parts) - 2, 3):
-                        item_id = parts[index]
-                        if not item_id:
-                            continue
+                        item_id = parts[index].strip()
                         quality = int(parts[index + 1]) if parts[index + 1].isdigit() else 0
-                        count = int(parts[index + 2]) if parts[index + 2].isdigit() else 1
-                        rewards.append((item_id, quality, count))
+                        count_str = parts[index + 2].strip()
+                        count = int(count_str) if count_str.isdigit() else 1
+
+                        if item_id:
+                            rewards.append((item_id, quality, count))
+                        elif count_str and count_str in ITEM_CONFIG:
+                            rewards.append((count_str, quality, 1))
                     SHOW_REWARD_CONFIG[parts[1]] = rewards
 
     adapt_path = os.path.join(text_asset_root, "AdaptData")
@@ -1191,6 +1194,35 @@ def ensure_daily_copy_state(picked_char):
         state['best_times'] = {}
     return state
 
+def calculate_npc_kill_rewards(player_level, npc_level=1):
+    """Calculates balanced EXP and Cash rewards for killing/hitting an NPC based on BaseLvData."""
+    try:
+        player_level = max(1, min(int(player_level), 80))
+    except (TypeError, ValueError):
+        player_level = 1
+
+    try:
+        npc_level = int(npc_level)
+        if npc_level > 200 or npc_level <= 0:
+            npc_level = player_level
+    except (TypeError, ValueError):
+        npc_level = player_level
+
+    # Effective level capped to prevent low-level power leveling
+    effective_lv = min(player_level, npc_level + 2)
+
+    # Get required EXP for effective level from BaseLvData
+    req_data = LEVEL_DATA.get(effective_lv, LEVEL_DATA.get(1, {'exp': 400}))
+    req_exp = req_data.get('exp', 400)
+
+    # Grant ~0.8% of level required EXP per NPC kill
+    exp_reward = max(3, int(req_exp * 0.008))
+
+    # Cash reward scales smoothly with effective level
+    cash_reward = max(10, effective_lv * 15 + 10)
+
+    return exp_reward, cash_reward
+
 def copy_attempts_remaining(picked_char, copy_id, cfg):
     state = ensure_daily_copy_state(picked_char)
     remaining = state.setdefault('remaining', {})
@@ -1200,10 +1232,16 @@ def copy_attempts_remaining(picked_char, copy_id, cfg):
 
 def street_race_rewards(level):
     """Return exactly the level-resolved _drop_bc ShowRewardData items."""
-    level = int(level)
-    eligible = [lv for lv in STREET_RACE_REWARD_BY_LEVEL if lv <= level]
-    reward_id = STREET_RACE_REWARD_BY_LEVEL[max(eligible)] if eligible else ''
-    return SHOW_REWARD_CONFIG.get(reward_id, [])
+    try:
+        level = int(level)
+    except (TypeError, ValueError):
+        level = 1
+    level = max(1, min(level, 80))
+    reward_id = STREET_RACE_REWARD_BY_LEVEL.get(level)
+    if not reward_id:
+        eligible = [lv for lv in STREET_RACE_REWARD_BY_LEVEL if lv <= level]
+        reward_id = STREET_RACE_REWARD_BY_LEVEL[max(eligible)] if eligible else ''
+    return SHOW_REWARD_CONFIG.get(str(reward_id), [])
 
 def sync_copy_scenes(picked_char):
     """Build TAG 555 from the APK's CopySceneData definitions."""
@@ -2414,32 +2452,20 @@ def client_handler(conn, addr):
                         advance_missions(picked_char, send_rpc_push, 'car', die_type=die_type)
 
                     if npcid and npcid != "None":
-                        # NPC Kill Rewards (EXP: level*20, CASH: level*100)
+                        # NPC Kill Rewards (scaled proportionally to BaseLvData required EXP)
                         npc_stats = get_npc_attr(npcid)
-                        reward_level = npc_stats['lv'] if 1 <= npc_stats['lv'] <= 200 else 1
-                        exp_kill = reward_level * 20
-                        cash_kill = reward_level * 100
-                        picked_char['exp'] += exp_kill
-                        picked_char['cash'] += cash_kill
+                        npc_lv = npc_stats.get('lv', 1)
+                        char_lv = picked_char.get('level', 1)
+
+                        exp_kill, cash_kill = calculate_npc_kill_rewards(char_lv, npc_lv)
+                        kill_rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
+                        grant_item_rewards(picked_char, kill_rewards, conn, send_rpc_push)
 
                         # Send reward tip (Tag 638)
                         send_rpc_push(638, encode_sproto([(0, [
                             encode_sproto([(0, "2001"), (1, exp_kill), (3, 0)]),
                             encode_sproto([(0, "1001"), (1, cash_kill), (3, 0)])
                         ])]))
-
-                        # Level up loop
-                        while True:
-                            lv = picked_char.get('level', 1)
-                            rd = LEVEL_DATA.get(lv)
-                            if rd and picked_char['exp'] >= rd['exp']:
-                                picked_char['exp'] -= rd['exp']
-                                picked_char['level'] = lv + 1
-                                # Level Up: Fully Restore HP
-                                new_stats = get_character_stats(picked_char)
-                                picked_char['hp'] = new_stats['hp_max']
-                                print(f"[LEVEL UP] CharID={picked_char['id']} NewLevel={picked_char['level']} HP Restored to {picked_char['hp']}")
-                            else: break
 
                         advance_missions(picked_char, send_rpc_push, 'kill', target_id=npcid)
 
@@ -2501,8 +2527,7 @@ def client_handler(conn, addr):
                 print(f"[*] Vehicle impact with NPC type={impact_type}")
                 if picked_char:
                     char_lv = picked_char.get('level', 1)
-                    exp_impact = char_lv * 30 + 50
-                    cash_impact = char_lv * 150 + 100
+                    exp_impact, cash_impact = calculate_npc_kill_rewards(char_lv, npc_level=1)
                     impact_rewards = [("2001", 0, exp_impact), ("1001", 0, cash_impact)]
                     grant_item_rewards(picked_char, impact_rewards, conn, send_rpc_push)
 
