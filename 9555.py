@@ -1343,6 +1343,13 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             (0, map_str), (1, 0), (2, end_time), (3, 1), (4, 0), (5, 0)
         ]))
 
+        if picked_char:
+            advance_missions(picked_char, push_wrapper, 'enter_copy', target_id='105')
+            advance_missions(picked_char, push_wrapper, 'exp_copy')
+            advance_missions(picked_char, push_wrapper, 'interact', target_id='105')
+            advance_missions(picked_char, push_wrapper, 'interact', target_id='1019')
+            push_wrapper(519, sync_mission_data(picked_char))
+
         def local_send_npc(nid, name, x, z, o):
             inst_id = send_npc_create(nid, name, x, z, o)
             if inst_id:
@@ -1833,9 +1840,9 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
         elif logic_type == 25 and event == 'capture':
             # LogicType 25 (Capture) matches activity ID or NPC target
             matched = not target or target == target_value or str(cfg.get('logic_id', '')) == target_value
-        elif logic_type in [102, 103, 105, 106, 107, 108, 110, 113, 114, 117, 119, 120, 132] and event == 'interact':
-            # Dungeon/Guide entry missions advance on interaction/entry
-            matched = str(cfg.get('logic_id')) == str(target_id)
+        elif logic_type in [102, 103, 105, 106, 107, 108, 110, 113, 114, 117, 119, 120, 132] and event in ['interact', 'exp_copy', 'enter_copy', 'dungeon']:
+            # Dungeon/Guide entry missions advance on interaction/entry/exp_copy
+            matched = not target_id or str(cfg.get('logic_id')) == str(target_id) or event in ['exp_copy', 'enter_copy', 'dungeon']
         elif logic_type == 114 and event == 'world_boss':
             matched = True
         elif logic_type == 7 and event == 'map':
