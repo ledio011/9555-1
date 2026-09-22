@@ -187,9 +187,31 @@ try:
                         'exr_coe': int(parts[34]) if len(parts) > 34 and parts[34].isdigit() else 10000,
                         'crd_coe': int(parts[35]) if len(parts) > 35 and parts[35].isdigit() else 10000,
                         'crr_coe': int(parts[36]) if len(parts) > 36 and parts[36].isdigit() else 10000,
-                        'atk_abs': int(parts[44]) if is_abs and len(parts) > 44 and parts[44].isdigit() else 0,
-                        'hp_abs': int(parts[45]) if is_abs and len(parts) > 45 and parts[45].isdigit() else 0,
-                        'def_abs': int(parts[46]) if is_abs and len(parts) > 46 and parts[46].isdigit() else 0
+                        'anti_stun_coe': int(parts[37]) if len(parts) > 37 and parts[37].isdigit() else 10000,
+                        'anti_knock_down_coe': int(parts[38]) if len(parts) > 38 and parts[38].isdigit() else 10000,
+                        'defa_coe': int(parts[39]) if len(parts) > 39 and parts[39].isdigit() else 10000,
+                        'dgea_coe': int(parts[40]) if len(parts) > 40 and parts[40].isdigit() else 10000,
+                        'resa_coe': int(parts[41]) if len(parts) > 41 and parts[41].isdigit() else 10000,
+                        'hita_coe': int(parts[42]) if len(parts) > 42 and parts[42].isdigit() else 10000,
+                        'cria_coe': int(parts[43]) if len(parts) > 43 and parts[43].isdigit() else 10000,
+                        'atk_abs': int(parts[44]) if len(parts) > 44 and parts[44].isdigit() else 0,
+                        'hp_abs': int(parts[45]) if len(parts) > 45 and parts[45].isdigit() else 0,
+                        'def_abs': int(parts[46]) if len(parts) > 46 and parts[46].isdigit() else 0,
+                        'hit_abs': int(parts[47]) if len(parts) > 47 and parts[47].isdigit() else 0,
+                        'eva_abs': int(parts[48]) if len(parts) > 48 and parts[48].isdigit() else 0,
+                        'cri_abs': int(parts[49]) if len(parts) > 49 and parts[49].isdigit() else 0,
+                        'res_abs': int(parts[50]) if len(parts) > 50 and parts[50].isdigit() else 0,
+                        'exd_abs': int(parts[51]) if len(parts) > 51 and parts[51].isdigit() else 0,
+                        'exr_abs': int(parts[52]) if len(parts) > 52 and parts[52].isdigit() else 0,
+                        'crd_abs': int(parts[53]) if len(parts) > 53 and parts[53].isdigit() else 0,
+                        'crr_abs': int(parts[54]) if len(parts) > 54 and parts[54].isdigit() else 0,
+                        'anti_stun_abs': int(parts[55]) if len(parts) > 55 and parts[55].isdigit() else 0,
+                        'anti_knock_down_abs': int(parts[56]) if len(parts) > 56 and parts[56].isdigit() else 0,
+                        'defa_abs': int(parts[57]) if len(parts) > 57 and parts[57].isdigit() else 0,
+                        'dgea_abs': int(parts[58]) if len(parts) > 58 and parts[58].isdigit() else 0,
+                        'resa_abs': int(parts[59]) if len(parts) > 59 and parts[59].isdigit() else 0,
+                        'hita_abs': int(parts[60]) if len(parts) > 60 and parts[60].isdigit() else 0,
+                        'cria_abs': int(parts[61]) if len(parts) > 61 and parts[61].isdigit() else 0,
                     }
         print(f"[NPC CONFIG LOADED] count={len(NPC_CONFIG)}")
 
@@ -884,49 +906,67 @@ def sync_char_attrs_rpc(conn, picked_char):
     except: pass
 
 def get_npc_attr(nid):
-    cfg = NPC_CONFIG.get(nid)
-    if not cfg: return {'hp_max': 10000, 'atk': 100, 'def': 10, 'hit': 100, 'eva': 10, 'cri': 10, 'res': 10, 'lv': 1, 'defa': 3000, 'dgea': 6000, 'resa': 3000, 'hita': 300, 'cria': 3000, 'exd': 0, 'exr': 0, 'crd': 5000, 'crr': 0}
+    cfg = NPC_CONFIG.get(str(nid))
+    if not cfg:
+        return {
+            'hp_max': 10000, 'atk': 100, 'def': 10, 'hit': 100, 'eva': 10, 'cri': 10, 'res': 10,
+            'lv': 1, 'defa': 3000, 'dgea': 6000, 'resa': 3000, 'hita': 300, 'cria': 3000,
+            'exd': 0, 'exr': 0, 'crd': 5000, 'crr': 0, 'power': 3000
+        }
 
     lvl = cfg.get('level', 1)
-    # Use highest available level stats if level exceeds 80
-    max_lv = max(LEVEL_DATA.keys())
+    max_lv = max(LEVEL_DATA.keys()) if LEVEL_DATA else 1
     effective_lv = min(lvl, max_lv)
-    ld = LEVEL_DATA.get(effective_lv)
+    ld = LEVEL_DATA.get(effective_lv, LEVEL_DATA.get(1, {}))
 
     if cfg.get('is_abs'):
         hp = cfg.get('hp_abs', 10000)
         atk = cfg.get('atk_abs', 100)
         df = cfg.get('def_abs', 10)
+        hit = cfg.get('hit_abs', 100)
+        eva = cfg.get('eva_abs', 10)
+        cri = cfg.get('cri_abs', 10)
+        res = cfg.get('res_abs', 10)
+        exd = cfg.get('exd_abs', 0)
+        exr = cfg.get('exr_abs', 0)
+        crd = cfg.get('crd_abs', 5000)
+        crr = cfg.get('crr_abs', 0)
+        defa = cfg.get('defa_abs', 3000)
+        dgea = cfg.get('dgea_abs', 6000)
+        resa = cfg.get('resa_abs', 3000)
+        hita = cfg.get('hita_abs', 300)
+        cria = cfg.get('cria_abs', 3000)
     else:
         hp = (ld['hp'][0] * cfg.get('hp_coe', 10000)) // 10000
         atk = (ld['atk'][0] * cfg.get('atk_coe', 10000)) // 10000
         df = (ld['def'][0] * cfg.get('def_coe', 10000)) // 10000
+        hit = (ld['hit'][0] * cfg.get('hit_coe', 10000)) // 10000
+        eva = (ld['eva'][0] * cfg.get('eva_coe', 10000)) // 10000
+        cri = (ld['cri'][0] * cfg.get('cri_coe', 10000)) // 10000
+        res = (ld['res'][0] * cfg.get('res_coe', 10000)) // 10000
+        exd = (ld['exd'][0] * cfg.get('exd_coe', 10000)) // 10000
+        exr = (ld['exr'][0] * cfg.get('exr_coe', 10000)) // 10000
+        crd = (ld['crd'][0] * cfg.get('crd_coe', 10000)) // 10000
+        crr = (ld['crr'][0] * cfg.get('crr_coe', 10000)) // 10000
+        defa = (ld.get('defa', 3000) * cfg.get('defa_coe', 10000)) // 10000
+        dgea = (ld.get('dgea', 6000) * cfg.get('dgea_coe', 10000)) // 10000
+        resa = (ld.get('resa', 3000) * cfg.get('resa_coe', 10000)) // 10000
+        hita = (ld.get('hita', 300) * cfg.get('hita_coe', 10000)) // 10000
+        cria = (ld.get('cria', 3000) * cfg.get('cria_coe', 10000)) // 10000
 
-    # Original stats check: if Atk/Hp are defined explicitly in NpcData, use them as minimums
     if cfg.get('hp_abs', 0) > hp: hp = cfg['hp_abs']
     if cfg.get('atk_abs', 0) > atk: atk = cfg['atk_abs']
+    if cfg.get('def_abs', 0) > df: df = cfg['def_abs']
 
-    # Ratings scaling
-    def scale_rating(base_val, coe):
-        return (base_val * coe) // 10000
-
-    # Calculate Power for NPC
-    prof_coeffs = {"atk":16, "hp":1, "def":11, "hit":2, "eva":5.5, "cri":10, "res":10}
-    raw_power = (atk * prof_coeffs['atk'] + hp * prof_coeffs['hp'] + df * prof_coeffs['def']) # Simplified for NPC
+    prof_coeffs = {"atk": 16, "hp": 1, "def": 11}
+    raw_power = (atk * prof_coeffs['atk'] + hp * prof_coeffs['hp'] + df * prof_coeffs['def'])
     power = int(raw_power * 3.0)
 
-    # NPCs use Level 1 coefficients as default fallback if not specified elsewhere
     return {
-        'hp_max': hp, 'atk': atk + 180, 'def': df,
-        'hit': scale_rating(ld['hit'][0], cfg.get('hit_coe', 10000)),
-        'eva': scale_rating(ld['eva'][0], cfg.get('eva_coe', 10000)),
-        'cri': scale_rating(ld['cri'][0], cfg.get('cri_coe', 10000)),
-        'res': scale_rating(ld['res'][0], cfg.get('res_coe', 10000)),
-        'lv': lvl, 'defa': ld['defa'], 'dgea': ld['dgea'], 'resa': ld['resa'], 'hita': ld['hita'], 'cria': ld['cria'],
-        'exd': scale_rating(ld['exd'][0], cfg.get('exd_coe', 10000)),
-        'exr': scale_rating(ld['exr'][0], cfg.get('exr_coe', 10000)),
-        'crd': scale_rating(ld['crd'][0], cfg.get('crd_coe', 10000)),
-        'crr': scale_rating(ld['crr'][0], cfg.get('crr_coe', 10000)),
+        'hp_max': hp, 'atk': atk, 'def': df,
+        'hit': hit, 'eva': eva, 'cri': cri, 'res': res,
+        'lv': lvl, 'defa': defa, 'dgea': dgea, 'resa': resa, 'hita': hita, 'cria': cria,
+        'exd': exd, 'exr': exr, 'crd': crd, 'crr': crr,
         'power': power
     }
 
@@ -2804,22 +2844,17 @@ def client_handler(conn, addr):
             elif msg == 119: # ask_pickup_item
                 iid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
                 if picked_char:
-                    # Item pickup can advance Logic 3/4 missions
                     advance_missions(picked_char, send_rpc_push, 'pickup', target_id=iid)
+                    advance_missions(picked_char, send_rpc_push, 'interact', target_id=iid)
                     add_to_inventory(picked_char, iid, 1)
                     send_rpc_push(611, sync_inventory_data(picked_char))
                 if session is not None:
-                    # Response: ret(0)=0 (Success)
                     resp = encode_sproto([(0, 0)])
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 108: # leave_copy_scene
                 if picked_char:
-                    # Street Race has its own Continue/Exit button.  Unlike
-                    # the Capture arena it does not auto-return after five
-                    # seconds, and it must restore the city position saved
-                    # when the race was entered.
                     if picked_char.get('active_copy_id'):
                         saved_pos = picked_char.get('pre_copy_pos')
                         picked_char['pre_copy_pos'] = None
@@ -2838,10 +2873,31 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-    except: traceback.print_exc()
-    finally: conn.close()
+    except Exception as exc:
+        print(f"[!] Client handler exception for {addr}: {exc}")
+        traceback.print_exc()
+    finally:
+        try:
+            conn_id = id(conn)
+            if conn_id in NPC_SPAWNED_MAPS:
+                del NPC_SPAWNED_MAPS[conn_id]
+            conn.close()
+        except Exception:
+            pass
+        print(f"[-] Client disconnected: {addr}")
 
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM); server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-server.bind(("0.0.0.0", PORT)); server.listen(20)
-print(f"GAME SERVER 9555 READY (ATG MISSION SYSTEM REBUILT)");
-while True: cl, ad = server.accept(); threading.Thread(target=client_handler, args=(cl, ad), daemon=True).start()
+def start_server():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    server.bind(("0.0.0.0", PORT))
+    server.listen(20)
+    print(f"GAME SERVER 9555 READY ON PORT {PORT}")
+    while True:
+        try:
+            cl, ad = server.accept()
+            threading.Thread(target=client_handler, args=(cl, ad), daemon=True).start()
+        except Exception as e:
+            print(f"[!] Accept error: {e}")
+
+if __name__ == "__main__":
+    start_server()
