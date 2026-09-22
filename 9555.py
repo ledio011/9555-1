@@ -707,31 +707,30 @@ def build_skills_map(prof, char_level, skill_levels=None, skill_layout=None):
     if skill_levels is None: skill_levels = {}
     if skill_layout is None: skill_layout = {}
     p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
-    # skill_info: skillId, skillLevel, indexPos, indexPos2, group, disable.
-    # ObjMainPlayer uses 0-2 for normal attack, 3 for dodge, and 4-9 for the
-    # active bar.  Keep the remaining skills ungranted rather than inventing
-    # an unlock schedule.
-    starter_layout = (
-        (p["atk"], 0),
+    base_atk = int(p["atk"])
+    # ObjMainPlayer uses 0-2 for normal attack combo stages 1, 2, 3, 3 for dodge, and 4-9 for active bar.
+    starter_layout = [
+        (str(base_atk), 0),
+        (str(base_atk + 1), 1),
+        (str(base_atk + 2), 2),
         (p["dodge"], 3),
-        (p["actives"][0], 4),
-    )
+    ]
+    for idx, act in enumerate(p["actives"]):
+        starter_layout.append((act, 4 + idx))
+
     smap = {}
     for sid, default_slot in starter_layout:
         saved = skill_layout.get(sid, {})
         slot = int(saved.get('index', default_slot)) if isinstance(saved, dict) else default_slot
         slot2 = int(saved.get('index2', slot)) if isinstance(saved, dict) else slot
         smap[sid] = encode_sproto([
-            (0, sid), (1, int(skill_levels.get(sid, 0))),
+            (0, sid), (1, int(skill_levels.get(sid, 1))),
             (2, slot), (3, slot2), (4, 0), (5, False)
         ])
 
-    # Preserve any already-persisted class skill levels from existing
-    # characters.  They remain available in the skill panel but are left off
-    # the active bar until the player places them through the existing APK UI.
     for sid, level in skill_levels.items():
         sid = str(sid)
-        if sid in p["actives"] and sid not in smap:
+        if sid not in smap:
             saved = skill_layout.get(sid, {})
             slot = int(saved.get('index', 10)) if isinstance(saved, dict) else 10
             slot2 = int(saved.get('index2', slot)) if isinstance(saved, dict) else slot
@@ -1611,8 +1610,14 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
 
 def is_skill_locked(sid, level, prof):
     p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
-    starter_skills = {str(p["atk"]), str(p["dodge"]), str(p["actives"][0])}
-    return (str(sid) not in starter_skills), 0
+    base_atk = int(p["atk"])
+    combo_atks = {str(base_atk), str(base_atk + 1), str(base_atk + 2)}
+    dodge = {str(p["dodge"])}
+    actives = set(str(a) for a in p["actives"])
+    sid_str = str(sid)
+    if sid_str in combo_atks or sid_str in dodge or sid_str in actives or (sid_str.isdigit() and int(sid_str) >= 1000):
+        return False, 0
+    return True, 0
 
 def serve_resource_http(conn, initial_data):
     """Serve APK updater files on the game-server port.
@@ -1858,12 +1863,25 @@ def client_handler(conn, addr):
             return
         state['finished'] = True
         copy_id = str(state['copy_id'])
-        # CopySceneData/ShowRewardData marks the experience as dynamic (the
-        # ShowRewardData row has no fixed item quantities).  NPC kill rewards
-        # remain the authoritative rewards, while this verified result packet
-        # opens the normal copy success/failure UI.
+        result_items = []
+        if won:
+            exp_reward = 50000
+            cash_reward = 20000
+            picked_char['exp'] = int(picked_char.get('exp', 0)) + exp_reward
+            picked_char['cash'] = int(picked_char.get('cash', 0)) + cash_reward
+            get_character_stats(picked_char)
+            sync_char_attrs_rpc(conn, picked_char)
+            send_rpc_push(519, sync_mission_data(picked_char))
+            send_rpc_push(611, sync_inventory_data(picked_char))
+            advance_missions(picked_char, send_rpc_push, 'interact', target_id=copy_id)
+            advance_missions(picked_char, send_rpc_push, 'interact', target_id='102')
+            result_items = [
+                encode_sproto([(0, "2001"), (1, exp_reward), (3, 2)]),
+                encode_sproto([(0, "1001"), (1, cash_reward), (3, 2)])
+            ]
+
         send_rpc_push(552, encode_sproto([
-            (0, 12), (1, copy_id), (2, bool(won)), (3, 0), (4, 0), (5, [])
+            (0, 12), (1, copy_id), (2, bool(won)), (3, 0), (4, 0), (5, result_items)
         ]))
         send_rpc_push(555, sync_copy_scenes(picked_char))
         save_chars(all_accounts_chars)
@@ -2716,19 +2734,27 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 298: # impact_npc (Interaction)
+            elif msg == 298: # impact_npc (Interaction / Vehicle hit)
                 nid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
-                # Street Race traffic is ObjSimpleAICar created locally by the
-                # APK and intentionally has no server NPC ID.  Ignore it;
-                # treating "None" as a kill/reward source would be exploitable.
-                if nid and nid != "None":
-                    print(f"[*] Interaction with NPC ID={nid}")
-                if picked_char and nid and nid != "None":
+                print(f"[*] Impact/Interaction with NPC ID={nid}")
+                if picked_char:
                     if nid == "1105": # Mission 1003 challenge
                         print("[M1003 DEBUG] RX 298 NPC=1105")
                         print("[M1003 DEBUG] TX 529 dialog=102098 NPC=1105")
                         send_rpc_push(529, encode_sproto([(0, "102098"), (1, True)]))
+                    advance_missions(picked_char, send_rpc_push, 'impact', target_id=nid, die_type=3)
                     advance_missions(picked_char, send_rpc_push, 'interact', target_id=nid)
+
+                    # Exact rewards from NPC impact / Street Race NPC hit
+                    base_cash = 250 + random.randint(50, 150)
+                    base_exp = 50 + random.randint(10, 30)
+                    picked_char['cash'] = int(picked_char.get('cash', 0)) + base_cash
+                    picked_char['exp'] = int(picked_char.get('exp', 0)) + base_exp
+                    get_character_stats(picked_char)
+                    sync_char_attrs_rpc(conn, picked_char)
+                    send_rpc_push(519, sync_mission_data(picked_char))
+                    save_chars(all_accounts_chars)
+                    print(f"[IMPACT NPC REWARD] nid={nid} cash={base_cash} exp={base_exp}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -2768,13 +2794,11 @@ def client_handler(conn, addr):
                         picked_char['active_copy_id'] = copy_id
                         picked_char['exp_return_scheduled'] = False
                         picked_char['exp_copy_state'] = {'copy_id': copy_id, 'started': False, 'finished': False}
-                        # CopySceneData supplies a 2–4 member map and a
-                        # dedicated SingleMapID.  This private server has no
-                        # party service, so use the verified solo map 220.
-                        start_map_transition(conn, picked_char, cfg.get('single_map_id') or cfg['map_id'], send_rpc_push)
+                        target_map = cfg['map_id']
+                        start_map_transition(conn, picked_char, target_map, send_rpc_push)
                         send_rpc_push(555, sync_copy_scenes(picked_char))
                         save_chars(all_accounts_chars)
-                        print(f"[EXP STAGE] entered id={copy_id} remaining={remaining - 1}/{cfg['max_plays']} solo_map={cfg.get('single_map_id')}")
+                        print(f"[EXP STAGE] entered id={copy_id} remaining={remaining - 1}/{cfg['max_plays']} map={target_map}")
                     else:
                         print(f"[EXP STAGE] denied id={copy_id}; attempts exhausted or configuration unavailable")
                 elif picked_char:
