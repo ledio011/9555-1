@@ -888,9 +888,10 @@ def get_full_char(c):
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
 
-    # character.download: the APK treats 2 as completed.  Sending 1 again on
-    # reconnect would reopen the optional download/reward UI forever, even
-    # though MSG 270 was already persisted for this character.
+    # character.download (Tag 15):
+    # The APK shows the "Download / With New Car" tip when Tag 15 == 1.
+    # It stops showing it when Tag 15 == 0 or 2.
+    # New characters start with False, so they see the prompt.
     download_state = 2 if c.get('download_complete') else 1
     return encode_sproto([
         (0, c['id']),
