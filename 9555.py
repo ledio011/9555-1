@@ -1164,6 +1164,16 @@ def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
             timer = threading.Timer(5.0, leave_exp_copy)
             timer.daemon = True
             timer.start()
+        else:
+            # Tag 618: notice_relife_player triggers RebirthUIRoot Respawn UI
+            relife_req = encode_sproto([
+                (0, 1),
+                (1, 0),
+                (2, ""),
+                (3, picked_char['id']),
+                (4, picked_char['name'])
+            ])
+            send_rpc_push(618, relife_req)
 
         picked_char.pop('exp_stage_state', None)
 
@@ -1330,51 +1340,6 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             return send_npc_create(nid, name, x, z, o)
 
         spawn_exp_stage_subwave_internal(conn, push_wrapper, picked_char, exp_state, exp_cfg, local_send_npc)
-
-        def run_exp_monster_ai():
-            if not picked_char or not exp_state.get('ai_active') or picked_char.get('map_id') != map_str:
-                return
-            if picked_char.get('hp', 0) <= 0:
-                return
-
-            player_stats = get_character_stats(picked_char)
-
-            for inst_id in list(exp_state.get('active_monsters', [])):
-                if NPC_HP_MAP.get(inst_id, 0) <= 0:
-                    continue
-                target_nid = NPC_INST_MAP.get(inst_id)
-                if not target_nid:
-                    continue
-
-                monster_cfg = NPC_CONFIG.get(target_nid, {})
-                monster_stats = get_npc_attr(target_nid)
-                monster_skill = monster_cfg.get('skill_group', '50001') or '50001'
-
-                dmg, is_hit, is_cri = get_combat_damage(monster_stats, player_stats, skill_id=monster_skill, skill_lv=1)
-
-                # Send monster attack animation (Tag 508)
-                push_wrapper(508, encode_sproto([(0, inst_id), (1, picked_char['id']), (2, monster_skill)]))
-
-                if is_hit and dmg > 0:
-                    picked_char['hp'] = max(0, picked_char['hp'] - dmg)
-                    # Push damage effect to player (Tag 128)
-                    push_wrapper(128, encode_sproto([(0, picked_char['id']), (1, dmg), (2, monster_skill)]))
-                    sync_char_attrs_rpc(conn, picked_char)
-                    print(f"[EXP STAGE AI] Monster {inst_id} ({target_nid}) attacked player {picked_char['id']} with skill {monster_skill} for {dmg} damage! Player HP={picked_char['hp']}")
-
-                    if picked_char['hp'] <= 0:
-                        print(f"[EXP STAGE AI] Player {picked_char['id']} died in EXP Stage!")
-                        finish_exp_stage(conn, push_wrapper, picked_char, exp_state, win=False)
-                        return
-
-            if exp_state.get('ai_active') and picked_char.get('map_id') == map_str:
-                timer = threading.Timer(2.5, run_exp_monster_ai)
-                timer.daemon = True
-                timer.start()
-
-        ai_timer = threading.Timer(2.5, run_exp_monster_ai)
-        ai_timer.daemon = True
-        ai_timer.start()
         return
 
     # 1. Spawn Static NPCs & Monsters
