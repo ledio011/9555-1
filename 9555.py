@@ -726,37 +726,33 @@ def build_skills_map(prof, char_level, skill_levels=None, skill_layout=None):
     if skill_levels is None: skill_levels = {}
     if skill_layout is None: skill_layout = {}
     p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
-    base_atk = int(p["atk"])
-    # ObjMainPlayer uses 0-2 for normal attack combo stages 1, 2, 3, 3 for dodge, and 4-9 for active bar.
-    # Grant all 3 combo stages at level 1 to ensure no cooldown on basic attacks.
-    starter_layout = [
-        (str(base_atk), 0),
-        (str(base_atk + 1), 1),
-        (str(base_atk + 2), 2),
-        (p["dodge"], 3),
-    ]
     smap = {}
-    for sid, default_slot in starter_layout:
-        saved = skill_layout.get(sid, {})
-        slot = int(saved.get('index', default_slot)) if isinstance(saved, dict) else default_slot
-        slot2 = int(saved.get('index2', slot)) if isinstance(saved, dict) else slot
-        smap[sid] = encode_sproto([
-            (0, sid), (1, int(skill_levels.get(sid, 1))),
-            (2, slot), (3, slot2), (4, 0), (5, False)
-        ])
 
-    # Grant professional actives based on player level
+    # 1. Normal Attack (Group 0, Slot 0)
+    atk_sid = p["atk"]
+    smap[atk_sid] = encode_sproto([(0, atk_sid), (1, int(skill_levels.get(atk_sid, 1))), (2, 0), (3, 1), (4, 0), (5, False)])
+
+    # Support for Attack Combo stages 2 and 3 (Group 0, Slot 10 - hidden)
+    # This prevents the button from showing a cooldown icon when cycling the combo.
+    base_atk = int(atk_sid)
+    for combo_sid in [str(base_atk + 1), str(base_atk + 2)]:
+        smap[combo_sid] = encode_sproto([(0, combo_sid), (1, 1), (2, 10), (3, 1), (4, 0), (5, False)])
+
+    # 2. Dodge (Group 1, Slot 3)
+    dodge_sid = p["dodge"]
+    smap[dodge_sid] = encode_sproto([(0, dodge_sid), (1, int(skill_levels.get(dodge_sid, 1))), (2, 3), (3, 1), (4, 1), (5, False)])
+
+    # 3. Active Professional Skills (Group 2, 3, 4, 5, 6, 7)
     for i, sid in enumerate(p["actives"]):
         unlock_lv = SKILL_UNLOCK_LVS[i] if i < len(SKILL_UNLOCK_LVS) else 1
         if char_level >= unlock_lv:
-            saved = skill_layout.get(sid, {})
-            slot = int(saved.get('index', 4 + i)) if isinstance(saved, dict) else (4 + i)
-            slot2 = int(saved.get('index2', slot)) if isinstance(saved, dict) else slot
+            # Map actives to slots 4-9
             smap[sid] = encode_sproto([
                 (0, sid), (1, int(skill_levels.get(sid, 1))),
-                (2, slot), (3, slot2), (4, 0), (5, False)
+                (2, 4 + i), (3, unlock_lv), (4, 2 + i), (5, False)
             ])
 
+    # 4. Preserve any other saved skills (unassigned)
     for sid, level in skill_levels.items():
         sid = str(sid)
         if sid not in smap:
@@ -1640,16 +1636,17 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
 def is_skill_locked(sid, level, prof):
     p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
     base_atk = int(p["atk"])
-    combo_atks = {str(base_atk), str(base_atk + 1), str(base_atk + 2)}
-    dodge = {str(p["dodge"])}
-    actives = p["actives"]
+    # Basic attack combo stages 1, 2, 3 and dodge are NEVER locked
+    combo_chain = {str(base_atk), str(base_atk + 1), str(base_atk + 2), str(p["dodge"])}
     sid_str = str(sid)
-    if sid_str in combo_atks or sid_str in dodge:
+    if sid_str in combo_chain:
         return False, 0
-    if sid_str in actives:
-        idx = actives.index(sid_str)
+    # Active professional skills follow the unlock level schedule
+    if sid_str in p["actives"]:
+        idx = p["actives"].index(sid_str)
         unlock_lv = SKILL_UNLOCK_LVS[idx] if idx < len(SKILL_UNLOCK_LVS) else 1
         return (level < unlock_lv), unlock_lv
+    # Other internal/mission skills are unlocked by default
     if sid_str.isdigit() and int(sid_str) >= 1000:
         return False, 0
     return True, 0
