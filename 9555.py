@@ -1177,6 +1177,48 @@ def sync_copy_scenes(picked_char):
         copies[copy_id] = encode_sproto(info_fields)
     return encode_sproto([(0, copies)])
 
+def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None):
+    """Grants EXP, Cash, and Inventory items, handles level-ups, and syncs attributes."""
+    exp_gained = 0
+    cash_gained = 0
+    inv_changed = False
+
+    for entry in rewards_list:
+        item_id = str(entry[0])
+        amount = int(entry[2]) if len(entry) > 2 else int(entry[1])
+        if item_id == "2001":  # EXP
+            exp_gained += amount
+        elif item_id == "1001":  # Cash
+            cash_gained += amount
+        else:  # Inventory items / currency
+            add_to_inventory(picked_char, item_id, amount)
+            inv_changed = True
+
+    if exp_gained > 0:
+        picked_char['exp'] = picked_char.get('exp', 0) + exp_gained
+        while True:
+            lv = picked_char.get('level', 1)
+            rd = LEVEL_DATA.get(lv)
+            if rd and picked_char['exp'] >= rd['exp']:
+                picked_char['exp'] -= rd['exp']
+                picked_char['level'] = lv + 1
+                new_stats = get_character_stats(picked_char)
+                picked_char['hp'] = new_stats['hp_max']
+                print(f"[LEVEL UP] CharID={picked_char['id']} NewLevel={picked_char['level']} HP Restored to {picked_char['hp']}")
+            else:
+                break
+
+    if cash_gained > 0:
+        picked_char['cash'] = picked_char.get('cash', 0) + cash_gained
+
+    save_chars(all_accounts_chars)
+
+    if (exp_gained > 0 or cash_gained > 0) and conn:
+        sync_char_attrs_rpc(conn, picked_char)
+
+    if inv_changed and send_rpc_push:
+        send_rpc_push(611, sync_inventory_data(picked_char))
+
 def give_mission_rewards(picked_char, mid):
     """Resolves rewards by profession and calculates level ups using BaseLvData."""
     try:
@@ -2385,7 +2427,20 @@ def client_handler(conn, addr):
                 impact_type = get_val_int(body, 0)
                 print(f"[*] Vehicle impact with NPC type={impact_type}")
                 if picked_char:
+                    char_lv = picked_char.get('level', 1)
+                    exp_impact = char_lv * 30 + 50
+                    cash_impact = char_lv * 150 + 100
+                    impact_rewards = [("2001", 0, exp_impact), ("1001", 0, cash_impact)]
+                    grant_item_rewards(picked_char, impact_rewards, conn, send_rpc_push)
+
+                    # Send floating reward popup tip (Tag 638)
+                    send_rpc_push(638, encode_sproto([(0, [
+                        encode_sproto([(0, "2001"), (1, exp_impact), (3, 0)]),
+                        encode_sproto([(0, "1001"), (1, cash_impact), (3, 0)])
+                    ])]))
+
                     advance_missions(picked_char, send_rpc_push, 'impact')
+                    advance_missions(picked_char, send_rpc_push, 'level')
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -2427,7 +2482,7 @@ def client_handler(conn, addr):
                 active_copy_id = str(picked_char.get('active_copy_id') or '') if picked_char else ''
                 cfg = COPY_SCENE_CONFIG.get(active_copy_id)
                 won = get_val_int(body, 0, 0) == 1
-                elapsed = get_val_int(body, 1, 0)
+                elapsed = max(0, get_val_int(body, 1, 0))
                 path_str = field_text(body, 2)
                 if picked_char and cfg and cfg['subtype'] == 7:
                     state = ensure_daily_copy_state(picked_char)
@@ -2440,9 +2495,9 @@ def client_handler(conn, addr):
                             best_times[active_copy_id] = elapsed
                             best_strs[active_copy_id] = path_str
                     rewards = street_race_rewards(picked_char.get('level', 1)) if won else []
-                    for item_id, _, amount in rewards:
-                        add_to_inventory(picked_char, item_id, amount)
-                    save_chars(all_accounts_chars)
+                    if won and rewards:
+                        grant_item_rewards(picked_char, rewards, conn, send_rpc_push)
+
                     result_items = [encode_sproto([(0, item_id), (1, amount), (3, quality)])
                                     for item_id, quality, amount in rewards]
                     # car_copy_result (TAG 608) is the dedicated APK Street
@@ -2458,7 +2513,7 @@ def client_handler(conn, addr):
                         # the qualifying dungeon event; entering or failing
                         # the race must not advance it.
                         advance_missions(picked_char, send_rpc_push, 'interact', target_id='102')
-                        send_rpc_push(611, sync_inventory_data(picked_char))
+                        advance_missions(picked_char, send_rpc_push, 'level')
                     send_rpc_push(555, sync_copy_scenes(picked_char))
                     schedule_street_race_return()
                     print(f"[STREET RACE] result id={active_copy_id} win={won} time={elapsed} rewards={rewards}")
