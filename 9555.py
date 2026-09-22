@@ -176,6 +176,7 @@ try:
                         'model': parts[4],
                         'level': lvl,
                         'is_abs': is_abs,
+                        'skill_group': parts[14] if len(parts) > 14 and parts[14] else '50001',
                         'atk_coe': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 10000,
                         'hp_coe': int(parts[27]) if len(parts) > 27 and parts[27].isdigit() else 10000,
                         'def_coe': int(parts[28]) if len(parts) > 28 and parts[28].isdigit() else 10000,
@@ -1039,7 +1040,7 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     hit_p = min((attacker_stats['hit'] + 1.0) / (attacker_stats['hita'] + attacker_stats['hit'] + 1.0), 1.0)
     dge_p = min((defender_stats['eva'] + 1.0) / (defender_stats['dgea'] + defender_stats['eva'] + 1.0), 0.5)
 
-    hit_prob = 1.0 + hit_p - dge_p + skill_shit
+    hit_prob = 1.0
     roll_hit = random.random()
 
     if is_area:
@@ -1108,16 +1109,32 @@ def spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state
 
     print(f"[EXP STAGE] Spawned copy={exp_state['copy_id']} group={exp_state['cur_group']} wave={exp_state['cur_wave']} subwave={subwave} monsters={len(exp_state['active_monsters'])}")
 
+def get_exp_stage_full_reward(char_lv):
+    """Resolve exact EXP Stage reward from ShowRewardData (21000 + char_lv)."""
+    try:
+        lv = max(1, min(int(char_lv), 80))
+    except (TypeError, ValueError):
+        lv = 1
+
+    reward_id = str(21000 + lv)
+    rewards = SHOW_REWARD_CONFIG.get(reward_id, [])
+    if rewards:
+        for item_id, qual, count in rewards:
+            if item_id == "2001":
+                return count
+    return 195000
+
 def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
     exp_state['ai_active'] = False
     copy_id = exp_state['copy_id']
     char_lv = picked_char.get('level', 1) if picked_char else 1
-    ld = get_level_data(char_lv)
 
+    full_exp = get_exp_stage_full_reward(char_lv)
     total_max_kills = 350
     ratio = min(1.0, exp_state['total_kills'] / total_max_kills) if total_max_kills > 0 else 1.0
-    exp_reward = int(ld['exp'] * 0.25 * ratio) if win else int(ld['exp'] * 0.05 * ratio)
-    cash_reward = int(ld['exp'] * 0.05 * ratio) if win else int(ld['exp'] * 0.01 * ratio)
+
+    exp_reward = int(full_exp * ratio) if win else int(full_exp * ratio * 0.5)
+    cash_reward = int(exp_reward * 0.1)
 
     if picked_char:
         rewards = [("2001", 0, exp_reward), ("1001", 0, cash_reward)]
@@ -1138,16 +1155,17 @@ def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
             advance_missions(picked_char, send_rpc_push, 'exp_copy')
             advance_missions(picked_char, send_rpc_push, 'interact', target_id=copy_id)
             advance_missions(picked_char, send_rpc_push, 'level')
+            saved_pos = picked_char.get('pre_copy_pos')
+            picked_char['pre_copy_pos'] = None
+
+            def leave_exp_copy():
+                start_map_transition(conn, picked_char, "11", send_rpc_push, override_pos=saved_pos)
+
+            timer = threading.Timer(5.0, leave_exp_copy)
+            timer.daemon = True
+            timer.start()
+
         picked_char.pop('exp_stage_state', None)
-        saved_pos = picked_char.get('pre_copy_pos')
-        picked_char['pre_copy_pos'] = None
-
-        def leave_exp_copy():
-            start_map_transition(conn, picked_char, "11", send_rpc_push, override_pos=saved_pos)
-
-        timer = threading.Timer(5.0, leave_exp_copy)
-        timer.daemon = True
-        timer.start()
 
     print(f"[EXP STAGE] Finished copy={copy_id} win={win} total_kills={exp_state['total_kills']} exp={exp_reward} cash={cash_reward}")
 
@@ -1328,18 +1346,21 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 if not target_nid:
                     continue
 
+                monster_cfg = NPC_CONFIG.get(target_nid, {})
                 monster_stats = get_npc_attr(target_nid)
-                dmg, is_hit, is_cri = get_combat_damage(monster_stats, player_stats, skill_id="10000", skill_lv=1)
+                monster_skill = monster_cfg.get('skill_group', '50001') or '50001'
+
+                dmg, is_hit, is_cri = get_combat_damage(monster_stats, player_stats, skill_id=monster_skill, skill_lv=1)
 
                 # Send monster attack animation (Tag 508)
-                push_wrapper(508, encode_sproto([(0, inst_id), (1, picked_char['id']), (2, "10000")]))
+                push_wrapper(508, encode_sproto([(0, inst_id), (1, picked_char['id']), (2, monster_skill)]))
 
                 if is_hit and dmg > 0:
                     picked_char['hp'] = max(0, picked_char['hp'] - dmg)
                     # Push damage effect to player (Tag 128)
-                    push_wrapper(128, encode_sproto([(0, picked_char['id']), (1, dmg), (2, "10000")]))
+                    push_wrapper(128, encode_sproto([(0, picked_char['id']), (1, dmg), (2, monster_skill)]))
                     sync_char_attrs_rpc(conn, picked_char)
-                    print(f"[EXP STAGE AI] Monster {inst_id} attacked player {picked_char['id']} for {dmg} damage! Player HP={picked_char['hp']}")
+                    print(f"[EXP STAGE AI] Monster {inst_id} ({target_nid}) attacked player {picked_char['id']} with skill {monster_skill} for {dmg} damage! Player HP={picked_char['hp']}")
 
                     if picked_char['hp'] <= 0:
                         print(f"[EXP STAGE AI] Player {picked_char['id']} died in EXP Stage!")
