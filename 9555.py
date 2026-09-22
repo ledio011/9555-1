@@ -1,8 +1,9 @@
-import socket, struct, threading, random, json, os, time, traceback
-
 PORT = int(os.environ.get("PORT", 15678))
-CHAR_DB = "characters_final.json"
-RESOURCE_ROOT = os.path.join(os.path.dirname(__file__), "assets")
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CHAR_DB = os.path.join(SCRIPT_DIR, "characters_final.json")
+BAK_DB = CHAR_DB + ".bak"
+TMP_DB = CHAR_DB + ".tmp"
+RESOURCE_ROOT = os.path.join(SCRIPT_DIR, "assets")
 server_session_counter = 8000
 GLOBAL_INST_COUNTER = 3000000
 NPC_INST_MAP = {} # inst_id -> nid (to resolve rewards)
@@ -366,6 +367,11 @@ def save_chars(data):
     """Crash-safe atomic writer to prevent character loss during kill -9."""
     if not isinstance(data, dict):
         return
+    # Guard against accidental wipe: never overwrite a non-empty database on disk with an empty dict
+    if not data:
+        if os.path.exists(CHAR_DB) and os.path.getsize(CHAR_DB) > 10:
+            print("[SAVE GUARD] Refusing to overwrite non-empty CHAR_DB with empty dictionary!")
+            return
     try:
         # 1. Write new state to temporary file
         with open(TMP_DB, "w", encoding="utf-8") as f:
@@ -374,7 +380,7 @@ def save_chars(data):
             os.fsync(f.fileno())
 
         # 2. Backup current good database file if it exists
-        if os.path.exists(CHAR_DB):
+        if os.path.exists(CHAR_DB) and os.path.getsize(CHAR_DB) > 10:
             try:
                 with open(CHAR_DB, "r", encoding="utf-8") as src, open(BAK_DB, "w", encoding="utf-8") as dst:
                     dst.write(src.read())
