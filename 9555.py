@@ -2126,6 +2126,8 @@ def client_handler(conn, addr):
                 if picked_char:
                     mid = picked_char.get('map_id', '11')
                     print(f"[MAP READY RECEIVED] map_id={mid}")
+                    if picked_char.get('exp_copy_state') and not picked_char['exp_copy_state'].get('started'):
+                        start_exp_stage_battle()
                     # Tag 654 is start_enter_game.  The APK interprets state=1
                     # as completion of the optional resource download, so it
                     # must only be sent after the client's MSG 270 request.
