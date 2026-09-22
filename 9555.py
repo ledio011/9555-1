@@ -2900,6 +2900,28 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif msg == 132: # relife_player (Revive player)
+                if picked_char:
+                    p_stats = get_character_stats(picked_char)
+                    picked_char['hp'] = p_stats['hp_max']
+                    sync_char_attrs_rpc(conn, picked_char)
+
+                    # Send Sproto Tag 512 (aoi_relife_player)
+                    relife_char = encode_sproto([
+                        (0, picked_char['id']),
+                        (1, p_stats['hp_max']),
+                        (2, int(picked_char['pos'][0])),
+                        (3, int(picked_char['pos'][1])),
+                        (4, int(picked_char['pos'][2]))
+                    ])
+                    send_rpc_push(512, encode_sproto([(0, relife_char)]))
+                    save_chars(all_accounts_chars)
+                    print(f"[REVIVE] Player {picked_char['id']} revived with HP={p_stats['hp_max']}")
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
             elif msg == 220: # start_battle (Street Race & EXP Stage start)
                 if picked_char and picked_char.get('active_copy_id'):
                     copy_id = picked_char['active_copy_id']
