@@ -28,6 +28,7 @@ MOUNT_CONFIG = {} # garage vehicle id -> client MountData definition
 COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
 SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
 STREET_RACE_REWARD_BY_LEVEL = {} # level -> AdaptData _drop_bc ShowRewardData id
+ITEM_CONFIG = {} # itemId -> {type, function}
 
 try:
     script_dir = os.path.dirname(__file__)
@@ -317,6 +318,18 @@ try:
             for parts in rows:
                 if len(parts) > street_reward_index and parts[0] == '*' and parts[1].isdigit():
                     STREET_RACE_REWARD_BY_LEVEL[int(parts[1])] = parts[street_reward_index]
+
+    item_path = os.path.join(text_asset_root, "ItemData")
+    if os.path.exists(item_path):
+        with open(item_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(',')
+                if len(parts) > 11 and parts[0] == '*' and parts[1]:
+                    ITEM_CONFIG[parts[1]] = {
+                        'type': int(parts[7]) if parts[7].isdigit() else 0,
+                        'function': int(parts[11]) if parts[11].isdigit() else 0
+                    }
+        print(f"[ITEM CONFIG LOADED] items={len(ITEM_CONFIG)}")
 except: traceback.print_exc()
 
 def load_chars():
@@ -525,28 +538,28 @@ def get_boss_char(inst_id, did):
     # These names are server placeholders, not names supplied by the APK data.
     name = "XK7NQ2VJ"
     prof = 0
-    
+
     # VERIFIED ORIGINAL BOSS DATA: Level 3
     lv = 3
     hp_max = 9560
     power = 6000
     atk = 660
     df = 60
-    
+
     # Visual
     v = get_visual(name, prof)
-    
+
     # attribute_other fields are decoded by ObjZombiePlayer. A non-zero
     # title_level (4) makes PlayerHeadInfoLogic render the overhead title.
     # TitleData defines level 1 as a valid title.
     attr_oth = encode_sproto([
         (0, hp_max), (1, 0), (2, lv), (3, power), (4, 1), (15, 2)
     ])
-    
+
     # Movement: Restore Y=120. Client docking raycasts from Y=150 down.
     pos_data = encode_sproto([(0, 400), (1, 120), (2, 0), (3, -9000)])
     mv = encode_sproto([(0, pos_data), (1, pos_data)])
-    
+
     # ObjZombiePlayer removes a skill from its automatic list after using it.
     # Supplying the complete XD combat set gives it valid fallbacks to chase
     # and attack instead of becoming idle when the first skill is unavailable.
@@ -556,10 +569,10 @@ def get_boss_char(inst_id, did):
         "108": 1, "109": 1, "110": 1,
     }
     skills_map = build_skills_map(prof, 25, boss_skill_levels)
-    
+
     # Runtime: attribute(6), attribute_all(7)
     attr_run = encode_sproto([(0, hp_max), (2, atk), (3, df)])
-    
+
     # Load level 3 coefficients for Boss
     ld = LEVEL_DATA.get(3, LEVEL_DATA.get(1))
     attr_all_data = [
@@ -571,7 +584,7 @@ def get_boss_char(inst_id, did):
     ]
     attr_all = encode_sproto(attr_all_data)
     run = encode_sproto([(6, attr_run), (7, attr_all)])
-    
+
     return encode_sproto([
         (0, inst_id),
         (1, encode_sproto([(0, name), (1, prof), (2, 1), (3, "502"), (4, 1)])), # general
@@ -664,7 +677,7 @@ def get_character_stats(c):
     eva = ld['eva'][prof]
     cri = ld['cri'][prof]
     res = ld['res'][prof]
-    
+
     # Add Weapon ATK (Level 1 weapon 10001/20001/30001 gives 180 ATK)
     atk += 180
 
@@ -821,7 +834,7 @@ def get_npc_attr(nid):
     # Ratings scaling
     def scale_rating(base_val, coe):
         return (base_val * coe) // 10000
-    
+
     # Calculate Power for NPC
     prof_coeffs = {"atk":16, "hp":1, "def":11, "hit":2, "eva":5.5, "cri":10, "res":10}
     raw_power = (atk * prof_coeffs['atk'] + hp * prof_coeffs['hp'] + df * prof_coeffs['def']) # Simplified for NPC
@@ -829,7 +842,7 @@ def get_npc_attr(nid):
 
     # NPCs use Level 1 coefficients as default fallback if not specified elsewhere
     return {
-        'hp_max': hp, 'atk': atk + 180, 'def': df, 
+        'hp_max': hp, 'atk': atk + 180, 'def': df,
         'hit': scale_rating(ld['hit'][0], cfg.get('hit_coe', 10000)),
         'eva': scale_rating(ld['eva'][0], cfg.get('eva_coe', 10000)),
         'cri': scale_rating(ld['cri'][0], cfg.get('cri_coe', 10000)),
@@ -871,30 +884,30 @@ def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
 def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_area=False, pvp_scale=1.0):
     """Original Damage calculation reproduced from CharacterAttributeData.cs"""
     prefix = "[AREA DAMAGE]" if is_area else "[COMBAT]"
-    
+
     # 1. Get Skill Multipliers from EffInfoData
     skill_cfg = SKILL_CONFIG.get(skill_id, {})
     eff_id = skill_cfg.get('eff0', "10000") # Default to NormalAttack if not found
     eff_cfg = EFF_CONFIG.get(eff_id, {
         'dmg_fixed': 0, 'dmg_fixed_add': 0, 'dmg_multi': 10000, 'dmg_multi_add': 0, 'adds': {}
     })
-    
+
     skill_damage = eff_cfg['dmg_fixed'] + eff_cfg['dmg_fixed_add'] * skill_lv
     skill_scale = (eff_cfg['dmg_multi'] + (eff_cfg['dmg_multi_add'] or 0) * skill_lv) / 10000.0
-    
+
     # PvP Scale handling (num3 in CharacterAttributeData.cs)
     pvp_mult = pvp_scale
     if attacker_stats.get('power', 0) > defender_stats.get('power', 0):
         pvp_mult += 0.05
-    
+
     # 2. Check Hit/Dodge
     skill_shit = eff_cfg['adds'].get(3001, 0) / 10000.0
     hit_p = min((attacker_stats['hit'] + 1.0) / (attacker_stats['hita'] + attacker_stats['hit'] + 1.0), 1.0)
     dge_p = min((defender_stats['eva'] + 1.0) / (defender_stats['dgea'] + defender_stats['eva'] + 1.0), 0.5)
-    
+
     hit_prob = 1.0 + hit_p - dge_p + skill_shit
     roll_hit = random.random()
-    
+
     if is_area:
         print(f"{prefix} HIT CHECK: roll={roll_hit:.3f} prob={hit_prob:.3f} (hit_p={hit_p:.3f}, dge_p={dge_p:.3f}, skill={skill_shit:.3f})")
         print(f"{prefix} STATS: AtkHIT={attacker_stats['hit']} AtkHITA={attacker_stats['hita']} DefEVA={defender_stats['eva']} DefDGEA={defender_stats['dgea']}")
@@ -902,38 +915,38 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     if roll_hit > hit_prob:
         if is_area: print(f"{prefix} RESULT: MISS")
         return 0, False, False # MISS
-        
+
     # 3. Check Crit
     skill_scri = eff_cfg['adds'].get(3002, 0) / 10000.0
     cri_p = min((attacker_stats['cri'] + 1.0) / (attacker_stats['cri'] + attacker_stats['cria'] + 1.0), 0.9)
     res_p = min((defender_stats['res'] + 1.0) / (defender_stats['res'] + defender_stats['resa'] + 1.0), 0.8)
-    
+
     cri_prob = cri_p - res_p + skill_scri
     is_cri = random.random() < cri_prob
-    
+
     # 4. Calculate Damage
     scaled_damage = skill_damage * pvp_mult
     scaled_scale = skill_scale * pvp_mult
-    
+
     base_dmg = attacker_stats['atk'] * scaled_scale + scaled_damage
     def_red = min((defender_stats['def'] + 1.0) / (defender_stats['def'] + attacker_stats['defa']), 0.5)
-    
+
     # 5. Handling Critical Multiplier
     crit_mult = 1.0
     if is_cri:
         crit_mult = max(1.0, min(1.0 + (attacker_stats['crd'] - defender_stats['crr']) / 10000.0, 2.0))
-        
+
     # 6. Final Formula with Random Variance [0.95, 1.05]
     rand_var = random.randint(0, 1000) / 1000.0 + 0.95
-    
+
     skill_sexd = eff_cfg['adds'].get(3003, 0) / 10000.0
     exd_factor = 1.0 + (attacker_stats['exd'] - defender_stats['exr']) / 10000.0 + skill_sexd
-    
+
     final_dmg = crit_mult * base_dmg * rand_var * (1.0 - def_red) * exd_factor
-    
+
     if is_area:
         print(f"{prefix} RESULT: HIT dmg={int(final_dmg)} base={base_dmg:.1f} red={def_red:.3f} crit={crit_mult:.2f} exd={exd_factor:.2f} var={rand_var:.3f}")
-        
+
     return int(max(1, final_dmg)), True, is_cri
 
 def spawn_map_npcs(conn, map_id, picked_char=None):
@@ -1092,16 +1105,18 @@ def field_text(fields, tag, default=''):
     return str(value) if value is not None else default
 
 def current_daily_stamp():
-    """The server's daily-copy reset key (UTC calendar day)."""
-    return time.strftime('%Y-%m-%d', time.gmtime())
+    """The server's daily-copy reset key (UTC calendar day adjusted for 03:00 AM reset)."""
+    adjusted_time = time.time() - (3 * 3600)
+    return time.strftime('%Y-%m-%d', time.gmtime(adjusted_time))
 
 def ensure_daily_copy_state(picked_char):
-    """Reset the APK-configured daily attempts once per calendar day."""
+    """Reset the APK-configured daily attempts once per calendar day at 03:00 AM."""
     state = picked_char.setdefault('daily_copy_state', {})
     stamp = current_daily_stamp()
     if state.get('day') != stamp:
         state['day'] = stamp
         state['remaining'] = {}
+        state['best_times'] = {}
     return state
 
 def copy_attempts_remaining(picked_char, copy_id, cfg):
@@ -1142,9 +1157,12 @@ def sync_copy_scenes(picked_char):
         # copyscene_info: ID, CurNum, BestGrade, Type, str, enable, state, Type2.
         # Type=1 marks a daily copy.  The client finds the Street Race entry
         # through CopySceneData.SubType == 7, rather than a server-made ID.
+        state = ensure_daily_copy_state(picked_char)
+        best_grade = state.get('best_times', {}).get(copy_id, -1)
+        best_str = state.get('best_times_str', {}).get(copy_id, "")
         copies[copy_id] = encode_sproto([
             (0, copy_id), (1, copy_attempts_remaining(picked_char, copy_id, cfg)),
-            (3, 1), (5, True), (6, 0), (7, cfg['subtype'])
+            (2, best_grade), (3, 1), (4, best_str), (5, True), (6, 0), (7, cfg['subtype'])
         ])
     return encode_sproto([(0, copies)])
 
@@ -1931,14 +1949,14 @@ def client_handler(conn, addr):
                             skill_lv = picked_char.get('skill_levels', {}).get(sid, 0)
 
                             is_area = (picked_char.get('map_id') == "502")
-                            
+
                             # Player -> NPC Damage
                             dmg, is_hit, is_cri = get_combat_damage(attacker_stats, defender_stats, sid, skill_lv, is_area=is_area, pvp_scale=1.0)
 
                             # Update Server State
                             if is_hit and tid in NPC_HP_MAP:
                                 NPC_HP_MAP[tid] -= dmg
-                                
+
                                 # BOSS DEATH HANDLING
                                 if NPC_HP_MAP[tid] <= 0:
                                     if tid == picked_char.get('boss_inst_id'):
@@ -1954,7 +1972,7 @@ def client_handler(conn, addr):
                             # dmg_item: id(0), damage(1), skillId(2), isCrit(4)
                             dmg_item = encode_sproto([(0, tid), (1, dmg), (2, sid), (4, is_cri)])
                             send_rpc_push(111, encode_sproto([(0, [dmg_item])]))
-                            
+
                             # Synchronization of target HP to ensure bar update
                             if tid in NPC_HP_MAP:
                                 # attribute_other (Tag 1): hp(0), level(2)
@@ -2086,6 +2104,24 @@ def client_handler(conn, addr):
                             send_rpc_push(611, sync_inventory_data(picked_char))
                             send_rpc_push(630, encode_sproto([(0, build_mount_info(picked_char))]))
                             print(f"[MOUNT] voucher redeemed item={item.get('id')} vehicle={mount_id}")
+                        elif item.get('id') in ITEM_CONFIG:
+                            cfg = ITEM_CONFIG[item['id']]
+                            if cfg['type'] == 18: # REMAIN ticket
+                                subtype = cfg['function']
+                                state = ensure_daily_copy_state(picked_char)
+                                # Find all copy IDs for this subtype and reset their remaining counts.
+                                # The client uses Item 9205 (SubType 7) for Street Race.
+                                for copy_id, sc_cfg in COPY_SCENE_CONFIG.items():
+                                    if sc_cfg['subtype'] == subtype:
+                                        state['remaining'][copy_id] = sc_cfg['max_plays']
+                                item['amount'] -= 1
+                                if item['amount'] < 1:
+                                    inventory.pop(item_index)
+                                success = 1
+                                save_chars(all_accounts_chars)
+                                send_rpc_push(611, sync_inventory_data(picked_char))
+                                send_rpc_push(555, sync_copy_scenes(picked_char))
+                                print(f"[TICKET] used item={item['id']} for subtype={subtype}")
                 send_rpc_push(526, encode_sproto([(0, success), (1, index_id)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -2102,19 +2138,19 @@ def client_handler(conn, addr):
                 target_id = get_val_int(body, 0)
                 dmg = get_val_int(body, 1)
                 eff_id = body.get(2, b"").decode('utf-8')
-                
+
                 if picked_char and target_id == picked_char['id']:
                     is_area = (picked_char.get('map_id') == "502")
                     if is_area:
                         print(f"[AREA BOSS ATTACK] dmg={dmg} eff={eff_id}")
-                    
+
                     new_hp = picked_char.get('hp', 0) - dmg
                     picked_char['hp'] = max(0, new_hp)
                     sync_char_attrs_rpc(conn, picked_char)
                     if picked_char['hp'] == 0 and picked_char.get('map_id') == '502':
                         print('[M1003 DEBUG] Player died in arena; scheduling loss return')
                         schedule_domin_return(restore_hp=True)
-                
+
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -2144,7 +2180,7 @@ def client_handler(conn, addr):
                         elif target_id in NPC_HP_MAP:
                             # Damage to NPC/Monster/Boss
                             NPC_HP_MAP[target_id] -= dmg
-                            
+
                             # Synchronization of target HP to ensure bar update
                             target_nid = NPC_INST_MAP.get(target_id)
                             defender_stats = None
@@ -2152,7 +2188,7 @@ def client_handler(conn, addr):
                                 # Resolve stats for syncing (Boss uses "1105", NPCs use nid)
                                 nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
                                 defender_stats = get_npc_attr(nid_str)
-                                
+
                                 # Send attribute update (Tag 510)
                                 a_oth_fields = [(0, max(0, NPC_HP_MAP[target_id])), (2, defender_stats['lv'])]
                                 if NPC_INST_MAP.get(target_id, '').startswith('BOSS_'):
@@ -2178,7 +2214,7 @@ def client_handler(conn, addr):
                                         a_oth = encode_sproto(a_oth_fields)
                                         aoi_attr = encode_sproto([(0, target_id), (1, a_oth)])
                                         send_rpc_push(510, encode_sproto([(0, aoi_attr)]))
-                                    
+
                                     did = picked_char.get('active_domin_id', '1')
                                     print(f"[M1003 DEBUG] Boss {target_id} killed by client dmg. Winning did={did}")
                                     # Do not send generic copy_scene_result (552) for Capture.
@@ -2385,13 +2421,17 @@ def client_handler(conn, addr):
                 cfg = COPY_SCENE_CONFIG.get(active_copy_id)
                 won = get_val_int(body, 0, 0) == 1
                 elapsed = get_val_int(body, 1, 0)
+                path_str = field_text(body, 2)
                 if picked_char and cfg and cfg['subtype'] == 7:
                     state = ensure_daily_copy_state(picked_char)
                     best_times = state.setdefault('best_times', {})
+                    best_strs = state.setdefault('best_times_str', {})
                     old_time = best_times.get(active_copy_id)
                     new_record = won and (old_time is None or elapsed < int(old_time))
                     if won:
-                        best_times[active_copy_id] = elapsed if new_record else int(old_time)
+                        if new_record:
+                            best_times[active_copy_id] = elapsed
+                            best_strs[active_copy_id] = path_str
                     rewards = street_race_rewards(picked_char.get('level', 1)) if won else []
                     for item_id, _, amount in rewards:
                         add_to_inventory(picked_char, item_id, amount)
@@ -2415,6 +2455,21 @@ def client_handler(conn, addr):
                     send_rpc_push(555, sync_copy_scenes(picked_char))
                     schedule_street_race_return()
                     print(f"[STREET RACE] result id={active_copy_id} win={won} time={elapsed} rewards={rewards}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 220: # start_battle (Street Race start)
+                if picked_char and picked_char.get('active_copy_id'):
+                    copy_id = picked_char['active_copy_id']
+                    cfg = COPY_SCENE_CONFIG.get(copy_id)
+                    if cfg and cfg['subtype'] == 7:
+                        # Street Race track timer (TAG 629).
+                        # notify_copy_start_info: end_time(0), type(1), wave_time(2), curWave(3).
+                        # type=0 initializes the countdown timer.
+                        duration = int(cfg.get('exist_time') or 900)
+                        send_rpc_push(629, encode_sproto([(0, int(time.time()) + duration), (1, 0)]))
+                        print(f"[STREET RACE] started timer for id={copy_id} duration={duration}s")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
