@@ -1,7 +1,13 @@
 import socket, struct, threading, random, json, os, time, traceback
 
 PORT = int(os.environ.get("PORT", 15678))
-CHAR_DB = "characters_final.json"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# Keep the database beside this server script.  A relative path depends on the
+# process working directory and can make the same account appear empty after a
+# restart started from a different directory.
+CHAR_DB = os.path.join(SCRIPT_DIR, "characters_final.json")
+CHAR_DB_LOCK = threading.RLock()
+CHAR_DB_LOAD_ERROR = False
 RESOURCE_ROOT = os.path.join(os.path.dirname(__file__), "assets")
 server_session_counter = 8000
 GLOBAL_INST_COUNTER = 3000000
@@ -349,21 +355,85 @@ try:
 except: traceback.print_exc()
 
 def load_chars():
-    if os.path.exists(CHAR_DB):
-        try:
-            with open(CHAR_DB, "r") as f: return json.load(f)
-        except: return {}
-    return {}
+    """Load the persistent account -> character database without altering it."""
+    global CHAR_DB_LOAD_ERROR
+    if not os.path.exists(CHAR_DB):
+        return {}
+    try:
+        with open(CHAR_DB, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise ValueError("character database root is not an object")
+        return data
+    except Exception as exc:
+        # Do not replace a damaged database with an empty one: that would make
+        # existing accounts look new and could cause an accidental re-create.
+        CHAR_DB_LOAD_ERROR = True
+        print(f"[CHAR DB] load failed; preserving existing file: {exc}")
+        return {}
 
 def save_chars(data):
+    """Atomically persist all character state after each important mutation."""
+    tmp_path = f"{CHAR_DB}.tmp.{os.getpid()}.{threading.get_ident()}"
     try:
-        with open(CHAR_DB, "w") as f: json.dump(data, f, indent=4)
-    except: pass
+        with CHAR_DB_LOCK:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+            # os.replace is atomic on a single filesystem: after kill -9 the
+            # database is either the complete old file or the complete new one.
+            os.replace(tmp_path, CHAR_DB)
+        return True
+    except Exception as exc:
+        print(f"[CHAR DB] save failed; existing database was not replaced: {exc}")
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+        return False
 
 all_accounts_chars = load_chars()
 
+def area_key(area_id):
+    """JSON object keys are strings, including after a server restart."""
+    try:
+        return str(int(area_id))
+    except (TypeError, ValueError):
+        return str(area_id)
+
+def account_characters(area_id, account_id, create=False):
+    """Return the one account's persisted character list using canonical keys."""
+    key = area_key(area_id)
+    account_id = str(account_id)
+    if create:
+        area = all_accounts_chars.setdefault(key, {})
+        return area.setdefault(account_id, [])
+    area = all_accounts_chars.get(key, {})
+    chars = area.get(account_id, []) if isinstance(area, dict) else []
+    return chars if isinstance(chars, list) else []
+
 def generate_unique_char_id():
-    return int(time.time() * 1000) % 1000000000
+    """Allocate an ID once; never reuse an ID already persisted in the DB."""
+    with CHAR_DB_LOCK:
+        used_ids = set()
+        for area in all_accounts_chars.values():
+            if not isinstance(area, dict):
+                continue
+            for chars in area.values():
+                if not isinstance(chars, list):
+                    continue
+                for character in chars:
+                    if isinstance(character, dict) and 'id' in character:
+                        try:
+                            used_ids.add(int(character['id']))
+                        except (TypeError, ValueError):
+                            pass
+        candidate = int(time.time() * 1000) % 1000000000
+        while candidate in used_ids:
+            candidate = (candidate + 1) % 1000000000
+        return candidate
 
 def get_area_id(serverId):
     try:
@@ -617,11 +687,10 @@ PROF_SKILLS = {
     1: {"atk": "201", "dodge": "204", "actives": ["205", "206", "207", "208", "209", "210"]},
     2: {"atk": "301", "dodge": "304", "actives": ["305", "306", "307", "308", "309", "310"]}
 }
-# The client has no "learn skill" request.  It only supports upgrading an
-# already-granted skill (130) and moving it between the two loadouts (192/316).
-# New characters therefore receive only their class normal attack.  Additional
-# grants must come from an identified server-side reward/quest source; do not
-# manufacture unlock levels from an unrelated table.
+# The APK receives character skills from sync_skill_info (tag 540).  A new
+# character's starter layout contains only its normal attack, dodge, and the
+# first class active in the existing SkillData order.  The other actives are
+# not granted here.
 SKILL_UNLOCK_LVS = []
 
 def get_skill_upgrade_cost(lv):
@@ -633,17 +702,43 @@ def get_skill_upgrade_cost(lv):
     if lv == 26: return 18000000
     return 20000000
 
-def build_skills_map(prof, char_level, skill_levels=None):
+def build_skills_map(prof, char_level, skill_levels=None, skill_layout=None):
     prof = int(prof)
     if skill_levels is None: skill_levels = {}
+    if skill_layout is None: skill_layout = {}
     p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
-    smap = {}
     # skill_info: skillId, skillLevel, indexPos, indexPos2, group, disable.
-    # Index 0 is the normal-attack slot used by ObjMainPlayer.
-    smap[p["atk"]] = encode_sproto([
-        (0, p["atk"]), (1, skill_levels.get(p["atk"], 0)),
-        (2, 0), (3, 0), (4, 0), (5, False)
-    ])
+    # ObjMainPlayer uses 0-2 for normal attack, 3 for dodge, and 4-9 for the
+    # active bar.  Keep the remaining skills ungranted rather than inventing
+    # an unlock schedule.
+    starter_layout = (
+        (p["atk"], 0),
+        (p["dodge"], 3),
+        (p["actives"][0], 4),
+    )
+    smap = {}
+    for sid, default_slot in starter_layout:
+        saved = skill_layout.get(sid, {})
+        slot = int(saved.get('index', default_slot)) if isinstance(saved, dict) else default_slot
+        slot2 = int(saved.get('index2', slot)) if isinstance(saved, dict) else slot
+        smap[sid] = encode_sproto([
+            (0, sid), (1, int(skill_levels.get(sid, 0))),
+            (2, slot), (3, slot2), (4, 0), (5, False)
+        ])
+
+    # Preserve any already-persisted class skill levels from existing
+    # characters.  They remain available in the skill panel but are left off
+    # the active bar until the player places them through the existing APK UI.
+    for sid, level in skill_levels.items():
+        sid = str(sid)
+        if sid in p["actives"] and sid not in smap:
+            saved = skill_layout.get(sid, {})
+            slot = int(saved.get('index', 10)) if isinstance(saved, dict) else 10
+            slot2 = int(saved.get('index2', slot)) if isinstance(saved, dict) else slot
+            smap[sid] = encode_sproto([
+                (0, sid), (1, int(level)), (2, slot), (3, slot2),
+                (4, 0), (5, False)
+            ])
     return smap
 
 def get_general(c):
@@ -764,7 +859,7 @@ def get_full_char(c):
 
     char_level = stats['lv']
     skill_levels = c.get('skill_levels', {})
-    skills_map = build_skills_map(c.get('prof', 0), char_level, skill_levels)
+    skills_map = build_skills_map(c.get('prof', 0), char_level, skill_levels, c.get('skill_layout', {}))
     wid = "10001" if c.get('prof', 0) == 0 else "20001" if c.get('prof', 0) == 1 else "30001"
     w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
@@ -1392,6 +1487,8 @@ def init_character_fields(c):
     fields = {
         'level': 1, 'exp': 0, 'cash': 1000,
         'skill_levels': {},
+        # Per-skill slots use the existing change_skill_position protocol.
+        'skill_layout': {},
         'active_missions': {},
         'completed_side_missions': [],
         'last_main_mission_id': "-1",
@@ -1514,7 +1611,8 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
 
 def is_skill_locked(sid, level, prof):
     p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
-    return (str(sid) != str(p["atk"])), 0
+    starter_skills = {str(p["atk"]), str(p["dodge"]), str(p["actives"][0])}
+    return (str(sid) not in starter_skills), 0
 
 def serve_resource_http(conn, initial_data):
     """Serve APK updater files on the game-server port.
@@ -1869,7 +1967,10 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 103: # character_list
-                chars = all_accounts_chars.get(cur_areaId, {}).get(acc_id, [])
+                # JSON restores area IDs as strings.  account_characters()
+                # uses the canonical key, so this finds the same record after
+                # a restart instead of presenting the account as empty.
+                chars = account_characters(cur_areaId, acc_id)
                 # Sort by last_played descending (internal)
                 chars.sort(key=lambda x: x.get('last_played', 0), reverse=True)
 
@@ -1886,19 +1987,39 @@ def client_handler(conn, addr):
             elif msg == 104: # character_create
                 c_data = decode_sproto(body.get(0, b""))
                 name = c_data.get(0, b"").decode('utf-8') if isinstance(c_data.get(0), bytes) else str(c_data.get(0, "Hero"))
-                prof = get_val_int(c_data, 1, 0); cid = generate_unique_char_id()
-                if cur_areaId not in all_accounts_chars: all_accounts_chars[cur_areaId] = {}
-                if acc_id not in all_accounts_chars[cur_areaId]: all_accounts_chars[cur_areaId][acc_id] = []
-                nc = {'id': cid, 'name': name, 'prof': prof}
-                init_character_fields(nc)
-                all_accounts_chars[cur_areaId][acc_id].append(nc); save_chars(all_accounts_chars)
-                resp = encode_sproto([(0, get_char_ov(nc)), (1, 0)])
+                existing_chars = account_characters(cur_areaId, acc_id)
+                if existing_chars:
+                    # An existing account owns its saved character.  Never
+                    # replace it or append a default character merely because
+                    # the client repeats character_create after a restart.
+                    existing = existing_chars[0]
+                    print(f"[CHARACTER CREATE] existing character retained id={existing.get('id')}")
+                    resp = encode_sproto([(0, get_char_ov(existing)), (1, 0)])
+                elif CHAR_DB_LOAD_ERROR:
+                    # A damaged database must be repaired/restored first;
+                    # creating now could overwrite the only account mapping.
+                    print("[CHARACTER CREATE] refused because character database did not load")
+                    resp = encode_sproto([(1, 1)])
+                else:
+                    prof = get_val_int(c_data, 1, 0)
+                    cid = generate_unique_char_id()
+                    nc = {'id': cid, 'name': name, 'prof': prof}
+                    init_character_fields(nc)
+                    account_characters(cur_areaId, acc_id, create=True).append(nc)
+                    if not save_chars(all_accounts_chars):
+                        # Do not report a newly-created permanent character
+                        # until its account-to-character mapping is on disk.
+                        account_characters(cur_areaId, acc_id).remove(nc)
+                        resp = encode_sproto([(1, 1)])
+                    else:
+                        print(f"[CHARACTER CREATE] id={cid} account={acc_id}")
+                        resp = encode_sproto([(0, get_char_ov(nc)), (1, 0)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 105: # character_pick
                 char_id = get_val_int(body, 0)
-                picked_char = next((c for c in all_accounts_chars.get(cur_areaId, {}).get(acc_id, []) if c['id'] == char_id), None)
+                picked_char = next((c for c in account_characters(cur_areaId, acc_id) if c.get('id') == char_id), None)
                 resp = encode_sproto([(0, 1 if picked_char else 0)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -1941,7 +2062,10 @@ def client_handler(conn, addr):
                     sync_char_attrs_rpc(conn, picked_char)
 
                     # 540: skill_sync
-                    smap = build_skills_map(picked_char['prof'], picked_char['level'], picked_char.get('skill_levels', {}))
+                    smap = build_skills_map(
+                        picked_char['prof'], picked_char['level'],
+                        picked_char.get('skill_levels', {}), picked_char.get('skill_layout', {})
+                    )
                     send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
 
                     # 519: mission_sync
@@ -2133,19 +2257,55 @@ def client_handler(conn, addr):
                 sid = body.get(0, b"").decode('utf-8')
                 cur_lv = get_val_int(body, 1)
                 if picked_char:
-                    starter_skill = PROF_SKILLS.get(int(picked_char.get('prof', 0)), PROF_SKILLS[0])['atk']
-                    if sid != starter_skill:
-                        # The APK request upgrades only a skill already in
-                        # sync_skill_info.  Refuse nonexistent/ungranted IDs.
+                    prof_skills = PROF_SKILLS.get(int(picked_char.get('prof', 0)), PROF_SKILLS[0])
+                    granted = set(build_skills_map(
+                        picked_char['prof'], picked_char['level'],
+                        picked_char.get('skill_levels', {}), picked_char.get('skill_layout', {})
+                    ))
+                    # Dodge has no upgrade data.  Other skills must already
+                    # be present in the character's tag-540 skill map.
+                    if sid not in granted or sid == prof_skills['dodge']:
                         sid = ''
                     cost = get_skill_upgrade_cost(cur_lv)
                     if sid and picked_char.get('cash', 0) >= cost and picked_char.get('level', 1) > cur_lv + 1:
                         picked_char['cash'] -= cost
                         picked_char['skill_levels'][sid] = cur_lv + 1
                         save_chars(all_accounts_chars)
-                        smap = build_skills_map(picked_char['prof'], picked_char['level'], picked_char['skill_levels'])
+                        smap = build_skills_map(
+                            picked_char['prof'], picked_char['level'],
+                            picked_char['skill_levels'], picked_char.get('skill_layout', {})
+                        )
                         send_rpc_push(540, encode_sproto([(0, smap), (1, True)]))
                         sync_char_attrs_rpc(conn, picked_char)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 192: # change_skill_position
+                # APK request fields: skillId(0), indexPos(1).  Persist the
+                # exact existing request so an active skill does not move back
+                # to its default slot after a forced server restart.
+                sid = field_text(body, 0)
+                index_pos = get_val_int(body, 1, -1)
+                if picked_char and 0 <= index_pos <= 10:
+                    granted = build_skills_map(
+                        picked_char['prof'], picked_char['level'],
+                        picked_char.get('skill_levels', {}), picked_char.get('skill_layout', {})
+                    )
+                    if sid in granted:
+                        picked_char.setdefault('skill_layout', {})[sid] = {
+                            'index': index_pos,
+                            'index2': index_pos
+                        }
+                        save_chars(all_accounts_chars)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 316: # change_skill_index
+                # The APK switches its current active bar locally.  Accept the
+                # existing request; no new protocol field or server-side skill
+                # grant is needed for this action.
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -2304,6 +2464,9 @@ def client_handler(conn, addr):
                     
                     new_hp = picked_char.get('hp', 0) - dmg
                     picked_char['hp'] = max(0, new_hp)
+                    # HP is character state too; persist it immediately so a
+                    # forced process stop cannot revive or reset the player.
+                    save_chars(all_accounts_chars)
                     sync_char_attrs_rpc(conn, picked_char)
                     if picked_char['hp'] == 0 and picked_char.get('map_id') == '502':
                         print('[M1003 DEBUG] Player died in arena; scheduling loss return')
@@ -2333,6 +2496,10 @@ def client_handler(conn, addr):
                             # Damage to player
                             new_hp = picked_char.get('hp', 0) - dmg
                             picked_char['hp'] = max(0, new_hp)
+                            # Save each accepted player-damage update.  This
+                            # server is commonly stopped with kill -9, so
+                            # shutdown-time persistence is not sufficient.
+                            save_chars(all_accounts_chars)
                             sync_char_attrs_rpc(conn, picked_char)
                             if picked_char['hp'] == 0 and picked_char.get('map_id') == '502':
                                 print('[M1003 DEBUG] Player died in arena; scheduling loss return')
