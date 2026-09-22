@@ -1158,12 +1158,23 @@ def sync_copy_scenes(picked_char):
         # Type=1 marks a daily copy.  The client finds the Street Race entry
         # through CopySceneData.SubType == 7, rather than a server-made ID.
         state = ensure_daily_copy_state(picked_char)
-        best_grade = state.get('best_times', {}).get(copy_id, -1)
-        best_str = state.get('best_times_str', {}).get(copy_id, "")
-        copies[copy_id] = encode_sproto([
-            (0, copy_id), (1, copy_attempts_remaining(picked_char, copy_id, cfg)),
-            (2, best_grade), (3, 1), (4, best_str), (5, True), (6, 0), (7, cfg['subtype'])
-        ])
+        best_grade = state.get('best_times', {}).get(copy_id)
+        best_str = state.get('best_times_str', {}).get(copy_id)
+
+        info_fields = [
+            (0, copy_id),
+            (1, copy_attempts_remaining(picked_char, copy_id, cfg)),
+            (3, 1),
+            (5, True),
+            (6, 0),
+            (7, cfg['subtype'])
+        ]
+        if best_grade is not None:
+            info_fields.append((2, int(best_grade)))
+        if best_str:
+            info_fields.append((4, str(best_str)))
+
+        copies[copy_id] = encode_sproto(info_fields)
     return encode_sproto([(0, copies)])
 
 def give_mission_rewards(picked_char, mid):
@@ -2455,6 +2466,38 @@ def client_handler(conn, addr):
                     send_rpc_push(555, sync_copy_scenes(picked_char))
                     schedule_street_race_return()
                     print(f"[STREET RACE] result id={active_copy_id} win={won} time={elapsed} rewards={rewards}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 191: # request_top_rank_list
+                sort_type = get_val_int(body, 0)
+                items = []
+                if sort_type == 7: # RANK_TYPE.CAR (Street Race)
+                    # For street race rank, we can show characters who have records.
+                    # We'll collect all characters across all accounts and sort by best time.
+                    all_best_times = []
+                    for acct_chars in all_accounts_chars.values():
+                        for char_name, c_data in acct_chars.items():
+                            c_state = c_data.get('daily_copy_state', {})
+                            b_times = c_state.get('best_times', {})
+                            # Find best time across any track
+                            times = [int(t) for t in b_times.values() if t is not None]
+                            if times:
+                                all_best_times.append((min(times), char_name, c_data))
+
+                    # Sort by time ASCENDING
+                    all_best_times.sort(key=lambda x: x[0])
+                    for i, (b_time, name, c_data) in enumerate(all_best_times[:50]):
+                        items.append(encode_sproto([
+                            (0, i + 1),        # id (rank position)
+                            (1, b_time),       # score (time)
+                            (2, name),         # name
+                            (3, c_data.get('profession', 1)), # profession
+                            (4, str(sort_type)) # sortType
+                        ]))
+
+                send_rpc_push(598, encode_sproto([(0, items), (1, sort_type)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
