@@ -899,6 +899,31 @@ def get_full_char(c):
         (15, download_state)
     ])
 
+def sync_common_data_rpc(picked_char):
+    """Build Sproto Tag 592 (sync_common_data) with tutorial function state dic."""
+    func_info_map = {}
+    if picked_char and picked_char.get('tutorial', 0) == 1:
+        for fid in range(1, 100):
+            func_info_map[str(fid)] = encode_sproto([(0, str(fid)), (1, 1)])
+    elif picked_char:
+        saved_func = picked_char.get('func_info', {})
+        for fid, fstate in saved_func.items():
+            func_info_map[str(fid)] = encode_sproto([(0, str(fid)), (1, int(fstate))])
+
+    sync_fields = [
+        (0, int(time.time())),
+        (1, 0),
+        (2, int(time.time()) + 86400),
+        (3, 10000),
+        (4, 0),
+        (5, 0),
+        (6, 0),
+        (7, 0),
+        (8, func_info_map),
+        (9, 0)
+    ]
+    return encode_sproto(sync_fields)
+
 def sync_char_attrs_rpc(conn, picked_char):
     """Sends TAG 510 (aoi_update_attribute) to sync all stats."""
     stats = get_character_stats(picked_char)
@@ -2242,7 +2267,9 @@ def client_handler(conn, addr):
 
                     # 614: sync_common_data
                     fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
-                    funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
+                    if picked_char.get('tutorial', 0) == 1:
+                        fids += [str(i) for i in range(1, 100)]
+                    funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in set(fids)}
                     send_rpc_push(614, encode_sproto([
                         (0, int(time.time())), (2, 0), (4, 10000), (9, funcs), (12, random.randint(1, 10000)), (13, 1), (14, int(time.time()))
                     ]))
@@ -2250,8 +2277,8 @@ def client_handler(conn, addr):
                     # 611: inventory_sync
                     send_rpc_push(611, sync_inventory_data(picked_char))
 
-                    # 592: backpack_sync
-                    send_rpc_push(592, encode_sproto([(0, {})]))
+                    # 592: sync_common_data
+                    send_rpc_push(592, sync_common_data_rpc(picked_char))
 
                     # 616: fashion_sync
                     send_rpc_push(616, encode_sproto([(0, {})]))
@@ -3063,12 +3090,11 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 306: # tutorial_finish
-                # The APK sends this before scheduling its optional-download tip.
-                # It is an RPC request, so it must receive an empty success reply.
                 if picked_char:
                     picked_char['tutorial'] = 1
                     save_chars(all_accounts_chars)
-                print("[TUTORIAL] tutorial_finish acknowledged")
+                    send_rpc_push(592, sync_common_data_rpc(picked_char))
+                print("[TUTORIAL] tutorial_finish acknowledged and persisted")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
