@@ -229,7 +229,8 @@ try:
                         'nid': nid,
                         'x': int(parts[4]),
                         'z': int(parts[5]),
-                        'o': int(parts[6])
+                        'o': int(parts[6]),
+                        'group': group
                     }
                     if group == 9999:
                         if mid not in STATIC_NPC_DATA: STATIC_NPC_DATA[mid] = []
@@ -238,6 +239,24 @@ try:
                         if mid not in MONSTER_DATA: MONSTER_DATA[mid] = []
                         MONSTER_DATA[mid].append(entry)
         print(f"[MONSTER DATA LOADED] monsters_map={len(MONSTER_DATA)} static_npcs_map={len(STATIC_NPC_DATA)}")
+
+    # Load DailyExpData
+    DAILY_EXP_CONFIG = {}
+    exp_path = os.path.join(text_asset_root, "DailyExpData")
+    if os.path.exists(exp_path):
+        with open(exp_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 6 and parts[1].isdigit():
+                    cid = parts[1]
+                    DAILY_EXP_CONFIG[cid] = {
+                        'wave_count': int(parts[2]) if parts[2].isdigit() else 4,
+                        'group_npc_count': [int(x) for x in parts[3].split("#") if x.isdigit()] or [5, 10, 15, 20],
+                        'group_count': int(parts[4]) if parts[4].isdigit() else 7,
+                        'group_time': int(parts[5]) if parts[5].isdigit() else 60,
+                        'monsters': [x for x in parts[6].split("#") if x]
+                    }
+        print(f"[DAILY EXP CONFIG LOADED] count={len(DAILY_EXP_CONFIG)}")
 
     # Load KillTargetMissionData (Mission Spawns)
     kt_path = os.path.join(text_asset_root, "KillTargetMissionData")
@@ -1064,6 +1083,72 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
 
     return int(max(1, final_dmg)), True, is_cri
 
+def spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state, exp_cfg, send_npc_func):
+    subwave = (exp_state['cur_group'] - 1) * 4 + exp_state['cur_wave']
+    exp_state['subwave'] = subwave
+    exp_state['wave_kills'] = 0
+    exp_state['active_monsters'].clear()
+
+    monsters_list = exp_cfg.get('monsters', [])
+    wave_idx = min(exp_state['cur_wave'] - 1, len(monsters_list) - 1)
+    mon_group_id = monsters_list[wave_idx] if (wave_idx >= 0 and wave_idx < len(monsters_list)) else (exp_state['copy_id'] + "1")
+
+    mon_entries = MONSTER_DATA.get(mon_group_id, [])
+    subwave_spawns = [m for m in mon_entries if m.get('group') == subwave]
+    if not subwave_spawns:
+        subwave_spawns = [m for m in mon_entries if m.get('group') == ((subwave - 1) % 28) + 1]
+    if not subwave_spawns:
+        subwave_spawns = mon_entries[:5]
+
+    for m in subwave_spawns:
+        cfg = NPC_CONFIG.get(m['nid'], {'name': f"ExpMonster_{m['nid']}"})
+        inst_id = send_npc_func(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
+        if inst_id:
+            exp_state['active_monsters'].add(inst_id)
+
+    print(f"[EXP STAGE] Spawned copy={exp_state['copy_id']} group={exp_state['cur_group']} wave={exp_state['cur_wave']} subwave={subwave} monsters={len(exp_state['active_monsters'])}")
+
+def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
+    copy_id = exp_state['copy_id']
+    char_lv = picked_char.get('level', 1) if picked_char else 1
+    ld = get_level_data(char_lv)
+
+    total_max_kills = 350
+    ratio = min(1.0, exp_state['total_kills'] / total_max_kills) if total_max_kills > 0 else 1.0
+    exp_reward = int(ld['exp'] * 0.25 * ratio)
+    cash_reward = int(ld['exp'] * 0.05 * ratio)
+
+    if picked_char:
+        rewards = [("2001", 0, exp_reward), ("1001", 0, cash_reward)]
+        grant_item_rewards(picked_char, rewards, conn, send_rpc_push)
+
+    res_items = [
+        encode_sproto([(0, "2001"), (1, exp_reward), (3, 0)]),
+        encode_sproto([(0, "1001"), (1, cash_reward), (3, 0)])
+    ]
+
+    # Tag 552: copy_scene_result (subType=12, id=copy_id, win=True, gradeFlag=1, grade=3, items=res_items)
+    send_rpc_push(552, encode_sproto([
+        (0, 12), (1, copy_id), (2, win), (3, 1), (4, 3), (5, res_items)
+    ]))
+
+    if picked_char:
+        advance_missions(picked_char, send_rpc_push, 'exp_copy')
+        advance_missions(picked_char, send_rpc_push, 'interact', target_id=copy_id)
+        advance_missions(picked_char, send_rpc_push, 'level')
+        picked_char.pop('exp_stage_state', None)
+        saved_pos = picked_char.get('pre_copy_pos')
+        picked_char['pre_copy_pos'] = None
+
+        def leave_exp_copy():
+            start_map_transition(conn, picked_char, "11", send_rpc_push, override_pos=saved_pos)
+
+        timer = threading.Timer(5.0, leave_exp_copy)
+        timer.daemon = True
+        timer.start()
+
+    print(f"[EXP STAGE] Completed copy={copy_id} total_kills={exp_state['total_kills']} exp={exp_reward} cash={cash_reward}")
+
 def spawn_map_npcs(conn, map_id, picked_char=None):
     """Spawns all NPCs, Monsters, and Traffic defined in data for the map."""
     map_str = str(map_id)
@@ -1104,6 +1189,39 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         try: conn.sendall(struct.pack(">H", len(pf)) + pf)
         except: pass
         return inst_id
+
+    # Check for EXP Stage maps (223..229)
+    if map_str in ["223", "224", "225", "226", "227", "228", "229"]:
+        exp_cfg = DAILY_EXP_CONFIG.get(map_str, DAILY_EXP_CONFIG.get("223", {
+            'wave_count': 4, 'group_npc_count': [5, 10, 15, 20], 'group_count': 7, 'group_time': 60,
+            'monsters': [f"{map_str}1", f"{map_str}2", f"{map_str}3", f"{map_str}4"]
+        }))
+        end_time = int(time.time()) + 600
+        exp_state = {
+            'copy_id': map_str,
+            'cur_group': 1,
+            'cur_wave': 1,
+            'subwave': 1,
+            'wave_kills': 0,
+            'total_kills': 0,
+            'start_time': int(time.time()),
+            'end_time': end_time,
+            'active_monsters': set()
+        }
+        if picked_char:
+            picked_char['exp_stage_state'] = exp_state
+
+        send_rpc_push = lambda tag, data: conn.sendall(struct.pack(">H", len(sproto_pack(encode_sproto([(0, tag)]) + data))) + sproto_pack(encode_sproto([(0, tag)]) + data))
+        send_rpc_push(629, encode_sproto([(0, end_time), (1, 0)]))
+        send_rpc_push(683, encode_sproto([
+            (0, map_str), (1, 0), (2, end_time), (3, 1), (4, 0), (5, 0)
+        ]))
+
+        def local_send_npc(nid, name, x, z, o):
+            return send_npc_create(nid, name, x, z, o)
+
+        spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state, exp_cfg, local_send_npc)
+        return
 
     # 1. Spawn Static NPCs & Monsters
     # Map 11 (TUTORIAL_CAR) handles spawning locally on client.
@@ -1973,9 +2091,19 @@ def client_handler(conn, addr):
                 if picked_char:
                     mid = picked_char.get('map_id', '11')
                     print(f"[MAP READY RECEIVED] map_id={mid}")
-                    # Tag 654 is start_enter_game.  The APK interprets state=1
-                    # as completion of the optional resource download, so it
-                    # must only be sent after the client's MSG 270 request.
+                    if mid in ["223", "224", "225", "226", "227", "228", "229"]:
+                        exp_state = picked_char.get('exp_stage_state')
+                        if exp_state:
+                            send_rpc_push(629, encode_sproto([(0, exp_state['end_time']), (1, 0)]))
+                            send_rpc_push(683, encode_sproto([
+                                (0, exp_state['copy_id']),
+                                (1, exp_state['cur_wave'] - 1),
+                                (2, exp_state['end_time']),
+                                (3, exp_state['cur_group']),
+                                (4, exp_state['wave_kills']),
+                                (5, exp_state['total_kills'])
+                            ]))
+                            print(f"[EXP STAGE] map_ready sent 629 & 683 updates for copy={mid}")
                     if mid == "502":
                         # Map 502 exposes its match timer only through this APK tag.
                         send_rpc_push(629, encode_sproto([(0, int(time.time()) + 60), (1, 0)]))
@@ -2491,6 +2619,67 @@ def client_handler(conn, addr):
                     if die_type in [2, 6]:
                         advance_missions(picked_char, send_rpc_push, 'car', die_type=die_type)
 
+                    exp_state = picked_char.get('exp_stage_state')
+                    if exp_state and inst_id and inst_id in exp_state.get('active_monsters', set()):
+                        exp_state['active_monsters'].discard(inst_id)
+                        exp_state['wave_kills'] += 1
+                        exp_state['total_kills'] += 1
+
+                        exp_cfg = DAILY_EXP_CONFIG.get(exp_state['copy_id'], {})
+                        wave_reqs = exp_cfg.get('group_npc_count', [5, 10, 15, 20])
+                        req_kills = wave_reqs[min(exp_state['cur_wave'] - 1, len(wave_reqs) - 1)]
+
+                        send_rpc_push(683, encode_sproto([
+                            (0, exp_state['copy_id']),
+                            (1, exp_state['cur_wave'] - 1),
+                            (2, exp_state['end_time']),
+                            (3, exp_state['cur_group']),
+                            (4, exp_state['wave_kills']),
+                            (5, exp_state['total_kills'])
+                        ]))
+
+                        def send_npc_wrapper(nid, name, x, z, o):
+                            global GLOBAL_INST_COUNTER
+                            npc_stats = get_npc_attr(nid)
+                            hp_cur = npc_stats['hp_max']
+                            hp_max = npc_stats['hp_max']
+                            atk = npc_stats['atk']
+                            df = npc_stats['def']
+                            lvl = npc_stats['lv']
+
+                            GLOBAL_INST_COUNTER += 1
+                            i_id = GLOBAL_INST_COUNTER
+                            NPC_HP_MAP[i_id] = hp_max
+                            NPC_INST_MAP[i_id] = str(nid)
+
+                            final_nid = str(nid)
+                            if ";" in final_nid:
+                                if "XD_A" in final_nid: final_nid = "100"
+                                elif "QJ_A" in final_nid: final_nid = "104"
+                                elif "NQS_A" in final_nid: final_nid = "105"
+
+                            attr = encode_sproto([
+                                (0, i_id), (1, final_nid), (2, hp_cur), (3, hp_max), (4, atk), (5, df),
+                                (15, x), (16, z), (17, o), (18, lvl), (21, name)
+                            ])
+                            ph = encode_sproto([(0, 509)])
+                            pf = sproto_pack(ph + encode_sproto([(0, attr)]))
+                            try: conn.sendall(struct.pack(">H", len(pf)) + pf)
+                            except: pass
+                            return i_id
+
+                        if len(exp_state['active_monsters']) == 0 or exp_state['wave_kills'] >= req_kills:
+                            if exp_state['cur_wave'] < exp_cfg.get('wave_count', 4):
+                                exp_state['cur_wave'] += 1
+                                spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state, exp_cfg, send_npc_wrapper)
+                            else:
+                                if exp_state['cur_group'] < exp_cfg.get('group_count', 7):
+                                    exp_state['cur_group'] += 1
+                                    exp_state['cur_wave'] = 1
+                                    spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state, exp_cfg, send_npc_wrapper)
+                                else:
+                                    finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True)
+
                     if npcid and npcid != "None":
                         # NPC Kill Rewards (scaled proportionally to BaseLvData required EXP)
                         npc_stats = get_npc_attr(npcid)
@@ -2586,12 +2775,23 @@ def client_handler(conn, addr):
             elif msg == 107: # enter_copy_scene
                 copy_id = field_text(body, 0)
                 cfg = COPY_SCENE_CONFIG.get(copy_id)
-                if picked_char and cfg and cfg['subtype'] == 7:
+                if picked_char and copy_id in ["223", "224", "225", "226", "227", "228", "229"]:
+                    remaining = copy_attempts_remaining(picked_char, copy_id, cfg or {'max_plays': 3})
+                    if remaining > 0:
+                        if picked_char.get('pre_copy_pos') is None:
+                            picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                        state = ensure_daily_copy_state(picked_char)
+                        state['remaining'][copy_id] = remaining - 1
+                        picked_char['active_copy_id'] = copy_id
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(555, sync_copy_scenes(picked_char))
+                        start_map_transition(conn, picked_char, copy_id, send_rpc_push)
+                        print(f"[EXP STAGE] entered id={copy_id} remaining={remaining - 1}")
+                    else:
+                        print(f"[EXP STAGE] denied id={copy_id}; daily attempts exhausted")
+                elif picked_char and cfg and cfg['subtype'] == 7:
                     remaining = copy_attempts_remaining(picked_char, copy_id, cfg)
                     if remaining > 0:
-                        # CarRewardPageRootLogic's Repeat button sends this
-                        # same request.  Keep the original city position so
-                        # Continue/Exit always returns the player to city.
                         if picked_char.get('pre_copy_pos') is None:
                             picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
                         state = ensure_daily_copy_state(picked_char)
@@ -2600,17 +2800,11 @@ def client_handler(conn, addr):
                         picked_char['street_race_return_scheduled'] = False
                         save_chars(all_accounts_chars)
                         start_map_transition(conn, picked_char, cfg['map_id'], send_rpc_push)
-                        # The client decreases its local counter immediately;
-                        # TAG 555 makes the authoritative remaining count
-                        # survive a reconnect or a Retry.
                         send_rpc_push(555, sync_copy_scenes(picked_char))
                         print(f"[STREET RACE] entered id={copy_id} remaining={remaining - 1}/{cfg['max_plays']}")
                     else:
                         print(f"[STREET RACE] denied id={copy_id}; daily attempts exhausted")
                 elif picked_char:
-                    # Other copy subtypes retain the server's existing map
-                    # transition behavior until their individual flows are
-                    # implemented and verified.
                     start_map_transition(conn, picked_char, copy_id, send_rpc_push)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -2695,17 +2889,26 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 220: # start_battle (Street Race start)
+            elif msg == 220: # start_battle (Street Race & EXP Stage start)
                 if picked_char and picked_char.get('active_copy_id'):
                     copy_id = picked_char['active_copy_id']
                     cfg = COPY_SCENE_CONFIG.get(copy_id)
                     if cfg and cfg['subtype'] == 7:
-                        # Street Race track timer (TAG 629).
-                        # notify_copy_start_info: end_time(0), type(1), wave_time(2), curWave(3).
-                        # type=0 initializes the countdown timer.
                         duration = int(cfg.get('exist_time') or 900)
                         send_rpc_push(629, encode_sproto([(0, int(time.time()) + duration), (1, 0)]))
                         print(f"[STREET RACE] started timer for id={copy_id} duration={duration}s")
+                if picked_char and picked_char.get('exp_stage_state'):
+                    exp_state = picked_char['exp_stage_state']
+                    send_rpc_push(629, encode_sproto([(0, exp_state['end_time']), (1, 0)]))
+                    send_rpc_push(683, encode_sproto([
+                        (0, exp_state['copy_id']),
+                        (1, exp_state['cur_wave'] - 1),
+                        (2, exp_state['end_time']),
+                        (3, exp_state['cur_group']),
+                        (4, exp_state['wave_kills']),
+                        (5, exp_state['total_kills'])
+                    ]))
+                    print(f"[EXP STAGE] start_battle sent 629 & 683 updates for copy={exp_state['copy_id']}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
