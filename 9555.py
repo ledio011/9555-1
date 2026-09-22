@@ -1,3 +1,5 @@
+import socket, struct, threading, random, json, os, time, traceback
+
 PORT = int(os.environ.get("PORT", 15678))
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CHAR_DB = os.path.join(SCRIPT_DIR, "characters_final.json")
