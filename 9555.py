@@ -2156,10 +2156,14 @@ def client_handler(conn, addr):
                     print(f"[MAP READY RECEIVED] map_id={mid}")
                     if picked_char.get('exp_copy_state') and not picked_char['exp_copy_state'].get('started'):
                         start_exp_stage_battle()
-                    send_rpc_push(654, encode_sproto([(0, 1)])) # start_enter_game
+
                     # Tag 654 is start_enter_game.  The APK interprets state=1
-                    # as completion of the optional resource download, so it
-                    # must only be sent after the client's MSG 270 request.
+                    # as completion of the optional resource download. Sending
+                    # it prematurely on map_ready would close the download tip
+                    # before the player can click it. Only send if already done.
+                    if picked_char.get('download_complete'):
+                        send_rpc_push(654, encode_sproto([(0, 1)]))
+
                     if mid == "502":
                         # Map 502 exposes its match timer only through this APK tag.
                         send_rpc_push(629, encode_sproto([(0, int(time.time()) + 60), (1, 0)]))
