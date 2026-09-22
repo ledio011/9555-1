@@ -617,10 +617,12 @@ PROF_SKILLS = {
     1: {"atk": "201", "dodge": "204", "actives": ["205", "206", "207", "208", "209", "210"]},
     2: {"atk": "301", "dodge": "304", "actives": ["305", "306", "307", "308", "309", "310"]}
 }
-# SkillData has no serialized Locklevel column in this APK and its C# class
-# defaults Locklevel to 1.  Do not invent level gates: all class skills are
-# available at level 1, while weapons, skins, and mounts remain separate data.
-SKILL_UNLOCK_LVS = [1, 1, 1, 1, 1, 1]
+# The client has no "learn skill" request.  It only supports upgrading an
+# already-granted skill (130) and moving it between the two loadouts (192/316).
+# New characters therefore receive only their class normal attack.  Additional
+# grants must come from an identified server-side reward/quest source; do not
+# manufacture unlock levels from an unrelated table.
+SKILL_UNLOCK_LVS = []
 
 def get_skill_upgrade_cost(lv):
     if lv < 0: return 0
@@ -636,19 +638,12 @@ def build_skills_map(prof, char_level, skill_levels=None):
     if skill_levels is None: skill_levels = {}
     p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
     smap = {}
-    smap[p["atk"]] = encode_sproto([(0, p["atk"]), (1, skill_levels.get(p["atk"], 0)), (2, 0), (3, 1), (4, 0), (5, False)])
-    smap[p["dodge"]] = encode_sproto([(0, p["dodge"]), (1, skill_levels.get(p["dodge"], 0)), (2, 3), (3, 1), (4, 1), (5, False)])
-    for i in range(len(p["actives"])):
-        sid = p["actives"][i]
-        unlock_lv = SKILL_UNLOCK_LVS[i]
-        smap[sid] = encode_sproto([
-            (0, sid),
-            (1, skill_levels.get(sid, 0)),
-            (2, 4 + i),
-            (3, unlock_lv),
-            (4, 2 + i),
-            (5, False)
-        ])
+    # skill_info: skillId, skillLevel, indexPos, indexPos2, group, disable.
+    # Index 0 is the normal-attack slot used by ObjMainPlayer.
+    smap[p["atk"]] = encode_sproto([
+        (0, p["atk"]), (1, skill_levels.get(p["atk"], 0)),
+        (2, 0), (3, 0), (4, 0), (5, False)
+    ])
     return smap
 
 def get_general(c):
@@ -998,11 +993,9 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             elif "QJ_A" in final_nid: final_nid = "104"
             elif "NQS_A" in final_nid: final_nid = "105"
 
-        # npc_attribute schema: id(0), npcdataid(1), hp(2), max_hp(3), atk(4), def(5), x(15), z(16), o(17), level(18), player_name(21)
-        attr = encode_sproto([
-            (0, inst_id), (1, final_nid), (2, hp_cur), (3, hp_max), (4, atk), (5, df),
-            (15, x), (16, z), (17, o), (18, lvl), (21, name)
-        ])
+        # ObjInitNpcData reads all combat fields.  An abbreviated attribute
+        # creates an NPC with null/zero state and fails inside ObjNpcPoolGroup.
+        attr = build_npc_attribute(inst_id, final_nid, npc_stats, x, z, o)
         ph = encode_sproto([(0, 509)]); pf = sproto_pack(ph + encode_sproto([(0, attr)]))
         try: conn.sendall(struct.pack(">H", len(pf)) + pf)
         except: pass
@@ -1058,12 +1051,7 @@ def spawn_exp_stage_wave(conn, exp_cfg, group_index, wave_index):
         inst_id = GLOBAL_INST_COUNTER
         NPC_INST_MAP[inst_id] = nid
         NPC_HP_MAP[inst_id] = stats['hp_max']
-        attr = encode_sproto([
-            (0, inst_id), (1, nid), (2, stats['hp_max']), (3, stats['hp_max']),
-            (4, stats['atk']), (5, stats['def']), (15, monster['x']),
-            (16, monster['z']), (17, monster['o']), (18, stats['lv']),
-            (21, NPC_CONFIG.get(nid, {}).get('name', f"NPC_{nid}"))
-        ])
+        attr = build_npc_attribute(inst_id, nid, stats, monster['x'], monster['z'], monster['o'])
         packet = sproto_pack(encode_sproto([(0, 509)]) + encode_sproto([(0, attr)]))
         try:
             conn.sendall(struct.pack(">H", len(packet)) + packet)
@@ -1071,6 +1059,18 @@ def spawn_exp_stage_wave(conn, exp_cfg, group_index, wave_index):
         except Exception:
             break
     return instance_ids
+
+def build_npc_attribute(inst_id, nid, stats, x, z, o):
+    """Complete npc_attribute required by ObjInitNpcData.InitData in the APK."""
+    return encode_sproto([
+        (0, inst_id), (1, str(nid)), (2, stats['hp_max']), (3, stats['hp_max']),
+        (4, stats['atk']), (5, stats['def']), (6, stats['hit']), (7, stats['eva']),
+        (8, stats['cri']), (9, stats['exd']), (10, stats['exr']), (11, stats['res']),
+        (12, stats['crd']), (13, stats['crr']), (14, stats['defa']),
+        (15, x), (16, z), (17, o), (18, stats['lv']),
+        (19, 0), (20, 0), (21, NPC_CONFIG.get(str(nid), {}).get('name', '')),
+        (24, stats['dgea']), (25, stats['resa']), (26, stats['hita']), (27, stats['cria'])
+    ])
 
 def sync_mission_data(picked_char):
     own_missions_list = []
@@ -1514,11 +1514,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
 
 def is_skill_locked(sid, level, prof):
     p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
-    if sid in p["actives"]:
-        idx = p["actives"].index(sid)
-        if level < SKILL_UNLOCK_LVS[idx]:
-            return True, SKILL_UNLOCK_LVS[idx]
-    return False, 0
+    return (str(sid) != str(p["atk"])), 0
 
 def serve_resource_http(conn, initial_data):
     """Serve APK updater files on the game-server port.
@@ -2137,8 +2133,13 @@ def client_handler(conn, addr):
                 sid = body.get(0, b"").decode('utf-8')
                 cur_lv = get_val_int(body, 1)
                 if picked_char:
+                    starter_skill = PROF_SKILLS.get(int(picked_char.get('prof', 0)), PROF_SKILLS[0])['atk']
+                    if sid != starter_skill:
+                        # The APK request upgrades only a skill already in
+                        # sync_skill_info.  Refuse nonexistent/ungranted IDs.
+                        sid = ''
                     cost = get_skill_upgrade_cost(cur_lv)
-                    if picked_char.get('cash', 0) >= cost and picked_char.get('level', 1) > cur_lv + 1:
+                    if sid and picked_char.get('cash', 0) >= cost and picked_char.get('level', 1) > cur_lv + 1:
                         picked_char['cash'] -= cost
                         picked_char['skill_levels'][sid] = cur_lv + 1
                         save_chars(all_accounts_chars)
@@ -2159,53 +2160,9 @@ def client_handler(conn, addr):
                         # Do NOT send 508. Response will be empty.
                     else:
                         send_rpc_push(508, encode_sproto([(0, picked_char['id']), (1, tid), (2, sid), (3, alist)]))
-
-                        # Authoritative Combat: Calculate and Sync Damage
-                        target_nid = NPC_INST_MAP.get(tid)
-                        if target_nid:
-                            defender_stats = get_npc_attr(target_nid)
-                            attacker_stats = get_character_stats(picked_char)
-                            skill_lv = picked_char.get('skill_levels', {}).get(sid, 0)
-
-                            is_area = (picked_char.get('map_id') == "502")
-                            
-                            # Player -> NPC Damage
-                            dmg, is_hit, is_cri = get_combat_damage(attacker_stats, defender_stats, sid, skill_lv, is_area=is_area, pvp_scale=1.0)
-
-                            # Update Server State
-                            if is_hit and tid in NPC_HP_MAP:
-                                NPC_HP_MAP[tid] -= dmg
-                                
-                                # BOSS DEATH HANDLING
-                                if NPC_HP_MAP[tid] <= 0:
-                                    if tid == picked_char.get('boss_inst_id'):
-                                        did = picked_char.get('active_domin_id', '1')
-                                        print(f"[M1003 DEBUG] Boss {tid} died. Winning did={did}")
-                                        # Capture is not a generic copy. Tag 552 would open the
-                                        # Star Reward page instead of the normal mission reward UI.
-                                        advance_missions(picked_char, send_rpc_push, 'capture', target_id=did)
-                                        picked_char['boss_inst_id'] = None
-                                        DEAD_NPC_SET.add(tid)
-
-                            # Push damage info to client (Tag 111: accept_damge)
-                            # dmg_item: id(0), damage(1), skillId(2), isCrit(4)
-                            dmg_item = encode_sproto([(0, tid), (1, dmg), (2, sid), (4, is_cri)])
-                            send_rpc_push(111, encode_sproto([(0, [dmg_item])]))
-                            
-                            # Synchronization of target HP to ensure bar update
-                            if tid in NPC_HP_MAP:
-                                # attribute_other (Tag 1): hp(0), level(2)
-                                # attribute (Tag 2): max_hp(0)
-                                a_oth_fields = [(0, max(0, NPC_HP_MAP[tid])), (2, defender_stats['lv'])]
-                                if NPC_INST_MAP.get(tid, '').startswith('BOSS_'):
-                                    a_oth_fields.extend([(4, 1), (15, 2)])
-                                a_oth = encode_sproto(a_oth_fields)
-                                a_base = encode_sproto([(0, defender_stats['hp_max'])])
-                                aoi_attr = encode_sproto([(0, tid), (1, a_oth), (2, a_base)])
-                                send_rpc_push(510, encode_sproto([(0, aoi_attr)]))
-
-                            # Server-side counter-attack logic removed since client sends msg 128
-                            # Only sync player attrs if damaged by local client logic
+                        # The client applies the attack and then sends MSG 111
+                        # (accept_damge).  Re-applying it here and again in
+                        # MSG 111 was the source of doubled player damage.
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -2434,19 +2391,20 @@ def client_handler(conn, addr):
                                     advance_missions(picked_char, send_rpc_push, 'capture', target_id=did)
                                     picked_char['boss_inst_id'] = None
                                 else:
-                                    # Regular NPC/Monster drop
-                                    global GLOBAL_INST_COUNTER
-                                    GLOBAL_INST_COUNTER += 1
-                                    pos = picked_char['pos']
-                                    nested_item = encode_sproto([(0, "1001"), (1, 50), (3, 1)])
-                                    drop_data = encode_sproto([
-                                        (0, GLOBAL_INST_COUNTER), (1, int(pos[0] + 100)), (2, int(pos[2] + 100)),
-                                        (3, 1), (4, nested_item), (7, picked_char['id'])
-                                    ])
-                                    send_rpc_push(527, drop_data)
+                                    if not picked_char.get('exp_copy_state'):
+                                        # Regular open-world NPC/monster drop.
+                                        global GLOBAL_INST_COUNTER
+                                        GLOBAL_INST_COUNTER += 1
+                                        pos = picked_char['pos']
+                                        nested_item = encode_sproto([(0, "1001"), (1, 50), (3, 1)])
+                                        drop_data = encode_sproto([
+                                            (0, GLOBAL_INST_COUNTER), (1, int(pos[0] + 100)), (2, int(pos[2] + 100)),
+                                            (3, 1), (4, nested_item), (7, picked_char['id'])
+                                        ])
+                                        send_rpc_push(527, drop_data)
 
-                                    if target_nid:
-                                        advance_missions(picked_char, send_rpc_push, 'kill', target_id=target_nid)
+                                        if target_nid:
+                                            advance_missions(picked_char, send_rpc_push, 'kill', target_id=target_nid)
 
                     if session is not None:
                         ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -2505,8 +2463,11 @@ def client_handler(conn, addr):
                     if die_type in [2, 6]:
                         advance_missions(picked_char, send_rpc_push, 'car', die_type=die_type)
 
-                    if npcid and npcid != "None":
-                        # NPC Kill Rewards (EXP: level*20, CASH: level*100)
+                    if npcid and npcid != "None" and not picked_char.get('exp_copy_state'):
+                        # Open-world NPC rewards.  Exp Stage has a dynamic
+                        # server reward table (ShowRewardData 30301 contains
+                        # no quantities), so never substitute fabricated
+                        # per-kill cash/EXP there.
                         npc_stats = get_npc_attr(npcid)
                         reward_level = npc_stats['lv'] if 1 <= npc_stats['lv'] <= 200 else 1
                         exp_kill = reward_level * 20
