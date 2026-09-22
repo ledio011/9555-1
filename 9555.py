@@ -339,31 +339,52 @@ BAK_DB = CHAR_DB + ".bak"
 TMP_DB = CHAR_DB + ".tmp"
 
 def load_chars():
-    """Crash-safe character loader with automatic backup recovery."""
+    """Crash-safe character loader with automatic backup recovery and key normalization."""
+    data = None
     if os.path.exists(CHAR_DB):
         try:
             with open(CHAR_DB, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
-                    return data
+                raw_data = json.load(f)
+                if isinstance(raw_data, dict):
+                    data = raw_data
         except Exception as e:
             print(f"[WARN] Failed to load {CHAR_DB}: {e}")
 
-    if os.path.exists(BAK_DB):
+    if data is None and os.path.exists(BAK_DB):
         try:
             with open(BAK_DB, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                if isinstance(data, dict):
+                raw_data = json.load(f)
+                if isinstance(raw_data, dict):
                     print(f"[RECOVERY] Restored character database from {BAK_DB}!")
+                    data = raw_data
                     try:
                         with open(CHAR_DB, "w", encoding="utf-8") as out:
                             json.dump(data, out, indent=4)
                     except: pass
-                    return data
         except Exception as e:
             print(f"[WARN] Failed to load backup {BAK_DB}: {e}")
 
-    return {}
+    if not isinstance(data, dict):
+        return {}
+
+    # Normalize area keys to string so int vs str JSON key lookups always match
+    normalized = {}
+    for area_k, acc_dict in data.items():
+        if isinstance(acc_dict, dict):
+            normalized[str(area_k)] = acc_dict
+    return normalized
+
+def get_account_chars(all_chars, area_id, acc_id):
+    """Safely retrieves character list for account across int/str area_id keys."""
+    if not isinstance(all_chars, dict):
+        return []
+    area_key = str(area_id)
+    acc_dict = all_chars.get(area_key)
+    if acc_dict is None and isinstance(area_id, int):
+        acc_dict = all_chars.get(area_id)
+    if isinstance(acc_dict, dict):
+        return acc_dict.get(acc_id, [])
+    return []
 
 def save_chars(data):
     """Crash-safe atomic writer to prevent character loss during kill -9."""
@@ -1747,7 +1768,7 @@ def client_handler(conn, addr):
 
             if msg == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
-                sid = get_val_int(body, 5, 1); cur_areaId = get_area_id(sid)
+                sid = get_val_int(body, 5, 1); cur_areaId = str(get_area_id(sid))
                 # sync_common_data: serverTime(0), time_offset(2), func_info(9), pvp_scale(4), seed(12), server_level(13), start_time(14)
                 resp = encode_sproto([
                     (0, 2), (1, "1.012.017"), (2, "205"), (3, 1),
@@ -1758,7 +1779,7 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 103: # character_list
-                chars = all_accounts_chars.get(cur_areaId, {}).get(acc_id, [])
+                chars = get_account_chars(all_accounts_chars, cur_areaId, acc_id)
                 # Sort by last_played descending (internal)
                 chars.sort(key=lambda x: x.get('last_played', 0), reverse=True)
 
@@ -1776,18 +1797,19 @@ def client_handler(conn, addr):
                 c_data = decode_sproto(body.get(0, b""))
                 name = c_data.get(0, b"").decode('utf-8') if isinstance(c_data.get(0), bytes) else str(c_data.get(0, "Hero"))
                 prof = get_val_int(c_data, 1, 0); cid = generate_unique_char_id()
-                if cur_areaId not in all_accounts_chars: all_accounts_chars[cur_areaId] = {}
-                if acc_id not in all_accounts_chars[cur_areaId]: all_accounts_chars[cur_areaId][acc_id] = []
+                cur_area_key = str(cur_areaId)
+                if cur_area_key not in all_accounts_chars: all_accounts_chars[cur_area_key] = {}
+                if acc_id not in all_accounts_chars[cur_area_key]: all_accounts_chars[cur_area_key][acc_id] = []
                 nc = {'id': cid, 'name': name, 'prof': prof}
                 init_character_fields(nc)
-                all_accounts_chars[cur_areaId][acc_id].append(nc); save_chars(all_accounts_chars)
+                all_accounts_chars[cur_area_key][acc_id].append(nc); save_chars(all_accounts_chars)
                 resp = encode_sproto([(0, get_char_ov(nc)), (1, 0)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 105: # character_pick
                 char_id = get_val_int(body, 0)
-                picked_char = next((c for c in all_accounts_chars.get(cur_areaId, {}).get(acc_id, []) if c['id'] == char_id), None)
+                picked_char = next((c for c in get_account_chars(all_accounts_chars, cur_areaId, acc_id) if c['id'] == char_id), None)
                 resp = encode_sproto([(0, 1 if picked_char else 0)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
