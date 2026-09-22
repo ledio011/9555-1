@@ -1109,14 +1109,15 @@ def spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state
     print(f"[EXP STAGE] Spawned copy={exp_state['copy_id']} group={exp_state['cur_group']} wave={exp_state['cur_wave']} subwave={subwave} monsters={len(exp_state['active_monsters'])}")
 
 def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
+    exp_state['ai_active'] = False
     copy_id = exp_state['copy_id']
     char_lv = picked_char.get('level', 1) if picked_char else 1
     ld = get_level_data(char_lv)
 
     total_max_kills = 350
     ratio = min(1.0, exp_state['total_kills'] / total_max_kills) if total_max_kills > 0 else 1.0
-    exp_reward = int(ld['exp'] * 0.25 * ratio)
-    cash_reward = int(ld['exp'] * 0.05 * ratio)
+    exp_reward = int(ld['exp'] * 0.25 * ratio) if win else int(ld['exp'] * 0.05 * ratio)
+    cash_reward = int(ld['exp'] * 0.05 * ratio) if win else int(ld['exp'] * 0.01 * ratio)
 
     if picked_char:
         rewards = [("2001", 0, exp_reward), ("1001", 0, cash_reward)]
@@ -1127,15 +1128,16 @@ def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
         encode_sproto([(0, "1001"), (1, cash_reward), (3, 0)])
     ]
 
-    # Tag 552: copy_scene_result (subType=12, id=copy_id, win=True, gradeFlag=1, grade=3, items=res_items)
+    # Tag 552: copy_scene_result (subType=12, id=copy_id, win=win, gradeFlag=1, grade=3 if win else 1, items=res_items)
     send_rpc_push(552, encode_sproto([
-        (0, 12), (1, copy_id), (2, win), (3, 1), (4, 3), (5, res_items)
+        (0, 12), (1, copy_id), (2, win), (3, 1), (4, 3 if win else 1), (5, res_items)
     ]))
 
     if picked_char:
-        advance_missions(picked_char, send_rpc_push, 'exp_copy')
-        advance_missions(picked_char, send_rpc_push, 'interact', target_id=copy_id)
-        advance_missions(picked_char, send_rpc_push, 'level')
+        if win:
+            advance_missions(picked_char, send_rpc_push, 'exp_copy')
+            advance_missions(picked_char, send_rpc_push, 'interact', target_id=copy_id)
+            advance_missions(picked_char, send_rpc_push, 'level')
         picked_char.pop('exp_stage_state', None)
         saved_pos = picked_char.get('pre_copy_pos')
         picked_char['pre_copy_pos'] = None
@@ -1147,7 +1149,7 @@ def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
         timer.daemon = True
         timer.start()
 
-    print(f"[EXP STAGE] Completed copy={copy_id} total_kills={exp_state['total_kills']} exp={exp_reward} cash={cash_reward}")
+    print(f"[EXP STAGE] Finished copy={copy_id} win={win} total_kills={exp_state['total_kills']} exp={exp_reward} cash={cash_reward}")
 
 def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid):
     if not picked_char: return
@@ -1288,7 +1290,8 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             'total_kills': 0,
             'start_time': int(time.time()),
             'end_time': end_time,
-            'active_monsters': []
+            'active_monsters': [],
+            'ai_active': True
         }
         if picked_char:
             picked_char['exp_stage_state'] = exp_state
@@ -1309,6 +1312,48 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             return send_npc_create(nid, name, x, z, o)
 
         spawn_exp_stage_subwave_internal(conn, push_wrapper, picked_char, exp_state, exp_cfg, local_send_npc)
+
+        def run_exp_monster_ai():
+            if not picked_char or not exp_state.get('ai_active') or picked_char.get('map_id') != map_str:
+                return
+            if picked_char.get('hp', 0) <= 0:
+                return
+
+            player_stats = get_character_stats(picked_char)
+
+            for inst_id in list(exp_state.get('active_monsters', [])):
+                if NPC_HP_MAP.get(inst_id, 0) <= 0:
+                    continue
+                target_nid = NPC_INST_MAP.get(inst_id)
+                if not target_nid:
+                    continue
+
+                monster_stats = get_npc_attr(target_nid)
+                dmg, is_hit, is_cri = get_combat_damage(monster_stats, player_stats, skill_id="10000", skill_lv=1)
+
+                # Send monster attack animation (Tag 508)
+                push_wrapper(508, encode_sproto([(0, inst_id), (1, picked_char['id']), (2, "10000")]))
+
+                if is_hit and dmg > 0:
+                    picked_char['hp'] = max(0, picked_char['hp'] - dmg)
+                    # Push damage effect to player (Tag 128)
+                    push_wrapper(128, encode_sproto([(0, picked_char['id']), (1, dmg), (2, "10000")]))
+                    sync_char_attrs_rpc(conn, picked_char)
+                    print(f"[EXP STAGE AI] Monster {inst_id} attacked player {picked_char['id']} for {dmg} damage! Player HP={picked_char['hp']}")
+
+                    if picked_char['hp'] <= 0:
+                        print(f"[EXP STAGE AI] Player {picked_char['id']} died in EXP Stage!")
+                        finish_exp_stage(conn, push_wrapper, picked_char, exp_state, win=False)
+                        return
+
+            if exp_state.get('ai_active') and picked_char.get('map_id') == map_str:
+                timer = threading.Timer(2.5, run_exp_monster_ai)
+                timer.daemon = True
+                timer.start()
+
+        ai_timer = threading.Timer(2.5, run_exp_monster_ai)
+        ai_timer.daemon = True
+        ai_timer.start()
         return
 
     # 1. Spawn Static NPCs & Monsters
