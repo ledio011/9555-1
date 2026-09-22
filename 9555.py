@@ -178,7 +178,11 @@ try:
                 if len(parts) > 60 and parts[1].isdigit():
                     nid = parts[1]
                     lvl = int(parts[9]) if parts[9].isdigit() else 1
-                    is_abs = "绝对值" in parts[12]
+                    # Map all 75 columns. Real values (Absolute stats) start at index 44.
+                    # NpcData columns (index): Atk(44), Hp(45), Def(46), HIT(47), DGE(48), CRI(49),
+                    # RES(50), EXD(51), EXR(52), CRD(53), CRR(54), AntiStun(55), AntiKnockDown(56),
+                    # DEFA(57), DGEA(58), RESA(59), HITA(60), CRIA(61).
+                    is_abs = "绝对值" in parts[12] or (len(parts) > 45 and parts[45].isdigit() and int(parts[45]) > 100)
                     NPC_CONFIG[nid] = {
                         'name': parts[2],
                         'model': parts[4],
@@ -195,9 +199,23 @@ try:
                         'exr_coe': int(parts[34]) if len(parts) > 34 and parts[34].isdigit() else 10000,
                         'crd_coe': int(parts[35]) if len(parts) > 35 and parts[35].isdigit() else 10000,
                         'crr_coe': int(parts[36]) if len(parts) > 36 and parts[36].isdigit() else 10000,
-                        'atk_abs': int(parts[44]) if is_abs and len(parts) > 44 and parts[44].isdigit() else 0,
-                        'hp_abs': int(parts[45]) if is_abs and len(parts) > 45 and parts[45].isdigit() else 0,
-                        'def_abs': int(parts[46]) if is_abs and len(parts) > 46 and parts[46].isdigit() else 0
+                        'atk_abs': int(parts[44]) if len(parts) > 44 and parts[44].isdigit() else 0,
+                        'hp_abs': int(parts[45]) if len(parts) > 45 and parts[45].isdigit() else 0,
+                        'def_abs': int(parts[46]) if len(parts) > 46 and parts[46].isdigit() else 0,
+                        'hit_abs': int(parts[47]) if len(parts) > 47 and parts[47].isdigit() else 0,
+                        'eva_abs': int(parts[48]) if len(parts) > 48 and parts[48].isdigit() else 0,
+                        'cri_abs': int(parts[49]) if len(parts) > 49 and parts[49].isdigit() else 0,
+                        'res_abs': int(parts[50]) if len(parts) > 50 and parts[50].isdigit() else 0,
+                        'exd_abs': int(parts[51]) if len(parts) > 51 and parts[51].isdigit() else 0,
+                        'exr_abs': int(parts[52]) if len(parts) > 52 and parts[52].isdigit() else 0,
+                        'crd_abs': int(parts[53]) if len(parts) > 53 and parts[53].isdigit() else 0,
+                        'crr_abs': int(parts[54]) if len(parts) > 54 and parts[54].isdigit() else 0,
+                        'defa_abs': int(parts[57]) if len(parts) > 57 and parts[57].isdigit() else 0,
+                        'dgea_abs': int(parts[58]) if len(parts) > 58 and parts[58].isdigit() else 0,
+                        'resa_abs': int(parts[59]) if len(parts) > 59 and parts[59].isdigit() else 0,
+                        'hita_abs': int(parts[60]) if len(parts) > 60 and parts[60].isdigit() else 0,
+                        'cria_abs': int(parts[61]) if len(parts) > 61 and parts[61].isdigit() else 0,
+                        'drop_id': parts[20] if len(parts) > 20 else ""
                     }
         print(f"[NPC CONFIG LOADED] count={len(NPC_CONFIG)}")
 
@@ -216,7 +234,8 @@ try:
                         'group': group,
                         'x': int(parts[4]),
                         'z': int(parts[5]),
-                        'o': int(parts[6])
+                        'o': int(parts[6]),
+                        'pathid': parts[9] if len(parts) > 9 else ""
                     }
                     if group == 9999:
                         if mid not in STATIC_NPC_DATA: STATIC_NPC_DATA[mid] = []
@@ -691,7 +710,7 @@ PROF_SKILLS = {
 # character's starter layout contains only its normal attack, dodge, and the
 # first class active in the existing SkillData order.  The other actives are
 # not granted here.
-SKILL_UNLOCK_LVS = []
+SKILL_UNLOCK_LVS = [1, 5, 10, 15, 20, 25]
 
 def get_skill_upgrade_cost(lv):
     if lv < 0: return 0
@@ -709,15 +728,13 @@ def build_skills_map(prof, char_level, skill_levels=None, skill_layout=None):
     p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
     base_atk = int(p["atk"])
     # ObjMainPlayer uses 0-2 for normal attack combo stages 1, 2, 3, 3 for dodge, and 4-9 for active bar.
+    # Grant all 3 combo stages at level 1 to ensure no cooldown on basic attacks.
     starter_layout = [
         (str(base_atk), 0),
         (str(base_atk + 1), 1),
         (str(base_atk + 2), 2),
         (p["dodge"], 3),
     ]
-    for idx, act in enumerate(p["actives"]):
-        starter_layout.append((act, 4 + idx))
-
     smap = {}
     for sid, default_slot in starter_layout:
         saved = skill_layout.get(sid, {})
@@ -727,6 +744,18 @@ def build_skills_map(prof, char_level, skill_levels=None, skill_layout=None):
             (0, sid), (1, int(skill_levels.get(sid, 1))),
             (2, slot), (3, slot2), (4, 0), (5, False)
         ])
+
+    # Grant professional actives based on player level
+    for i, sid in enumerate(p["actives"]):
+        unlock_lv = SKILL_UNLOCK_LVS[i] if i < len(SKILL_UNLOCK_LVS) else 1
+        if char_level >= unlock_lv:
+            saved = skill_layout.get(sid, {})
+            slot = int(saved.get('index', 4 + i)) if isinstance(saved, dict) else (4 + i)
+            slot2 = int(saved.get('index2', slot)) if isinstance(saved, dict) else slot
+            smap[sid] = encode_sproto([
+                (0, sid), (1, int(skill_levels.get(sid, 1))),
+                (2, slot), (3, slot2), (4, 0), (5, False)
+            ])
 
     for sid, level in skill_levels.items():
         sid = str(sid)
@@ -920,47 +949,38 @@ def get_npc_attr(nid):
     if not cfg: return {'hp_max': 10000, 'atk': 100, 'def': 10, 'hit': 100, 'eva': 10, 'cri': 10, 'res': 10, 'lv': 1, 'defa': 3000, 'dgea': 6000, 'resa': 3000, 'hita': 300, 'cria': 3000, 'exd': 0, 'exr': 0, 'crd': 5000, 'crr': 0}
 
     lvl = cfg.get('level', 1)
-    # Use highest available level stats if level exceeds 80
     max_lv = max(LEVEL_DATA.keys())
-    effective_lv = min(lvl, max_lv)
-    ld = LEVEL_DATA.get(effective_lv)
+    ld = LEVEL_DATA.get(min(lvl, max_lv), LEVEL_DATA[1])
 
-    if cfg.get('is_abs'):
-        hp = cfg.get('hp_abs', 10000)
-        atk = cfg.get('atk_abs', 100)
-        df = cfg.get('def_abs', 10)
-    else:
-        hp = (ld['hp'][0] * cfg.get('hp_coe', 10000)) // 10000
-        atk = (ld['atk'][0] * cfg.get('atk_coe', 10000)) // 10000
-        df = (ld['def'][0] * cfg.get('def_coe', 10000)) // 10000
-
-    # Original stats check: if Atk/Hp are defined explicitly in NpcData, use them as minimums
-    if cfg.get('hp_abs', 0) > hp: hp = cfg['hp_abs']
-    if cfg.get('atk_abs', 0) > atk: atk = cfg['atk_abs']
-
-    # Ratings scaling
-    def scale_rating(base_val, coe):
-        return (base_val * coe) // 10000
+    stats = {}
+    stats['hp_max'] = cfg.get('hp_abs') if cfg.get('hp_abs') else (ld['hp'][0] * cfg.get('hp_coe', 10000)) // 10000
+    stats['atk'] = cfg.get('atk_abs') if cfg.get('atk_abs') else (ld['atk'][0] * cfg.get('atk_coe', 10000)) // 10000
+    stats['def'] = cfg.get('def_abs') if cfg.get('def_abs') else (ld['def'][0] * cfg.get('def_coe', 10000)) // 10000
     
-    # Calculate Power for NPC
-    prof_coeffs = {"atk":16, "hp":1, "def":11, "hit":2, "eva":5.5, "cri":10, "res":10}
-    raw_power = (atk * prof_coeffs['atk'] + hp * prof_coeffs['hp'] + df * prof_coeffs['def']) # Simplified for NPC
-    power = int(raw_power * 3.0)
+    stats['hit'] = cfg.get('hit_abs') if cfg.get('hit_abs') else (ld['hit'][0] * cfg.get('hit_coe', 10000)) // 10000
+    stats['eva'] = cfg.get('eva_abs') if cfg.get('eva_abs') else (ld['eva'][0] * cfg.get('eva_coe', 10000)) // 10000
+    stats['cri'] = cfg.get('cri_abs') if cfg.get('cri_abs') else (ld['cri'][0] * cfg.get('cri_coe', 10000)) // 10000
+    stats['res'] = cfg.get('res_abs') if cfg.get('res_abs') else (ld['res'][0] * cfg.get('res_coe', 10000)) // 10000
 
-    # NPCs use Level 1 coefficients as default fallback if not specified elsewhere
-    return {
-        'hp_max': hp, 'atk': atk + 180, 'def': df, 
-        'hit': scale_rating(ld['hit'][0], cfg.get('hit_coe', 10000)),
-        'eva': scale_rating(ld['eva'][0], cfg.get('eva_coe', 10000)),
-        'cri': scale_rating(ld['cri'][0], cfg.get('cri_coe', 10000)),
-        'res': scale_rating(ld['res'][0], cfg.get('res_coe', 10000)),
-        'lv': lvl, 'defa': ld['defa'], 'dgea': ld['dgea'], 'resa': ld['resa'], 'hita': ld['hita'], 'cria': ld['cria'],
-        'exd': scale_rating(ld['exd'][0], cfg.get('exd_coe', 10000)),
-        'exr': scale_rating(ld['exr'][0], cfg.get('exr_coe', 10000)),
-        'crd': scale_rating(ld['crd'][0], cfg.get('crd_coe', 10000)),
-        'crr': scale_rating(ld['crr'][0], cfg.get('crr_coe', 10000)),
-        'power': power
-    }
+    stats['exd'] = cfg.get('exd_abs') if cfg.get('exd_abs') else (ld['exd'][0] * cfg.get('exd_coe', 10000)) // 10000
+    stats['exr'] = cfg.get('exr_abs') if cfg.get('exr_abs') else (ld['exr'][0] * cfg.get('exr_coe', 10000)) // 10000
+    stats['crd'] = cfg.get('crd_abs') if cfg.get('crd_abs') else (ld['crd'][0] * cfg.get('crd_coe', 10000)) // 10000
+    stats['crr'] = cfg.get('crr_abs') if cfg.get('crr_abs') else (ld['crr'][0] * cfg.get('crr_coe', 10000)) // 10000
+
+    stats['defa'] = cfg.get('defa_abs') if cfg.get('defa_abs') else ld['defa']
+    stats['dgea'] = cfg.get('dgea_abs') if cfg.get('dgea_abs') else ld['dgea']
+    stats['resa'] = cfg.get('resa_abs') if cfg.get('resa_abs') else ld['resa']
+    stats['hita'] = cfg.get('hita_abs') if cfg.get('hita_abs') else ld['hita']
+    stats['cria'] = cfg.get('cria_abs') if cfg.get('cria_abs') else ld['cria']
+
+    stats['lv'] = lvl
+
+    # Calculate Power
+    prof_coeffs = {"atk":16, "hp":1, "def":11, "hit":2, "eva":5.5, "cri":10, "res":10}
+    raw_power = (stats['atk'] * prof_coeffs['atk'] + stats['hp_max'] * prof_coeffs['hp'] + stats['def'] * prof_coeffs['def'])
+    stats['power'] = int(raw_power * 3.0)
+
+    return stats
 
 def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
     """Sends TAG 510 to sync NPC stats."""
@@ -1066,7 +1086,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         return
     spawned_maps.add(map_str)
 
-    def send_npc_create(nid, name, x, z, o):
+    def send_npc_create(nid, name, x, z, o, pathid=""):
         global GLOBAL_INST_COUNTER
         npc_stats = get_npc_attr(nid)
         hp_cur = npc_stats['hp_max']
@@ -1089,7 +1109,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
 
         # ObjInitNpcData reads all combat fields.  An abbreviated attribute
         # creates an NPC with null/zero state and fails inside ObjNpcPoolGroup.
-        attr = build_npc_attribute(inst_id, final_nid, npc_stats, x, z, o)
+        attr = build_npc_attribute(inst_id, final_nid, npc_stats, x, z, o, pathid)
         ph = encode_sproto([(0, 509)]); pf = sproto_pack(ph + encode_sproto([(0, attr)]))
         try: conn.sendall(struct.pack(">H", len(pf)) + pf)
         except: pass
@@ -1101,12 +1121,12 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         if map_str in STATIC_NPC_DATA:
             for m in STATIC_NPC_DATA[map_str]:
                 cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}"})
-                send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
+                send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'], m.get('pathid', ''))
 
         if map_str in MONSTER_DATA:
             for i, m in enumerate(MONSTER_DATA[map_str]):
                 cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
-                send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
+                send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'], m.get('pathid', ''))
 
     # 2. Spawn Mission targets defined by the APK data.
     # Map 11 (TUTORIAL_CAR) spawns targets LOCALLY. Server spawning causes duplicates/crashes.
@@ -1145,7 +1165,7 @@ def spawn_exp_stage_wave(conn, exp_cfg, group_index, wave_index):
         inst_id = GLOBAL_INST_COUNTER
         NPC_INST_MAP[inst_id] = nid
         NPC_HP_MAP[inst_id] = stats['hp_max']
-        attr = build_npc_attribute(inst_id, nid, stats, monster['x'], monster['z'], monster['o'])
+        attr = build_npc_attribute(inst_id, nid, stats, monster['x'], monster['z'], monster['o'], monster.get('pathid', ''))
         packet = sproto_pack(encode_sproto([(0, 509)]) + encode_sproto([(0, attr)]))
         try:
             conn.sendall(struct.pack(">H", len(packet)) + packet)
@@ -1154,15 +1174,17 @@ def spawn_exp_stage_wave(conn, exp_cfg, group_index, wave_index):
             break
     return instance_ids
 
-def build_npc_attribute(inst_id, nid, stats, x, z, o):
+def build_npc_attribute(inst_id, nid, stats, x, z, o, pathid=""):
     """Complete npc_attribute required by ObjInitNpcData.InitData in the APK."""
+    # player_name (Tag 21) is hijacked for PathID if it starts with a digit
+    # or matches the NPCPathData pattern.
     return encode_sproto([
         (0, inst_id), (1, str(nid)), (2, stats['hp_max']), (3, stats['hp_max']),
         (4, stats['atk']), (5, stats['def']), (6, stats['hit']), (7, stats['eva']),
         (8, stats['cri']), (9, stats['exd']), (10, stats['exr']), (11, stats['res']),
         (12, stats['crd']), (13, stats['crr']), (14, stats['defa']),
         (15, x), (16, z), (17, o), (18, stats['lv']),
-        (19, 0), (20, 0), (21, NPC_CONFIG.get(str(nid), {}).get('name', '')),
+        (19, 0), (20, 0), (21, pathid if pathid else NPC_CONFIG.get(str(nid), {}).get('name', '')),
         (24, stats['dgea']), (25, stats['resa']), (26, stats['hita']), (27, stats['cria'])
     ])
 
@@ -1272,11 +1294,16 @@ def copy_attempts_remaining(picked_char, copy_id, cfg):
     return max(0, int(remaining[copy_id]))
 
 def street_race_rewards(level):
-    """Return exactly the level-resolved _drop_bc ShowRewardData items."""
+    """Return level-resolved _drop_bc ShowRewardData items + guaranteed Spare Parts."""
     level = int(level)
     eligible = [lv for lv in STREET_RACE_REWARD_BY_LEVEL if lv <= level]
     reward_id = STREET_RACE_REWARD_BY_LEVEL[max(eligible)] if eligible else ''
-    return SHOW_REWARD_CONFIG.get(reward_id, [])
+    rewards = list(SHOW_REWARD_CONFIG.get(reward_id, []))
+    # Guaranteed Spare Parts (Item 3001) for finishing.
+    # Base 10 + 5 per 10 levels.
+    parts_amt = 10 + (level // 10) * 5
+    rewards.append(("3001", 1, parts_amt))
+    return rewards
 
 def sync_copy_scenes(picked_char):
     """Build TAG 555 from the APK's CopySceneData definitions."""
@@ -1302,9 +1329,11 @@ def sync_copy_scenes(picked_char):
         # copyscene_info: ID, CurNum, BestGrade, Type, str, enable, state, Type2.
         # Type=1 marks a daily copy.  The client finds the Street Race entry
         # through CopySceneData.SubType == 7, rather than a server-made ID.
+        state = ensure_daily_copy_state(picked_char)
+        best_time = state.get('best_times', {}).get(copy_id, 0)
         copies[copy_id] = encode_sproto([
             (0, copy_id), (1, copy_attempts_remaining(picked_char, copy_id, cfg)),
-            (3, 1), (5, True), (6, 0), (7, cfg['subtype'])
+            (2, int(best_time)), (3, 1), (5, True), (6, 0), (7, cfg['subtype'])
         ])
     return encode_sproto([(0, copies)])
 
@@ -1613,9 +1642,15 @@ def is_skill_locked(sid, level, prof):
     base_atk = int(p["atk"])
     combo_atks = {str(base_atk), str(base_atk + 1), str(base_atk + 2)}
     dodge = {str(p["dodge"])}
-    actives = set(str(a) for a in p["actives"])
+    actives = p["actives"]
     sid_str = str(sid)
-    if sid_str in combo_atks or sid_str in dodge or sid_str in actives or (sid_str.isdigit() and int(sid_str) >= 1000):
+    if sid_str in combo_atks or sid_str in dodge:
+        return False, 0
+    if sid_str in actives:
+        idx = actives.index(sid_str)
+        unlock_lv = SKILL_UNLOCK_LVS[idx] if idx < len(SKILL_UNLOCK_LVS) else 1
+        return (level < unlock_lv), unlock_lv
+    if sid_str.isdigit() and int(sid_str) >= 1000:
         return False, 0
     return True, 0
 
@@ -1674,6 +1709,7 @@ def serve_resource_http(conn, initial_data):
             pass
 
 def client_handler(conn, addr):
+    global GLOBAL_INST_COUNTER
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
     global server_session_counter
     send_lock = threading.Lock()
@@ -1806,13 +1842,15 @@ def client_handler(conn, addr):
         copy_id = str(state.get('copy_id') or '')
         exp_cfg = DAILY_EXP_CONFIG.get(copy_id, {})
         wave_index = int(state.get('wave_index', 0))
-        expected = (exp_cfg.get('wave_sizes') or [0])[min(wave_index, len(exp_cfg.get('wave_sizes', [0])) - 1)]
-        # notice_copy_scene_info drives the APK HUD: current wave index,
-        # server end timestamp, group progress, this-group kills, all kills.
+        # notice_copy_scene_info drives the APK HUD.
+        # index(1): current wave index.
+        # parm1(3): group index (1-based).
+        # parm2(4): current kills in this wave/group.
+        # parm3(5): total kills in stage.
         send_rpc_push(683, encode_sproto([
             (0, copy_id), (1, wave_index), (2, int(state.get('end_time', time.time()))),
             (3, int(state.get('group_index', 0)) + 1),
-            (4, min(int(state.get('group_kills', 0)), expected * int(exp_cfg.get('wave_count', 0)))),
+            (4, int(state.get('group_kills', 0))),
             (5, int(state.get('total_kills', 0)))
         ]))
 
@@ -2006,16 +2044,10 @@ def client_handler(conn, addr):
                 c_data = decode_sproto(body.get(0, b""))
                 name = c_data.get(0, b"").decode('utf-8') if isinstance(c_data.get(0), bytes) else str(c_data.get(0, "Hero"))
                 existing_chars = account_characters(cur_areaId, acc_id)
-                if existing_chars:
-                    # An existing account owns its saved character.  Never
-                    # replace it or append a default character merely because
-                    # the client repeats character_create after a restart.
-                    existing = existing_chars[0]
-                    print(f"[CHARACTER CREATE] existing character retained id={existing.get('id')}")
-                    resp = encode_sproto([(0, get_char_ov(existing)), (1, 0)])
+                if len(existing_chars) >= 4:
+                    print(f"[CHARACTER CREATE] list full for account={acc_id}")
+                    resp = encode_sproto([(1, 2)]) # Error code for full
                 elif CHAR_DB_LOAD_ERROR:
-                    # A damaged database must be repaired/restored first;
-                    # creating now could overwrite the only account mapping.
                     print("[CHARACTER CREATE] refused because character database did not load")
                     resp = encode_sproto([(1, 1)])
                 else:
@@ -2025,12 +2057,10 @@ def client_handler(conn, addr):
                     init_character_fields(nc)
                     account_characters(cur_areaId, acc_id, create=True).append(nc)
                     if not save_chars(all_accounts_chars):
-                        # Do not report a newly-created permanent character
-                        # until its account-to-character mapping is on disk.
                         account_characters(cur_areaId, acc_id).remove(nc)
                         resp = encode_sproto([(1, 1)])
                     else:
-                        print(f"[CHARACTER CREATE] id={cid} account={acc_id}")
+                        print(f"[CHARACTER CREATE] new character id={cid} name={name}")
                         resp = encode_sproto([(0, get_char_ov(nc)), (1, 0)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -2128,6 +2158,7 @@ def client_handler(conn, addr):
                     print(f"[MAP READY RECEIVED] map_id={mid}")
                     if picked_char.get('exp_copy_state') and not picked_char['exp_copy_state'].get('started'):
                         start_exp_stage_battle()
+                    send_rpc_push(654, encode_sproto([(0, 1)])) # start_enter_game
                     # Tag 654 is start_enter_game.  The APK interprets state=1
                     # as completion of the optional resource download, so it
                     # must only be sent after the client's MSG 270 request.
@@ -2579,13 +2610,15 @@ def client_handler(conn, addr):
                                     picked_char['boss_inst_id'] = None
                                 else:
                                     if not picked_char.get('exp_copy_state'):
-                                        # Regular open-world NPC/monster drop.
-                                        global GLOBAL_INST_COUNTER
+                                        # Regular NPC/Monster visual drop (GTA-style)
                                         GLOBAL_INST_COUNTER += 1
                                         pos = picked_char['pos']
-                                        nested_item = encode_sproto([(0, "1001"), (1, 50), (3, 1)])
+                                        # Resolve rewards based on NPC level
+                                        reward_lv = defender_stats['lv']
+                                        cash_amt = reward_lv * 50 + random.randint(10, 100)
+                                        nested_item = encode_sproto([(0, "1001"), (1, cash_amt), (3, 1)])
                                         drop_data = encode_sproto([
-                                            (0, GLOBAL_INST_COUNTER), (1, int(pos[0] + 100)), (2, int(pos[2] + 100)),
+                                            (0, GLOBAL_INST_COUNTER), (1, int(pos[0] + 50)), (2, int(pos[2] + 50)),
                                             (3, 1), (4, nested_item), (7, picked_char['id'])
                                         ])
                                         send_rpc_push(527, drop_data)
@@ -2667,6 +2700,16 @@ def client_handler(conn, addr):
                             encode_sproto([(0, "2001"), (1, exp_kill), (3, 0)]),
                             encode_sproto([(0, "1001"), (1, cash_kill), (3, 0)])
                         ])]))
+
+                        # GTA-style visual drop model on the ground
+                        GLOBAL_INST_COUNTER += 1
+                        pos = picked_char['pos']
+                        nested_item = encode_sproto([(0, "1001"), (1, cash_kill), (3, 1)])
+                        drop_data = encode_sproto([
+                            (0, GLOBAL_INST_COUNTER), (1, int(pos[0] + 50)), (2, int(pos[2] + 50)),
+                            (3, 1), (4, nested_item), (7, picked_char['id'])
+                        ])
+                        send_rpc_push(527, drop_data)
 
                         # Level up loop
                         while True:
@@ -2752,6 +2795,17 @@ def client_handler(conn, addr):
                     base_exp = 50 + random.randint(10, 30)
                     picked_char['cash'] = int(picked_char.get('cash', 0)) + base_cash
                     picked_char['exp'] = int(picked_char.get('exp', 0)) + base_exp
+
+                    # Physical model drop for visual confirmation (GTA style)
+                    GLOBAL_INST_COUNTER += 1
+                    pos = picked_char['pos']
+                    nested_item = encode_sproto([(0, "1001"), (1, base_cash), (3, 1)])
+                    drop_data = encode_sproto([
+                        (0, GLOBAL_INST_COUNTER), (1, int(pos[0] + 30)), (2, int(pos[2] + 30)),
+                        (3, 1), (4, nested_item), (7, picked_char['id'])
+                    ])
+                    send_rpc_push(527, drop_data)
+
                     get_character_stats(picked_char)
                     sync_char_attrs_rpc(conn, picked_char)
                     send_rpc_push(519, sync_mission_data(picked_char))
@@ -2796,7 +2850,9 @@ def client_handler(conn, addr):
                         picked_char['active_copy_id'] = copy_id
                         picked_char['exp_return_scheduled'] = False
                         picked_char['exp_copy_state'] = {'copy_id': copy_id, 'started': False, 'finished': False}
-                        target_map = cfg['map_id']
+                        # Use Map 301 (Chinatown) or Map 306 (Rich Dist) to enable AI.
+                        # These are SINGLE_KILL_MONSTER_COPY which allow NPCs to move/attack.
+                        target_map = '301' if int(copy_id) >= 223 else '306'
                         start_map_transition(conn, picked_char, target_map, send_rpc_push)
                         send_rpc_push(555, sync_copy_scenes(picked_char))
                         save_chars(all_accounts_chars)
