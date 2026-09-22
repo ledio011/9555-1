@@ -332,17 +332,60 @@ try:
         print(f"[ITEM CONFIG LOADED] items={len(ITEM_CONFIG)}")
 except: traceback.print_exc()
 
+BAK_DB = CHAR_DB + ".bak"
+TMP_DB = CHAR_DB + ".tmp"
+
 def load_chars():
+    """Crash-safe character loader with automatic backup recovery."""
     if os.path.exists(CHAR_DB):
         try:
-            with open(CHAR_DB, "r") as f: return json.load(f)
-        except: return {}
+            with open(CHAR_DB, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+        except Exception as e:
+            print(f"[WARN] Failed to load {CHAR_DB}: {e}")
+
+    if os.path.exists(BAK_DB):
+        try:
+            with open(BAK_DB, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    print(f"[RECOVERY] Restored character database from {BAK_DB}!")
+                    try:
+                        with open(CHAR_DB, "w", encoding="utf-8") as out:
+                            json.dump(data, out, indent=4)
+                    except: pass
+                    return data
+        except Exception as e:
+            print(f"[WARN] Failed to load backup {BAK_DB}: {e}")
+
     return {}
 
 def save_chars(data):
+    """Crash-safe atomic writer to prevent character loss during kill -9."""
+    if not isinstance(data, dict):
+        return
     try:
-        with open(CHAR_DB, "w") as f: json.dump(data, f, indent=4)
-    except: pass
+        # 1. Write new state to temporary file
+        with open(TMP_DB, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+
+        # 2. Backup current good database file if it exists
+        if os.path.exists(CHAR_DB):
+            try:
+                with open(CHAR_DB, "r", encoding="utf-8") as src, open(BAK_DB, "w", encoding="utf-8") as dst:
+                    dst.write(src.read())
+                    dst.flush()
+                    os.fsync(dst.fileno())
+            except: pass
+
+        # 3. Atomic rename guarantees either old file or new file exists intact
+        os.replace(TMP_DB, CHAR_DB)
+    except Exception as e:
+        print(f"[ERROR] Failed atomic save_chars: {e}")
 
 all_accounts_chars = load_chars()
 
