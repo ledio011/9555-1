@@ -1087,7 +1087,7 @@ def spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state
     subwave = (exp_state['cur_group'] - 1) * 4 + exp_state['cur_wave']
     exp_state['subwave'] = subwave
     exp_state['wave_kills'] = 0
-    exp_state['active_monsters'].clear()
+    exp_state['active_monsters'] = []
 
     monsters_list = exp_cfg.get('monsters', [])
     wave_idx = min(exp_state['cur_wave'] - 1, len(monsters_list) - 1)
@@ -1103,8 +1103,8 @@ def spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state
     for m in subwave_spawns:
         cfg = NPC_CONFIG.get(m['nid'], {'name': f"ExpMonster_{m['nid']}"})
         inst_id = send_npc_func(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
-        if inst_id:
-            exp_state['active_monsters'].add(inst_id)
+        if inst_id and inst_id not in exp_state['active_monsters']:
+            exp_state['active_monsters'].append(inst_id)
 
     print(f"[EXP STAGE] Spawned copy={exp_state['copy_id']} group={exp_state['cur_group']} wave={exp_state['cur_wave']} subwave={subwave} monsters={len(exp_state['active_monsters'])}")
 
@@ -1148,6 +1148,88 @@ def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
         timer.start()
 
     print(f"[EXP STAGE] Completed copy={copy_id} total_kills={exp_state['total_kills']} exp={exp_reward} cash={cash_reward}")
+
+def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid):
+    if not picked_char: return
+
+    exp_state = picked_char.get('exp_stage_state')
+    if exp_state and inst_id:
+        active_monsters = exp_state.get('active_monsters', [])
+        if inst_id in active_monsters:
+            active_monsters.remove(inst_id)
+            exp_state['wave_kills'] += 1
+            exp_state['total_kills'] += 1
+
+            exp_cfg = DAILY_EXP_CONFIG.get(exp_state['copy_id'], {})
+            wave_reqs = exp_cfg.get('group_npc_count', [5, 10, 15, 20])
+            req_kills = wave_reqs[min(exp_state['cur_wave'] - 1, len(wave_reqs) - 1)]
+
+            send_rpc_push(683, encode_sproto([
+                (0, exp_state['copy_id']),
+                (1, exp_state['cur_wave'] - 1),
+                (2, exp_state['end_time']),
+                (3, exp_state['cur_group']),
+                (4, exp_state['wave_kills']),
+                (5, exp_state['total_kills'])
+            ]))
+
+            def send_npc_wrapper(nid, name, x, z, o):
+                global GLOBAL_INST_COUNTER
+                npc_stats = get_npc_attr(nid)
+                hp_cur = npc_stats['hp_max']
+                hp_max = npc_stats['hp_max']
+                atk = npc_stats['atk']
+                df = npc_stats['def']
+                lvl = npc_stats['lv']
+
+                GLOBAL_INST_COUNTER += 1
+                i_id = GLOBAL_INST_COUNTER
+                NPC_HP_MAP[i_id] = hp_max
+                NPC_INST_MAP[i_id] = str(nid)
+
+                final_nid = str(nid)
+                if ";" in final_nid:
+                    if "XD_A" in final_nid: final_nid = "100"
+                    elif "QJ_A" in final_nid: final_nid = "104"
+                    elif "NQS_A" in final_nid: final_nid = "105"
+
+                attr = encode_sproto([
+                    (0, i_id), (1, final_nid), (2, hp_cur), (3, hp_max), (4, atk), (5, df),
+                    (15, x), (16, z), (17, o), (18, lvl), (21, name)
+                ])
+                ph = encode_sproto([(0, 509)])
+                pf = sproto_pack(ph + encode_sproto([(0, attr)]))
+                try: conn.sendall(struct.pack(">H", len(pf)) + pf)
+                except: pass
+                return i_id
+
+            if len(active_monsters) == 0 or exp_state['wave_kills'] >= req_kills:
+                if exp_state['cur_wave'] < exp_cfg.get('wave_count', 4):
+                    exp_state['cur_wave'] += 1
+                    spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state, exp_cfg, send_npc_wrapper)
+                else:
+                    if exp_state['cur_group'] < exp_cfg.get('group_count', 7):
+                        exp_state['cur_group'] += 1
+                        exp_state['cur_wave'] = 1
+                        spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state, exp_cfg, send_npc_wrapper)
+                    else:
+                        finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True)
+
+    if npcid and npcid != "None":
+        npc_stats = get_npc_attr(npcid)
+        npc_lv = npc_stats.get('lv', 1)
+        char_lv = picked_char.get('level', 1)
+
+        exp_kill, cash_kill = calculate_npc_kill_rewards(char_lv, npc_lv)
+        kill_rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
+        grant_item_rewards(picked_char, kill_rewards, conn, send_rpc_push)
+
+        send_rpc_push(638, encode_sproto([(0, [
+            encode_sproto([(0, "2001"), (1, exp_kill), (3, 0)]),
+            encode_sproto([(0, "1001"), (1, cash_kill), (3, 0)])
+        ])]))
+
+        advance_missions(picked_char, send_rpc_push, 'kill', target_id=npcid)
 
 def spawn_map_npcs(conn, map_id, picked_char=None):
     """Spawns all NPCs, Monsters, and Traffic defined in data for the map."""
@@ -1206,21 +1288,27 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             'total_kills': 0,
             'start_time': int(time.time()),
             'end_time': end_time,
-            'active_monsters': set()
+            'active_monsters': []
         }
         if picked_char:
             picked_char['exp_stage_state'] = exp_state
 
-        send_rpc_push = lambda tag, data: conn.sendall(struct.pack(">H", len(sproto_pack(encode_sproto([(0, tag)]) + data))) + sproto_pack(encode_sproto([(0, tag)]) + data))
-        send_rpc_push(629, encode_sproto([(0, end_time), (1, 0)]))
-        send_rpc_push(683, encode_sproto([
+        def push_wrapper(tag, data):
+            try:
+                ph_p = encode_sproto([(0, tag)])
+                pf_p = sproto_pack(ph_p + data)
+                conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+            except: pass
+
+        push_wrapper(629, encode_sproto([(0, end_time), (1, 0)]))
+        push_wrapper(683, encode_sproto([
             (0, map_str), (1, 0), (2, end_time), (3, 1), (4, 0), (5, 0)
         ]))
 
         def local_send_npc(nid, name, x, z, o):
             return send_npc_create(nid, name, x, z, o)
 
-        spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state, exp_cfg, local_send_npc)
+        spawn_exp_stage_subwave_internal(conn, push_wrapper, picked_char, exp_state, exp_cfg, local_send_npc)
         return
 
     # 1. Spawn Static NPCs & Monsters
@@ -2269,56 +2357,8 @@ def client_handler(conn, addr):
                     if locked:
                         print(f"[SKILL LOCKED] sid={sid} req={req_lv}")
                         send_rpc_push(529, encode_sproto([(0, "#{100681}"), (1, True)]))
-                        # Do NOT send 508. Response will be empty.
                     else:
                         send_rpc_push(508, encode_sproto([(0, picked_char['id']), (1, tid), (2, sid), (3, alist)]))
-
-                        # Authoritative Combat: Calculate and Sync Damage
-                        target_nid = NPC_INST_MAP.get(tid)
-                        if target_nid:
-                            defender_stats = get_npc_attr(target_nid)
-                            attacker_stats = get_character_stats(picked_char)
-                            skill_lv = picked_char.get('skill_levels', {}).get(sid, 0)
-
-                            is_area = (picked_char.get('map_id') == "502")
-
-                            # Player -> NPC Damage
-                            dmg, is_hit, is_cri = get_combat_damage(attacker_stats, defender_stats, sid, skill_lv, is_area=is_area, pvp_scale=1.0)
-
-                            # Update Server State
-                            if is_hit and tid in NPC_HP_MAP:
-                                NPC_HP_MAP[tid] -= dmg
-
-                                # BOSS DEATH HANDLING
-                                if NPC_HP_MAP[tid] <= 0:
-                                    if tid == picked_char.get('boss_inst_id'):
-                                        did = picked_char.get('active_domin_id', '1')
-                                        print(f"[M1003 DEBUG] Boss {tid} died. Winning did={did}")
-                                        # Capture is not a generic copy. Tag 552 would open the
-                                        # Star Reward page instead of the normal mission reward UI.
-                                        advance_missions(picked_char, send_rpc_push, 'capture', target_id=did)
-                                        picked_char['boss_inst_id'] = None
-                                        DEAD_NPC_SET.add(tid)
-
-                            # Push damage info to client (Tag 111: accept_damge)
-                            # dmg_item: id(0), damage(1), skillId(2), isCrit(4)
-                            dmg_item = encode_sproto([(0, tid), (1, dmg), (2, sid), (4, is_cri)])
-                            send_rpc_push(111, encode_sproto([(0, [dmg_item])]))
-
-                            # Synchronization of target HP to ensure bar update
-                            if tid in NPC_HP_MAP:
-                                # attribute_other (Tag 1): hp(0), level(2)
-                                # attribute (Tag 2): max_hp(0)
-                                a_oth_fields = [(0, max(0, NPC_HP_MAP[tid])), (2, defender_stats['lv'])]
-                                if NPC_INST_MAP.get(tid, '').startswith('BOSS_'):
-                                    a_oth_fields.extend([(4, 1), (15, 2)])
-                                a_oth = encode_sproto(a_oth_fields)
-                                a_base = encode_sproto([(0, defender_stats['hp_max'])])
-                                aoi_attr = encode_sproto([(0, tid), (1, a_oth), (2, a_base)])
-                                send_rpc_push(510, encode_sproto([(0, aoi_attr)]))
-
-                            # Server-side counter-attack logic removed since client sends msg 128
-                            # Only sync player attrs if damaged by local client logic
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -2549,23 +2589,10 @@ def client_handler(conn, addr):
 
                                     did = picked_char.get('active_domin_id', '1')
                                     print(f"[M1003 DEBUG] Boss {target_id} killed by client dmg. Winning did={did}")
-                                    # Do not send generic copy_scene_result (552) for Capture.
                                     advance_missions(picked_char, send_rpc_push, 'capture', target_id=did)
                                     picked_char['boss_inst_id'] = None
                                 else:
-                                    # Regular NPC/Monster drop
-                                    global GLOBAL_INST_COUNTER
-                                    GLOBAL_INST_COUNTER += 1
-                                    pos = picked_char['pos']
-                                    nested_item = encode_sproto([(0, "1001"), (1, 50), (3, 1)])
-                                    drop_data = encode_sproto([
-                                        (0, GLOBAL_INST_COUNTER), (1, int(pos[0] + 100)), (2, int(pos[2] + 100)),
-                                        (3, 1), (4, nested_item), (7, picked_char['id'])
-                                    ])
-                                    send_rpc_push(527, drop_data)
-
-                                    if target_nid:
-                                        advance_missions(picked_char, send_rpc_push, 'kill', target_id=target_nid)
+                                    on_npc_killed(conn, send_rpc_push, picked_char, target_id, target_nid)
 
                     if session is not None:
                         ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -2577,7 +2604,6 @@ def client_handler(conn, addr):
                 die_type = 0
 
                 if msg == 307:
-                    # local_npc_die: npcid(0), x(1), z(2), type(3)
                     val0 = body.get(0)
                     if isinstance(val0, bytes): s_val0 = val0.decode('utf-8')
                     elif val0 is not None: s_val0 = str(val0)
@@ -2590,7 +2616,6 @@ def client_handler(conn, addr):
                     except: pass
                     if not npcid: npcid = s_val0
                 else:
-                    # single_copy_scene_npc_die: characterId(0), npcdataid(1), pos_x(2), pos_z(3), type(4)
                     val0 = body.get(0)
                     if isinstance(val0, int): inst_id = val0
                     elif isinstance(val0, (bytes, bytearray)):
@@ -2605,98 +2630,18 @@ def client_handler(conn, addr):
                     if not npcid and inst_id:
                         npcid = NPC_INST_MAP.get(inst_id)
 
-                # CRITICAL DOUBLE-DEATH PROTECTION
                 is_duplicate = False
-                if inst_id is not None and inst_id > 1000000: # Only deduplicate server-side instances
+                if inst_id is not None and inst_id > 1000000:
                     if inst_id in DEAD_NPC_SET: is_duplicate = True
                     else: DEAD_NPC_SET.add(inst_id)
 
-                # Cleanup HP tracking
                 if inst_id and inst_id in NPC_HP_MAP: del NPC_HP_MAP[inst_id]
 
                 if picked_char and not is_duplicate:
-                    # Car-robbery packets (type 2/6) usually have no NPC ID.
                     if die_type in [2, 6]:
                         advance_missions(picked_char, send_rpc_push, 'car', die_type=die_type)
 
-                    exp_state = picked_char.get('exp_stage_state')
-                    if exp_state and inst_id and inst_id in exp_state.get('active_monsters', set()):
-                        exp_state['active_monsters'].discard(inst_id)
-                        exp_state['wave_kills'] += 1
-                        exp_state['total_kills'] += 1
-
-                        exp_cfg = DAILY_EXP_CONFIG.get(exp_state['copy_id'], {})
-                        wave_reqs = exp_cfg.get('group_npc_count', [5, 10, 15, 20])
-                        req_kills = wave_reqs[min(exp_state['cur_wave'] - 1, len(wave_reqs) - 1)]
-
-                        send_rpc_push(683, encode_sproto([
-                            (0, exp_state['copy_id']),
-                            (1, exp_state['cur_wave'] - 1),
-                            (2, exp_state['end_time']),
-                            (3, exp_state['cur_group']),
-                            (4, exp_state['wave_kills']),
-                            (5, exp_state['total_kills'])
-                        ]))
-
-                        def send_npc_wrapper(nid, name, x, z, o):
-                            global GLOBAL_INST_COUNTER
-                            npc_stats = get_npc_attr(nid)
-                            hp_cur = npc_stats['hp_max']
-                            hp_max = npc_stats['hp_max']
-                            atk = npc_stats['atk']
-                            df = npc_stats['def']
-                            lvl = npc_stats['lv']
-
-                            GLOBAL_INST_COUNTER += 1
-                            i_id = GLOBAL_INST_COUNTER
-                            NPC_HP_MAP[i_id] = hp_max
-                            NPC_INST_MAP[i_id] = str(nid)
-
-                            final_nid = str(nid)
-                            if ";" in final_nid:
-                                if "XD_A" in final_nid: final_nid = "100"
-                                elif "QJ_A" in final_nid: final_nid = "104"
-                                elif "NQS_A" in final_nid: final_nid = "105"
-
-                            attr = encode_sproto([
-                                (0, i_id), (1, final_nid), (2, hp_cur), (3, hp_max), (4, atk), (5, df),
-                                (15, x), (16, z), (17, o), (18, lvl), (21, name)
-                            ])
-                            ph = encode_sproto([(0, 509)])
-                            pf = sproto_pack(ph + encode_sproto([(0, attr)]))
-                            try: conn.sendall(struct.pack(">H", len(pf)) + pf)
-                            except: pass
-                            return i_id
-
-                        if len(exp_state['active_monsters']) == 0 or exp_state['wave_kills'] >= req_kills:
-                            if exp_state['cur_wave'] < exp_cfg.get('wave_count', 4):
-                                exp_state['cur_wave'] += 1
-                                spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state, exp_cfg, send_npc_wrapper)
-                            else:
-                                if exp_state['cur_group'] < exp_cfg.get('group_count', 7):
-                                    exp_state['cur_group'] += 1
-                                    exp_state['cur_wave'] = 1
-                                    spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state, exp_cfg, send_npc_wrapper)
-                                else:
-                                    finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True)
-
-                    if npcid and npcid != "None":
-                        # NPC Kill Rewards (scaled proportionally to BaseLvData required EXP)
-                        npc_stats = get_npc_attr(npcid)
-                        npc_lv = npc_stats.get('lv', 1)
-                        char_lv = picked_char.get('level', 1)
-
-                        exp_kill, cash_kill = calculate_npc_kill_rewards(char_lv, npc_lv)
-                        kill_rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
-                        grant_item_rewards(picked_char, kill_rewards, conn, send_rpc_push)
-
-                        # Send reward tip (Tag 638)
-                        send_rpc_push(638, encode_sproto([(0, [
-                            encode_sproto([(0, "2001"), (1, exp_kill), (3, 0)]),
-                            encode_sproto([(0, "1001"), (1, cash_kill), (3, 0)])
-                        ])]))
-
-                        advance_missions(picked_char, send_rpc_push, 'kill', target_id=npcid)
+                    on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid)
 
                     if die_type == 3:
                         advance_missions(picked_char, send_rpc_push, 'impact', target_id=npcid)
