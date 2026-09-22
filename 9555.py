@@ -28,7 +28,6 @@ MOUNT_CONFIG = {} # garage vehicle id -> client MountData definition
 COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
 SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
 STREET_RACE_REWARD_BY_LEVEL = {} # level -> AdaptData _drop_bc ShowRewardData id
-DAILY_EXP_CONFIG = {} # Exp Stage ID -> DailyExpData wave definitions
 
 try:
     script_dir = os.path.dirname(__file__)
@@ -46,11 +45,6 @@ try:
     text_asset_root = os.path.join(script_dir, "assets", "Bundle", "TextAsset")
     if not os.path.isdir(text_asset_root):
         text_asset_root = os.path.join(script_dir, "assets", "Bundle", "TextAssets")
-    # The local reverse-engineering workspace keeps the APK tables under
-    # Decompiled/.  Deployed servers still use assets/ first; this fallback
-    # only makes the identical data available for local verification.
-    if not os.path.isdir(text_asset_root):
-        text_asset_root = os.path.join(script_dir, "Decompiled", "assets", "Bundle", "TextAsset")
 
     # Load EffInfoData
     eff_path = os.path.join(text_asset_root, "EffInfoData")
@@ -207,7 +201,6 @@ try:
                     nid = parts[3]
                     entry = {
                         'nid': nid,
-                        'group': group,
                         'x': int(parts[4]),
                         'z': int(parts[5]),
                         'o': int(parts[6])
@@ -281,38 +274,16 @@ try:
         with open(copy_path, "r", encoding='utf-8') as f:
             for line in f:
                 parts = line.strip().split(",")
-                if len(parts) > 31 and parts[0] == "*" and parts[1].isdigit() and parts[11] == "1":
+                if len(parts) > 19 and parts[0] == "*" and parts[1].isdigit() and parts[11] == "1":
                     COPY_SCENE_CONFIG[parts[1]] = {
                         'map_id': parts[5],
                         'subtype': int(parts[12]) if parts[12].isdigit() else 0,
                         'exist_time': int(parts[13]) if parts[13].isdigit() else 0,
                         'end_time': int(parts[10]) if parts[10].isdigit() else 0,
                         'max_plays': int(parts[18]) if parts[18].isdigit() else 0,
-                        'min_level': int(parts[19]) if parts[19].isdigit() else 1,
-                        'max_level': int(parts[20]) if parts[20].isdigit() else 80,
-                        'min_member': int(parts[21]) if parts[21].isdigit() else 1,
-                        'max_member': int(parts[22]) if parts[22].isdigit() else 1,
-                        'single_map_id': parts[31]
+                        'min_level': int(parts[19]) if parts[19].isdigit() else 1
                     }
         print(f"[COPY SCENE CONFIG LOADED] daily_copies={len(COPY_SCENE_CONFIG)}")
-
-    # Experience Stage uses DailyExpData for its seven groups and four waves.
-    # The MonsterData map IDs listed here provide the actual NPC placement for
-    # every wave; this keeps both the counts and enemy stats data-driven.
-    daily_exp_path = os.path.join(text_asset_root, "DailyExpData")
-    if os.path.exists(daily_exp_path):
-        with open(daily_exp_path, "r", encoding='utf-8') as f:
-            for line in f:
-                parts = line.strip().split(',')
-                if len(parts) >= 7 and parts[0] == "*" and parts[1].isdigit():
-                    DAILY_EXP_CONFIG[parts[1]] = {
-                        'wave_count': int(parts[2]) if parts[2].isdigit() else 0,
-                        'wave_sizes': [int(v) for v in parts[3].split('#') if v.isdigit()],
-                        'group_count': int(parts[4]) if parts[4].isdigit() else 0,
-                        'group_time': int(parts[5]) if parts[5].isdigit() else 0,
-                        'monster_maps': [v for v in parts[6].split('#') if v]
-                    }
-        print(f"[DAILY EXP CONFIG LOADED] stages={len(DAILY_EXP_CONFIG)}")
 
     # Street Race's actual reward preview is resolved by AdaptData's
     # _drop_bc key, then ShowRewardData.  Read those client tables rather
@@ -617,10 +588,7 @@ PROF_SKILLS = {
     1: {"atk": "201", "dodge": "204", "actives": ["205", "206", "207", "208", "209", "210"]},
     2: {"atk": "301", "dodge": "304", "actives": ["305", "306", "307", "308", "309", "310"]}
 }
-# SkillData has no serialized Locklevel column in this APK and its C# class
-# defaults Locklevel to 1.  Do not invent level gates: all class skills are
-# available at level 1, while weapons, skins, and mounts remain separate data.
-SKILL_UNLOCK_LVS = [1, 1, 1, 1, 1, 1]
+SKILL_UNLOCK_LVS = [1, 5, 10, 15, 20, 25]
 
 def get_skill_upgrade_cost(lv):
     if lv < 0: return 0
@@ -641,14 +609,15 @@ def build_skills_map(prof, char_level, skill_levels=None):
     for i in range(len(p["actives"])):
         sid = p["actives"][i]
         unlock_lv = SKILL_UNLOCK_LVS[i]
-        smap[sid] = encode_sproto([
-            (0, sid),
-            (1, skill_levels.get(sid, 0)),
-            (2, 4 + i),
-            (3, unlock_lv),
-            (4, 2 + i),
-            (5, False)
-        ])
+        if char_level >= unlock_lv:
+            smap[sid] = encode_sproto([
+                (0, sid),
+                (1, skill_levels.get(sid, 0)),
+                (2, 4 + i),
+                (3, unlock_lv),
+                (4, 2 + i),
+                (5, False)
+            ])
     return smap
 
 def get_general(c):
@@ -1037,41 +1006,6 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                         if str(s['map']) == map_str:
                             send_npc_create(s['car_id'], f"QuestCar_{s['car_id']}", s['x'], s['z'], 0)
 
-def spawn_exp_stage_wave(conn, exp_cfg, group_index, wave_index):
-    """Spawn exactly one APK-configured Experience Stage wave.
-
-    DailyExpData names four MonsterData maps, one per wave.  Each such map
-    contains 28 placement groups (seven stage groups times four waves).
-    """
-    monster_maps = exp_cfg.get('monster_maps', [])
-    if not (0 <= wave_index < len(monster_maps)):
-        return set()
-    phase = group_index * exp_cfg.get('wave_count', 0) + wave_index + 1
-    records = [m for m in MONSTER_DATA.get(str(monster_maps[wave_index]), [])
-               if m.get('group') == phase]
-    instance_ids = set()
-    global GLOBAL_INST_COUNTER
-    for monster in records:
-        nid = str(monster['nid'])
-        stats = get_npc_attr(nid)
-        GLOBAL_INST_COUNTER += 1
-        inst_id = GLOBAL_INST_COUNTER
-        NPC_INST_MAP[inst_id] = nid
-        NPC_HP_MAP[inst_id] = stats['hp_max']
-        attr = encode_sproto([
-            (0, inst_id), (1, nid), (2, stats['hp_max']), (3, stats['hp_max']),
-            (4, stats['atk']), (5, stats['def']), (15, monster['x']),
-            (16, monster['z']), (17, monster['o']), (18, stats['lv']),
-            (21, NPC_CONFIG.get(nid, {}).get('name', f"NPC_{nid}"))
-        ])
-        packet = sproto_pack(encode_sproto([(0, 509)]) + encode_sproto([(0, attr)]))
-        try:
-            conn.sendall(struct.pack(">H", len(packet)) + packet)
-            instance_ids.add(inst_id)
-        except Exception:
-            break
-    return instance_ids
-
 def sync_mission_data(picked_char):
     own_missions_list = []
     for mid, mdata in picked_char.get('active_missions', {}).items():
@@ -1193,7 +1127,7 @@ def sync_copy_scenes(picked_char):
     # the first configured ID (e.g. Street Race 211 at level 4).
     selected = {}
     for copy_id, cfg in COPY_SCENE_CONFIG.items():
-        if level < cfg['min_level'] or level > cfg.get('max_level', 80):
+        if level < cfg['min_level']:
             continue
         try:
             numeric_id = int(copy_id)
@@ -1406,8 +1340,6 @@ def init_character_fields(c):
         'daily_copy_state': {},
         'active_copy_id': None,
         'pre_copy_pos': None,
-        'exp_copy_state': None,
-        'exp_return_scheduled': False,
         'active_domin_id': None,
         'boss_inst_id': None,
         'pre_arena_pos': None
@@ -1667,175 +1599,6 @@ def client_handler(conn, addr):
             print(f"[STREET RACE] exit countdown finished; returned after copy={copy_id}")
 
         leave_after_notice(delay)
-
-    def schedule_exp_stage_return():
-        """Use the Exp Stage CopySceneData EndTime=5 exit countdown."""
-        if not picked_char or picked_char.get('exp_return_scheduled'):
-            return
-        state = picked_char.get('exp_copy_state') or {}
-        copy_id = str(state.get('copy_id') or '')
-        cfg = COPY_SCENE_CONFIG.get(copy_id, {})
-        picked_char['exp_return_scheduled'] = True
-
-        def leave_after_notice(seconds_left):
-            if not picked_char or not picked_char.get('exp_return_scheduled'):
-                return
-            if seconds_left > 0:
-                send_rpc_push(529, encode_sproto([
-                    (0, f"You will leave the scene after {seconds_left} seconds"), (1, True)
-                ]))
-                timer = threading.Timer(1.0, leave_after_notice, args=(seconds_left - 1,))
-                timer.daemon = True
-                timer.start()
-                return
-            return_pos = picked_char.get('pre_copy_pos')
-            picked_char['pre_copy_pos'] = None
-            picked_char['active_copy_id'] = None
-            picked_char['exp_copy_state'] = None
-            picked_char['exp_return_scheduled'] = False
-            # Exp Stage returns the player to city healthy; it does not respawn
-            # them inside the timed copy.
-            picked_char['hp'] = get_character_stats(picked_char)['hp_max']
-            save_chars(all_accounts_chars)
-            start_map_transition(conn, picked_char, '11', send_rpc_push, override_pos=return_pos)
-            print(f"[EXP STAGE] exit countdown finished; returned after copy={copy_id}")
-
-        leave_after_notice(int(cfg.get('end_time') or 5))
-
-    def send_exp_stage_info():
-        state = picked_char.get('exp_copy_state') or {}
-        copy_id = str(state.get('copy_id') or '')
-        exp_cfg = DAILY_EXP_CONFIG.get(copy_id, {})
-        wave_index = int(state.get('wave_index', 0))
-        expected = (exp_cfg.get('wave_sizes') or [0])[min(wave_index, len(exp_cfg.get('wave_sizes', [0])) - 1)]
-        # notice_copy_scene_info drives the APK HUD: current wave index,
-        # server end timestamp, group progress, this-group kills, all kills.
-        send_rpc_push(683, encode_sproto([
-            (0, copy_id), (1, wave_index), (2, int(state.get('end_time', time.time()))),
-            (3, int(state.get('group_index', 0)) + 1),
-            (4, min(int(state.get('group_kills', 0)), expected * int(exp_cfg.get('wave_count', 0)))),
-            (5, int(state.get('total_kills', 0)))
-        ]))
-
-    def offer_exp_stage_respawn():
-        """Open the APK's current-map rebirth UI after an Exp Stage death."""
-        state = picked_char.get('exp_copy_state') or {}
-        if not state or state.get('finished') or state.get('awaiting_respawn'):
-            return
-        state['awaiting_respawn'] = True
-        # REBIRTH_TYPE.CURRENT_MAP_REBIRTH is enum value 1.  The configured
-        # download reward supplies item 9011, used here as the one-item cost.
-        send_rpc_push(618, encode_sproto([(0, 1), (1, 1), (2, '9011')]))
-        print('[EXP STAGE] player died; offered current-map respawn or city return')
-
-    def resolve_exp_stage_respawn(in_place):
-        state = picked_char.get('exp_copy_state') or {}
-        if not state.get('awaiting_respawn'):
-            return
-        if not in_place:
-            state['awaiting_respawn'] = False
-            finish_exp_stage(False)
-            return
-        inventory = picked_char.get('inventory', [])
-        item = next((entry for entry in inventory if str(entry.get('id')) == '9011' and int(entry.get('amount', 0)) > 0), None)
-        if not item:
-            # Do not permit a free in-place resurrection; the client also
-            # disables this button when the required item is unavailable.
-            return
-        item['amount'] -= 1
-        if item['amount'] <= 0:
-            inventory.remove(item)
-        state['awaiting_respawn'] = False
-        picked_char['hp'] = get_character_stats(picked_char)['hp_max']
-        # aoi_relife_player updates the local player model and restores HP in
-        # the APK without resetting the active timed-copy wave state.
-        relife = encode_sproto([
-            (0, picked_char['id']), (1, encode_sproto([(0, picked_char['hp'])])),
-            (2, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
-        ])
-        send_rpc_push(512, encode_sproto([(0, relife)]))
-        send_rpc_push(611, sync_inventory_data(picked_char))
-        save_chars(all_accounts_chars)
-        print('[EXP STAGE] current-map respawn used item=9011')
-
-    def finish_exp_stage(won):
-        state = picked_char.get('exp_copy_state') or {}
-        if not state or state.get('finished'):
-            return
-        state['finished'] = True
-        copy_id = str(state['copy_id'])
-        # CopySceneData/ShowRewardData marks the experience as dynamic (the
-        # ShowRewardData row has no fixed item quantities).  NPC kill rewards
-        # remain the authoritative rewards, while this verified result packet
-        # opens the normal copy success/failure UI.
-        send_rpc_push(552, encode_sproto([
-            (0, 12), (1, copy_id), (2, bool(won)), (3, 0), (4, 0), (5, [])
-        ]))
-        send_rpc_push(555, sync_copy_scenes(picked_char))
-        save_chars(all_accounts_chars)
-        schedule_exp_stage_return()
-        print(f"[EXP STAGE] result id={copy_id} win={won} kills={state.get('total_kills', 0)}")
-
-    def start_exp_stage_battle():
-        state = picked_char.get('exp_copy_state') or {}
-        copy_id = str(state.get('copy_id') or '')
-        exp_cfg = DAILY_EXP_CONFIG.get(copy_id)
-        copy_cfg = COPY_SCENE_CONFIG.get(copy_id)
-        if not exp_cfg or not copy_cfg or state.get('started'):
-            return
-        state.update({
-            'started': True, 'finished': False, 'group_index': 0, 'wave_index': 0,
-            'group_kills': 0, 'total_kills': 0,
-            'end_time': int(time.time()) + int(copy_cfg['exist_time'])
-        })
-        state['instance_ids'] = list(spawn_exp_stage_wave(conn, exp_cfg, 0, 0))
-        # notify_copy_start_info starts the APK countdown; type 12 is the
-        # configured CopySceneData subtype and wave_time is DailyExpData's 60.
-        send_rpc_push(629, encode_sproto([
-            (0, state['end_time']), (1, 12), (2, exp_cfg['group_time']), (3, 1)
-        ]))
-        send_exp_stage_info()
-
-        def expire(expected_copy_id=copy_id, expected_end=state['end_time']):
-            live = picked_char.get('exp_copy_state') or {}
-            if (live.get('copy_id') == expected_copy_id and live.get('end_time') == expected_end
-                    and not live.get('finished')):
-                finish_exp_stage(False)
-
-        timer = threading.Timer(max(1, int(copy_cfg['exist_time'])), expire)
-        timer.daemon = True
-        timer.start()
-        print(f"[EXP STAGE] started id={copy_id} groups={exp_cfg['group_count']} waves={exp_cfg['wave_count']} end={state['end_time']}")
-
-    def record_exp_stage_kill(inst_id):
-        state = picked_char.get('exp_copy_state') or {}
-        if not state.get('started') or state.get('finished'):
-            return
-        instance_ids = set(state.get('instance_ids', []))
-        if inst_id not in instance_ids:
-            return
-        instance_ids.discard(inst_id)
-        state['instance_ids'] = list(instance_ids)
-        state['group_kills'] = int(state.get('group_kills', 0)) + 1
-        state['total_kills'] = int(state.get('total_kills', 0)) + 1
-        if instance_ids:
-            send_exp_stage_info()
-            return
-        exp_cfg = DAILY_EXP_CONFIG.get(str(state['copy_id']), {})
-        state['wave_index'] = int(state.get('wave_index', 0)) + 1
-        if state['wave_index'] >= int(exp_cfg.get('wave_count', 0)):
-            state['wave_index'] = 0
-            state['group_index'] = int(state.get('group_index', 0)) + 1
-            state['group_kills'] = 0
-        if state['group_index'] >= int(exp_cfg.get('group_count', 0)):
-            send_exp_stage_info()
-            finish_exp_stage(True)
-            return
-        state['instance_ids'] = list(spawn_exp_stage_wave(
-            conn, exp_cfg, int(state['group_index']), int(state['wave_index'])))
-        # The client has a next_wave handler for this exact transition.
-        send_rpc_push(515, encode_sproto([(0, int(state['wave_index']) + 1)]))
-        send_exp_stage_info()
 
     try:
         # HTTP updater traffic begins with GET/HEAD; game packets begin with a
@@ -2351,8 +2114,6 @@ def client_handler(conn, addr):
                     if picked_char['hp'] == 0 and picked_char.get('map_id') == '502':
                         print('[M1003 DEBUG] Player died in arena; scheduling loss return')
                         schedule_domin_return(restore_hp=True)
-                    elif picked_char['hp'] == 0 and picked_char.get('exp_copy_state'):
-                        offer_exp_stage_respawn()
                 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -2380,8 +2141,6 @@ def client_handler(conn, addr):
                             if picked_char['hp'] == 0 and picked_char.get('map_id') == '502':
                                 print('[M1003 DEBUG] Player died in arena; scheduling loss return')
                                 schedule_domin_return(restore_hp=True)
-                            elif picked_char['hp'] == 0 and picked_char.get('exp_copy_state'):
-                                offer_exp_stage_respawn()
                         elif target_id in NPC_HP_MAP:
                             # Damage to NPC/Monster/Boss
                             NPC_HP_MAP[target_id] -= dmg
@@ -2408,14 +2167,6 @@ def client_handler(conn, addr):
                                 if target_id in DEAD_NPC_SET:
                                     continue
                                 DEAD_NPC_SET.add(target_id)
-
-                                # Exp Stage combat reaches zero HP through
-                                # accept_damge before the APK emits its
-                                # follow-up single_copy_scene_npc_die packet.
-                                # Count the authoritative instance here so a
-                                # duplicate notification cannot stall a wave.
-                                if picked_char.get('exp_copy_state'):
-                                    record_exp_stage_kill(target_id)
 
                                 # BOSS DEATH HANDLING
                                 if target_id == picked_char.get('boss_inst_id'):
@@ -2496,11 +2247,6 @@ def client_handler(conn, addr):
                 if inst_id and inst_id in NPC_HP_MAP: del NPC_HP_MAP[inst_id]
 
                 if picked_char and not is_duplicate:
-                    # Experience Stage NPCs are server-instanced.  Count only
-                    # those IDs, never a client-supplied NPC name or a local
-                    # Street Race obstacle.
-                    if msg == 127:
-                        record_exp_stage_kill(inst_id)
                     # Car-robbery packets (type 2/6) usually have no NPC ID.
                     if die_type in [2, 6]:
                         advance_missions(picked_char, send_rpc_push, 'car', die_type=die_type)
@@ -2590,12 +2336,8 @@ def client_handler(conn, addr):
 
             elif msg == 298: # impact_npc (Interaction)
                 nid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
-                # Street Race traffic is ObjSimpleAICar created locally by the
-                # APK and intentionally has no server NPC ID.  Ignore it;
-                # treating "None" as a kill/reward source would be exploitable.
-                if nid and nid != "None":
-                    print(f"[*] Interaction with NPC ID={nid}")
-                if picked_char and nid and nid != "None":
+                print(f"[*] Interaction with NPC ID={nid}")
+                if picked_char:
                     if nid == "1105": # Mission 1003 challenge
                         print("[M1003 DEBUG] RX 298 NPC=1105")
                         print("[M1003 DEBUG] TX 529 dialog=102098 NPC=1105")
@@ -2629,26 +2371,6 @@ def client_handler(conn, addr):
                         print(f"[STREET RACE] entered id={copy_id} remaining={remaining - 1}/{cfg['max_plays']}")
                     else:
                         print(f"[STREET RACE] denied id={copy_id}; daily attempts exhausted")
-                elif picked_char and cfg and cfg['subtype'] == 12:
-                    remaining = copy_attempts_remaining(picked_char, copy_id, cfg)
-                    exp_cfg = DAILY_EXP_CONFIG.get(copy_id)
-                    if remaining > 0 and exp_cfg:
-                        if picked_char.get('pre_copy_pos') is None:
-                            picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
-                        state = ensure_daily_copy_state(picked_char)
-                        state['remaining'][copy_id] = remaining - 1
-                        picked_char['active_copy_id'] = copy_id
-                        picked_char['exp_return_scheduled'] = False
-                        picked_char['exp_copy_state'] = {'copy_id': copy_id, 'started': False, 'finished': False}
-                        # CopySceneData supplies a 2–4 member map and a
-                        # dedicated SingleMapID.  This private server has no
-                        # party service, so use the verified solo map 220.
-                        start_map_transition(conn, picked_char, cfg.get('single_map_id') or cfg['map_id'], send_rpc_push)
-                        send_rpc_push(555, sync_copy_scenes(picked_char))
-                        save_chars(all_accounts_chars)
-                        print(f"[EXP STAGE] entered id={copy_id} remaining={remaining - 1}/{cfg['max_plays']} solo_map={cfg.get('single_map_id')}")
-                    else:
-                        print(f"[EXP STAGE] denied id={copy_id}; attempts exhausted or configuration unavailable")
                 elif picked_char:
                     # Other copy subtypes retain the server's existing map
                     # transition behavior until their individual flows are
@@ -2693,21 +2415,6 @@ def client_handler(conn, addr):
                     send_rpc_push(555, sync_copy_scenes(picked_char))
                     schedule_street_race_return()
                     print(f"[STREET RACE] result id={active_copy_id} win={won} time={elapsed} rewards={rewards}")
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-            elif msg == 220: # start_battle (sent by EXPSceneManager after arrival)
-                if picked_char and picked_char.get('exp_copy_state'):
-                    start_exp_stage_battle()
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-            elif msg == 132: # relife_player
-                if picked_char and picked_char.get('exp_copy_state'):
-                    # isInplace is the sole request field in the APK protocol.
-                    resolve_exp_stage_respawn(get_val_int(body, 0, 0) == 1)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -2862,14 +2569,7 @@ def client_handler(conn, addr):
                     # the Capture arena it does not auto-return after five
                     # seconds, and it must restore the city position saved
                     # when the race was entered.
-                    if picked_char.get('exp_copy_state'):
-                        saved_pos = picked_char.get('pre_copy_pos')
-                        picked_char['pre_copy_pos'] = None
-                        picked_char['active_copy_id'] = None
-                        picked_char['exp_copy_state'] = None
-                        picked_char['exp_return_scheduled'] = False
-                        picked_char['hp'] = get_character_stats(picked_char)['hp_max']
-                    elif picked_char.get('active_copy_id'):
+                    if picked_char.get('active_copy_id'):
                         saved_pos = picked_char.get('pre_copy_pos')
                         picked_char['pre_copy_pos'] = None
                         picked_char['active_copy_id'] = None
