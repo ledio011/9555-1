@@ -1840,14 +1840,16 @@ def init_character_fields(c):
     for k, v in fields.items():
         if k not in c: c[k] = v
 
-    # Initialize HP if not set
-    if 'hp' not in c:
-        lv = c.get('level', 1)
-        prof = c.get('prof', 0)
-        ld = LEVEL_DATA.get(lv, LEVEL_DATA.get(1, {'hp': [3000,3000,3000]}))
-        c['hp'] = ld['hp'][prof] if prof < len(ld['hp']) else ld['hp'][0]
+    # Initialize or restore HP if not set or if dead
+    stats = get_character_stats(c)
+    if 'hp' not in c or c.get('hp', 0) <= 0:
+        c['hp'] = stats['hp_max']
 
 def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, override_pos=None):
+    if picked_char and picked_char.get('hp', 0) <= 0:
+        stats = get_character_stats(picked_char)
+        picked_char['hp'] = stats['hp_max']
+
     src_map = picked_char.get('map_id', '11')
     target_map_id = str(target_map_id)
     picked_char['map_id'] = target_map_id
