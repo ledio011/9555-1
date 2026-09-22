@@ -2381,15 +2381,11 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 298: # impact_npc (Interaction)
-                nid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
-                print(f"[*] Interaction with NPC ID={nid}")
+            elif msg == 298: # impact_npc (Vehicle collision / running over NPC)
+                impact_type = get_val_int(body, 0)
+                print(f"[*] Vehicle impact with NPC type={impact_type}")
                 if picked_char:
-                    if nid == "1105": # Mission 1003 challenge
-                        print("[M1003 DEBUG] RX 298 NPC=1105")
-                        print("[M1003 DEBUG] TX 529 dialog=102098 NPC=1105")
-                        send_rpc_push(529, encode_sproto([(0, "102098"), (1, True)]))
-                    advance_missions(picked_char, send_rpc_push, 'interact', target_id=nid)
+                    advance_missions(picked_char, send_rpc_push, 'impact')
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -2477,14 +2473,18 @@ def client_handler(conn, addr):
                     # For street race rank, we can show characters who have records.
                     # We'll collect all characters across all accounts and sort by best time.
                     all_best_times = []
-                    for acct_chars in all_accounts_chars.values():
-                        for char_name, c_data in acct_chars.items():
-                            c_state = c_data.get('daily_copy_state', {})
-                            b_times = c_state.get('best_times', {})
-                            # Find best time across any track
-                            times = [int(t) for t in b_times.values() if t is not None]
-                            if times:
-                                all_best_times.append((min(times), char_name, c_data))
+                    for area_dict in all_accounts_chars.values():
+                        if isinstance(area_dict, dict):
+                            for char_list in area_dict.values():
+                                if isinstance(char_list, list):
+                                    for c_data in char_list:
+                                        if isinstance(c_data, dict):
+                                            char_name = c_data.get('name', 'Hero')
+                                            c_state = c_data.get('daily_copy_state', {})
+                                            b_times = c_state.get('best_times', {})
+                                            times = [int(t) for t in b_times.values() if t is not None]
+                                            if times:
+                                                all_best_times.append((min(times), char_name, c_data))
 
                     # Sort by time ASCENDING
                     all_best_times.sort(key=lambda x: x[0])
