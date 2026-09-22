@@ -2665,9 +2665,15 @@ def client_handler(conn, addr):
                             new_hp = picked_char.get('hp', 0) - dmg
                             picked_char['hp'] = max(0, new_hp)
                             sync_char_attrs_rpc(conn, picked_char)
-                            if picked_char['hp'] == 0 and picked_char.get('map_id') == '502':
-                                print('[M1003 DEBUG] Player died in arena; scheduling loss return')
-                                schedule_domin_return(restore_hp=True)
+                            if picked_char['hp'] == 0:
+                                if picked_char.get('map_id') == '502':
+                                    print('[M1003 DEBUG] Player died in arena; scheduling loss return')
+                                    schedule_domin_return(restore_hp=True)
+                                else:
+                                    relife_req = encode_sproto([
+                                        (0, 1), (1, 0), (2, "9202"), (3, picked_char['id']), (4, picked_char['name'])
+                                    ])
+                                    send_rpc_push(618, relife_req)
                         elif target_id in NPC_HP_MAP:
                             # Damage to NPC/Monster/Boss
                             NPC_HP_MAP[target_id] -= dmg
