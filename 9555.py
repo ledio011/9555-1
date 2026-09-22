@@ -924,6 +924,26 @@ def sync_common_data_rpc(picked_char):
     ]
     return encode_sproto(sync_fields)
 
+def sync_dance_state_rpc(picked_char=None):
+    """Build Sproto Tag 686 (sync_dance_state_info) for Single Dance & Guild Dance."""
+    now = int(time.time())
+    dance_info = encode_sproto([
+        (0, 1001),                   # uuid
+        (1, "1001"),                 # ID (CityDanceData 1001)
+        (2, now),                    # start_time
+        (3, now + 1800),             # end_time
+        (4, 1),                      # state = 1 (open/active)
+        (5, 0),                      # parm
+        (6, 1800),                   # duration = 1800s (30 minutes)
+        (7, now + 86400)             # reset_time
+    ])
+    dance_map = {1001: dance_info}
+    return encode_sproto([
+        (0, 1),        # state = 1
+        (1, 1),        # open = 1
+        (2, dance_map) # dance_state_info map
+    ])
+
 def sync_char_attrs_rpc(conn, picked_char):
     """Sends TAG 510 (aoi_update_attribute) to sync all stats."""
     stats = get_character_stats(picked_char)
@@ -1619,7 +1639,7 @@ def calculate_npc_kill_rewards(player_level, npc_level=1):
 def copy_attempts_remaining(picked_char, copy_id, cfg):
     state = ensure_daily_copy_state(picked_char)
     remaining = state.setdefault('remaining', {})
-    if copy_id not in remaining or copy_id in ["223", "224", "225", "226", "227", "228", "229"]:
+    if copy_id not in remaining:
         remaining[copy_id] = int(cfg.get('max_plays', 3))
     return max(0, int(remaining[copy_id]))
 
@@ -1869,6 +1889,8 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             # Dungeon/Guide entry missions advance on interaction/entry/exp_copy
             matched = not target_id or str(cfg.get('logic_id')) == str(target_id) or event in ['exp_copy', 'enter_copy', 'dungeon']
         elif logic_type == 114 and event == 'world_boss':
+            matched = True
+        elif logic_type == 132 and event == 'dance':
             matched = True
         elif logic_type == 7 and event == 'map':
             matched = target == str(map_id)
@@ -3035,6 +3057,44 @@ def client_handler(conn, addr):
                         (5, exp_state['total_kills'])
                     ]))
                     print(f"[EXP STAGE] start_battle sent 629 & 683 updates for copy={exp_state['copy_id']}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 313: # request_dance_state_info
+                send_rpc_push(686, sync_dance_state_rpc(picked_char))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 227: # request_dance_info
+                # Return list of unlocked dance moves
+                # danceinfo: ID(0), name(1), modelId(2), animationName(3)
+                d1 = encode_sproto([(0, "1001"), (3, "attack_1")])
+                d2 = encode_sproto([(0, "1002"), (3, "attack_2")])
+                send_rpc_push(623, encode_sproto([(0, [d1, d2])]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 229: # use_dance (Start dancing)
+                did = body.get(0, b"").decode('utf-8')
+                # start_participate_dance: curUse(0), endTime(1)
+                send_rpc_push(624, encode_sproto([(0, did), (1, int(time.time()) + 1800)]))
+                if picked_char:
+                    advance_missions(picked_char, send_rpc_push, 'dance')
+                    # Sync AOI so others see us dancing
+                    social_dance = encode_sproto([(0, picked_char['id']), (1, did), (2, True)])
+                    send_rpc_push(657, encode_sproto([(0, social_dance)]))
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 228: # pause_participate_dance (Stop dancing)
+                if picked_char:
+                    social_dance = encode_sproto([(0, picked_char['id']), (1, ""), (2, False)])
+                    send_rpc_push(657, encode_sproto([(0, social_dance)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
