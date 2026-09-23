@@ -964,6 +964,10 @@ def sync_common_data_rpc(picked_char):
     ]
     return encode_sproto(sync_fields)
 
+def ItemContainerTool_Name(slot):
+    names = {0: "HEAD", 1: "BODY", 2: "BELT", 3: "LEG", 4: "NECKLACE", 5: "WEAPON"}
+    return names.get(slot, f"SLOT_{slot}")
+
 def get_equip_slot_index(subtype):
     """Map ItemData.SubType (0=WEAPON, 1=HEAD, 2=BODY, 3=LEG, 4=BELT, 5=NECKLACE) to container slot index."""
     m = {0: 5, 1: 0, 2: 1, 3: 3, 4: 2, 5: 4}
@@ -2544,7 +2548,8 @@ def client_handler(conn, addr):
 
             raw = sproto_unpack(data); pkg = decode_sproto(raw, 0)
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
-            print(f"[RX] MSG={msg} SESSION={session}")
+            if msg in (100, 105, 115, 116, 117, 121, 122, 129, 167, 168, 170, 171, 172, 199, 223, 224, 303) or (picked_char and picked_char.get('map_ready_done')):
+                print(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
 
             if msg == 4: # login
@@ -2685,8 +2690,11 @@ def client_handler(conn, addr):
 
             elif msg == 100: # map_ready
                 if picked_char:
+                    picked_char['map_ready_done'] = True
                     mid = str(picked_char.get('map_id', '11'))
-                    print(f"[MAP READY RECEIVED] map_id={mid}")
+                    print(f"==================================================")
+                    print(f"[MAP READY RECEIVED] Character is fully in map_id={mid}!")
+                    print(f"==================================================")
 
                     # 1. TAG 654: start_enter_game (Close loading box & enable HUD controls)
                     send_rpc_push(654, encode_sproto([(0, 1)]))
@@ -3060,16 +3068,25 @@ def client_handler(conn, addr):
                             old_idx = int(time.time() * 1000) % 10000000 + len(ebp)
                             old_item['indexId'] = old_idx
                             ebp[old_idx] = old_item
-                            send_update_item_push(send_rpc_push, 0, old_idx, old_item) # 0 = EQUIP_BACKPACK
+                            send_update_item_push(send_rpc_push, 0, old_idx, old_item)
                         else:
-                            send_update_item_push(send_rpc_push, 0, index_id, None)      # 0 = EQUIP_BACKPACK
-                        send_update_item_push(send_rpc_push, 1, slot, item)            # 1 = EQUIPPACK
+                            send_update_item_push(send_rpc_push, 0, index_id, None)
+                        send_update_item_push(send_rpc_push, 1, slot, item)
                         save_chars(all_accounts_chars)
                         send_rpc_push(592, sync_backpack_item_rpc(picked_char))
                         send_rpc_push(611, sync_item_pack_rpc(picked_char))
                         sync_char_attrs_rpc(conn, picked_char)
                         sync_main_player_visual(picked_char, send_rpc_push)
-                        print(f"[BAG EQUIP] Equipped item {item_id} into slot {slot}")
+                        old_name = old_item.get('itemId') if old_item else 'None'
+                        print(f"==================================================")
+                        print(f"[BAG UI ACTION] EQUIP ITEM")
+                        print(f"  • Equipping Item ID  : {item_id}")
+                        print(f"  • Equipment Slot    : Slot {slot} ({ItemContainerTool_Name(slot)})")
+                        print(f"  • Swapped Old Item  : {old_name}")
+                        print(f"  • Equipment Bag     : Synced (Tag 592, Code 0)")
+                        print(f"  • Equipped Pack     : Synced (Tag 525, Code 1)")
+                        print(f"  • Character Stats   : Updated & Synced (Tag 510)")
+                        print(f"==================================================")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3084,13 +3101,20 @@ def client_handler(conn, addr):
                         new_idx = int(time.time() * 1000) % 10000000 + len(ebp)
                         un_item['indexId'] = new_idx
                         ebp[new_idx] = un_item
-                        send_update_item_push(send_rpc_push, 1, index_id, None) # 1 = EQUIPPACK
-                        send_update_item_push(send_rpc_push, 0, new_idx, un_item) # 0 = EQUIP_BACKPACK
+                        send_update_item_push(send_rpc_push, 1, index_id, None)
+                        send_update_item_push(send_rpc_push, 0, new_idx, un_item)
                         save_chars(all_accounts_chars)
                         send_rpc_push(592, sync_backpack_item_rpc(picked_char))
                         sync_char_attrs_rpc(conn, picked_char)
                         sync_main_player_visual(picked_char, send_rpc_push)
-                        print(f"[BAG UNEQUIP] Unequipped item {un_item['itemId']} from slot {index_id}")
+                        print(f"==================================================")
+                        print(f"[BAG UI ACTION] UNEQUIP ITEM")
+                        print(f"  • Unequipping Item  : {un_item.get('itemId')}")
+                        print(f"  • From Slot         : Slot {index_id} ({ItemContainerTool_Name(index_id)})")
+                        print(f"  • Moved To Bag Index: {new_idx}")
+                        print(f"  • Equipped Pack     : Cleared Slot {index_id} (Tag 525, Code 1)")
+                        print(f"  • Equipment Bag     : Updated Index {new_idx} (Tag 525, Code 0)")
+                        print(f"==================================================")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
