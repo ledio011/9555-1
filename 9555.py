@@ -916,7 +916,7 @@ def get_full_char(c):
                 if encoded:
                     fashion_equip_map[int(item.get('indexId', slot))] = encoded
 
-    download_state = 2
+    download_state = 2 if c.get('download_complete') else 1
     return encode_sproto([
         (0, char_id),
         (1, gen),
@@ -2207,7 +2207,7 @@ def init_character_fields(c):
         'friend_applys': {},
         'enemies': {},
         'mails': {},
-        'pos': [29860, 100, -17005, 0],
+        'pos': [7007, 100, 5033, 0],
         'map_id': "11",
         'tutorial': 0,
         'download_complete': False,
@@ -2642,12 +2642,11 @@ def client_handler(conn, addr):
                     for m_id, m_data in picked_char.get('mails', {}).items():
                         send_rpc_push(603, build_mail_update_obj(m_data))
 
-                    # Height Y safety check for spawn pos
-                    if picked_char.get('pos') and len(picked_char['pos']) >= 3 and picked_char['pos'][1] <= 0:
-                        picked_char['pos'][1] = 100
-
-                    # TAG 503: enter_map & TAG 504: main_player_create
+                    # Correct spawn pos for map 11
                     mid = str(picked_char.get('map_id', '11'))
+                    if mid == "11" and (not picked_char.get('pos') or picked_char['pos'] == [29860, 100, -17005, 0] or picked_char['pos'] == [18250, 100, -4016, -6458] or picked_char['pos'][1] <= 0):
+                        picked_char['pos'] = [7007, 100, 5033, 0]
+
                     scene_name = "Unknown"
                     if mid in MAP_CONFIG:
                         scene_name = MAP_CONFIG[mid]['scene']
