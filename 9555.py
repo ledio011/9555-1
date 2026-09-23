@@ -893,7 +893,7 @@ def get_full_char(c):
                     equip_map[int(item.get('indexId', slot))] = encoded
     if not equip_map:
         wid = "10001" if c.get('prof', 0) == 0 else "20001" if c.get('prof', 0) == 1 else "30001"
-        w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (4, 1), (5, 1), (6, [0]*8), (7, 1)])
+        w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (4, 0), (5, 1), (6, 1), (7, [0]*8), (8, 1)])
         equip_map = {5: w1}
 
     # Tag 10: badge_equip (Dictionary<long, gameitem>)
@@ -970,11 +970,12 @@ def encode_gameitem_sproto(item):
     if 'indexId' in item: fields.append((0, int(item['indexId'])))
     if 'itemId' in item: fields.append((1, str(item['itemId'])))
     if 'bindflag' in item: fields.append((2, bool(item['bindflag'])))
-    if 'quality' in item: fields.append((3, int(item['quality'])))
-    if 'level' in item: fields.append((4, int(item['level'])))
+    if 'level' in item: fields.append((3, int(item['level'])))
+    if 'flags' in item: fields.append((4, int(item.get('flags', 0))))
     if 'stack' in item: fields.append((5, int(item['stack'])))
-    if 'parm' in item: fields.append((6, [int(x) for x in item['parm']]))
-    if 'appraise' in item: fields.append((7, int(item['appraise'])))
+    if 'quality' in item: fields.append((6, int(item['quality'])))
+    if 'parm' in item and isinstance(item['parm'], list): fields.append((7, [int(x) for x in item['parm']]))
+    if 'appraise' in item: fields.append((8, int(item['appraise'])))
     return encode_sproto(fields)
 
 def sync_backpack_item_rpc(picked_char):
