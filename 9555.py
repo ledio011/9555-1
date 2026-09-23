@@ -2581,7 +2581,7 @@ def client_handler(conn, addr):
             elif msg == 105: # character_pick
                 char_id = get_val_int(body, 0)
                 picked_char = next((c for c in get_account_chars(all_accounts_chars, cur_areaId, acc_id) if c['id'] == char_id), None)
-                resp = encode_sproto([(0, 0 if picked_char else 1)])
+                resp = encode_sproto([]) if picked_char else encode_sproto([(0, 1)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
@@ -3239,6 +3239,12 @@ def client_handler(conn, addr):
                     func_info[str(fid)] = fstate
                     save_chars(all_accounts_chars)
                     print(f"[FUNC UNLOCK] Completed function unlock fid={fid} state={fstate}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 234: # leave_game
+                print(f"[LEAVE GAME] Client requested leave_game")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
