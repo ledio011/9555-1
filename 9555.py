@@ -961,33 +961,40 @@ def calculate_dance_reward(char_level, dance_id="10001"):
 
     return max(1, int(base_exp * multiplier * variance))
 
-def build_friend_info_obj(c, is_online=True):
+def build_friend_info_obj(c, ftype=0, main_char_id=0):
     stats = get_character_stats(c)
+    cid = main_char_id if main_char_id else c['id']
+    fid = c['id']
+    time_info = c['id'] if ftype == 6 else int(time.time())
+
     return encode_sproto([
-        (0, c['id']),                      # friendId (tag 0)
-        (1, c.get('name', 'Hero')),        # name (tag 1)
-        (2, stats['lv']),                  # level (tag 2)
-        (3, c.get('prof', 0)),             # profession (tag 3)
-        (4, stats['power']),               # combValue (tag 4)
-        (5, 1 if is_online else 0),        # state (tag 5)
-        (6, 100),                          # friendScore (tag 6)
-        (7, 0),                            # guildId (tag 7)
-        (8, "")                            # guildName (tag 8)
+        (0, cid),                          # characterId (tag 0)
+        (1, fid),                          # friendId (tag 1)
+        (2, c.get('name', 'Hero')),        # name (tag 2)
+        (3, stats['lv']),                  # level (tag 3)
+        (4, c.get('prof', 0)),             # profession (tag 4)
+        (5, stats['power']),               # combValue (tag 5)
+        (6, 1),                            # state (tag 6: 1=online)
+        (7, time_info),                    # timeInfo (tag 7)
+        (8, ftype),                        # friendType (tag 8: 0=friend, 2=apply, 6=enemy)
+        (9, 0),                            # guildId (tag 9)
+        (10, ""),                          # guildName (tag 10)
+        (11, 100)                          # friendScore (tag 11)
     ])
 
 def sync_friend_info_rpc(picked_char):
-    """Build Sproto Tag 538 (syn_friend_info) for Friends, Requests (Applys) and Enemies (Foes)."""
+    """Build Sproto Tag 538 (syn_friend_info) for Friends (ftype=0), Requests (ftype=2) and Enemies (ftype=6)."""
     friends_map = {}
     for fid, f_data in picked_char.get('friends', {}).items():
-        friends_map[int(fid)] = build_friend_info_obj(f_data, True)
+        friends_map[int(fid)] = build_friend_info_obj(f_data, ftype=0)
 
     applys_map = {}
     for fid, f_data in picked_char.get('friend_applys', {}).items():
-        applys_map[int(fid)] = build_friend_info_obj(f_data, True)
+        applys_map[int(fid)] = build_friend_info_obj(f_data, ftype=2)
 
     enemys_map = {}
     for fid, f_data in picked_char.get('enemies', {}).items():
-        enemys_map[int(fid)] = build_friend_info_obj(f_data, True)
+        enemys_map[int(fid)] = build_friend_info_obj(f_data, ftype=6, main_char_id=picked_char['id'])
 
     return encode_sproto([
         (0, friends_map), # friends (tag 0)
@@ -3312,6 +3319,78 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif msg == 123: # mail_operation
+                mail_id = get_val_int(body, 0)
+                operation = get_val_int(body, 1) # 0=Read, 1=Delete, 2=Claim Item, 3=Claim All, 4=Delete All Read
+                if picked_char:
+                    mails = picked_char.setdefault('mails', {})
+                    s_mid = str(mail_id)
+
+                    if operation == 0: # Read Mail
+                        if s_mid in mails:
+                            mails[s_mid]['readTime'] = int(time.time())
+                            if mails[s_mid].get('mailState', 0) == 0:
+                                mails[s_mid]['mailState'] = 1
+                            save_chars(all_accounts_chars)
+                            send_rpc_push(531, build_mail_update_obj(mails[s_mid]))
+                            print(f"[MAIL] Read mail id={mail_id}")
+
+                    elif operation == 1: # Delete Single Mail
+                        if s_mid in mails:
+                            del mails[s_mid]
+                            save_chars(all_accounts_chars)
+                            send_rpc_push(532, encode_sproto([(0, mail_id)])) # mail_delete Tag 532
+                            print(f"[MAIL] Deleted mail id={mail_id}")
+
+                    elif operation == 2: # Claim Mail Attachment
+                        if s_mid in mails and mails[s_mid].get('mailState', 0) != 3:
+                            m_obj = mails[s_mid]
+                            rewards_to_grant = []
+                            for item_id, item_info in m_obj.get('items', {}).items():
+                                amt = item_info.get('count', 1) if isinstance(item_info, dict) else int(item_info)
+                                rewards_to_grant.append((str(item_id), 0, amt))
+
+                            if rewards_to_grant:
+                                grant_item_rewards(picked_char, rewards_to_grant, conn, send_rpc_push)
+                                send_rpc_push(638, encode_sproto([(0, [encode_sproto([(0, r[0]), (1, r[2]), (3, 0)]) for r in rewards_to_grant])]))
+
+                            m_obj['mailState'] = 3 # 3 = GETITEM (Claimed)
+                            m_obj['readTime'] = int(time.time())
+                            save_chars(all_accounts_chars)
+                            send_rpc_push(531, build_mail_update_obj(m_obj))
+                            print(f"[MAIL] Claimed rewards for mail id={mail_id}")
+
+                    elif operation == 3: # Claim All Mail Attachments
+                        claimed_any = False
+                        all_rewards = []
+                        for m_obj in list(mails.values()):
+                            if m_obj.get('mailState', 0) != 3 and m_obj.get('items'):
+                                for item_id, item_info in m_obj.get('items', {}).items():
+                                    amt = item_info.get('count', 1) if isinstance(item_info, dict) else int(item_info)
+                                    all_rewards.append((str(item_id), 0, amt))
+                                m_obj['mailState'] = 3 # 3 = GETITEM (Claimed)
+                                m_obj['readTime'] = int(time.time())
+                                claimed_any = True
+                                send_rpc_push(531, build_mail_update_obj(m_obj))
+
+                        if claimed_any:
+                            grant_item_rewards(picked_char, all_rewards, conn, send_rpc_push)
+                            send_rpc_push(638, encode_sproto([(0, [encode_sproto([(0, r[0]), (1, r[2]), (3, 0)]) for r in all_rewards])]))
+                            save_chars(all_accounts_chars)
+                            print(f"[MAIL] Claimed ALL mail rewards for player {picked_char['id']}")
+
+                    elif operation == 4: # Delete All Read Mails
+                        to_del = [m_id for m_id, m_obj in mails.items() if m_obj.get('mailState', 0) in (1, 3)]
+                        for m_id in to_del:
+                            del mails[m_id]
+                            send_rpc_push(532, encode_sproto([(0, int(m_id))]))
+                        save_chars(all_accounts_chars)
+                        print(f"[MAIL] Deleted all read mails count={len(to_del)}")
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
             elif msg == 124: # add_friend
                 target_id = get_val_int(body, 0)
                 ftype = get_val_int(body, 1) # 0 = Friend, 1 = Enemy
@@ -3330,13 +3409,15 @@ def client_handler(conn, addr):
                         if ftype == 1:
                             picked_char.setdefault('enemies', {})[str(target_id)] = target_char
                             save_chars(all_accounts_chars)
-                            send_rpc_push(533, encode_sproto([(0, 1)]))
+                            send_rpc_push(533, encode_sproto([(0, build_friend_info_obj(target_char, ftype=6, main_char_id=picked_char['id']))]))
                             send_rpc_push(538, sync_friend_info_rpc(picked_char))
                             print(f"[SOCIAL] Added enemy {target_id} for player {picked_char['id']}")
                         else:
                             target_char.setdefault('friend_applys', {})[str(picked_char['id'])] = picked_char
                             save_chars(all_accounts_chars)
-                            send_rpc_push(533, encode_sproto([(0, 1)]))
+                            send_rpc_push(533, encode_sproto([(0, build_friend_info_obj(target_char, ftype=2))]))
+                            # Send live notification push to target (Tag 536)
+                            send_rpc_push(536, encode_sproto([(0, build_friend_info_obj(picked_char, ftype=2))]))
                             print(f"[SOCIAL] Sent friend request from {picked_char['id']} to {target_id}")
 
             elif msg == 125: # del_friend
@@ -3349,11 +3430,30 @@ def client_handler(conn, addr):
                     else:
                         picked_char.get('friends', {}).pop(s_tid, None)
                     save_chars(all_accounts_chars)
-                    send_rpc_push(535, encode_sproto([(0, 1)]))
+                    send_rpc_push(535, encode_sproto([(0, target_id)]))
                     send_rpc_push(538, sync_friend_info_rpc(picked_char))
                     print(f"[SOCIAL] Deleted enemy/friend {target_id}")
 
-            elif msg == 214: # approve_resverve_friend
+            elif msg == 126: # request_update_friend_useinfo (The Foe / Friends Tab Update)
+                req_type = get_val_int(body, 0, 0)
+                if picked_char:
+                    if req_type == 1: # The Foe / Enemies
+                        enemys_map = {}
+                        for fid, f_data in picked_char.get('enemies', {}).items():
+                            enemys_map[int(fid)] = build_friend_info_obj(f_data, ftype=6, main_char_id=picked_char['id'])
+                        send_rpc_push(534, encode_sproto([(0, enemys_map), (1, 1)])) # Tag 534 ret_request_update_friend_useinfo
+                        print(f"[SOCIAL] Responded Tag 534 for Foe list count={len(enemys_map)}")
+                    else: # Friends
+                        friends_map = {}
+                        for fid, f_data in picked_char.get('friends', {}).items():
+                            friends_map[int(fid)] = build_friend_info_obj(f_data, ftype=0)
+                        send_rpc_push(534, encode_sproto([(0, friends_map), (1, 0)])) # Tag 534 ret_request_update_friend_useinfo
+                        print(f"[SOCIAL] Responded Tag 534 for Friends list count={len(friends_map)}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 158: # approve_resverve_friend (Accept/Refuse Friend Request)
                 target_id = get_val_int(body, 0)
                 is_agree = get_val_int(body, 1) # 1 = Agree, 0 = Refuse
                 if picked_char:
@@ -3368,7 +3468,7 @@ def client_handler(conn, addr):
                         send_rpc_push(538, sync_friend_info_rpc(picked_char))
                         print(f"[SOCIAL] Friend request from {target_id} {'accepted' if is_agree == 1 else 'refused'}")
 
-            elif msg == 217: # req_random_online_character_list
+            elif msg == 159: # req_random_online_character_list
                 if picked_char:
                     rec_list = []
                     for area_dict in all_accounts_chars.values():
@@ -3377,78 +3477,70 @@ def client_handler(conn, addr):
                                 if isinstance(char_list, list):
                                     for c in char_list:
                                         if isinstance(c, dict) and c.get('id') != picked_char['id']:
-                                            rec_list.append(build_friend_info_obj(c, True))
+                                            rec_list.append(build_friend_info_obj(c, ftype=0))
                                             if len(rec_list) >= 5: break
-                    send_rpc_push(517, encode_sproto([(0, rec_list)]))
+                    send_rpc_push(517, encode_sproto([(0, rec_list)])) # Tag 517 ret_random_online_character_list
 
-            elif msg == 280: # mail_operation
-                mail_id = get_val_int(body, 0)
-                operation = get_val_int(body, 1) # 0=Read, 1=Delete, 2=Claim Item, 3=Claim All, 4=Delete All Read
+            elif msg == 160: # search_online_character_by_name
+                search_name = field_text(body, 0)
+                if picked_char and search_name:
+                    res_list = []
+                    for area_dict in all_accounts_chars.values():
+                        if isinstance(area_dict, dict):
+                            for char_list in area_dict.values():
+                                if isinstance(char_list, list):
+                                    for c in char_list:
+                                        if isinstance(c, dict) and search_name.lower() in c.get('name', '').lower():
+                                            res_list.append(build_friend_info_obj(c, ftype=0))
+                    send_rpc_push(518, encode_sproto([(0, res_list)])) # Tag 518 ret_search_online_character_by_name
+
+            elif msg == 324: # update_player_map_info (Revenge Enemy Location Tracker)
+                target_id = get_val_int(body, 0)
+                target_char = None
+                for area_dict in all_accounts_chars.values():
+                    if isinstance(area_dict, dict):
+                        for char_list in area_dict.values():
+                            if isinstance(char_list, list):
+                                for c in char_list:
+                                    if isinstance(c, dict) and c.get('id') == target_id:
+                                        target_char = c
+                                        break
+                if target_char:
+                    m_id = str(target_char.get('map_id', '11'))
+                    m_pos = target_char.get('pos', [29860, 100, -17005, 0])
+                    pos_obj = encode_sproto([
+                        (0, int(m_pos[0])), (1, int(m_pos[1])), (2, int(m_pos[2]))
+                    ])
+                    resp = encode_sproto([
+                        (0, 1),        # state = 1 (online)
+                        (1, m_id),     # mapid
+                        (2, pos_obj)   # pos
+                    ])
+                    print(f"[SOCIAL] Responded MSG 324 for Enemy Revenge target={target_id} map={m_id}")
+                else:
+                    resp = encode_sproto([(0, 0)])
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 321: # gather_other_player (Revenge Enemy Teleport / Warp)
+                target_id = get_val_int(body, 0)
                 if picked_char:
-                    mails = picked_char.setdefault('mails', {})
-                    s_mid = str(mail_id)
-
-                    if operation == 0: # Read Mail
-                        if s_mid in mails:
-                            mails[s_mid]['readTime'] = int(time.time())
-                            if mails[s_mid].get('mailState', 0) == 0:
-                                mails[s_mid]['mailState'] = 1
-                            save_chars(all_accounts_chars)
-                            send_rpc_push(603, build_mail_update_obj(mails[s_mid]))
-                            print(f"[MAIL] Read mail id={mail_id}")
-
-                    elif operation == 1: # Delete Single Mail
-                        if s_mid in mails:
-                            del mails[s_mid]
-                            save_chars(all_accounts_chars)
-                            send_rpc_push(604, encode_sproto([(0, mail_id)])) # mail_delete Tag 604
-                            print(f"[MAIL] Deleted mail id={mail_id}")
-
-                    elif operation == 2: # Claim Mail Attachment
-                        if s_mid in mails and mails[s_mid].get('mailState', 0) != 2:
-                            m_obj = mails[s_mid]
-                            rewards_to_grant = []
-                            for item_id, item_info in m_obj.get('items', {}).items():
-                                amt = item_info.get('count', 1) if isinstance(item_info, dict) else int(item_info)
-                                rewards_to_grant.append((str(item_id), 0, amt))
-
-                            if rewards_to_grant:
-                                grant_item_rewards(picked_char, rewards_to_grant, conn, send_rpc_push)
-                                send_rpc_push(638, encode_sproto([(0, [encode_sproto([(0, r[0]), (1, r[2]), (3, 0)]) for r in rewards_to_grant])]))
-
-                            m_obj['mailState'] = 2
-                            m_obj['readTime'] = int(time.time())
-                            save_chars(all_accounts_chars)
-                            send_rpc_push(603, build_mail_update_obj(m_obj))
-                            print(f"[MAIL] Claimed rewards for mail id={mail_id}")
-
-                    elif operation == 3: # Claim All Mail Attachments
-                        claimed_any = False
-                        all_rewards = []
-                        for m_obj in list(mails.values()):
-                            if m_obj.get('mailState', 0) != 2 and m_obj.get('items'):
-                                for item_id, item_info in m_obj.get('items', {}).items():
-                                    amt = item_info.get('count', 1) if isinstance(item_info, dict) else int(item_info)
-                                    all_rewards.append((str(item_id), 0, amt))
-                                m_obj['mailState'] = 2
-                                m_obj['readTime'] = int(time.time())
-                                claimed_any = True
-                                send_rpc_push(603, build_mail_update_obj(m_obj))
-
-                        if claimed_any:
-                            grant_item_rewards(picked_char, all_rewards, conn, send_rpc_push)
-                            send_rpc_push(638, encode_sproto([(0, [encode_sproto([(0, r[0]), (1, r[2]), (3, 0)]) for r in all_rewards])]))
-                            save_chars(all_accounts_chars)
-                            print(f"[MAIL] Claimed ALL mail rewards for player {picked_char['id']}")
-
-                    elif operation == 4: # Delete All Read Mails
-                        to_del = [m_id for m_id, m_obj in mails.items() if m_obj.get('mailState', 0) in (1, 2)]
-                        for m_id in to_del:
-                            del mails[m_id]
-                            send_rpc_push(604, encode_sproto([(0, int(m_id))]))
-                        save_chars(all_accounts_chars)
-                        print(f"[MAIL] Deleted all read mails count={len(to_del)}")
-
+                    target_char = None
+                    for area_dict in all_accounts_chars.values():
+                        if isinstance(area_dict, dict):
+                            for char_list in area_dict.values():
+                                if isinstance(char_list, list):
+                                    for c in char_list:
+                                        if isinstance(c, dict) and c.get('id') == target_id:
+                                            target_char = c
+                                            break
+                    if target_char:
+                        e_map = str(target_char.get('map_id', '11'))
+                        e_pos = list(target_char.get('pos', [29860, 100, -17005, 0]))
+                        start_map_transition(conn, picked_char, e_map, send_rpc_push, override_pos=e_pos)
+                        print(f"[REVENGE WARP] Player {picked_char['id']} teleported to enemy {target_id} on map {e_map}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
