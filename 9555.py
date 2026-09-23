@@ -1749,12 +1749,49 @@ def sync_inventory_data(picked_char):
     return encode_sproto([(0, items)])
 
 def add_to_inventory(picked_char, item_id, amount):
+    item_id = str(item_id)
     if 'inventory' not in picked_char: picked_char['inventory'] = []
+    found = False
     for item in picked_char['inventory']:
-        if item['id'] == item_id:
+        if str(item['id']) == item_id:
             item['amount'] += amount
-            return
-    picked_char['inventory'].append({'id': item_id, 'amount': amount})
+            found = True
+            break
+    if not found:
+        picked_char['inventory'].append({'id': item_id, 'amount': amount})
+
+    cfg = ITEM_CONFIG.get(item_id, {})
+    itype = cfg.get('type', 0)
+    
+    if itype in (1, 2):
+        ckey = 'fashion_backpack' if itype == 2 else 'equip_backpack'
+        container = picked_char.setdefault(ckey, {})
+        idx = int(time.time() * 1000) % 10000000 + len(container)
+        container[idx] = {
+            'indexId': idx, 'itemId': item_id, 'bindflag': True,
+            'quality': 1, 'level': 1, 'stack': amount, 'parm': [0]*8, 'appraise': 1
+        }
+    elif itype == 22:
+        container = picked_char.setdefault('badge_backpack', {})
+        idx = int(time.time() * 1000) % 10000000 + len(container)
+        container[idx] = {
+            'indexId': idx, 'itemId': item_id, 'bindflag': True,
+            'quality': 1, 'level': 1, 'stack': amount, 'parm': [0]*8, 'appraise': 1
+        }
+    else:
+        container = picked_char.setdefault('item_backpack', {})
+        existing = False
+        for idx, item in container.items():
+            if str(item.get('itemId')) == item_id:
+                item['stack'] = item.get('stack', 1) + amount
+                existing = True
+                break
+        if not existing:
+            idx = int(time.time() * 1000) % 10000000 + len(container)
+            container[idx] = {
+                'indexId': idx, 'itemId': item_id, 'bindflag': True,
+                'quality': 1, 'level': 1, 'stack': amount, 'parm': [0]*8, 'appraise': 1
+            }
 
 def build_mount_info(picked_char):
     """Build the exact mount map consumed by the APK garage handlers.
@@ -1939,7 +1976,10 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None)
         sync_char_attrs_rpc(conn, picked_char)
 
     if inv_changed and send_rpc_push:
-        send_rpc_push(611, sync_inventory_data(picked_char))
+        send_rpc_push(611, sync_item_pack_rpc(picked_char))
+        send_rpc_push(592, sync_backpack_item_rpc(picked_char))
+        send_rpc_push(604, sync_badgepack_item_rpc(picked_char))
+        send_rpc_push(616, sync_fashion_backpack_item_rpc(picked_char))
 
 def give_mission_rewards(picked_char, mid):
     """Resolves rewards by profession and calculates level ups using BaseLvData."""
@@ -2515,14 +2555,17 @@ def client_handler(conn, addr):
                         (0, int(time.time())), (2, 0), (4, 10000), (9, funcs), (12, random.randint(1, 10000)), (13, 1), (14, int(time.time()))
                     ]))
 
-                    # 611: inventory_sync
-                    send_rpc_push(611, sync_inventory_data(picked_char))
+                    # 611: sync_item_pack (Item Backpack)
+                    send_rpc_push(611, sync_item_pack_rpc(picked_char))
 
-                    # 592: sync_common_data
-                    send_rpc_push(592, sync_common_data_rpc(picked_char))
+                    # 592: sync_backpack_item (Equipment Backpack)
+                    send_rpc_push(592, sync_backpack_item_rpc(picked_char))
 
-                    # 616: fashion_sync
-                    send_rpc_push(616, encode_sproto([(0, {})]))
+                    # 604: sync_badgepack_item (Badge Backpack)
+                    send_rpc_push(604, sync_badgepack_item_rpc(picked_char))
+
+                    # 616: sync_fashion_backpack_item (Fashion Backpack)
+                    send_rpc_push(616, sync_fashion_backpack_item_rpc(picked_char))
 
                     # 510: initial stats sync
                     sync_char_attrs_rpc(conn, picked_char)
@@ -3016,6 +3059,54 @@ def client_handler(conn, addr):
                         send_rpc_push(611, sync_inventory_data(picked_char))
                         send_rpc_push(617, encode_sproto([(0, reward_items)])) # ret_open_item_package (Tag 617)
                         print(f"[BAG OPEN BOX] Opened box index={index_id} count={count} cash={reward_cash} exp={reward_exp}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 122: # sort_item
+                if picked_char:
+                    send_rpc_push(611, sync_item_pack_rpc(picked_char))
+                    send_rpc_push(592, sync_backpack_item_rpc(picked_char))
+                    send_rpc_push(604, sync_badgepack_item_rpc(picked_char))
+                    send_rpc_push(616, sync_fashion_backpack_item_rpc(picked_char))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 303: # equip_appraise
+                index_id = get_val_int(body, 0)
+                if picked_char:
+                    ebp = picked_char.setdefault('equip_backpack', {})
+                    if index_id in ebp:
+                        ebp[index_id]['appraise'] = 1
+                        save_chars(all_accounts_chars)
+                        send_update_item_push(send_rpc_push, 1, index_id, ebp[index_id])
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 167: # equip_enhance
+                index_id = get_val_int(body, 0)
+                if picked_char:
+                    ebp = picked_char.setdefault('equip_backpack', {})
+                    epack = picked_char.setdefault('equip_pack', {})
+                    target_item = ebp.get(index_id) or epack.get(index_id)
+                    if target_item:
+                        cost = (target_item.get('level', 1) + 1) * 2000
+                        if picked_char.get('cash', 0) >= cost:
+                            picked_char['cash'] -= cost
+                            target_item['level'] = target_item.get('level', 1) + 1
+                            save_chars(all_accounts_chars)
+                            ctype = 1 if index_id in ebp else 2
+                            send_update_item_push(send_rpc_push, ctype, index_id, target_item)
+                            sync_char_attrs_rpc(conn, picked_char)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 199: # badge_merge
+                if picked_char:
+                    send_rpc_push(604, sync_badgepack_item_rpc(picked_char))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
