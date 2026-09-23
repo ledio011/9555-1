@@ -916,7 +916,7 @@ def get_full_char(c):
                 if encoded:
                     fashion_equip_map[int(item.get('indexId', slot))] = encoded
 
-    download_state = 2 if c.get('download_complete') else 1
+    download_state = 2
     return encode_sproto([
         (0, char_id),
         (1, gen),
