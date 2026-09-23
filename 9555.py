@@ -2334,14 +2334,12 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
         print(f"[MAP ENTER SEND] map_id={target_map_id} scene={scene_name} pos={picked_char['pos']}")
 
-        # TAG 503: enter_map
-        data = encode_sproto([(0, target_map_id), (1, 0), (2, 1)])
-        ph_p = encode_sproto([(0, 503)])
-        pf_p = sproto_pack(ph_p + data)
-        conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
-        print(f"[M1003 DEBUG] TX 503 map_id={target_map_id}")
-        print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
-        print(f"[MAP ENTER SEND] map_id={target_map_id} scene={scene_name} pos={picked_char['pos']}")
+        # TAG 504: main_player_create
+        send_rpc_push(504, encode_sproto([
+            (0, get_full_char(picked_char)),
+            (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
+        ]))
+        print(f"[MAIN PLAYER CREATE SEND] map_id={target_map_id}")
 
         # BOSS SPAWN for Dominance Map 502
         if target_map_id == "502":
@@ -2645,7 +2643,11 @@ def client_handler(conn, addr):
                     for m_id, m_data in picked_char.get('mails', {}).items():
                         send_rpc_push(603, build_mail_update_obj(m_data))
 
-                    # TAG 503: enter_map
+                    # Height Y safety check for spawn pos
+                    if picked_char.get('pos') and len(picked_char['pos']) >= 3 and picked_char['pos'][1] <= 0:
+                        picked_char['pos'][1] = 100
+
+                    # TAG 503: enter_map & TAG 504: main_player_create
                     mid = str(picked_char.get('map_id', '11'))
                     scene_name = "Unknown"
                     if mid in MAP_CONFIG:
@@ -2663,6 +2665,13 @@ def client_handler(conn, addr):
                         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
                         print(f"[MAP ENTER SEND] map_id={mid} scene={scene_name} pos={picked_char['pos']}")
 
+                        # TAG 504: main_player_create
+                        send_rpc_push(504, encode_sproto([
+                            (0, get_full_char(picked_char)),
+                            (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
+                        ]))
+                        print(f"[MAIN PLAYER CREATE SEND] map_id={mid}")
+
                     except Exception:
                         print("[!] FAILED TO SEND INITIAL MAP ENTER")
                         traceback.print_exc()
@@ -2673,17 +2682,10 @@ def client_handler(conn, addr):
                     mid = str(picked_char.get('map_id', '11'))
                     print(f"[MAP READY RECEIVED] map_id={mid}")
 
-                    # 1. TAG 654: start_enter_game (Close loading box & enable HUD)
+                    # 1. TAG 654: start_enter_game (Close loading box & enable HUD controls)
                     send_rpc_push(654, encode_sproto([(0, 1)]))
 
-                    # 2. TAG 504: main_player_create
-                    send_rpc_push(504, encode_sproto([
-                        (0, get_full_char(picked_char)),
-                        (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
-                    ]))
-                    print(f"[MAIN PLAYER CREATE SEND] map_id={mid}")
-
-                    # 3. TAG 505 / AOI: spawn map NPCs
+                    # 2. TAG 505 / AOI: spawn map NPCs
                     spawn_map_npcs(conn, mid, picked_char)
 
                     if mid in ["223", "224", "225", "226", "227", "228", "229"]:
