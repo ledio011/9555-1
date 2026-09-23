@@ -2315,6 +2315,8 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
                 print(f"[TELEPORT] Spawn fix map={target_map_id} pos={landing_pos}")
 
     if landing_pos:
+        if landing_pos[1] <= 0:
+            landing_pos[1] = 100
         picked_char['pos'] = landing_pos
     else:
         print(f"[MAP CONFIG MISSING] map_id={target_map_id}")
