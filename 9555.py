@@ -3487,10 +3487,28 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg in [118, 218, 145, 225, 258, 261, 278, 296, 299, 319]:
+            elif msg == 218: # request_update_friend_useinfo (The Foe / Friends update)
+                req_type = get_val_int(body, 0, 0)
+                if picked_char:
+                    if req_type == 1: # The Foe / Enemies
+                        enemys_map = {}
+                        for fid, f_data in picked_char.get('enemies', {}).items():
+                            enemys_map[int(fid)] = build_friend_info_obj(f_data, True)
+                        send_rpc_push(602, encode_sproto([(0, enemys_map), (1, 1)]))
+                        print(f"[SOCIAL] Responded Tag 602 for Foe list count={len(enemys_map)}")
+                    else: # Friends
+                        friends_map = {}
+                        for fid, f_data in picked_char.get('friends', {}).items():
+                            friends_map[int(fid)] = build_friend_info_obj(f_data, True)
+                        send_rpc_push(602, encode_sproto([(0, friends_map), (1, 0)]))
+                        print(f"[SOCIAL] Responded Tag 602 for Friends list count={len(friends_map)}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg in [118, 145, 225, 258, 261, 278, 296, 299, 319]:
                 resp_data = encode_sproto([])
                 if msg == 118: resp_data = encode_sproto([(0, f"User_{random.randint(100,999)}")])
-                elif msg == 218: resp_data = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp_data)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if msg == 145 and picked_char:
