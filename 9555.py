@@ -2516,7 +2516,7 @@ def client_handler(conn, addr):
                     ]))
 
                     # 611: inventory_sync
-                    send_rpc_push(611, sync_inventory_data(picked_char))*
+                    send_rpc_push(611, sync_inventory_data(picked_char))
 
                     # 592: sync_common_data
                     send_rpc_push(592, sync_common_data_rpc(picked_char))
