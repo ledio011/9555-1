@@ -848,35 +848,37 @@ def get_char_ov(c, sort_index=None):
     ])
 
 def get_full_char(c):
+    char_id = int(c.get('id', 0))
     gen = get_general(c)
     stats = get_character_stats(c)
 
-    hp_cur = c.get('hp', stats['hp_max'])
+    hp_cur = int(c.get('hp', stats['hp_max']))
 
     attr_oth = encode_sproto([
         (0, hp_cur),
-        (1, stats['exp']),
-        (2, stats['lv']),
-        (3, stats['power']),
+        (1, int(stats['exp'])),
+        (2, int(stats['lv'])),
+        (3, int(stats['power'])),
         (15, 1)
     ])
 
-    prop = encode_sproto([(13, c.get('cash', 1000)), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
+    prop = encode_sproto([(13, int(c.get('cash', 1000))), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
     pos = c.get('pos', [29860, 100, -17005, 0])
-    mv = get_movement(pos[0], pos[1], pos[2], pos[3])
+    if len(pos) >= 3 and pos[1] <= 0:
+        pos[1] = 100
+    mv = get_movement(int(pos[0]), int(pos[1]), int(pos[2]), int(pos[3]) if len(pos) > 3 else 0)
 
-    attr_run = encode_sproto([(0, stats['hp_max']), (2, stats['atk']), (3, stats['def'])])
-    # attr_all tags (attribute.cs): 0:max_hp, 2:atk, 3:def, 4:hit, 5:eva, 6:cri, 7:res, 8:exd, 9:exr, 10:crd, 11:crr, 12:defa, 13:mov, 17:dgea, 18:resa, 19:hita, 20:cria
+    attr_run = encode_sproto([(0, int(stats['hp_max'])), (2, int(stats['atk'])), (3, int(stats['def']))])
     attr_all_data = [
-        (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
-        (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
-        (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
-        (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
+        (0, int(stats['hp_max'])), (2, int(stats['atk'])), (3, int(stats['def'])),
+        (4, int(stats['hit'])), (5, int(stats['eva'])), (6, int(stats['cri'])), (7, int(stats['res'])),
+        (8, int(stats['exd'])), (9, int(stats['exr'])), (10, int(stats['crd'])), (11, int(stats['crr'])),
+        (12, int(stats['defa'])), (13, 500), (17, int(stats['dgea'])), (18, int(stats['resa'])), (19, int(stats['hita'])), (20, int(stats['cria']))
     ]
     attr_all = encode_sproto(attr_all_data)
     run = encode_sproto([(6, attr_run), (7, attr_all)])
 
-    char_level = stats['lv']
+    char_level = int(stats['lv'])
     skill_levels = c.get('skill_levels', {})
     skills_map = build_skills_map(c.get('prof', 0), char_level, skill_levels)
     
@@ -898,11 +900,11 @@ def get_full_char(c):
     badge_equip_map = {}
     bpack = c.get('badge_equip_pack', {})
     if bpack:
-        for pos, item in bpack.items():
+        for pos_idx, item in bpack.items():
             if item and isinstance(item, dict):
                 encoded = encode_gameitem_sproto(item)
                 if encoded:
-                    badge_equip_map[int(item.get('indexId', pos))] = encoded
+                    badge_equip_map[int(item.get('indexId', pos_idx))] = encoded
 
     # Tag 11: fashion_equip (Dictionary<long, gameitem>)
     fashion_equip_map = {}
@@ -914,12 +916,9 @@ def get_full_char(c):
                 if encoded:
                     fashion_equip_map[int(item.get('indexId', slot))] = encoded
 
-    # character.download: the APK treats 2 as completed.  Sending 1 again on
-    # reconnect would reopen the optional download/reward UI forever, even
-    # though MSG 270 was already persisted for this character.
     download_state = 2 if c.get('download_complete') else 1
     return encode_sproto([
-        (0, c['id']),
+        (0, char_id),
         (1, gen),
         (2, attr_oth),
         (5, prop),
