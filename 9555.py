@@ -3479,7 +3479,7 @@ def client_handler(conn, addr):
                                         if isinstance(c, dict) and c.get('id') != picked_char['id']:
                                             rec_list.append(build_friend_info_obj(c, ftype=0))
                                             if len(rec_list) >= 5: break
-                    send_rpc_push(517, encode_sproto([(0, rec_list)])) # Tag 517 ret_random_online_character_list
+                    send_rpc_push(570, encode_sproto([(0, rec_list)])) # Tag 570 ret_random_online_character_list
 
             elif msg == 160: # search_online_character_by_name
                 search_name = field_text(body, 0)
@@ -3492,7 +3492,7 @@ def client_handler(conn, addr):
                                     for c in char_list:
                                         if isinstance(c, dict) and search_name.lower() in c.get('name', '').lower():
                                             res_list.append(build_friend_info_obj(c, ftype=0))
-                    send_rpc_push(518, encode_sproto([(0, res_list)])) # Tag 518 ret_search_online_character_by_name
+                    send_rpc_push(571, encode_sproto([(0, res_list)])) # Tag 571 ret_search_online_character_by_name
 
             elif msg == 324: # update_player_map_info (Revenge Enemy Location Tracker)
                 target_id = get_val_int(body, 0)
