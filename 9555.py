@@ -2168,7 +2168,7 @@ def init_character_fields(c):
         'pos': [29860, 100, -17005, 0],
         'map_id': "11",
         'tutorial': 0,
-        'download_complete': False,
+        'download_complete': True,
         'mounts': {},
         'equipped_mount_id': '',
         'mount_riding': False,
