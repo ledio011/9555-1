@@ -3119,9 +3119,10 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 121: # sell_item
+            elif msg == 129: # sell_item
                 index_id = get_val_int(body, 0)
                 item_count = get_val_int(body, 1, 1)
+                item_type = get_val_int(body, 2, 0)
                 if picked_char:
                     target_container = None
                     target_key = None
@@ -3145,6 +3146,7 @@ def client_handler(conn, addr):
                     
                     if item_found:
                         item_id = str(item_found.get('itemId', ''))
+                        item_cfg = ITEM_CONFIG.get(item_id, {})
                         sold_cnt = min(item_count, item_found.get('stack', 1))
                         earned_cash = sold_cnt * 100
                         if target_container and target_key:
@@ -3168,7 +3170,14 @@ def client_handler(conn, addr):
                         sync_char_attrs_rpc(conn, picked_char)
                         send_rpc_push(611, sync_item_pack_rpc(picked_char))
                         send_rpc_push(592, sync_backpack_item_rpc(picked_char))
-                        print(f"[BAG SELL] Sold item {item_id} count={sold_cnt} earned={earned_cash}")
+                        print(f"==================================================")
+                        print(f"[BAG UI ACTION] SELL ITEM (MSG 129)")
+                        print(f"  • Sold Item ID      : {item_id}")
+                        print(f"  • Sold Count        : {sold_cnt}")
+                        print(f"  • Cash Earned       : +{earned_cash} Cash")
+                        print(f"  • Total Cash Now    : {picked_char.get('cash', 0)}")
+                        print(f"  • Container Code    : Code {ctype}")
+                        print(f"==================================================")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3352,12 +3361,26 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 129: # select_potion
+            elif msg == 185: # change_potion
                 p_idx = get_val_int(body, 0)
                 if picked_char:
                     picked_char['potion_index'] = p_idx
                     save_chars(all_accounts_chars)
+                    print(f"==================================================")
                     print(f"[POTION SELECT] Selected potion index={p_idx}")
+                    print(f"==================================================")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 240: # change_item_state
+                index_id = get_val_int(body, 0)
+                state_type = get_val_int(body, 1)
+                print(f"==================================================")
+                print(f"[BAG UI ACTION] CHANGE ITEM STATE (MSG 240)")
+                print(f"  • Item Index        : {index_id}")
+                print(f"  • New State Type    : {state_type}")
+                print(f"==================================================")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
