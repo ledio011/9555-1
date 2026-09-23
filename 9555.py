@@ -919,13 +919,25 @@ def get_full_char(c):
 def sync_common_data_rpc(picked_char):
     """Build Sproto Tag 614 (sync_common_data) with tutorial function state dic."""
     func_info_map = {}
-    if picked_char and picked_char.get('tutorial', 0) == 1:
-        for fid in range(1, 100):
-            func_info_map[str(fid)] = encode_sproto([(0, str(fid)), (1, 1)])
-    elif picked_char:
+    if picked_char:
+        unlock_all = picked_char.get('unlock_all_funcs', False)
         saved_func = picked_char.get('func_info', {})
-        for fid, fstate in saved_func.items():
-            func_info_map[str(fid)] = encode_sproto([(0, str(fid)), (1, int(fstate))])
+        
+        all_func_ids = [
+            "100", "101", "102", "105", "106", "3001", "3002", "3003", "3004", "3005",
+            "3006", "3007", "3008", "3009", "3010", "3012", "3013", "3015", "3016", "3017",
+            "3018", "3019", "3020", "4001", "4002", "4003", "4004", "4011", "4012", "4013",
+            "4014", "4015", "4016", "4021", "4022", "4023", "4024", "4025", "4026", "4027",
+            "4031", "4041", "4043", "4051", "4052", "4053", "4054", "4055", "4061", "4062",
+            "4063", "4064", "4071", "4072", "4073", "4074", "4075", "4076", "4077", "4078",
+            "4080", "4081", "4084", "4085", "4086", "4087", "4088"
+        ]
+        
+        for fid in all_func_ids:
+            if unlock_all or saved_func.get(fid) == 1:
+                func_info_map[fid] = encode_sproto([(0, fid), (1, 1)])
+            elif fid in saved_func:
+                func_info_map[fid] = encode_sproto([(0, fid), (1, int(saved_func[fid]))])
 
     sync_fields = [
         (0, int(time.time())),
