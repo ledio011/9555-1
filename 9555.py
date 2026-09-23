@@ -3391,6 +3391,40 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif msg == 120: # chat
+                tell_id = get_val_int(body, 0)
+                tell_name = field_text(body, 1)
+                chat_info = field_text(body, 2)
+                chattype = get_val_int(body, 3, 0)
+                linktype = get_val_int(body, 4, 0)
+                intdata = body.get(5, [])
+                stringdata = body.get(6, [])
+
+                if picked_char:
+                    stats = get_character_stats(picked_char)
+                    chat_item_fields = [
+                        (0, picked_char['id']),
+                        (1, picked_char.get('name', 'Hero')),
+                        (2, tell_id),
+                        (3, tell_name),
+                        (4, chat_info),
+                        (5, chattype),
+                        (6, linktype),
+                        (9, picked_char.get('prof', 0)),
+                        (10, picked_char.get('level', 1)),
+                        (11, stats['power'])
+                    ]
+                    if intdata: chat_item_fields.append((7, intdata))
+                    if stringdata: chat_item_fields.append((8, stringdata))
+
+                    chat_item_obj = encode_sproto(chat_item_fields)
+                    send_rpc_push(528, encode_sproto([(0, [chat_item_obj])]))
+                    print(f"[CHAT] char={picked_char['id']} type={chattype} info={chat_info}")
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
             elif msg == 124: # add_friend
                 target_id = get_val_int(body, 0)
                 ftype = get_val_int(body, 1) # 0 = Friend, 1 = Enemy
@@ -3405,20 +3439,32 @@ def client_handler(conn, addr):
                                             target_char = c
                                             break
 
-                    if target_char:
-                        if ftype == 1:
-                            picked_char.setdefault('enemies', {})[str(target_id)] = target_char
+                    if target_char and target_char.get('id') != picked_char['id']:
+                        summary_sender = {
+                            'id': picked_char['id'],
+                            'name': picked_char.get('name', 'Hero'),
+                            'prof': picked_char.get('prof', 0),
+                            'level': picked_char.get('level', 1)
+                        }
+                        summary_target = {
+                            'id': target_char['id'],
+                            'name': target_char.get('name', 'Hero'),
+                            'prof': target_char.get('prof', 0),
+                            'level': target_char.get('level', 1)
+                        }
+                        if ftype == 1: # Enemy
+                            picked_char.setdefault('enemies', {})[str(target_id)] = summary_target
                             save_chars(all_accounts_chars)
-                            send_rpc_push(533, encode_sproto([(0, build_friend_info_obj(target_char, ftype=6, main_char_id=picked_char['id']))]))
                             send_rpc_push(538, sync_friend_info_rpc(picked_char))
                             print(f"[SOCIAL] Added enemy {target_id} for player {picked_char['id']}")
-                        else:
-                            target_char.setdefault('friend_applys', {})[str(picked_char['id'])] = picked_char
+                        else: # Friend Request
+                            target_char.setdefault('friend_applys', {})[str(picked_char['id'])] = summary_sender
                             save_chars(all_accounts_chars)
-                            send_rpc_push(533, encode_sproto([(0, build_friend_info_obj(target_char, ftype=2))]))
-                            # Send live notification push to target (Tag 536)
-                            send_rpc_push(536, encode_sproto([(0, build_friend_info_obj(picked_char, ftype=2))]))
-                            print(f"[SOCIAL] Sent friend request from {picked_char['id']} to {target_id}")
+                            print(f"[SOCIAL] Sent friend request from {picked_char['id']} to target {target_id}")
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 125: # del_friend
                 target_id = get_val_int(body, 0)
@@ -3460,13 +3506,41 @@ def client_handler(conn, addr):
                     s_tid = str(target_id)
                     apply_dict = picked_char.get('friend_applys', {})
                     if s_tid in apply_dict:
-                        applicant = apply_dict.pop(s_tid)
+                        applicant_data = apply_dict.pop(s_tid)
                         if is_agree == 1:
-                            picked_char.setdefault('friends', {})[s_tid] = applicant
-                            applicant.setdefault('friends', {})[str(picked_char['id'])] = picked_char
+                            target_char = None
+                            for area_dict in all_accounts_chars.values():
+                                if isinstance(area_dict, dict):
+                                    for char_list in area_dict.values():
+                                        if isinstance(char_list, list):
+                                            for c in char_list:
+                                                if isinstance(c, dict) and c.get('id') == target_id:
+                                                    target_char = c
+                                                    break
+
+                            summary_picked = {
+                                'id': picked_char['id'],
+                                'name': picked_char.get('name', 'Hero'),
+                                'prof': picked_char.get('prof', 0),
+                                'level': picked_char.get('level', 1)
+                            }
+                            summary_target = {
+                                'id': target_id,
+                                'name': applicant_data.get('name', 'Hero'),
+                                'prof': applicant_data.get('prof', 0),
+                                'level': applicant_data.get('level', 1)
+                            }
+                            picked_char.setdefault('friends', {})[s_tid] = summary_target
+                            if target_char:
+                                target_char.setdefault('friends', {})[str(picked_char['id'])] = summary_picked
+
                         save_chars(all_accounts_chars)
                         send_rpc_push(538, sync_friend_info_rpc(picked_char))
                         print(f"[SOCIAL] Friend request from {target_id} {'accepted' if is_agree == 1 else 'refused'}")
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 159: # req_random_online_character_list
                 if picked_char:
