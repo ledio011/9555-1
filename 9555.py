@@ -3250,103 +3250,104 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 225: # request_daily_active
-                send_rpc_push(619, encode_sproto([]))
+                send_rpc_push(619, encode_sproto([(0, 0), (1, 0), (2, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 319: # request_daily_mission
-                send_rpc_push(688, encode_sproto([]))
+                send_rpc_push(688, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 295: # request_sign_30_day_info
-                send_rpc_push(668, encode_sproto([]))
+                send_rpc_push(668, encode_sproto([(0, 1), (1, 0)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 288: # request_sign_week_info
-                send_rpc_push(661, encode_sproto([]))
+                send_rpc_push(661, encode_sproto([(0, 1), (1, 0)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 210: # request_first_buy
-                send_rpc_push(582, encode_sproto([]))
+                send_rpc_push(582, encode_sproto([(0, 0)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 202: # request_daily_buy
-                send_rpc_push(575, encode_sproto([]))
+                send_rpc_push(575, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 200: # request_tower_copy_info
-                send_rpc_push(573, encode_sproto([]))
+                send_rpc_push(573, encode_sproto([(0, 1), (1, 1)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 195: # request_slot_info
-                send_rpc_push(568, encode_sproto([]))
+                s_info = encode_sproto([(1, 0), (2, 10)])
+                send_rpc_push(568, encode_sproto([(0, s_info), (1, {}), (2, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 242: # request_activity_info
-                send_rpc_push(633, encode_sproto([]))
+                send_rpc_push(633, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 252: # request_rank_pvp_data
-                send_rpc_push(643, encode_sproto([]))
+                send_rpc_push(643, encode_sproto([(0, 0), (1, 0)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 257: # request_retrieve_info
-                send_rpc_push(648, encode_sproto([]))
+                send_rpc_push(648, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 261: # request_wild_boss_info
-                send_rpc_push(652, encode_sproto([]))
+                send_rpc_push(652, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 296: # request_30_day_info
-                send_rpc_push(669, encode_sproto([]))
+                send_rpc_push(669, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 278: # request_invest_pack
-                send_rpc_push(662, encode_sproto([]))
+                send_rpc_push(662, encode_sproto([(0, 0)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 258: # request_level_pack
-                send_rpc_push(649, encode_sproto([]))
+                send_rpc_push(649, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 253: # request_big_pack
-                send_rpc_push(644, encode_sproto([]))
+                send_rpc_push(644, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 299: # request_special_big_pack
-                send_rpc_push(671, encode_sproto([]))
+                send_rpc_push(671, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
