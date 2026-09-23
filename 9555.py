@@ -376,7 +376,8 @@ try:
                 if len(parts) > 11 and parts[0] == '*' and parts[1]:
                     ITEM_CONFIG[parts[1]] = {
                         'type': int(parts[7]) if parts[7].isdigit() else 0,
-                        'function': int(parts[11]) if parts[11].isdigit() else 0
+                        'subtype': int(parts[9]) if len(parts) > 9 and parts[9].isdigit() else 0,
+                        'function': int(parts[13]) if len(parts) > 13 and parts[13].isdigit() else 0
                     }
         print(f"[ITEM CONFIG LOADED] items={len(ITEM_CONFIG)}")
 except: traceback.print_exc()
@@ -878,9 +879,40 @@ def get_full_char(c):
     char_level = stats['lv']
     skill_levels = c.get('skill_levels', {})
     skills_map = build_skills_map(c.get('prof', 0), char_level, skill_levels)
-    wid = "10001" if c.get('prof', 0) == 0 else "20001" if c.get('prof', 0) == 1 else "30001"
-    w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
-    equip_map = {5: w1}
+    
+    # Tag 9: equip (Dictionary<long, gameitem>)
+    equip_map = {}
+    epack = c.get('equip_pack', {})
+    if epack:
+        for slot, item in epack.items():
+            if item and isinstance(item, dict):
+                encoded = encode_gameitem_sproto(item)
+                if encoded:
+                    equip_map[int(item.get('indexId', slot))] = encoded
+    if not equip_map:
+        wid = "10001" if c.get('prof', 0) == 0 else "20001" if c.get('prof', 0) == 1 else "30001"
+        w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (4, 1), (5, 1), (6, [0]*8), (7, 1)])
+        equip_map = {5: w1}
+
+    # Tag 10: badge_equip (Dictionary<long, gameitem>)
+    badge_equip_map = {}
+    bpack = c.get('badge_equip_pack', {})
+    if bpack:
+        for pos, item in bpack.items():
+            if item and isinstance(item, dict):
+                encoded = encode_gameitem_sproto(item)
+                if encoded:
+                    badge_equip_map[int(item.get('indexId', pos))] = encoded
+
+    # Tag 11: fashion_equip (Dictionary<long, gameitem>)
+    fashion_equip_map = {}
+    fpack = c.get('fashion_equip_pack', {})
+    if fpack:
+        for slot, item in fpack.items():
+            if item and isinstance(item, dict):
+                encoded = encode_gameitem_sproto(item)
+                if encoded:
+                    fashion_equip_map[int(item.get('indexId', slot))] = encoded
 
     # character.download: the APK treats 2 as completed.  Sending 1 again on
     # reconnect would reopen the optional download/reward UI forever, even
@@ -895,6 +927,8 @@ def get_full_char(c):
         (7, mv),
         (8, skills_map),
         (9, equip_map),
+        (10, badge_equip_map),
+        (11, fashion_equip_map),
         (12, 0),
         (13, run),
         (15, download_state)
@@ -924,6 +958,11 @@ def sync_common_data_rpc(picked_char):
         (9, 0)
     ]
     return encode_sproto(sync_fields)
+
+def get_equip_slot_index(subtype):
+    """Map ItemData.SubType (0=WEAPON, 1=HEAD, 2=BODY, 3=LEG, 4=BELT, 5=NECKLACE) to container slot index."""
+    m = {0: 5, 1: 0, 2: 1, 3: 3, 4: 2, 5: 4}
+    return m.get(int(subtype), 5)
 
 def encode_gameitem_sproto(item):
     """Encode gameitem object for Sproto serialization."""
@@ -2186,6 +2225,29 @@ def init_character_fields(c):
     for k, v in fields.items():
         if k not in c: c[k] = v
 
+    epack = c.setdefault('equip_pack', {})
+    prof_str = str(c.get('prof', 0))
+    starter_set = {
+        0: {"0": "10002", "1": "20002", "2": "30002"}.get(prof_str, "10002"),
+        1: {"0": "10003", "1": "20003", "2": "30003"}.get(prof_str, "10003"),
+        2: {"0": "10005", "1": "20005", "2": "30005"}.get(prof_str, "10005"),
+        3: {"0": "10004", "1": "20004", "2": "30004"}.get(prof_str, "10004"),
+        4: {"0": "10006", "1": "20006", "2": "30006"}.get(prof_str, "10006"),
+        5: {"0": "10001", "1": "20001", "2": "30001"}.get(prof_str, "10001"),
+    }
+    for s_idx, s_item_id in starter_set.items():
+        if s_idx not in epack or not epack[s_idx]:
+            epack[s_idx] = {
+                'indexId': s_idx,
+                'itemId': s_item_id,
+                'bindflag': True,
+                'quality': 1,
+                'level': 1,
+                'stack': 1,
+                'parm': [0]*8,
+                'appraise': 1
+            }
+
     # Add System Welcome Mail for new characters
     if not c.get('mails'):
         now = int(time.time())
@@ -2965,29 +3027,39 @@ def client_handler(conn, addr):
             elif msg == 116: # equip_item
                 index_id = get_val_int(body, 0)
                 if picked_char:
-                    inventory = picked_char.get('inventory', [])
-                    item_index = index_id - 10000
-                    if 0 <= item_index < len(inventory):
-                        item = inventory[item_index]
-                        item_id = str(item.get('id', ''))
+                    ebp = picked_char.setdefault('equip_backpack', {})
+                    epack = picked_char.setdefault('equip_pack', {})
+                    item = None
+                    if index_id in ebp:
+                        item = ebp.pop(index_id)
+                    else:
+                        inventory = picked_char.get('inventory', [])
+                        item_index = index_id - 10000
+                        if 0 <= item_index < len(inventory):
+                            raw = inventory.pop(item_index)
+                            item = {
+                                'indexId': index_id, 'itemId': str(raw['id']),
+                                'bindflag': True, 'quality': 1, 'level': 1, 'stack': 1, 'parm': [0]*8, 'appraise': 1
+                            }
+                    if item:
+                        item_id = str(item['itemId'])
                         item_cfg = ITEM_CONFIG.get(item_id, {})
-                        slot = item_cfg.get('function', 5)
-                        epack = picked_char.setdefault('equip_pack', {})
-                        epack[slot] = {
-                            'indexId': slot,
-                            'itemId': item_id,
-                            'bindflag': True,
-                            'quality': 1,
-                            'level': 1,
-                            'stack': 1,
-                            'parm': [0]*8,
-                            'appraise': 1
-                        }
-                        item['amount'] -= 1
-                        if item['amount'] < 1:
-                            inventory.pop(item_index)
+                        subtype = item_cfg.get('subtype', 0)
+                        slot = get_equip_slot_index(subtype)
+                        old_item = epack.get(slot)
+                        item['indexId'] = slot
+                        epack[slot] = item
+                        if old_item:
+                            old_idx = int(time.time() * 1000) % 10000000 + len(ebp)
+                            old_item['indexId'] = old_idx
+                            ebp[old_idx] = old_item
+                            send_update_item_push(send_rpc_push, 1, old_idx, old_item)
+                        else:
+                            send_update_item_push(send_rpc_push, 1, index_id, None)
+                        send_update_item_push(send_rpc_push, 2, slot, item)
                         save_chars(all_accounts_chars)
-                        send_rpc_push(611, sync_inventory_data(picked_char))
+                        send_rpc_push(592, sync_backpack_item_rpc(picked_char))
+                        send_rpc_push(611, sync_item_pack_rpc(picked_char))
                         sync_char_attrs_rpc(conn, picked_char)
                         sync_main_player_visual(picked_char, send_rpc_push)
                         print(f"[BAG EQUIP] Equipped item {item_id} into slot {slot}")
