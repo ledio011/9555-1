@@ -945,7 +945,7 @@ def sync_dance_state_rpc(picked_char=None):
     ])
 
 def calculate_dance_reward(char_level, dance_id="10001"):
-    """Calculates verified per-tick EXP reward from BaseLvData with ±5% variance."""
+    """Calculates verified per-second EXP reward from BaseLvData with ±5% variance."""
     try:
         char_level = max(1, min(int(char_level), 80))
     except (TypeError, ValueError):
@@ -954,22 +954,34 @@ def calculate_dance_reward(char_level, dance_id="10001"):
     req_data = LEVEL_DATA.get(char_level, LEVEL_DATA.get(1, {'exp': 400}))
     req_exp = req_data.get('exp', 400)
 
-    base_exp = max(2, int(req_exp * 0.005))
+    # Base EXP per 10s tick = 0.5% of req_exp; per second = (0.5% * req_exp) / 10
+    base_exp = max(1, int((req_exp * 0.005) / 10.0))
     multiplier = 2.0 if str(dance_id) == "10002" else 1.0
     variance = random.randint(95, 105) / 100.0
 
     return max(1, int(base_exp * multiplier * variance))
 
 def start_dance_session(conn, send_rpc_push, picked_char, dance_id="10001"):
-    """Starts continuous 10-second periodic dance EXP reward ticks."""
+    """Starts continuous 1.0-second periodic dance EXP reward ticks and 30-minute auto-stop."""
     if not picked_char:
         return
 
     picked_char['is_dancing'] = True
-    picked_char['dance_id'] = dance_id
+    picked_char['dance_id'] = str(dance_id)
+    picked_char['dance_start_time'] = int(time.time())
 
     def run_dance_ticks():
         if not picked_char or not picked_char.get('is_dancing'):
+            return
+
+        # Check 30-minute duration limit (1800 seconds)
+        elapsed = int(time.time()) - picked_char.get('dance_start_time', int(time.time()))
+        if elapsed >= 1800:
+            picked_char['is_dancing'] = False
+            social_dance = encode_sproto([(0, picked_char['id']), (1, "")])
+            send_rpc_push(657, encode_sproto([(0, social_dance)]))
+            sync_char_attrs_rpc(conn, picked_char)
+            print(f"[DANCE] Character {picked_char['id']} 30-minute dance session completed!")
             return
 
         char_lv = picked_char.get('level', 1)
@@ -981,11 +993,11 @@ def start_dance_session(conn, send_rpc_push, picked_char, dance_id="10001"):
         print(f"[DANCE TICK] Granted +{exp_reward} EXP to character {picked_char['id']} (did={cur_did})")
 
         if picked_char.get('is_dancing'):
-            timer = threading.Timer(10.0, run_dance_ticks)
+            timer = threading.Timer(1.0, run_dance_ticks)
             timer.daemon = True
             timer.start()
 
-    timer = threading.Timer(10.0, run_dance_ticks)
+    timer = threading.Timer(1.0, run_dance_ticks)
     timer.daemon = True
     timer.start()
 
@@ -994,9 +1006,13 @@ def sync_char_attrs_rpc(conn, picked_char):
     stats = get_character_stats(picked_char)
     hp_cur = picked_char.get('hp', stats['hp_max'])
 
+    dance_state = 1 if picked_char.get('is_dancing') else 0
+    dance_id = str(picked_char.get('dance_id', '10001')) if picked_char.get('is_dancing') else ''
+
     # attribute_other (Tag 1 in character_aoi_attribute)
     attr_oth = encode_sproto([
-        (0, hp_cur), (1, stats['exp']), (2, stats['lv']), (3, stats['power']), (15, 1)
+        (0, hp_cur), (1, stats['exp']), (2, stats['lv']), (3, stats['power']), (15, 1),
+        (17, dance_state), (18, dance_id)
     ])
 
     # attribute (Tag 2 in character_aoi_attribute)
@@ -3116,7 +3132,8 @@ def client_handler(conn, addr):
                 # Return map of unlocked dance moves (matches DanceData.csv IDs 10001 & 10002)
                 now = int(time.time())
                 d1 = encode_sproto([(0, "10001"), (1, True), (2, 0), (3, now + 86400)])
-                d2 = encode_sproto([(0, "10002"), (1, True), (2, 0), (3, now + 86400)])
+                is_m_unlocked = picked_char.get('unlocked_dances', {}).get('10002', False) if picked_char else False
+                d2 = encode_sproto([(0, "10002"), (1, is_m_unlocked), (2, 0), (3, now + 86400 if is_m_unlocked else 0)])
                 dance_map = {
                     "10001": d1,
                     "10002": d2
@@ -3131,13 +3148,33 @@ def client_handler(conn, addr):
                 did = field_text(body, 0, "10001")
                 if not did or did == "None":
                     did = "10001"
+
                 now = int(time.time())
+                if picked_char and did == "10002":
+                    unlocked_map = picked_char.setdefault('unlocked_dances', {})
+                    if not unlocked_map.get('10002'):
+                        cost = 500
+                        p_gold = picked_char.get('gold', 0)
+                        p_cash = picked_char.get('cash', 0)
+                        if p_gold >= cost:
+                            picked_char['gold'] -= cost
+                            unlocked_map['10002'] = True
+                            save_chars(all_accounts_chars)
+                            print(f"[DANCE BUY] Player {picked_char['id']} purchased Moonwalk with 500 Gold!")
+                        elif p_cash >= cost:
+                            picked_char['cash'] -= cost
+                            unlocked_map['10002'] = True
+                            save_chars(all_accounts_chars)
+                            print(f"[DANCE BUY] Player {picked_char['id']} purchased Moonwalk with 500 Cash!")
+
                 d1 = encode_sproto([(0, "10001"), (1, True), (2, 0), (3, now + 86400)])
-                d2 = encode_sproto([(0, "10002"), (1, True), (2, 0), (3, now + 86400)])
+                is_m_unlocked = picked_char.get('unlocked_dances', {}).get('10002', False) if picked_char else False
+                d2 = encode_sproto([(0, "10002"), (1, is_m_unlocked), (2, 0), (3, now + 86400 if is_m_unlocked else 0)])
                 dance_map = {
                     "10001": d1,
                     "10002": d2
                 }
+
                 # start_participate_dance (TAG 624): curUse(0), dance_info(1)
                 send_rpc_push(624, encode_sproto([(0, did), (1, dance_map)]))
                 if picked_char:
@@ -3149,7 +3186,7 @@ def client_handler(conn, addr):
                     social_dance = encode_sproto([(0, picked_char['id']), (1, str(did))])
                     send_rpc_push(657, encode_sproto([(0, social_dance)]))
 
-                    # Start continuous 10-second periodic dance EXP reward ticks
+                    # Start continuous 1.0-second periodic dance EXP reward ticks
                     start_dance_session(conn, send_rpc_push, picked_char, did)
 
                 if session is not None:
