@@ -2334,15 +2334,14 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
         print(f"[MAP ENTER SEND] map_id={target_map_id} scene={scene_name} pos={picked_char['pos']}")
 
-        # TAG 504: main_player_create
-        send_rpc_push(504, encode_sproto([
-            (0, get_full_char(picked_char)),
-            (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
-        ]))
-        print(f"[MAIN PLAYER CREATE SEND] map_id={target_map_id}")
-
-        # TAG 505: aoi_add (NPCs)
-        spawn_map_npcs(conn, target_map_id, picked_char)
+        # TAG 503: enter_map
+        data = encode_sproto([(0, target_map_id), (1, 0), (2, 1)])
+        ph_p = encode_sproto([(0, 503)])
+        pf_p = sproto_pack(ph_p + data)
+        conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+        print(f"[M1003 DEBUG] TX 503 map_id={target_map_id}")
+        print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
+        print(f"[MAP ENTER SEND] map_id={target_map_id} scene={scene_name} pos={picked_char['pos']}")
 
         # BOSS SPAWN for Dominance Map 502
         if target_map_id == "502":
@@ -2356,8 +2355,6 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
             boss_stats = get_npc_attr("1105")
             NPC_HP_MAP[boss_inst_id] = boss_stats['hp_max']
             NPC_INST_MAP[boss_inst_id] = "BOSS_" + did
-            # The APK cannot create the zombie player (or the VS panel) until
-            # map_ready.  Remember it here; MSG 100 sends the actual tag 544.
             picked_char['boss_waiting_for_map_ready'] = True
             print(f"[M1003 DEBUG] Prepared Boss did={did} inst={boss_inst_id} max_hp={boss_stats['hp_max']} (awaiting map_ready)")
 
@@ -2666,16 +2663,6 @@ def client_handler(conn, addr):
                         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
                         print(f"[MAP ENTER SEND] map_id={mid} scene={scene_name} pos={picked_char['pos']}")
 
-                        # TAG 504: main_player_create
-                        send_rpc_push(504, encode_sproto([
-                            (0, get_full_char(picked_char)),
-                            (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
-                        ]))
-                        print(f"[MAIN PLAYER CREATE SEND] map_id={mid}")
-
-                        # TAG 505: aoi_add (NPCs)
-                        spawn_map_npcs(conn, mid, picked_char)
-
                     except Exception:
                         print("[!] FAILED TO SEND INITIAL MAP ENTER")
                         traceback.print_exc()
@@ -2683,8 +2670,22 @@ def client_handler(conn, addr):
 
             elif msg == 100: # map_ready
                 if picked_char:
-                    mid = picked_char.get('map_id', '11')
+                    mid = str(picked_char.get('map_id', '11'))
                     print(f"[MAP READY RECEIVED] map_id={mid}")
+
+                    # 1. TAG 654: start_enter_game (Close loading box & enable HUD)
+                    send_rpc_push(654, encode_sproto([(0, 1)]))
+
+                    # 2. TAG 504: main_player_create
+                    send_rpc_push(504, encode_sproto([
+                        (0, get_full_char(picked_char)),
+                        (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
+                    ]))
+                    print(f"[MAIN PLAYER CREATE SEND] map_id={mid}")
+
+                    # 3. TAG 505 / AOI: spawn map NPCs
+                    spawn_map_npcs(conn, mid, picked_char)
+
                     if mid in ["223", "224", "225", "226", "227", "228", "229"]:
                         exp_state = picked_char.get('exp_stage_state')
                         if exp_state:
@@ -2699,20 +2700,15 @@ def client_handler(conn, addr):
                             ]))
                             print(f"[EXP STAGE] map_ready sent 629 & 683 updates for copy={mid}")
                     if mid == "502":
-                        # Map 502 exposes its match timer only through this APK tag.
                         send_rpc_push(629, encode_sproto([(0, int(time.time()) + 60), (1, 0)]))
                         boss_id = picked_char.get('boss_inst_id')
                         if boss_id and picked_char.pop('boss_waiting_for_map_ready', False):
                             did = picked_char.get('active_domin_id', '1')
                             boss_stats = get_npc_attr("1105")
-                            # Tag 544 creates ObjZombiePlayer and opens the VS UI.
                             send_rpc_push(544, encode_sproto([(0, get_boss_char(boss_id, did))]))
                             sync_npc_attrs_rpc(conn, boss_id, boss_stats, NPC_HP_MAP.get(boss_id, boss_stats['hp_max']))
                             print(f"[M1003 DEBUG] Spawned Boss did={did} inst={boss_id} after map_ready")
 
-                            # Tag 547 closes the VS UI and activates the APK's
-                            # built-in zombie auto-fight.  Sending it immediately
-                            # makes the VS UI invisible, so keep it on screen first.
                             def start_domin_battle(expected_boss_id=boss_id):
                                 if (picked_char.get('map_id') == '502'
                                         and picked_char.get('boss_inst_id') == expected_boss_id
@@ -2722,6 +2718,7 @@ def client_handler(conn, addr):
                             arena_timer = threading.Timer(2.5, start_domin_battle)
                             arena_timer.daemon = True
                             arena_timer.start()
+
                     send_rpc_push(519, sync_mission_data(picked_char))
 
             elif msg == 101: # move
