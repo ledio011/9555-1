@@ -12,6 +12,7 @@ NPC_INST_MAP = {} # inst_id -> nid (to resolve rewards)
 NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 DEAD_NPC_SET = set() # duplicate death/reward prevention set
+ONLINE_CHAR_MAP = {} # char_id -> send_rpc_push
 
 # Load Mission Data
 missions_data = {}
@@ -982,25 +983,21 @@ def build_friend_info_obj(c, ftype=0, main_char_id=0):
         (11, 100)                          # friendScore (tag 11)
     ])
 
-def sync_friend_info_rpc(picked_char):
-    """Build Sproto Tag 538 (syn_friend_info) for Friends (ftype=0), Requests (ftype=2) and Enemies (ftype=6)."""
+def send_social_update_rpc(send_rpc_push, picked_char):
+    """Push Tag 534 (ret_request_update_friend_useinfo) for Friends (ftype=0) and Requests (ftype=2)."""
     friends_map = {}
     for fid, f_data in picked_char.get('friends', {}).items():
         friends_map[int(fid)] = build_friend_info_obj(f_data, ftype=0)
-
-    applys_map = {}
     for fid, f_data in picked_char.get('friend_applys', {}).items():
-        applys_map[int(fid)] = build_friend_info_obj(f_data, ftype=2)
+        friends_map[int(fid)] = build_friend_info_obj(f_data, ftype=2)
+    send_rpc_push(534, encode_sproto([(0, friends_map), (1, 0)]))
 
+def send_enemy_update_rpc(send_rpc_push, picked_char):
+    """Push Tag 534 (ret_request_update_friend_useinfo) for Enemies (ftype=6)."""
     enemys_map = {}
     for fid, f_data in picked_char.get('enemies', {}).items():
         enemys_map[int(fid)] = build_friend_info_obj(f_data, ftype=6, main_char_id=picked_char['id'])
-
-    return encode_sproto([
-        (0, friends_map), # friends (tag 0)
-        (1, applys_map),  # applys (tag 1)
-        (2, enemys_map)   # enemys (tag 2)
-    ])
+    send_rpc_push(534, encode_sproto([(0, enemys_map), (1, 1)]))
 
 def build_mail_update_obj(mail_data):
     """Build Sproto mail_update schema object for Sproto Tag 603."""
@@ -2414,6 +2411,7 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
+                    ONLINE_CHAR_MAP[picked_char['id']] = send_rpc_push
                     picked_char['last_played'] = int(time.time())
                     print(f"[CHARACTER PICK] id={picked_char['id']} level={picked_char.get('level')}")
                     init_character_fields(picked_char)
@@ -2460,8 +2458,8 @@ def client_handler(conn, addr):
                     # 519: mission_sync
                     send_rpc_push(519, sync_mission_data(picked_char))
 
-                    # 538: friend_sync
-                    send_rpc_push(538, sync_friend_info_rpc(picked_char))
+                    # 534: friend_sync (Tag 534 delivers friends & pending requests)
+                    send_social_update_rpc(send_rpc_push, picked_char)
 
                     # 603: mail_sync
                     for m_id, m_data in picked_char.get('mails', {}).items():
@@ -3455,12 +3453,16 @@ def client_handler(conn, addr):
                         if ftype == 1: # Enemy
                             picked_char.setdefault('enemies', {})[str(target_id)] = summary_target
                             save_chars(all_accounts_chars)
-                            send_rpc_push(538, sync_friend_info_rpc(picked_char))
+                            send_enemy_update_rpc(send_rpc_push, picked_char)
                             print(f"[SOCIAL] Added enemy {target_id} for player {picked_char['id']}")
                         else: # Friend Request
                             target_char.setdefault('friend_applys', {})[str(picked_char['id'])] = summary_sender
                             save_chars(all_accounts_chars)
                             print(f"[SOCIAL] Sent friend request from {picked_char['id']} to target {target_id}")
+                            if target_id in ONLINE_CHAR_MAP:
+                                target_push = ONLINE_CHAR_MAP[target_id]
+                                target_push(536, encode_sproto([(0, build_friend_info_obj(summary_sender, ftype=2))]))
+                                print(f"[SOCIAL] Pushed Tag 536 real-time notification to target {target_id}")
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -3473,11 +3475,31 @@ def client_handler(conn, addr):
                     s_tid = str(target_id)
                     if ftype == 1:
                         picked_char.get('enemies', {}).pop(s_tid, None)
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(535, encode_sproto([(0, target_id)]))
+                        send_enemy_update_rpc(send_rpc_push, picked_char)
                     else:
                         picked_char.get('friends', {}).pop(s_tid, None)
-                    save_chars(all_accounts_chars)
-                    send_rpc_push(535, encode_sproto([(0, target_id)]))
-                    send_rpc_push(538, sync_friend_info_rpc(picked_char))
+                        target_char = None
+                        for area_dict in all_accounts_chars.values():
+                            if isinstance(area_dict, dict):
+                                for char_list in area_dict.values():
+                                    if isinstance(char_list, list):
+                                        for c in char_list:
+                                            if isinstance(c, dict) and c.get('id') == target_id:
+                                                target_char = c
+                                                break
+                        if target_char:
+                            target_char.get('friends', {}).pop(str(picked_char['id']), None)
+                        if target_id in ONLINE_CHAR_MAP:
+                            target_push = ONLINE_CHAR_MAP[target_id]
+                            target_push(537, encode_sproto([(0, picked_char['id'])])) # Tag 537 be_deleted_friend
+                            if target_char:
+                                send_social_update_rpc(target_push, target_char)
+
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(535, encode_sproto([(0, target_id)]))
+                        send_social_update_rpc(send_rpc_push, picked_char)
                     print(f"[SOCIAL] Deleted enemy/friend {target_id}")
 
             elif msg == 126: # request_update_friend_useinfo (The Foe / Friends Tab Update)
@@ -3489,12 +3511,14 @@ def client_handler(conn, addr):
                             enemys_map[int(fid)] = build_friend_info_obj(f_data, ftype=6, main_char_id=picked_char['id'])
                         send_rpc_push(534, encode_sproto([(0, enemys_map), (1, 1)])) # Tag 534 ret_request_update_friend_useinfo
                         print(f"[SOCIAL] Responded Tag 534 for Foe list count={len(enemys_map)}")
-                    else: # Friends
+                    else: # Friends and Friend Requests
                         friends_map = {}
                         for fid, f_data in picked_char.get('friends', {}).items():
                             friends_map[int(fid)] = build_friend_info_obj(f_data, ftype=0)
+                        for fid, f_data in picked_char.get('friend_applys', {}).items():
+                            friends_map[int(fid)] = build_friend_info_obj(f_data, ftype=2)
                         send_rpc_push(534, encode_sproto([(0, friends_map), (1, 0)])) # Tag 534 ret_request_update_friend_useinfo
-                        print(f"[SOCIAL] Responded Tag 534 for Friends list count={len(friends_map)}")
+                        print(f"[SOCIAL] Responded Tag 534 for Friends/Requests list count={len(friends_map)} (friends={len(picked_char.get('friends', {}))}, applys={len(picked_char.get('friend_applys', {}))})")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3507,17 +3531,16 @@ def client_handler(conn, addr):
                     apply_dict = picked_char.get('friend_applys', {})
                     if s_tid in apply_dict:
                         applicant_data = apply_dict.pop(s_tid)
+                        target_char = None
+                        for area_dict in all_accounts_chars.values():
+                            if isinstance(area_dict, dict):
+                                for char_list in area_dict.values():
+                                    if isinstance(char_list, list):
+                                        for c in char_list:
+                                            if isinstance(c, dict) and c.get('id') == target_id:
+                                                target_char = c
+                                                break
                         if is_agree == 1:
-                            target_char = None
-                            for area_dict in all_accounts_chars.values():
-                                if isinstance(area_dict, dict):
-                                    for char_list in area_dict.values():
-                                        if isinstance(char_list, list):
-                                            for c in char_list:
-                                                if isinstance(c, dict) and c.get('id') == target_id:
-                                                    target_char = c
-                                                    break
-
                             summary_picked = {
                                 'id': picked_char['id'],
                                 'name': picked_char.get('name', 'Hero'),
@@ -3535,7 +3558,10 @@ def client_handler(conn, addr):
                                 target_char.setdefault('friends', {})[str(picked_char['id'])] = summary_picked
 
                         save_chars(all_accounts_chars)
-                        send_rpc_push(538, sync_friend_info_rpc(picked_char))
+                        send_social_update_rpc(send_rpc_push, picked_char)
+                        if target_id in ONLINE_CHAR_MAP and target_char:
+                            send_social_update_rpc(ONLINE_CHAR_MAP[target_id], target_char)
+
                         print(f"[SOCIAL] Friend request from {target_id} {'accepted' if is_agree == 1 else 'refused'}")
 
                 if session is not None:
@@ -3766,6 +3792,8 @@ def client_handler(conn, addr):
         traceback.print_exc()
     finally:
         try:
+            if picked_char and ONLINE_CHAR_MAP.get(picked_char['id']) == send_rpc_push:
+                del ONLINE_CHAR_MAP[picked_char['id']]
             conn_id = id(conn)
             if conn_id in NPC_SPAWNED_MAPS:
                 del NPC_SPAWNED_MAPS[conn_id]
