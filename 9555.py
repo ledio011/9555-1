@@ -878,25 +878,9 @@ def get_full_char(c):
     char_level = stats['lv']
     skill_levels = c.get('skill_levels', {})
     skills_map = build_skills_map(c.get('prof', 0), char_level, skill_levels)
-    
-    equip_map = {}
-    epack = c.get('equip_pack', {})
-    if epack:
-        for slot, item in epack.items():
-            if item:
-                equip_map[int(slot)] = encode_sproto([
-                    (0, int(slot)),
-                    (1, str(item['itemId'])),
-                    (2, bool(item.get('bindflag', True))),
-                    (3, int(item.get('quality', 1))),
-                    (5, int(item.get('stack', 1))),
-                    (6, int(item.get('level', 1))),
-                    (7, [int(x) for x in item.get('parm', [0]*8)])
-                ])
-    else:
-        wid = "10001" if c.get('prof', 0) == 0 else "20001" if c.get('prof', 0) == 1 else "30001"
-        w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
-        equip_map = {5: w1}
+    wid = "10001" if c.get('prof', 0) == 0 else "20001" if c.get('prof', 0) == 1 else "30001"
+    w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
+    equip_map = {5: w1}
 
     # character.download: the APK treats 2 as completed.  Sending 1 again on
     # reconnect would reopen the optional download/reward UI forever, even
@@ -917,27 +901,15 @@ def get_full_char(c):
     ])
 
 def sync_common_data_rpc(picked_char):
-    """Build Sproto Tag 614 (sync_common_data) with tutorial function state dic."""
+    """Build Sproto Tag 592 (sync_common_data) with tutorial function state dic."""
     func_info_map = {}
-    if picked_char:
-        unlock_all = picked_char.get('unlock_all_funcs', False)
+    if picked_char and picked_char.get('tutorial', 0) == 1:
+        for fid in range(1, 100):
+            func_info_map[str(fid)] = encode_sproto([(0, str(fid)), (1, 1)])
+    elif picked_char:
         saved_func = picked_char.get('func_info', {})
-        
-        all_func_ids = [
-            "100", "101", "102", "105", "106", "3001", "3002", "3003", "3004", "3005",
-            "3006", "3007", "3008", "3009", "3010", "3012", "3013", "3015", "3016", "3017",
-            "3018", "3019", "3020", "4001", "4002", "4003", "4004", "4011", "4012", "4013",
-            "4014", "4015", "4016", "4021", "4022", "4023", "4024", "4025", "4026", "4027",
-            "4031", "4041", "4043", "4051", "4052", "4053", "4054", "4055", "4061", "4062",
-            "4063", "4064", "4071", "4072", "4073", "4074", "4075", "4076", "4077", "4078",
-            "4080", "4081", "4084", "4085", "4086", "4087", "4088"
-        ]
-        
-        for fid in all_func_ids:
-            if unlock_all or saved_func.get(fid) == 1:
-                func_info_map[fid] = encode_sproto([(0, fid), (1, 1)])
-            elif fid in saved_func:
-                func_info_map[fid] = encode_sproto([(0, fid), (1, int(saved_func[fid]))])
+        for fid, fstate in saved_func.items():
+            func_info_map[str(fid)] = encode_sproto([(0, str(fid)), (1, int(fstate))])
 
     sync_fields = [
         (0, int(time.time())),
@@ -2153,14 +2125,6 @@ def init_character_fields(c):
         'completed_side_missions': [],
         'last_main_mission_id': "-1",
         'inventory': [],
-        'equip_backpack': {},
-        'equip_pack': {},
-        'item_backpack': {},
-        'badge_backpack': {},
-        'badge_equip_pack': {},
-        'fashion_backpack': {},
-        'fashion_equip_pack': {},
-        'is_show_fashion': False,
         'friends': {},
         'friend_applys': {},
         'enemies': {},
@@ -2168,7 +2132,7 @@ def init_character_fields(c):
         'pos': [29860, 100, -17005, 0],
         'map_id': "11",
         'tutorial': 0,
-        'download_complete': True,
+        'download_complete': False,
         'mounts': {},
         'equipped_mount_id': '',
         'mount_riding': False,
@@ -2181,19 +2145,6 @@ def init_character_fields(c):
     }
     for k, v in fields.items():
         if k not in c: c[k] = v
-
-    if not c.get('equip_pack'):
-        wid = "10001" if c.get('prof', 0) == 0 else "20001" if c.get('prof', 0) == 1 else "30001"
-        c['equip_pack'][5] = {
-            'indexId': 5,
-            'itemId': wid,
-            'bindflag': True,
-            'quality': 1,
-            'level': 1,
-            'stack': 1,
-            'parm': [0]*8,
-            'appraise': 1
-        }
 
     # Add System Welcome Mail for new characters
     if not c.get('mails'):
@@ -2556,19 +2507,22 @@ def client_handler(conn, addr):
                     # Correct Sequence: 614 -> 611 -> 540 -> 519 -> 503
 
                     # 614: sync_common_data
-                    send_rpc_push(614, sync_common_data_rpc(picked_char))
+                    fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3016", "3030", "4014", "4026", "4061", "4062", "4063", "4064", "4081", "4084"]
+                    if picked_char.get('tutorial', 0) == 1:
+                        fids += [str(i) for i in range(1, 100)]
+                    funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in set(fids)}
+                    send_rpc_push(614, encode_sproto([
+                        (0, int(time.time())), (2, 0), (4, 10000), (9, funcs), (12, random.randint(1, 10000)), (13, 1), (14, int(time.time()))
+                    ]))
 
-                    # 611: sync_item_pack
-                    send_rpc_push(611, sync_item_pack_rpc(picked_char))
+                    # 611: inventory_sync
+                    send_rpc_push(611, sync_inventory_data(picked_char))*
 
-                    # 592: sync_backpack_item (Equipment Backpack)
-                    send_rpc_push(592, sync_backpack_item_rpc(picked_char))
+                    # 592: sync_common_data
+                    send_rpc_push(592, sync_common_data_rpc(picked_char))
 
-                    # 604: sync_badgepack_item (Badge Backpack)
-                    send_rpc_push(604, sync_badgepack_item_rpc(picked_char))
-
-                    # 616: sync_fashion_backpack_item (Fashion Backpack)
-                    send_rpc_push(616, sync_fashion_backpack_item_rpc(picked_char))
+                    # 616: fashion_sync
+                    send_rpc_push(616, encode_sproto([(0, {})]))
 
                     # 510: initial stats sync
                     sync_char_attrs_rpc(conn, picked_char)
