@@ -3183,6 +3183,18 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif msg == 268: # unlock_function_complete
+                fid = field_text(body, 0)
+                fstate = get_val_int(body, 1, 1)
+                if picked_char:
+                    func_info = picked_char.setdefault('func_info', {})
+                    func_info[str(fid)] = fstate
+                    save_chars(all_accounts_chars)
+                    print(f"[FUNC UNLOCK] Completed function unlock fid={fid} state={fstate}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
             elif msg == 221: # equip_fashion_item
                 index_id = get_val_int(body, 0)
                 if picked_char:
