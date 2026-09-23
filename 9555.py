@@ -2296,11 +2296,9 @@ def client_handler(conn, addr):
 
             elif msg == 103: # character_list
                 chars = get_account_chars(all_accounts_chars, cur_areaId, acc_id)
-                # Sort by last_played descending (internal)
-                chars.sort(key=lambda x: x.get('last_played', 0), reverse=True)
+                # Sort in creation order (1st created to 4th created)
+                chars.sort(key=lambda x: x.get('createtime', x.get('id', 0)))
 
-                # The client sorts character_overview.createtime ASCENDING.
-                # To make the last played (newest) show first, we give it the smallest createtime.
                 ov_list = []
                 for i, c in enumerate(chars):
                     ov_list.append(get_char_ov(c, i))
@@ -3262,7 +3260,7 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg in [118, 218, 145, 225, 258, 261, 278, 296, 299, 313, 319]:
+            elif msg in [118, 218, 145, 225, 258, 261, 278, 296, 299, 319]:
                 resp_data = encode_sproto([])
                 if msg == 118: resp_data = encode_sproto([(0, f"User_{random.randint(100,999)}")])
                 elif msg == 218: resp_data = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))])
