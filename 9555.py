@@ -974,19 +974,29 @@ def get_equip_slot_index(subtype):
     return m.get(int(subtype), 5)
 
 def encode_gameitem_sproto(item):
-    """Encode gameitem object for Sproto serialization."""
+    """Encode gameitem object for Sproto serialization matching C# schema."""
     if not item or not isinstance(item, dict): return None
-    fields = []
-    if 'indexId' in item: fields.append((0, int(item['indexId'])))
-    if 'itemId' in item: fields.append((1, str(item['itemId'])))
-    if 'bindflag' in item: fields.append((2, bool(item['bindflag'])))
-    if 'level' in item: fields.append((3, int(item['level'])))
-    if 'flags' in item: fields.append((4, int(item.get('flags', 0))))
-    if 'stack' in item: fields.append((5, int(item['stack'])))
+    index_id = int(item.get('indexId', 0))
+    item_id = str(item.get('itemId', '10001'))
+    bind_flag = bool(item.get('bindflag', True))
+    lvl = int(item.get('level', 1))
+    flg = int(item.get('flags', 0))
+    stk = int(item.get('stack', 1))
     qual = max(0, min(5, int(item.get('quality', 0))))
-    fields.append((6, qual))
-    if 'parm' in item and isinstance(item['parm'], list): fields.append((7, [int(x) for x in item['parm']]))
-    if 'appraise' in item: fields.append((8, int(item['appraise'])))
+    parm_list = [int(x) for x in item.get('parm', [0]*8)]
+    appr = int(item.get('appraise', 1))
+
+    fields = [
+        (0, index_id),
+        (1, item_id),
+        (2, bind_flag),
+        (3, lvl),
+        (4, flg),
+        (5, stk),
+        (6, qual),
+        (7, parm_list),
+        (8, appr)
+    ]
     return encode_sproto(fields)
 
 def sync_backpack_item_rpc(picked_char):
