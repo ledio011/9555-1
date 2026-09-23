@@ -960,6 +960,35 @@ def calculate_dance_reward(char_level, dance_id="10001"):
 
     return max(1, int(base_exp * multiplier * variance))
 
+def start_dance_session(conn, send_rpc_push, picked_char, dance_id="10001"):
+    """Starts continuous 10-second periodic dance EXP reward ticks."""
+    if not picked_char:
+        return
+
+    picked_char['is_dancing'] = True
+    picked_char['dance_id'] = dance_id
+
+    def run_dance_ticks():
+        if not picked_char or not picked_char.get('is_dancing'):
+            return
+
+        char_lv = picked_char.get('level', 1)
+        cur_did = picked_char.get('dance_id', '10001')
+        exp_reward = calculate_dance_reward(char_lv, cur_did)
+
+        grant_item_rewards(picked_char, [("2001", 0, exp_reward)], conn, send_rpc_push)
+        send_rpc_push(638, encode_sproto([(0, [encode_sproto([(0, "2001"), (1, exp_reward), (3, 0)])])]))
+        print(f"[DANCE TICK] Granted +{exp_reward} EXP to character {picked_char['id']} (did={cur_did})")
+
+        if picked_char.get('is_dancing'):
+            timer = threading.Timer(10.0, run_dance_ticks)
+            timer.daemon = True
+            timer.start()
+
+    timer = threading.Timer(10.0, run_dance_ticks)
+    timer.daemon = True
+    timer.start()
+
 def sync_char_attrs_rpc(conn, picked_char):
     """Sends TAG 510 (aoi_update_attribute) to sync all stats."""
     stats = get_character_stats(picked_char)
@@ -3112,19 +3141,16 @@ def client_handler(conn, addr):
                 # start_participate_dance (TAG 624): curUse(0), dance_info(1)
                 send_rpc_push(624, encode_sproto([(0, did), (1, dance_map)]))
                 if picked_char:
-                    # Grant initial per-tick dance EXP
-                    exp_reward = calculate_dance_reward(picked_char.get('level', 1), did)
-                    grant_item_rewards(picked_char, [("2001", 0, exp_reward)], conn, send_rpc_push)
-                    send_rpc_push(638, encode_sproto([(0, [encode_sproto([(0, "2001"), (1, exp_reward), (3, 0)])])]))
-
                     advance_missions(picked_char, send_rpc_push, 'dance')
                     advance_missions(picked_char, send_rpc_push, 'interact', target_id='1009')
                     advance_missions(picked_char, send_rpc_push, 'interact', target_id='132')
-                    send_rpc_push(519, sync_mission_data(picked_char))
 
-                    # Sync AOI so others see us dancing (strictly 2 fields in aoi_social_dance schema)
+                    # Sync AOI so others see us dancing
                     social_dance = encode_sproto([(0, picked_char['id']), (1, str(did))])
                     send_rpc_push(657, encode_sproto([(0, social_dance)]))
+
+                    # Start continuous 10-second periodic dance EXP reward ticks
+                    start_dance_session(conn, send_rpc_push, picked_char, did)
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -3132,6 +3158,7 @@ def client_handler(conn, addr):
 
             elif msg == 228: # pause_participate_dance (Stop dancing)
                 if picked_char:
+                    picked_char['is_dancing'] = False
                     social_dance = encode_sproto([(0, picked_char['id']), (1, "")])
                     send_rpc_push(657, encode_sproto([(0, social_dance)]))
                 if session is not None:
