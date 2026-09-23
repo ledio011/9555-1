@@ -3060,10 +3060,10 @@ def client_handler(conn, addr):
                             old_idx = int(time.time() * 1000) % 10000000 + len(ebp)
                             old_item['indexId'] = old_idx
                             ebp[old_idx] = old_item
-                            send_update_item_push(send_rpc_push, 1, old_idx, old_item)
+                            send_update_item_push(send_rpc_push, 0, old_idx, old_item) # 0 = EQUIP_BACKPACK
                         else:
-                            send_update_item_push(send_rpc_push, 1, index_id, None)
-                        send_update_item_push(send_rpc_push, 2, slot, item)
+                            send_update_item_push(send_rpc_push, 0, index_id, None)      # 0 = EQUIP_BACKPACK
+                        send_update_item_push(send_rpc_push, 1, slot, item)            # 1 = EQUIPPACK
                         save_chars(all_accounts_chars)
                         send_rpc_push(592, sync_backpack_item_rpc(picked_char))
                         send_rpc_push(611, sync_item_pack_rpc(picked_char))
@@ -3077,12 +3077,17 @@ def client_handler(conn, addr):
             elif msg == 117: # unequip_item
                 index_id = get_val_int(body, 0)
                 if picked_char:
+                    ebp = picked_char.setdefault('equip_backpack', {})
                     epack = picked_char.setdefault('equip_pack', {})
                     if index_id in epack:
                         un_item = epack.pop(index_id)
-                        add_to_inventory(picked_char, str(un_item['itemId']), 1)
+                        new_idx = int(time.time() * 1000) % 10000000 + len(ebp)
+                        un_item['indexId'] = new_idx
+                        ebp[new_idx] = un_item
+                        send_update_item_push(send_rpc_push, 1, index_id, None) # 1 = EQUIPPACK
+                        send_update_item_push(send_rpc_push, 0, new_idx, un_item) # 0 = EQUIP_BACKPACK
                         save_chars(all_accounts_chars)
-                        send_rpc_push(611, sync_inventory_data(picked_char))
+                        send_rpc_push(592, sync_backpack_item_rpc(picked_char))
                         sync_char_attrs_rpc(conn, picked_char)
                         sync_main_player_visual(picked_char, send_rpc_push)
                         print(f"[BAG UNEQUIP] Unequipped item {un_item['itemId']} from slot {index_id}")
@@ -3097,12 +3102,14 @@ def client_handler(conn, addr):
                     target_container = None
                     target_key = None
                     item_found = None
-                    for ckey in ['item_backpack', 'equip_backpack', 'fashion_backpack', 'badge_backpack']:
+                    ctype = 2 # ITEM_BACKPACK = 2
+                    for ckey, container_code in [('item_backpack', 2), ('equip_backpack', 0), ('fashion_backpack', 5), ('badge_backpack', 3)]:
                         c_dict = picked_char.get(ckey, {})
                         if index_id in c_dict or str(index_id) in c_dict:
                             target_container = c_dict
                             target_key = index_id if index_id in c_dict else str(index_id)
                             item_found = c_dict[target_key]
+                            ctype = container_code
                             break
                     
                     if not item_found:
@@ -3120,9 +3127,9 @@ def client_handler(conn, addr):
                             item_found['stack'] = item_found.get('stack', 1) - sold_cnt
                             if item_found['stack'] <= 0:
                                 target_container.pop(target_key, None)
-                                send_update_item_push(send_rpc_push, 1, index_id, None)
+                                send_update_item_push(send_rpc_push, ctype, index_id, None)
                             else:
-                                send_update_item_push(send_rpc_push, 1, index_id, item_found)
+                                send_update_item_push(send_rpc_push, ctype, index_id, item_found)
                         
                         inv = picked_char.get('inventory', [])
                         for inv_item in list(inv):
@@ -3149,12 +3156,14 @@ def client_handler(conn, addr):
                     item_found = None
                     target_container = None
                     target_key = None
-                    for ckey in ['item_backpack', 'equip_backpack']:
+                    ctype = 2 # ITEM_BACKPACK = 2
+                    for ckey, container_code in [('item_backpack', 2), ('equip_backpack', 0)]:
                         c_dict = picked_char.get(ckey, {})
                         if index_id in c_dict or str(index_id) in c_dict:
                             target_container = c_dict
                             target_key = index_id if index_id in c_dict else str(index_id)
                             item_found = c_dict[target_key]
+                            ctype = container_code
                             break
                     
                     if not item_found:
@@ -3171,9 +3180,9 @@ def client_handler(conn, addr):
                             item_found['stack'] = item_found.get('stack', 1) - count
                             if item_found['stack'] <= 0:
                                 target_container.pop(target_key, None)
-                                send_update_item_push(send_rpc_push, 1, index_id, None)
+                                send_update_item_push(send_rpc_push, ctype, index_id, None)
                             else:
-                                send_update_item_push(send_rpc_push, 1, index_id, item_found)
+                                send_update_item_push(send_rpc_push, ctype, index_id, item_found)
                         
                         reward_cash = 20000 * count
                         reward_exp = 5000 * count
@@ -3209,7 +3218,7 @@ def client_handler(conn, addr):
                         item_dict['appraise'] = 1
                         item_dict['quality'] = random.randint(1, 5)
                         save_chars(all_accounts_chars)
-                        send_update_item_push(send_rpc_push, 1, index_id, item_dict)
+                        send_update_item_push(send_rpc_push, 0, index_id, item_dict) # 0 = EQUIP_BACKPACK
                         score = item_dict['quality'] * 100
                         send_rpc_push(681, encode_sproto([
                             (0, encode_gameitem_sproto(item_dict)),
@@ -3234,9 +3243,9 @@ def client_handler(conn, addr):
                         inlay_map[socket_idx] = {'index': socket_idx, 'itemId': str(gem_item.get('itemId', ''))}
                         ebp.pop(gem_idx, None)
                         save_chars(all_accounts_chars)
-                        ctype = 1 if eq_idx in ebp else 2
+                        ctype = 0 if eq_idx in ebp else 1
                         send_update_item_push(send_rpc_push, ctype, eq_idx, item_dict)
-                        send_update_item_push(send_rpc_push, 1, gem_idx, None)
+                        send_update_item_push(send_rpc_push, 0, gem_idx, None)
                         sync_char_attrs_rpc(conn, picked_char)
                         print(f"[INLAY GEM] Item={eq_idx} Socket={socket_idx} Gem={gem_item.get('itemId')}")
                 if session is not None:
@@ -3253,7 +3262,7 @@ def client_handler(conn, addr):
                         parm = item_dict.setdefault('parm', [0]*8)
                         parm[1] = min(10, parm[1] + 1)
                         save_chars(all_accounts_chars)
-                        ctype = 1 if eq_idx in ebp else 2
+                        ctype = 0 if eq_idx in ebp else 1
                         send_update_item_push(send_rpc_push, ctype, eq_idx, item_dict)
                         sync_char_attrs_rpc(conn, picked_char)
                         print(f"[STAR REFINE] Item={eq_idx} NewStarLevel={parm[1]}")
@@ -3277,12 +3286,28 @@ def client_handler(conn, addr):
                         src_item['level'] = 1
                         src_parm[1] = 0
                         save_chars(all_accounts_chars)
-                        c_src = 1 if src_idx in ebp else 2
-                        c_dst = 1 if dst_idx in ebp else 2
+                        c_src = 0 if src_idx in ebp else 1
+                        c_dst = 0 if dst_idx in ebp else 1
                         send_update_item_push(send_rpc_push, c_src, src_idx, src_item)
                         send_update_item_push(send_rpc_push, c_dst, dst_idx, dst_item)
                         sync_char_attrs_rpc(conn, picked_char)
                         print(f"[EQUIP INHERIT] Inherited stats from {src_idx} to {dst_idx}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 172: # decomp_item
+                eq_idx = get_val_int(body, 0)
+                if picked_char:
+                    ebp = picked_char.setdefault('equip_backpack', {})
+                    if eq_idx in ebp:
+                        item_dict = ebp.pop(eq_idx)
+                        mats_granted = (item_dict.get('level', 1) + item_dict.get('quality', 1)) * 5
+                        add_to_inventory(picked_char, "3001", mats_granted)
+                        save_chars(all_accounts_chars)
+                        send_update_item_push(send_rpc_push, 0, eq_idx, None) # 0 = EQUIP_BACKPACK
+                        send_rpc_push(611, sync_item_pack_rpc(picked_char))
+                        print(f"[EQUIP DECOMP] Disassembled item={item_dict.get('itemId')} granted mats={mats_granted}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
