@@ -3689,21 +3689,17 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 172: # req_buy_guild_goods
-                eq_idx = get_val_int(body, 0)
-                if picked_char:
-                    ebp = picked_char.setdefault('equip_backpack', {})
-                    if eq_idx in ebp:
-                        item_dict = ebp.pop(eq_idx)
-                        mats_granted = (item_dict.get('level', 1) + item_dict.get('quality', 1)) * 5
-                        add_to_inventory(picked_char, "3001", mats_granted)
-                        save_chars(all_accounts_chars)
-                        send_update_item_push(send_rpc_push, 0, eq_idx, None)
-                        send_rpc_push(611, sync_item_pack_rpc(picked_char))
-                    item_id = str(item_dict.get('itemId', item_dict.get('id', '0')))
-                    send_rpc_push(583, encode_sproto([
-                        (0, item_id),
-                        (3, 0)
-                    ])) # ret_buy_guild_goods: itemId(0), leftNum(3)
+                # Protocol.buy_guild_goods.request: itemId is string field 0.
+                # Do not interpret the request as an equipment-backpack index.
+                item_id = field_text(body, 0)
+                if not item_id:
+                    item_id = "0"
+                print(f"[GUILD BUY] itemId={item_id}")
+                # Protocol.ret_buy_guild_goods: itemId(0), leftNum(3)
+                send_rpc_push(583, encode_sproto([
+                    (0, item_id),
+                    (3, 0)
+                ]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
