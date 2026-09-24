@@ -1,10 +1,20 @@
+# Python cache & logs
 __pycache__/
 *.pyc
 *.log
 .env
+.idea/
+
+# Ignore local game files & decompiled directory
+Atg_Auto/
+Atg_Auto/ATG.apk
+Atg_Auto/Decompiled/
 com.doodlemobile.vicecity.apk
 dec&normal/
+
+# Ignore local text extracts & backup files
 apk_index/text/
 apk_index/strings/
 characters_final.json.tmp
+*.tmp
 *.bak
