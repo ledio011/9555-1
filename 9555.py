@@ -2961,6 +2961,7 @@ def client_handler(conn, addr):
                     if res:
                         save_chars(all_accounts_chars)
                         print(f"[MISSION ACCEPT] mission_id={mid}")
+                    send_rpc_push(520, encode_sproto([(0, mid)]))
                     if session is not None:
                         ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                         conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3271,12 +3272,22 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 102: # skill_use
-                sid = body.get(1, b"").decode('utf-8'); tid = get_val_int(body, 0); alist = body.get(3, [])
+                sid_raw = body.get(1, b"")
+                sid = sid_raw.decode('utf-8') if isinstance(sid_raw, (bytes, bytearray)) else str(sid_raw)
+                tid = get_val_int(body, 0, -1)
+                alist = body.get(3, [])
                 if picked_char:
                     locked, req_lv = is_skill_locked(sid, picked_char.get('level', 1), picked_char.get('prof', 0))
                     if locked:
                         print(f"[SKILL LOCKED] sid={sid} req={req_lv}")
                         send_rpc_push(529, encode_sproto([(0, "#{100681}"), (1, True)]))
+                    else:
+                        # ret_skill_use (508): sendderId(0), targetId(1), skillId(2).
+                        send_rpc_push(508, encode_sproto([
+                            (0, picked_char.get('id', 0)),
+                            (1, tid),
+                            (2, sid)
+                        ]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3803,6 +3814,9 @@ def client_handler(conn, addr):
                         else:
                             target_char.setdefault('friend_applys', {})[str(picked_char['id'])] = summary_sender
                             save_chars(all_accounts_chars)
+                            send_rpc_push(533, encode_sproto([
+                                (0, build_friend_info_obj(summary_target, ftype=ftype))
+                            ]))
                             if target_id in ONLINE_CHAR_MAP:
                                 target_push = ONLINE_CHAR_MAP[target_id]
                                 target_push(536, encode_sproto([(0, build_friend_info_obj(summary_sender, ftype=2))]))
@@ -3987,7 +4001,7 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 210: # request_rank_pvp_data (Sproto Tag 210)
-                send_rpc_push(643, encode_sproto([(0, 0), (1, 0)])) # syn_rank_pvp_data Tag 643
+                send_rpc_push(541, encode_sproto([(0, 0), (1, 0)])) # syn_rank_pvp_data
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4001,8 +4015,11 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 296: # request_30_day_info (Sproto Tag 296)
-                send_rpc_push(669, encode_sproto([(0, {})])) # ret_request_30_day_info Tag 669
+            elif msg == 296: # req_level_reward (Sproto Tag 296)
+                level_reward = {}
+                for lr_id in LEVEL_REWARD_CONFIG:
+                    level_reward[str(lr_id)] = encode_sproto([(0, str(lr_id)), (1, 0)])
+                send_rpc_push(674, encode_sproto([(0, level_reward)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4046,7 +4063,10 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 263: # require_invest_reward (Sproto Tag 263)
-                send_rpc_push(655, encode_sproto([(0, 1)])) # ret_buy_invest_pack Tag 655
+                invest_pack = {}
+                for inv_id in INVEST_CONFIG:
+                    invest_pack[str(inv_id)] = encode_sproto([(0, str(inv_id)), (1, 0)])
+                send_rpc_push(655, encode_sproto([(0, invest_pack)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4689,7 +4709,7 @@ def client_handler(conn, addr):
                             picked_char['diamonds'] -= cost
                             can_buy = True
                         else:
-                            can_buy = True
+                            can_buy = False
 
                         if can_buy:
                             add_to_inventory(picked_char, matched_item['item_id'], buy_count)
@@ -4703,23 +4723,95 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg in [109, 110, 118, 133, 134, 135, 136, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 161, 162, 163, 164, 165, 166, 168, 169, 173, 174, 175, 176, 177, 182, 183, 184, 186, 187, 188, 189, 190, 192, 194, 196, 203, 204, 205, 206, 208, 209, 211, 212, 213, 214, 215, 216, 217, 219, 226, 230, 231, 232, 233, 243, 244, 245, 247, 248, 249, 250, 251, 254, 255, 266, 269, 271, 272, 275, 276, 277, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 297, 299, 300, 302, 305, 308, 309, 312, 314, 315, 316, 317, 318, 319, 320, 450, 451, 452]:
+            elif msg in [109, 110, 118, 133, 134, 135, 136, 138, 139, 140, 141, 142, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 161, 162, 163, 164, 165, 166, 168, 169, 173, 174, 175, 176, 177, 182, 183, 184, 186, 187, 188, 189, 190, 192, 194, 196, 203, 204, 205, 206, 208, 209, 211, 212, 213, 214, 215, 216, 217, 219, 226, 230, 231, 232, 233, 243, 244, 245, 247, 248, 249, 250, 251, 254, 255, 266, 269, 271, 272, 275, 276, 277, 279, 280, 281, 282, 283, 284, 285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295, 297, 299, 300, 302, 305, 308, 309, 312, 314, 315, 316, 317, 318, 319, 320, 450, 451, 452]:
                 resp_data = encode_sproto([])
                 if msg == 118:
                     resp_data = encode_sproto([(0, f"User_{random.randint(100, 999)}")])
-                elif msg == 143: # ask_shop_list
-                    send_rpc_push(554, encode_sproto([(0, {})]))
-                elif msg == 144: # buy_shop_item
-                    send_rpc_push(652, encode_sproto([(0, 1)]))
+
+                # Response-only requests whose APK handlers only need the packet to arrive.
+                elif msg == 133:
+                    send_rpc_push(542, encode_sproto([(0, 0)]))
+                elif msg == 134:
+                    send_rpc_push(543, encode_sproto([]))
+                elif msg == 139:
+                    if picked_char:
+                        send_rpc_push(550, sync_backpack_item_rpc(picked_char))
+                elif msg == 146:
+                    send_rpc_push(567, encode_sproto([]))
+                elif msg == 147:
+                    send_rpc_push(566, encode_sproto([]))
+                elif msg == 148:
+                    send_rpc_push(565, encode_sproto([]))
+                elif msg == 149:
+                    send_rpc_push(590, encode_sproto([]))
+                elif msg == 150:
+                    send_rpc_push(589, encode_sproto([]))
+                elif msg == 151:
+                    send_rpc_push(564, encode_sproto([]))
+                elif msg == 152:
+                    send_rpc_push(562, encode_sproto([]))
+                elif msg == 153:
+                    send_rpc_push(563, encode_sproto([]))
+                elif msg == 154:
+                    send_rpc_push(591, encode_sproto([]))
+                elif msg == 156:
+                    send_rpc_push(569, encode_sproto([]))
+                elif msg == 174:
+                    send_rpc_push(584, encode_sproto([]))
+                elif msg == 175:
+                    send_rpc_push(585, encode_sproto([(0, 1)]))
+                elif msg == 176:
+                    send_rpc_push(586, encode_sproto([]))
+                elif msg == 186:
+                    send_rpc_push(593, encode_sproto([(0, 1)]))
+                elif msg == 187:
+                    send_rpc_push(594, encode_sproto([(0, 1)]))
+                elif msg == 188:
+                    send_rpc_push(595, encode_sproto([(0, 1)]))
+                elif msg == 189:
+                    send_rpc_push(596, encode_sproto([(0, 1)]))
+                elif msg == 190:
+                    send_rpc_push(597, encode_sproto([(0, 1)]))
+                elif msg == 203:
+                    if picked_char:
+                        send_rpc_push(625, encode_sproto([(0, picked_char.get('tower_floor', 1))]))
+                    else:
+                        send_rpc_push(625, encode_sproto([]))
+                elif msg == 208:
+                    send_rpc_push(607, encode_sproto([]))
+                elif msg == 230:
+                    send_rpc_push(626, encode_sproto([(0, True)]))
+                elif msg == 243:
+                    send_rpc_push(634, encode_sproto([]))
+                elif msg == 254:
+                    day30 = min(30, (int(time.time()) // 86400) % 30 + 1)
+                    send_rpc_push(642, encode_sproto([
+                        (0, day30), (1, True), (2, 0), (3, True), (4, False), (5, 30)
+                    ]))
+                elif msg == 255:
+                    day7 = min(7, (int(time.time()) // 86400) % 7 + 1)
+                    send_rpc_push(643, encode_sproto([(0, day7), (1, True)]))
+                elif msg == 271:
+                    invest_pack = {}
+                    for inv_id in INVEST_CONFIG:
+                        invest_pack[str(inv_id)] = encode_sproto([(0, str(inv_id)), (1, 0)])
+                    send_rpc_push(655, encode_sproto([(0, invest_pack)]))
+                elif msg == 289:
+                    send_rpc_push(666, encode_sproto([]))
+                elif msg == 290 or msg == 292:
+                    send_rpc_push(669, encode_sproto([]))
+                elif msg == 294:
+                    send_rpc_push(672, encode_sproto([]))
+                elif msg == 452:
+                    # ret_watch_video_info fields are optional; a zeroed state closes the wait box safely.
+                    send_rpc_push(693, encode_sproto([(0, 0), (1, 0), (2, 0), (3, 0)]))
+
                 elif msg == 145: # ask_copyscenes_info
                     if picked_char: send_rpc_push(555, sync_copy_scenes(picked_char))
                 elif msg == 165: # get_team_list
                     send_rpc_push(574, encode_sproto([(0, {})]))
                 elif msg == 168: # req_offline_chat
                     send_rpc_push(579, encode_sproto([(0, {})]))
-                elif msg in (186, 187, 188, 189, 190):
-                    tag_map = {186: 593, 187: 594, 188: 595, 189: 596, 190: 597}
-                    send_rpc_push(tag_map[msg], encode_sproto([(0, {})]))
                 elif msg == 211: # request_rank_pvp_history
                     send_rpc_push(546, encode_sproto([(0, {})]))
                 elif msg == 212: # req_guild_skill
@@ -4783,22 +4875,6 @@ def client_handler(conn, addr):
         except Exception:
             pass
         print(f"[-] Client disconnected: {addr}")
-
-def start_server():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind(("0.0.0.0", PORT))
-    server.listen(20)
-    print(f"GAME SERVER 9555 READY ON PORT {PORT}")
-    while True:
-        try:
-            cl, ad = server.accept()
-            threading.Thread(target=client_handler, args=(cl, ad), daemon=True).start()
-        except Exception as e:
-            print(f"[!] Accept error: {e}")
-
-if __name__ == "__main__":
-    start_server()
 
 def start_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
