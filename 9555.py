@@ -2492,21 +2492,23 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
     print("[DEBUG] BEFORE MAP ENTER")
     try:
         ph_p = encode_sproto([(0, 503)])
-        # mapInfoId(0), line_index(1), line_count(2)
-        # enter_map.response schema: field 0 = mapInfoId
-        data = encode_sproto([(0, target_map_id)])
+        # enter_map.response schema: mapInfoId(0), line_index(1), line_count(2)
+        line_index = max(1, int(picked_char.get('line_index', 1)))
+        line_count = max(line_index, int(picked_char.get('line_count', 3)))
+        data = encode_sproto([
+            (0, target_map_id),
+            (1, line_index),
+            (2, line_count)
+        ])
         pf_p = sproto_pack(ph_p + data)
         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
         print(f"[M1003 DEBUG] TX 503 map_id={target_map_id}")
         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
         print(f"[MAP ENTER SEND] map_id={target_map_id} scene={scene_name} pos={picked_char['pos']}")
 
-        # TAG 504: main_player_create
-        send_rpc_push(504, encode_sproto([
-            (0, get_full_char(picked_char)),
-            (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
-        ]))
-        print(f"[MAIN PLAYER CREATE SEND] map_id={target_map_id}")
+        # TAG 504 is intentionally deferred until map_ready(100).
+        # The APK creates ObjManager.MainPlayer only after the scene is ready.
+        print(f"[MAIN PLAYER CREATE DEFERRED] map_id={target_map_id} until map_ready(100)")
 
         # BOSS SPAWN for Dominance Map 502
         if target_map_id == "502":
@@ -4000,8 +4002,12 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 242: # request_slot_info (Sproto Tag 242)
-                s_info = encode_sproto([(1, 0), (2, 10)])
-                send_rpc_push(633, encode_sproto([(0, s_info), (1, {}), (2, {})])) # ret_slot_info Tag 633
+                # ret_slot_info.slot_info uses curNum(0) and sumNum(1).
+                slot_state = picked_char.setdefault('slot_state', {'curNum': 10, 'sumNum': 0}) if picked_char else {'curNum': 10, 'sumNum': 0}
+                cur_num = max(0, int(slot_state.get('curNum', 10)))
+                sum_num = max(0, int(slot_state.get('sumNum', 0)))
+                s_info = encode_sproto([(0, cur_num), (1, sum_num)])
+                send_rpc_push(633, encode_sproto([(0, s_info), (1, {})])) # ret_slot_info Tag 633
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4805,10 +4811,51 @@ def client_handler(conn, addr):
                         send_rpc_push(625, encode_sproto([]))
                 elif msg == 208:
                     send_rpc_push(607, encode_sproto([]))
+                elif msg == 219:
+                    mid = str(picked_char.get('map_id', '11')) if picked_char else '11'
+                    line_index = max(1, int(picked_char.get('line_index', 1))) if picked_char else 1
+                    line_count = max(line_index, int(picked_char.get('line_count', 3))) if picked_char else 3
+                    send_rpc_push(568, encode_sproto([
+                        (0, line_index),
+                        (1, line_count)
+                    ]))
+                elif msg == 226:
+                    if picked_char:
+                        picked_char['pk'] = get_val_int(body, 0, picked_char.get('pk', 0))
+                        save_chars(all_accounts_chars)
                 elif msg == 230:
                     send_rpc_push(626, encode_sproto([(0, True)]))
                 elif msg == 243:
-                    send_rpc_push(634, encode_sproto([]))
+                    # spin_slot: update local slot counters and return slot_info.
+                    if picked_char:
+                        slot_state = picked_char.setdefault('slot_state', {'curNum': 10, 'sumNum': 0})
+                        cur_num = max(0, int(slot_state.get('curNum', 10)))
+                        sum_num = max(0, int(slot_state.get('sumNum', 0)))
+                        if cur_num > 0:
+                            cur_num -= 1
+                        sum_num += 1
+                        slot_state['curNum'] = cur_num
+                        slot_state['sumNum'] = sum_num
+                        save_chars(all_accounts_chars)
+                        slot_info = encode_sproto([(0, cur_num), (1, sum_num)])
+                        send_rpc_push(634, encode_sproto([(0, slot_info), (1, {})]))
+                    else:
+                        send_rpc_push(634, encode_sproto([(0, encode_sproto([(0, 0), (1, 0)])), (1, {})]))
+                elif msg == 244:
+                    # request_slot_sum_reward: return current total and an empty reward list.
+                    slot_state = picked_char.get('slot_state', {'curNum': 0, 'sumNum': 0}) if picked_char else {'curNum': 0, 'sumNum': 0}
+                    send_rpc_push(635, encode_sproto([
+                        (0, []),
+                        (1, max(0, int(slot_state.get('sumNum', 0))))
+                    ]))
+                elif msg == 249:
+                    # request_slot_reward: return current slot state; actual item list can be empty.
+                    slot_state = picked_char.get('slot_state', {'curNum': 0, 'sumNum': 0}) if picked_char else {'curNum': 0, 'sumNum': 0}
+                    slot_info = encode_sproto([
+                        (0, max(0, int(slot_state.get('curNum', 0)))),
+                        (1, max(0, int(slot_state.get('sumNum', 0))))
+                    ])
+                    send_rpc_push(634, encode_sproto([(0, slot_info), (1, {})]))
                 elif msg == 254:
                     day30 = min(30, (int(time.time()) // 86400) % 30 + 1)
                     send_rpc_push(642, encode_sproto([
