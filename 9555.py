@@ -3962,7 +3962,8 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 259: # request_first_buy (Sproto Tag 259)
-                send_rpc_push(647, encode_sproto([(0, 0)])) # ret_request_first_buy Tag 647
+                # ret_request_first_buy.ID is a string (field 0).
+                send_rpc_push(647, encode_sproto([(0, "1")])) # ret_request_first_buy Tag 647
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3996,12 +3997,16 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 242: # request_slot_info (Sproto Tag 242)
-                # ret_slot_info.slot_info uses curNum(0) and sumNum(1).
+                # SlotUIRootLogic.Reset reads: slot_datas(0), slot_info(1), slot_items(2).
                 slot_state = picked_char.setdefault('slot_state', {'curNum': 10, 'sumNum': 0}) if picked_char else {'curNum': 10, 'sumNum': 0}
                 cur_num = max(0, int(slot_state.get('curNum', 10)))
                 sum_num = max(0, int(slot_state.get('sumNum', 0)))
                 s_info = encode_sproto([(0, cur_num), (1, sum_num)])
-                send_rpc_push(633, encode_sproto([(0, s_info), (1, {})])) # ret_slot_info Tag 633
+                send_rpc_push(633, encode_sproto([
+                    (0, {}),
+                    (1, s_info),
+                    (2, {})
+                ])) # ret_slot_info Tag 633
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4062,9 +4067,9 @@ def client_handler(conn, addr):
                 special_big_packs = {
                     '1': encode_sproto([(0, "1"), (1, 0)])
                 }
-                # ret_request_big_pack: end_time is field 0; special_big_packs is field 3.
+                # ret_request_big_pack: ID is field 0 and special_big_packs is field 3.
                 send_rpc_push(648, encode_sproto([
-                    (0, 0),
+                    (0, "1"),
                     (3, special_big_packs)
                 ]))
                 if session is not None:
@@ -4814,7 +4819,7 @@ def client_handler(conn, addr):
                 elif msg == 190:
                     send_rpc_push(597, encode_sproto([(0, 1)]))
                 elif msg == 203:
-                    tower_id = get_val_int(body, 0, picked_char.get('tower_floor', 1) if picked_char else 1)
+                    tower_id = get_val_int(body, 1, picked_char.get('tower_floor', 1) if picked_char else 1)
                     send_rpc_push(625, encode_sproto([(1, tower_id)]))
                 elif msg == 208:
                     send_rpc_push(607, encode_sproto([]))
