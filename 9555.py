@@ -412,6 +412,112 @@ try:
                     })
         print(f"[SHOP CONFIG LOADED] categories={len(SHOP_CONFIG)}")
 
+    # Load DailyActiveData
+    DAILY_ACTIVE_CONFIG = {}
+    da_path = os.path.join(text_asset_root, "DailyActiveData")
+    if os.path.exists(da_path):
+        with open(da_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 7 and parts[0] == "*" and parts[1].isdigit():
+                    DAILY_ACTIVE_CONFIG[parts[1]] = {
+                        'type': int(parts[2]) if parts[2].isdigit() else 0,
+                        'score': int(parts[6]) if parts[6].isdigit() else 10,
+                        'count': int(parts[7]) if parts[7].isdigit() else 1
+                    }
+        print(f"[DAILY ACTIVE LOADED] count={len(DAILY_ACTIVE_CONFIG)}")
+
+    # Load SignInWeekData
+    SIGN_WEEK_CONFIG = {}
+    sw_path = os.path.join(text_asset_root, "SignInWeekData")
+    if os.path.exists(sw_path):
+        with open(sw_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 10 and parts[0] == "*" and parts[1].isdigit():
+                    day = int(parts[1])
+                    SIGN_WEEK_CONFIG[day] = {
+                        'xd_item': parts[2], 'xd_cnt': int(parts[3]) if parts[3].isdigit() else 1,
+                        'item2': parts[14] if len(parts) > 14 else '', 'cnt2': int(parts[15]) if len(parts) > 15 and parts[15].isdigit() else 1
+                    }
+        print(f"[SIGN WEEK LOADED] count={len(SIGN_WEEK_CONFIG)}")
+
+    # Load LevelRewardData
+    LEVEL_REWARD_CONFIG = {}
+    lr_path = os.path.join(text_asset_root, "LevelRewardData")
+    if os.path.exists(lr_path):
+        with open(lr_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 4 and parts[0] == "*" and parts[1].isdigit():
+                    LEVEL_REWARD_CONFIG[parts[1]] = {
+                        'target_lv': int(parts[2]) if parts[2].isdigit() else 1,
+                        'reward_item': parts[3],
+                        'reward_num': int(parts[4]) if parts[4].isdigit() else 100
+                    }
+        print(f"[LEVEL REWARD LOADED] count={len(LEVEL_REWARD_CONFIG)}")
+
+    # Load InvestData
+    INVEST_CONFIG = {}
+    inv_path = os.path.join(text_asset_root, "InvestData")
+    if os.path.exists(inv_path):
+        with open(inv_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 3 and parts[0] == "*" and parts[1].isdigit():
+                    INVEST_CONFIG[parts[1]] = {
+                        'item_id': parts[2],
+                        'item_cnt': int(parts[3]) if parts[3].isdigit() else 100,
+                        'target_lv': int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else 1
+                    }
+        print(f"[INVEST LOADED] count={len(INVEST_CONFIG)}")
+
+    # Load DailyBuyData
+    DAILY_BUY_CONFIG = {}
+    db_path = os.path.join(text_asset_root, "DailyBuyData")
+    if os.path.exists(db_path):
+        with open(db_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 4 and parts[0] == "*" and parts[1].isdigit():
+                    DAILY_BUY_CONFIG[parts[1]] = {
+                        'item1': parts[2], 'cnt1': int(parts[3]) if parts[3].isdigit() else 1,
+                        'item2': parts[5] if len(parts) > 5 else '', 'cnt2': int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else 1
+                    }
+        print(f"[DAILY BUY LOADED] count={len(DAILY_BUY_CONFIG)}")
+
+    # Load TowerData
+    TOWER_CONFIG = {}
+    tow_path = os.path.join(text_asset_root, "TowerData")
+    if os.path.exists(tow_path):
+        with open(tow_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 5 and parts[0] == "*" and parts[1].isdigit():
+                    floor = int(parts[1])
+                    TOWER_CONFIG[floor] = {
+                        'map_id': parts[3],
+                        'show_reward': parts[4],
+                        'drop_id': parts[5],
+                        'combo_val': int(parts[20]) if len(parts) > 20 and parts[20].isdigit() else 8000
+                    }
+        print(f"[TOWER LOADED] floors={len(TOWER_CONFIG)}")
+
+    # Load RetrieveData
+    RETRIEVE_CONFIG = {}
+    ret_path = os.path.join(text_asset_root, "RetrieveData")
+    if os.path.exists(ret_path):
+        with open(ret_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 4 and parts[0] == "*" and parts[1].isdigit():
+                    RETRIEVE_CONFIG[parts[1]] = {
+                        'type': int(parts[2]) if parts[2].isdigit() else 0,
+                        'cost1': int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else 5,
+                        'cost2': int(parts[12]) if len(parts) > 12 and parts[12].isdigit() else 10
+                    }
+        print(f"[RETRIEVE LOADED] count={len(RETRIEVE_CONFIG)}")
+
 except: traceback.print_exc()
 
 BAK_DB = CHAR_DB + ".bak"
@@ -3575,9 +3681,11 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 261: # request_daily_active (Sproto Tag 261)
-                daily_actives = { '101': encode_sproto([(0, "101"), (1, 1)]) }
+                daily_actives = {}
+                for da_id in DAILY_ACTIVE_CONFIG:
+                    daily_actives[da_id] = encode_sproto([(0, str(da_id)), (1, 1)])
                 daily_rewards = { '1': encode_sproto([(0, "1"), (1, 0)]) }
-                send_rpc_push(649, encode_sproto([(0, daily_actives), (1, daily_rewards), (2, 0)])) # ret_request_daily_active Tag 649
+                send_rpc_push(649, encode_sproto([(0, daily_actives), (1, daily_rewards), (2, 100)])) # ret_request_daily_active Tag 649
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3589,7 +3697,8 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 253: # request_sign_week_info (Sproto Tag 253)
-                send_rpc_push(641, encode_sproto([(0, False), (1, 1), (2, False), (3, False)])) # ret_request_sign_week_info Tag 641
+                cur_day = min(7, (int(time.time()) // 86400) % 7 + 1)
+                send_rpc_push(641, encode_sproto([(0, False), (1, cur_day), (2, True), (3, False)])) # ret_request_sign_week_info Tag 641
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3601,14 +3710,17 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 258: # request_daily_buy (Sproto Tag 258)
-                daily_buys = { '1': encode_sproto([(0, "1"), (1, 0)]) }
+                daily_buys = {}
+                for db_id in DAILY_BUY_CONFIG:
+                    daily_buys[str(db_id)] = encode_sproto([(0, str(db_id)), (1, 0)])
                 send_rpc_push(646, encode_sproto([(0, daily_buys)])) # ret_request_daily_buy Tag 646
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 202: # request_tower_copy_info (Sproto Tag 202)
-                send_rpc_push(606, encode_sproto([(0, 1), (1, 1)])) # ret_request_tower_copy_info Tag 606
+                cur_floor = picked_char.get('tower_floor', 1) if picked_char else 1
+                send_rpc_push(606, encode_sproto([(0, cur_floor), (1, len(TOWER_CONFIG) or 100)])) # ret_request_tower_copy_info Tag 606
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3646,7 +3758,9 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 278: # request_retrieve_info (Sproto Tag 278)
-                retrieve_info = { '1': encode_sproto([(0, "1"), (1, 0)]) }
+                retrieve_info = {}
+                for ret_id in RETRIEVE_CONFIG:
+                    retrieve_info[str(ret_id)] = encode_sproto([(0, str(ret_id)), (1, 0)])
                 send_rpc_push(658, encode_sproto([(0, retrieve_info)])) # ret_request_retrieve_info Tag 658
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -3659,14 +3773,18 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 257: # request_invest_pack (Sproto Tag 257)
-                invest_pack = { '0': encode_sproto([(0, "0"), (1, -1)]) }
+                invest_pack = {}
+                for inv_id in INVEST_CONFIG:
+                    invest_pack[str(inv_id)] = encode_sproto([(0, str(inv_id)), (1, 0)])
                 send_rpc_push(645, encode_sproto([(0, invest_pack)])) # ret_request_invest_pack Tag 645
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 256: # request_level_pack (Sproto Tag 256)
-                level_pack = { '1': encode_sproto([(0, "1"), (1, 0)]) }
+                level_pack = {}
+                for l_id in LEVEL_REWARD_CONFIG:
+                    level_pack[str(l_id)] = encode_sproto([(0, str(l_id)), (1, 0)])
                 send_rpc_push(644, encode_sproto([(0, level_pack)])) # ret_request_level_pack Tag 644
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -4350,7 +4468,7 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg in [118, 142, 143, 144, 145, 154, 155, 165, 166, 183, 184, 186, 187, 188, 189, 190, 192, 194, 196, 203, 205, 206, 211, 212, 213, 214, 215, 219, 226, 231, 232, 233, 244, 245, 247, 248, 249, 251, 266, 271, 272, 275, 276, 279, 281, 283, 285, 286, 287, 288, 290, 291, 292, 293, 295, 297, 299, 300, 302, 308, 309, 312, 316, 317, 318, 319, 320]:
+            elif msg in [118, 142, 145, 154, 155, 165, 166, 183, 184, 186, 187, 188, 189, 190, 192, 194, 196, 203, 205, 206, 211, 212, 213, 214, 215, 219, 226, 231, 232, 233, 244, 245, 247, 248, 249, 251, 266, 271, 272, 275, 276, 279, 281, 283, 285, 286, 287, 288, 290, 291, 292, 293, 295, 297, 299, 300, 302, 308, 309, 312, 316, 317, 318, 319, 320]:
                 resp_data = encode_sproto([])
                 if msg == 118:
                     resp_data = encode_sproto([(0, f"User_{random.randint(100, 999)}")])
