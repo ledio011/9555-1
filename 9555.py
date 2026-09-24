@@ -2823,8 +2823,18 @@ def client_handler(conn, addr):
                     if picked_char.get('tutorial', 0) == 1:
                         fids += [str(i) for i in range(1, 100)]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in set(fids)}
+                    # sync_common_data exact schema includes guildId(11) and big_pack(6).
+                    guild_id = int(picked_char.get('guild_id', 0))
                     send_rpc_push(614, encode_sproto([
-                        (0, int(time.time())), (2, 0), (4, 10000), (9, funcs), (12, random.randint(1, 10000)), (13, 1), (14, int(time.time()))
+                        (0, int(time.time())),   # serverTime
+                        (2, 0),                  # time_offset
+                        (4, 10000),              # pvp_scale
+                        (6, 0),                  # big_pack
+                        (9, funcs),              # func_info map
+                        (11, guild_id),          # guildId
+                        (12, random.randint(1, 10000)), # seed
+                        (13, 1),                 # server_level
+                        (14, int(time.time()))   # start_time
                     ]))
 
                     # 611: sync_item_pack (Item Backpack)
