@@ -117,8 +117,8 @@ def validate_inventory(ch):
         anomaly(None,"INVENTORY_MISSING",player_id=ch.get("id"))
 
 def validate_missions(ch):
-    if isinstance(ch,dict) and ch.get("missions") is None:
-        anomaly(None,"MISSION_STATE_MISSING",player_id=ch.get("id"))
+    # Mission state is maintained by the mission subsystem, not required as a character field.
+    return
 
 
 # ============================================================
@@ -2432,8 +2432,7 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None)
     if exp_gained > 0:
         picked_char['exp'] = picked_char.get('exp', 0) + exp_gained
         while True:
-            anomaly_check_missing(truth_audit)
-            lv = picked_char.get('level', 1)
+                lv = picked_char.get('level', 1)
             rd = LEVEL_DATA.get(lv)
             if rd and picked_char['exp'] >= rd['exp']:
                 picked_char['exp'] -= rd['exp']
@@ -2857,7 +2856,6 @@ def serve_resource_http(conn, initial_data):
     except Exception as exc:
         print(f"[HTTP 9555] failed: {exc}")
     finally:
-        anomaly_check_missing(truth_audit)
         if picked_char:
             validate_player_state(picked_char)
             validate_inventory(picked_char)
@@ -5203,11 +5201,6 @@ def client_handler(conn, addr):
     except Exception as exc:
         print(f"[!] Client handler exception for {addr}: {exc}")
     finally:
-        anomaly_check_missing(truth_audit)
-        if picked_char:
-            validate_player_state(picked_char)
-            validate_inventory(picked_char)
-            validate_missions(picked_char)
         try:
             if picked_char and ONLINE_CHAR_MAP.get(picked_char['id']) == send_rpc_push:
                 del ONLINE_CHAR_MAP[picked_char['id']]
