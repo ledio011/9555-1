@@ -3970,7 +3970,7 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 278: # request_invest_pack
-                send_rpc_push(662, encode_sproto([(0, 0)]))
+                send_rpc_push(662, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
