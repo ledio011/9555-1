@@ -3724,7 +3724,11 @@ def client_handler(conn, addr):
                         save_chars(all_accounts_chars)
                         send_update_item_push(send_rpc_push, 0, eq_idx, None)
                         send_rpc_push(611, sync_item_pack_rpc(picked_char))
-                    send_rpc_push(583, encode_sproto([(0, 0)])) # ret_buy_guild_goods Tag 583
+                    item_id = str(item_dict.get('itemId', item_dict.get('id', '0')))
+                    send_rpc_push(583, encode_sproto([
+                        (0, item_id),
+                        (3, 0)
+                    ])) # ret_buy_guild_goods: itemId(0), leftNum(3)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4827,7 +4831,12 @@ def client_handler(conn, addr):
                 elif msg == 189:
                     send_rpc_push(596, encode_sproto([(0, 1)]))
                 elif msg == 190:
-                    send_rpc_push(597, encode_sproto([(0, 1)]))
+                    consign_id = get_val_int(body, 0, 0)
+                    consign_item_id = field_text(body, 1)
+                    send_rpc_push(597, encode_sproto([
+                        (0, consign_id),
+                        (2, consign_item_id)
+                    ])) # ret_consign_buy_item: id(0), itemId(2)
                 elif msg == 203:
                     tower_id = get_val_int(body, 1, picked_char.get('tower_floor', 1) if picked_char else 1)
                     send_rpc_push(625, encode_sproto([(1, tower_id)]))
@@ -4872,13 +4881,9 @@ def client_handler(conn, addr):
                         (1, max(0, int(slot_state.get('sumNum', 0))))
                     ]))
                 elif msg == 249:
-                    # request_slot_reward: return current slot state; actual item list can be empty.
-                    slot_state = picked_char.get('slot_state', {'curNum': 0, 'sumNum': 0}) if picked_char else {'curNum': 0, 'sumNum': 0}
-                    slot_info = encode_sproto([
-                        (0, max(0, int(slot_state.get('curNum', 0)))),
-                        (1, max(0, int(slot_state.get('sumNum', 0))))
-                    ])
-                    send_rpc_push(634, encode_sproto([(0, slot_info), (1, {})]))
+                    # request_slot_reward has only uuid(0) and no matching response
+                    # protocol registration. Do not send an unrelated ret_spin_slot packet.
+                    # The generic request ACK below is the safe completion path.
                 elif msg == 254:
                     day30 = min(30, (int(time.time()) // 86400) % 30 + 1)
                     send_rpc_push(642, encode_sproto([
