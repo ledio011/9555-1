@@ -104,21 +104,36 @@ def validate_player_state(ch):
     if not isinstance(ch,dict):
         anomaly(None,"PLAYER_STATE_MISSING")
         return
-    for field in ("id","level","exp","cash","gold","hp","max_hp","map_id","pos"):
+    # These are persisted/authoritative character fields in this server.
+    for field in ("id","level","exp","cash"):
         if field not in ch:
             anomaly(None,"PLAYER_VALUE_MISSING",field=field,player_id=ch.get("id"))
     if ch.get("level",1) < 1:
         anomaly(None,"PLAYER_LEVEL_INVALID",value=ch.get("level"))
-    if ch.get("hp",0) < 0 or ch.get("max_hp",0) < 0:
-        anomaly(None,"PLAYER_HP_INVALID",hp=ch.get("hp"),max_hp=ch.get("max_hp"))
+    if ch.get("cash",0) < 0 or ch.get("exp",0) < 0:
+        anomaly(None,"PLAYER_RESOURCE_INVALID",cash=ch.get("cash"),exp=ch.get("exp"))
+    try:
+        stats = get_character_stats(ch)
+        hp_max = stats.get("hp_max", 0)
+        if hp_max <= 0:
+            anomaly(None,"PLAYER_MAX_HP_INVALID",player_id=ch.get("id"),max_hp=hp_max)
+        hp = ch.get("hp", hp_max)
+        if hp < 0 or hp > hp_max:
+            anomaly(None,"PLAYER_HP_INVALID",player_id=ch.get("id"),hp=hp,max_hp=hp_max)
+    except Exception as exc:
+        anomaly(None,"PLAYER_STATS_CALC_FAILED",player_id=ch.get("id"),error=str(exc))
 
 def validate_inventory(ch):
-    if isinstance(ch,dict) and ch.get("inventory") is None:
-        anomaly(None,"INVENTORY_MISSING",player_id=ch.get("id"))
+    # Inventory is represented by item_pack/equip packs, not a single inventory key.
+    if not isinstance(ch,dict):
+        return
+    if "item_pack" not in ch and "equip_pack" not in ch:
+        anomaly(None,"PLAYER_ITEM_STATE_MISSING",player_id=ch.get("id"))
 
 def validate_missions(ch):
-    if isinstance(ch,dict) and ch.get("missions") is None:
-        anomaly(None,"MISSION_STATE_MISSING",player_id=ch.get("id"))
+    # Mission state is maintained by the mission subsystem, not necessarily on the character dict.
+    if not isinstance(ch,dict):
+        return
 
 
 # ============================================================
@@ -2857,11 +2872,6 @@ def serve_resource_http(conn, initial_data):
     except Exception as exc:
         print(f"[HTTP 9555] failed: {exc}")
     finally:
-        anomaly_check_missing(truth_audit)
-        if picked_char:
-            validate_player_state(picked_char)
-            validate_inventory(picked_char)
-            validate_missions(picked_char)
         try:
             for _timer in protocol_debug.get("timers", {}).values():
                 try: _timer.cancel()
@@ -5203,6 +5213,11 @@ def client_handler(conn, addr):
     except Exception as exc:
         print(f"[!] Client handler exception for {addr}: {exc}")
     finally:
+        anomaly_check_missing(truth_audit)
+        if picked_char:
+            validate_player_state(picked_char)
+            validate_inventory(picked_char)
+            validate_missions(picked_char)
         try:
             if picked_char and ONLINE_CHAR_MAP.get(picked_char['id']) == send_rpc_push:
                 del ONLINE_CHAR_MAP[picked_char['id']]
