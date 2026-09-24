@@ -110,6 +110,105 @@ def protocol_debug_tx(state, tag):
         protocol_debug_mark(state, 504, "TX")
 
 
+# ============================================================
+# UNIVERSAL TRUTH / CONSISTENCY AUDIT
+# Records every RX/TX protocol event and compares declared
+# values against the authoritative server-side state when a
+# semantic mapping is registered. Unknown mappings are logged
+# as UNKNOWN instead of being falsely called valid/fake.
+# ============================================================
+TRUTH_AUDIT_ENABLED = True
+TRUTH_AUDIT_MAX_EVENTS = 500
+
+def truth_audit_new_state():
+    return {
+        "events": [],
+        "claims": [],
+        "semantic": {},
+        "last_state": None,
+    }
+
+def truth_audit_trim(state):
+    if not state:
+        return
+    for key in ("events", "claims"):
+        if len(state.get(key, [])) > TRUTH_AUDIT_MAX_EVENTS:
+            del state[key][:-TRUTH_AUDIT_MAX_EVENTS]
+
+def truth_audit_event(state, direction, kind, tag=None, detail=None):
+    if not TRUTH_AUDIT_ENABLED or state is None:
+        return
+    item = {
+        "ts": round(time.time(), 3),
+        "direction": direction,
+        "kind": kind,
+        "tag": tag,
+        "detail": detail if detail is not None else {}
+    }
+    state.setdefault("events", []).append(item)
+    truth_audit_trim(state)
+    print(
+        f"[TRUTH AUDIT] {direction} {kind}"
+        f"{' TAG='+str(tag) if tag is not None else ''}"
+        f" {detail if detail is not None else ''}",
+        flush=True
+    )
+
+def truth_audit_state_snapshot(picked_char):
+    if not isinstance(picked_char, dict):
+        return None
+    # Keep a stable, JSON-safe snapshot of the authoritative server state.
+    try:
+        return json.loads(json.dumps(picked_char, sort_keys=True, default=str))
+    except Exception:
+        return dict(picked_char)
+
+def truth_audit_compare(state, tag, claim_name, claimed, actual, source="server"):
+    if not TRUTH_AUDIT_ENABLED or state is None:
+        return
+    result = "UNKNOWN"
+    if actual is not None:
+        result = "VALID" if claimed == actual else "INCONSISTENT"
+    item = {
+        "ts": round(time.time(), 3),
+        "tag": tag,
+        "claim": claim_name,
+        "claimed": claimed,
+        "actual": actual,
+        "source": source,
+        "result": result,
+    }
+    state.setdefault("claims", []).append(item)
+    truth_audit_trim(state)
+    if result != "VALID":
+        print(
+            f"[TRUTH AUDIT] {result} TAG={tag} "
+            f"{claim_name}: claimed={claimed!r} actual={actual!r}",
+            flush=True
+        )
+
+def truth_audit_register(state, tag, name, claimed, actual):
+    """Register a semantic claim. Use this at the point a response is built."""
+    truth_audit_compare(state, tag, name, claimed, actual)
+
+def truth_audit_rx(state, tag, body):
+    if not TRUTH_AUDIT_ENABLED or state is None:
+        return
+    truth_audit_event(
+        state, "RX", "REQUEST", tag,
+        {"field_count": len(body) if isinstance(body, dict) else None}
+    )
+
+def truth_audit_tx(state, tag, data):
+    if not TRUTH_AUDIT_ENABLED or state is None:
+        return
+    truth_audit_event(
+        state, "TX", "RESPONSE",
+        tag,
+        {"payload_size": len(data) if data is not None else 0}
+    )
+
+
 # Load Mission Data
 missions_data = {}
 rewards_data = {}
@@ -2675,12 +2774,14 @@ def serve_resource_http(conn, initial_data):
 
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
+    truth_audit = truth_audit_new_state()
     protocol_debug = protocol_debug_new_state()
     global server_session_counter
     send_lock = threading.Lock()
 
     def send_rpc_push(tag, data):
         protocol_debug_tx(protocol_debug, tag)
+        truth_audit_tx(truth_audit, tag, data)
         try:
             ph_p = encode_sproto([(0, tag)])
             pf_p = sproto_pack(ph_p + data)
@@ -2835,7 +2936,8 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 105: # character_pick
+            elif msg == 105:
+                truth_audit_event(truth_audit, "STATE", "CHARACTER_PICKED", msg, {"char_id": picked_char.get("id") if picked_char else None}) # character_pick
                 char_id = get_val_int(body, 0)
                 picked_char = next((c for c in get_account_chars(all_accounts_chars, cur_areaId, acc_id) if c['id'] == char_id), None)
                 resp = encode_sproto([]) if picked_char else encode_sproto([(0, 1)])
@@ -4850,6 +4952,7 @@ def client_handler(conn, addr):
             elif msg == 270: # download_finish
                 if picked_char and not picked_char.get('download_complete'):
                     picked_char['download_complete'] = True
+                    truth_audit_register(truth_audit, 654, "download_complete", 1, int(bool(picked_char.get("download_complete"))))
                     # Expansion Rewards: Mount 9301 (Chevrolet voucher), 9011 (10), 9001 (20), 5026 (5)
                     add_to_inventory(picked_char, "9301", 1)
                     add_to_inventory(picked_char, "9011", 10)
@@ -4874,6 +4977,7 @@ def client_handler(conn, addr):
             elif msg == 306: # tutorial_finish
                 if picked_char:
                     picked_char['tutorial'] = 1
+                    truth_audit_register(truth_audit, 592, "tutorial", 1, int(picked_char.get("tutorial", 0)))
                     save_chars(all_accounts_chars)
                     send_rpc_push(592, sync_common_data_rpc(picked_char))
                 print("[TUTORIAL] tutorial_finish acknowledged and persisted")
