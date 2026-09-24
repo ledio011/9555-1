@@ -3936,7 +3936,8 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 121: # request_daily_mission (Sproto Tag 121)
-                send_rpc_push(688, encode_sproto([(0, {})])) # send_daily_mission Tag 688
+                # send_daily_mission is protocol tag 530.
+                send_rpc_push(530, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4030,7 +4031,10 @@ def client_handler(conn, addr):
             elif msg == 296: # req_level_reward (Sproto Tag 296)
                 level_reward = {}
                 for lr_id in LEVEL_REWARD_CONFIG:
-                    level_reward[str(lr_id)] = encode_sproto([(0, str(lr_id)), (1, 0)])
+                    level_reward[str(lr_id)] = encode_sproto([
+                        (0, str(lr_id)),
+                        (1, 0)
+                    ])
                 send_rpc_push(674, encode_sproto([(0, level_reward)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -4055,8 +4059,14 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 260: # request_big_pack (Sproto Tag 260)
-                special_big_packs = { '1': encode_sproto([(0, "1"), (1, 0)]) }
-                send_rpc_push(648, encode_sproto([(0, special_big_packs)])) # ret_request_big_pack Tag 648
+                special_big_packs = {
+                    '1': encode_sproto([(0, "1"), (1, 0)])
+                }
+                # ret_request_big_pack: end_time is field 0; special_big_packs is field 3.
+                send_rpc_push(648, encode_sproto([
+                    (0, 0),
+                    (3, special_big_packs)
+                ]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4069,7 +4079,9 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 262: # require_level_reward (Sproto Tag 262)
-                send_rpc_push(674, encode_sproto([(0, 1)])) # ret_level_reward Tag 674
+                reward_id = field_text(body, 0)
+                # require_level_reward is completed with get_level_reward (tag 675).
+                send_rpc_push(675, encode_sproto([(0, reward_id)] if reward_id else []))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4084,13 +4096,15 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 264: # require_first_buy_reward (Sproto Tag 264)
-                send_rpc_push(647, encode_sproto([(0, 1)])) # ret_request_first_buy Tag 647
+                reward_id = field_text(body, 0)
+                send_rpc_push(647, encode_sproto([(0, reward_id)] if reward_id else []))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 265: # require_daily_active_reward (Sproto Tag 265)
-                send_rpc_push(612, encode_sproto([(0, 1)])) # grant_daily_mission_reward Tag 612
+                reward_id = field_text(body, 0)
+                send_rpc_push(612, encode_sproto([(0, reward_id)] if reward_id else []))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
