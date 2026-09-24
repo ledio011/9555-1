@@ -1085,7 +1085,7 @@ def get_full_char(c):
     ])
 
 def sync_common_data_rpc(picked_char):
-    """Build Sproto Tag 592 (sync_common_data) with tutorial function state dic."""
+    """Build Sproto Tag 614 (sync_common_data) with tutorial function state map."""
     func_info_map = {}
     if picked_char and picked_char.get('tutorial', 0) == 1:
         for fid in range(1, 100):
@@ -2882,12 +2882,9 @@ def client_handler(conn, addr):
                         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
                         print(f"[MAP ENTER SEND] map_id={mid} scene={scene_name} pos={picked_char['pos']}")
 
-                        # TAG 504: main_player_create
-                        send_rpc_push(504, encode_sproto([
-                            (0, get_full_char(picked_char)),
-                            (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
-                        ]))
-                        print(f"[MAIN PLAYER CREATE SEND] map_id={mid}")
+                        # TAG 504 is sent after the client reports msg 100 (map_ready).
+                        # Sending it here races enter_map_handler / scene loading because 503
+                        # temporarily sets NetLogic.CanProcessPack = false.
 
                     except Exception:
                         print("[!] FAILED TO SEND INITIAL MAP ENTER")
@@ -2902,10 +2899,23 @@ def client_handler(conn, addr):
                     print(f"[MAP READY RECEIVED] Character is fully in map_id={mid}!")
                     print(f"==================================================")
 
-                    # 1. TAG 654: start_enter_game (Close loading box & enable HUD controls)
+                    # 1. TAG 504: main_player_create
+                    # main_player_create_handler.cs reads character/movement and creates ObjManager.MainPlayer.
+                    send_rpc_push(504, encode_sproto([
+                        (0, get_full_char(picked_char)),
+                        (1, get_movement(
+                            picked_char['pos'][0],
+                            picked_char['pos'][1],
+                            picked_char['pos'][2],
+                            picked_char['pos'][3]
+                        ))
+                    ]))
+                    print(f"[MAIN PLAYER CREATE SEND] map_id={mid}")
+
+                    # 2. TAG 654: start_enter_game (Close loading box & enable HUD controls)
                     send_rpc_push(654, encode_sproto([(0, 1)]))
 
-                    # 2. TAG 505 / AOI: spawn map NPCs
+                    # 3. TAG 509: npc_create / map NPC spawn
                     spawn_map_npcs(conn, mid, picked_char)
 
                     if mid in ["223", "224", "225", "226", "227", "228", "229"]:
