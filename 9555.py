@@ -48,6 +48,10 @@ NUMERIC_CACHE = defaultdict(list)
 
 TEXT_CACHE = defaultdict(list)
 
+SPROTO_TYPES = {}
+SPROTO_PROTOCOLS = {}
+PACKAGE_FIELDS = {}
+
 
 # ============================================================
 # LOAD INDEX
@@ -91,6 +95,8 @@ def load_index():
         build_ram_cache(
             files
         )
+
+        load_source_protocol()
 
         return True
 
@@ -343,6 +349,153 @@ def build_ram_cache(files):
 
 
 # ============================================================
+# SOURCE-DERIVED SPROTO
+# ============================================================
+
+def load_source_protocol():
+
+    global SPROTO_TYPES
+    global SPROTO_PROTOCOLS
+    global PACKAGE_FIELDS
+
+    SPROTO_TYPES = {}
+    SPROTO_PROTOCOLS = {}
+    PACKAGE_FIELDS = {}
+
+    types_file = (
+        INDEX_DIR / "protocol" / "sproto_types.json"
+    )
+
+    protocols_file = (
+        INDEX_DIR / "protocol" / "sproto_protocols.json"
+    )
+
+    try:
+
+        if types_file.exists():
+
+            SPROTO_TYPES = json.loads(
+                types_file.read_text(
+                    encoding="utf-8",
+                    errors="ignore"
+                )
+            )
+
+        if protocols_file.exists():
+
+            SPROTO_PROTOCOLS = json.loads(
+                protocols_file.read_text(
+                    encoding="utf-8",
+                    errors="ignore"
+                )
+            )
+
+        for name, schema in SPROTO_TYPES.items():
+
+            if name.lower().split(".")[-1] != "package":
+                continue
+
+            for field in schema.get("fields", []):
+
+                field_name = field.get("name")
+
+                if field_name:
+                    PACKAGE_FIELDS[
+                        field_name.lower()
+                    ] = field.get("tag")
+
+            break
+
+    except Exception as e:
+
+        print(
+            f"[SPROTO SOURCE ERROR] {e}",
+            flush=True
+        )
+
+    print(
+        f"[SPROTO SOURCE] "
+        f"types={len(SPROTO_TYPES)} "
+        f"protocols={len(SPROTO_PROTOCOLS)} "
+        f"package_fields={PACKAGE_FIELDS}",
+        flush=True
+    )
+
+
+def find_protocol(msg):
+
+    if msg is None:
+        return None
+
+    return SPROTO_PROTOCOLS.get(str(msg))
+
+
+def decode_sproto_integer(value):
+
+    if value is None:
+        return None
+
+    if value == 0:
+        return 0
+
+    if value % 2 == 0:
+        return (value // 2) - 1
+
+    return value
+
+
+def encode_sproto_integer(value):
+
+    try:
+        value = int(value)
+    except Exception:
+        return None
+
+    if value < 0:
+        return None
+
+    encoded = (value + 1) * 2
+
+    if encoded > 0xFFFF:
+        return None
+
+    return encoded
+
+
+def build_source_response(msg, session):
+
+    protocol = find_protocol(msg)
+
+    if protocol is None or session is None:
+        return None
+
+    session_tag = PACKAGE_FIELDS.get("session")
+
+    if session_tag is None:
+        return None
+
+    field_count = int(session_tag) + 1
+    fields = [0] * field_count
+
+    encoded_session = encode_sproto_integer(session)
+
+    if encoded_session is None:
+        return None
+
+    fields[int(session_tag)] = encoded_session
+
+    raw = (
+        struct.pack("<H", field_count)
+        + b"".join(
+            struct.pack("<H", value)
+            for value in fields
+        )
+    )
+
+    return sproto_pack(raw)
+
+
+# ============================================================
 # SOURCE LOOKUPS
 # ============================================================
 
@@ -556,41 +709,48 @@ def inspect_packet(raw):
             raw[:2]
         )[0]
 
-        header_size = (
-            2
-            + header_words * 2
-        )
+        header_size = 2 + header_words * 2
 
         if header_size > len(raw):
             return None, None
 
         fields = {}
-
         position = 2
 
-        for tag in range(
-            header_words
-        ):
+        for tag in range(header_words):
 
             if position + 2 > len(raw):
                 break
 
-            value = struct.unpack(
+            fields[tag] = struct.unpack(
                 "<H",
-                raw[
-                    position:
-                    position + 2
-                ]
+                raw[position:position + 2]
             )[0]
 
             position += 2
 
-            fields[tag] = value
+        type_tag = PACKAGE_FIELDS.get("type")
+        session_tag = PACKAGE_FIELDS.get("session")
 
-        return (
-            fields.get(0),
-            fields.get(1)
+        msg = (
+            fields.get(type_tag)
+            if type_tag is not None
+            else None
         )
+
+        session = (
+            fields.get(session_tag)
+            if session_tag is not None
+            else None
+        )
+
+        if msg is not None:
+            msg = decode_sproto_integer(msg)
+
+        if session is not None:
+            session = decode_sproto_integer(session)
+
+        return msg, session
 
     except Exception:
 
@@ -705,14 +865,6 @@ def client_thread(
                 raw
             )
 
-            # ------------------------------------------------
-            # CURRENT STAGE:
-            #
-            # The source resolver identifies the source
-            # information, but does not invent a server
-            # response.
-            # ------------------------------------------------
-
             if not result["known"]:
 
                 print(
@@ -723,9 +875,38 @@ def client_thread(
 
             else:
 
+                response = build_source_response(
+                    msg,
+                    session
+                )
+
+                if response is None:
+
+                    print(
+                        f"[SOURCE FOUND / "
+                        f"NO RESPONSE SCHEMA] "
+                        f"MSG={msg} "
+                        f"SESSION={session}",
+                        flush=True
+                    )
+
+                    continue
+
+                send_frame(
+                    conn,
+                    response
+                )
+
+                protocol = find_protocol(msg)
+
                 print(
-                    f"[SOURCE FOUND] "
-                    f"MSG={msg}",
+                    f"[TX] "
+                    f"MSG={msg} "
+                    f"SESSION={session} "
+                    f"PROTOCOL="
+                    f"{protocol.get('name') if protocol else None} "
+                    f"RESPONSE="
+                    f"{protocol.get('response') if protocol else None}",
                     flush=True
                 )
 
