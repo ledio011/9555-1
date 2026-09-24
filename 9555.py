@@ -275,27 +275,27 @@ load_game_assets()
 
 
 # ============================================================
-# DATABASE LOAD & SAVE
+# DATABASE LOAD & SAVE (CRASH-SAFE DICTIONARY WRAPPER)
 # ============================================================
 
 def load_chars():
-    if os.path.exists(CHAR_DB):
+    data = {}
+    db_file = CHAR_DB if os.path.exists(CHAR_DB) else BAK_DB if os.path.exists(BAK_DB) else None
+    if db_file:
         try:
-            with open(CHAR_DB, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    if os.path.exists(BAK_DB):
-        try:
-            with open(BAK_DB, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+            with open(db_file, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+                if isinstance(raw, dict):
+                    data = raw
+                elif isinstance(raw, list):
+                    data = {"1": {"user_default": raw}}
+        except Exception as e:
+            print(f"[WARN] Error loading database: {e}")
+    return data
 
 
 def save_chars(data):
-    if not data:
+    if not isinstance(data, dict) or not data:
         return
     try:
         with open(TMP_DB, "w", encoding="utf-8") as f:
@@ -372,10 +372,18 @@ def get_area_id(serverId):
 
 
 def get_account_chars(all_chars, area_id, acc_id):
+    if not isinstance(all_chars, dict):
+        return []
     area_key = str(area_id)
-    acc_dict = all_chars.get(area_key) or all_chars.get(area_id)
+    acc_dict = all_chars.get(area_key)
+    if acc_dict is None and isinstance(area_id, int):
+        acc_dict = all_chars.get(area_id)
+
     if isinstance(acc_dict, dict):
-        return acc_dict.get(acc_id, [])
+        res = acc_dict.get(acc_id, [])
+        return res if isinstance(res, list) else []
+    elif isinstance(acc_dict, list):
+        return acc_dict
     return []
 
 
@@ -385,9 +393,9 @@ def get_account_chars(all_chars, area_id, acc_id):
 
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}")
-    acc_id = "0"
+    acc_id = "user_default"
     picked_char = None
-    cur_areaId = 0
+    cur_areaId = "1"
 
     def send_rpc_push(tag, data):
         try:
@@ -430,13 +438,12 @@ def client_handler(conn, addr):
 
             print(f"[RX] MSG={msg} SESSION={session}")
 
-            # --------------------------------------------------------
-            # STATEFUL GAME HANDLERS
-            # --------------------------------------------------------
-            if msg == 4:  # login
-                acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
+            # Stateful Game Logic
+            if msg == 4:  # Login
+                acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1, "user_default"))
                 sid = get_val_int(body, 5, 1)
                 cur_areaId = str(get_area_id(sid))
+
                 resp = encode_sproto([
                     (0, 2), (1, "1.012.017"), (2, "205"), (3, 1),
                     (4, 10000), (12, random.randint(1, 10000))
@@ -450,11 +457,12 @@ def client_handler(conn, addr):
                 chars = get_account_chars(all_accounts_chars, cur_areaId, acc_id)
                 ov_list = []
                 for i, c in enumerate(chars):
-                    gen = encode_sproto([(0, c.get('name', 'Hero')), (1, c.get('prof', 0)), (2, 1), (3, str(c.get('map_id', '11')))])
-                    attr = encode_sproto([(0, c.get('level', 1)), (1, 3000)])
-                    v = encode_sproto([(0, c.get('name', 'Hero')), (1, "104"), (2, "QJ_A_T"), (3, "QJ_A_S"), (4, "QJ_A_X"), (5, "QJ_A_WQ")])
-                    ov = encode_sproto([(0, c['id']), (1, gen), (2, attr), (3, v), (4, i), (5, 0)])
-                    ov_list.append(ov)
+                    if isinstance(c, dict):
+                        gen = encode_sproto([(0, c.get('name', 'Hero')), (1, c.get('prof', 0)), (2, 1), (3, str(c.get('map_id', '11')))])
+                        attr = encode_sproto([(0, c.get('level', 1)), (1, 3000)])
+                        v = encode_sproto([(0, c.get('name', 'Hero')), (1, "104"), (2, "QJ_A_T"), (3, "QJ_A_S"), (4, "QJ_A_X"), (5, "QJ_A_WQ")])
+                        ov = encode_sproto([(0, c.get('id', i + 1)), (1, gen), (2, attr), (3, v), (4, i), (5, 0)])
+                        ov_list.append(ov)
                 resp = encode_sproto([(0, ov_list)])
                 if session is not None:
                     ph = encode_sproto([(1, session)])
@@ -463,7 +471,8 @@ def client_handler(conn, addr):
 
             elif msg == 105:  # character_pick
                 char_id = get_val_int(body, 0)
-                picked_char = next((c for c in get_account_chars(all_accounts_chars, cur_areaId, acc_id) if c['id'] == char_id), None)
+                chars = get_account_chars(all_accounts_chars, cur_areaId, acc_id)
+                picked_char = next((c for c in chars if isinstance(c, dict) and c.get('id') == char_id), None)
                 resp = encode_sproto([]) if picked_char else encode_sproto([(0, 1)])
                 if session is not None:
                     ph = encode_sproto([(1, session)])
@@ -471,7 +480,6 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
                 if picked_char:
-                    # Sync initial state
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (4, 10000)]))
                     send_rpc_push(654, encode_sproto([(0, 1)]))
 
@@ -487,9 +495,7 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif session is not None:
-                # ----------------------------------------------------
-                # AUTOMATIC SPROTO SCHEMA FALLBACK FOR ALL OTHER MESSAGES
-                # ----------------------------------------------------
+                # Automatic Sproto Schema Fallback for All Other Messages
                 response_frame = schema_engine.create_response_frame(msg, session)
                 if response_frame:
                     conn.sendall(response_frame)
