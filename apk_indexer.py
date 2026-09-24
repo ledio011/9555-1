@@ -751,6 +751,118 @@ def extract_numeric_relations(text):
     return records
 
 
+
+# ============================================================
+# SPROTO SOURCE EXTRACTION
+# ============================================================
+
+def extract_sproto_source(text):
+    """
+    Extract protocol/type definitions from any textual source that
+    contains sproto-style declarations. No protocol names or tags
+    are hardcoded here; everything comes from the scanned source.
+    """
+    result = {
+        "types": {},
+        "protocols": {}
+    }
+
+    if not text:
+        return result
+
+    # Remove comments while preserving line structure.
+    clean = re.sub(r"//.*?$|#.*?$", "", text, flags=re.MULTILINE)
+
+    # Type blocks: .Type { ... } or Type { ... }
+    block_pattern = re.compile(
+        r"(?:^|\n)\s*\.?([A-Za-z_][A-Za-z0-9_.]*)\s*\{",
+        re.MULTILINE
+    )
+
+    starts = list(block_pattern.finditer(clean))
+
+    for i, match in enumerate(starts):
+        name = match.group(1)
+        start = match.end()
+        depth = 1
+        pos = start
+
+        while pos < len(clean) and depth:
+            if clean[pos] == "{":
+                depth += 1
+            elif clean[pos] == "}":
+                depth -= 1
+            pos += 1
+
+        if depth:
+            continue
+
+        body = clean[start:pos - 1]
+
+        fields = []
+        field_pattern = re.compile(
+            r"^\s*([A-Za-z_][A-Za-z0-9_.]*)\s+"
+            r"(-?\d+)\s*:\s*"
+            r"(\*?[A-Za-z_][A-Za-z0-9_.]*(?:\([^)]*\))?)",
+            re.MULTILINE
+        )
+
+        for fm in field_pattern.finditer(body):
+            fields.append({
+                "name": fm.group(1),
+                "tag": int(fm.group(2)),
+                "type": fm.group(3)
+            })
+
+        if fields:
+            result["types"][name] = {
+                "name": name,
+                "fields": sorted(fields, key=lambda x: x["tag"])
+            }
+
+    # Protocol declarations: name <tag> { request ... response ... }
+    protocol_pattern = re.compile(
+        r"(?:^|\n)\s*([A-Za-z_][A-Za-z0-9_.]*)\s+(-?\d+)\s*\{",
+        re.MULTILINE
+    )
+
+    for match in protocol_pattern.finditer(clean):
+        name = match.group(1)
+        tag = int(match.group(2))
+        start = match.end()
+        depth = 1
+        pos = start
+
+        while pos < len(clean) and depth:
+            if clean[pos] == "{":
+                depth += 1
+            elif clean[pos] == "}":
+                depth -= 1
+            pos += 1
+
+        if depth:
+            continue
+
+        body = clean[start:pos - 1]
+
+        req = re.search(
+            r"\brequest\s+([A-Za-z_][A-Za-z0-9_.]*)",
+            body
+        )
+        resp = re.search(
+            r"\bresponse\s+([A-Za-z_][A-Za-z0-9_.]*)",
+            body
+        )
+
+        result["protocols"][str(tag)] = {
+            "name": name,
+            "tag": tag,
+            "request": req.group(1) if req else None,
+            "response": resp.group(1) if resp else None
+        }
+
+    return result
+
 # ============================================================
 # FILE ANALYSIS
 # ============================================================
@@ -994,6 +1106,8 @@ def analyze_file(path, source):
             extract_numeric_relations(text)
         )
 
+        result["metadata"]["sproto"] = extract_sproto_source(text)
+
         if result["type"] == "C_SHARP":
 
             result["metadata"]["csharp"] = (
@@ -1044,6 +1158,10 @@ def main():
     method_index = defaultdict(list)
 
     field_index = defaultdict(list)
+
+    sproto_types = {}
+    sproto_protocols = {}
+
 
     for index, path in enumerate(
         files,
@@ -1128,6 +1246,18 @@ def main():
                     )
             })
 
+        sproto = (
+            record
+            .get("metadata", {})
+            .get("sproto", {})
+        )
+
+        for name, item in sproto.get("types", {}).items():
+            sproto_types[name] = item
+
+        for tag, item in sproto.get("protocols", {}).items():
+            sproto_protocols[tag] = item
+
         csharp = (
             record
             .get("metadata", {})
@@ -1205,7 +1335,7 @@ def main():
 
     master = {
 
-        "index_version": 2,
+        "index_version": 3,
 
         "source": str(source),
 
@@ -1275,6 +1405,36 @@ def main():
 
         json.dump(
             method_index,
+            f,
+            indent=2,
+            ensure_ascii=False
+        )
+
+    with open(
+        OUTPUT
+        / "protocol"
+        / "sproto_types.json",
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            sproto_types,
+            f,
+            indent=2,
+            ensure_ascii=False
+        )
+
+    with open(
+        OUTPUT
+        / "protocol"
+        / "sproto_protocols.json",
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            sproto_protocols,
             f,
             indent=2,
             ensure_ascii=False
