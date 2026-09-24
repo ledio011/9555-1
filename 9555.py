@@ -4,170 +4,314 @@ import struct
 import threading
 import json
 import traceback
+import re
+from pathlib import Path
+from collections import defaultdict
+
+
+# ============================================================
+# SERVER CONFIG
+# ============================================================
 
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", "15678"))
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-INDEX_FILE = os.path.join(BASE_DIR, "apk_index", "index.json")
-
-
-# ============================================================
-# LOAD APK INDEX
-# ============================================================
+BASE_DIR = Path(__file__).resolve().parent
+INDEX_DIR = BASE_DIR / "apk_index"
+INDEX_FILE = INDEX_DIR / "index.json"
 
 APK_INDEX = None
 
+# Everything extracted from dec&normal is loaded here once.
+SOURCE_CACHE = []
+
+# Numeric lookup:
+# number -> source entries
+NUMERIC_CACHE = defaultdict(list)
+
+# Text lookup:
+# lowercase token -> source entries
+TEXT_CACHE = defaultdict(list)
+
+
+# ============================================================
+# INDEX LOADER
+# ============================================================
 
 def load_index():
+
     global APK_INDEX
 
-    if not os.path.exists(INDEX_FILE):
-        print(f"[ERROR] Missing index: {INDEX_FILE}", flush=True)
+    if not INDEX_FILE.exists():
+
+        print(
+            f"[ERROR] Missing index: {INDEX_FILE}",
+            flush=True
+        )
+
         return False
 
     try:
-        with open(INDEX_FILE, "r", encoding="utf-8") as f:
+
+        with open(
+            INDEX_FILE,
+            "r",
+            encoding="utf-8"
+        ) as f:
+
             APK_INDEX = json.load(f)
 
+        files = APK_INDEX.get("files", [])
+
         print(
-            f"[+] APK index loaded: "
-            f"{len(APK_INDEX.get('files', []))} files",
+            f"[+] APK index loaded: {len(files)} files",
             flush=True
         )
+
+        build_source_cache(files)
 
         return True
 
     except Exception as e:
-        print(f"[ERROR] Cannot load APK index: {e}", flush=True)
+
+        print(
+            f"[ERROR] Cannot load APK index: {e}",
+            flush=True
+        )
+
+        traceback.print_exc()
+
         return False
 
 
 # ============================================================
-# TCP FRAME
+# SOURCE CACHE
 # ============================================================
 
-def recv_exact(sock, size):
-    data = bytearray()
+def build_source_cache(files):
 
-    while len(data) < size:
-        chunk = sock.recv(size - len(data))
+    SOURCE_CACHE.clear()
+    NUMERIC_CACHE.clear()
+    TEXT_CACHE.clear()
 
-        if not chunk:
-            return None
+    loaded_text = 0
+    loaded_strings = 0
 
-        data.extend(chunk)
+    for entry in files:
 
-    return bytes(data)
-
-
-def recv_frame(sock):
-    header = recv_exact(sock, 2)
-
-    if header is None:
-        return None
-
-    size = struct.unpack(">H", header)[0]
-
-    if size == 0:
-        return b""
-
-    return recv_exact(sock, size)
-
-
-def send_frame(sock, payload):
-    if payload is None:
-        return
-
-    if len(payload) > 65535:
-        raise ValueError(
-            f"Payload too large: {len(payload)}"
+        relative_path = entry.get(
+            "relative_path",
+            ""
         )
 
-    sock.sendall(
-        struct.pack(">H", len(payload)) +
-        payload
+        source_path = entry.get(
+            "path",
+            relative_path
+        )
+
+        record = {
+            "path": source_path,
+            "relative_path": relative_path,
+            "type": entry.get("type"),
+            "name": entry.get("name"),
+            "text": "",
+            "strings": "",
+            "metadata": entry.get(
+                "metadata",
+                {}
+            ),
+            "protocol_candidates": entry.get(
+                "protocol_candidates",
+                []
+            )
+        }
+
+        # ----------------------------------------------------
+        # TEXT EXTRACT
+        # ----------------------------------------------------
+
+        text_file = entry.get("text_file")
+
+        if text_file:
+
+            path = Path(text_file)
+
+            if not path.is_absolute():
+                path = BASE_DIR / path
+
+            if path.exists():
+
+                try:
+
+                    record["text"] = path.read_text(
+                        encoding="utf-8",
+                        errors="ignore"
+                    )
+
+                    loaded_text += 1
+
+                except Exception:
+                    pass
+
+        # ----------------------------------------------------
+        # STRING EXTRACT
+        # ----------------------------------------------------
+
+        strings_file = entry.get("strings_file")
+
+        if strings_file:
+
+            path = Path(strings_file)
+
+            if not path.is_absolute():
+                path = BASE_DIR / path
+
+            if path.exists():
+
+                try:
+
+                    record["strings"] = path.read_text(
+                        encoding="utf-8",
+                        errors="ignore"
+                    )
+
+                    loaded_strings += 1
+
+                except Exception:
+                    pass
+
+        SOURCE_CACHE.append(record)
+
+        # ----------------------------------------------------
+        # INDEX NUMERIC RELATIONS
+        # ----------------------------------------------------
+
+        for relation in record["protocol_candidates"]:
+
+            value = relation.get("value")
+
+            if value is None:
+                continue
+
+            NUMERIC_CACHE[str(value)].append({
+                "path": relative_path,
+                "name": relation.get("name"),
+                "context": relation.get(
+                    "context",
+                    ""
+                )
+            })
+
+        # ----------------------------------------------------
+        # INDEX TEXT
+        # ----------------------------------------------------
+
+        combined = (
+            record["text"]
+            + "\n"
+            + record["strings"]
+        )
+
+        if combined:
+
+            words = re.findall(
+                r"[A-Za-z_][A-Za-z0-9_.]{2,}",
+                combined
+            )
+
+            for word in set(words):
+
+                TEXT_CACHE[
+                    word.lower()
+                ].append(relative_path)
+
+    print(
+        f"[+] Source cache ready",
+        flush=True
+    )
+
+    print(
+        f"    Text extracts   : {loaded_text}",
+        flush=True
+    )
+
+    print(
+        f"    String extracts : {loaded_strings}",
+        flush=True
+    )
+
+    print(
+        f"    Numeric keys    : {len(NUMERIC_CACHE)}",
+        flush=True
+    )
+
+    print(
+        f"    Text keys       : {len(TEXT_CACHE)}",
+        flush=True
     )
 
 
 # ============================================================
-# SPROTO PACK
+# SOURCE SEARCH
 # ============================================================
 
-def sproto_unpack(data):
-    """
-    Decode sproto's 8-byte zero-compressed blocks.
-    """
+def search_source_number(number):
 
-    out = bytearray()
-    pos = 0
-
-    while pos < len(data):
-
-        bitmap = data[pos]
-        pos += 1
-
-        for i in range(8):
-
-            if bitmap & (1 << i):
-
-                if pos >= len(data):
-                    raise ValueError(
-                        "Invalid sproto packed data"
-                    )
-
-                out.append(data[pos])
-                pos += 1
-
-            else:
-                out.append(0)
-
-    return bytes(out)
+    return NUMERIC_CACHE.get(
+        str(number),
+        []
+    )
 
 
-def sproto_pack(data):
-    """
-    Encode raw sproto data using zero compression.
-    """
+def search_source_text(value):
 
-    out = bytearray()
-    pos = 0
+    if not value:
+        return []
 
-    while pos < len(data):
+    value = str(value).lower()
 
-        chunk = data[pos:pos + 8]
-        pos += len(chunk)
+    results = []
 
-        bitmap = 0
-        values = bytearray()
+    # Exact indexed token first.
+    for path in TEXT_CACHE.get(value, []):
 
-        for i, value in enumerate(chunk):
+        results.append({
+            "path": path,
+            "match": value
+        })
 
-            if value != 0:
-                bitmap |= (1 << i)
-                values.append(value)
+    # Then source-content search.
+    if not results:
 
-        out.append(bitmap)
-        out.extend(values)
+        for entry in SOURCE_CACHE:
 
-    return bytes(out)
+            text = (
+                entry["text"]
+                + "\n"
+                + entry["strings"]
+            )
+
+            if value in text.lower():
+
+                results.append({
+                    "path": entry["relative_path"],
+                    "match": value
+                })
+
+    return results
 
 
 # ============================================================
-# BASIC SPROTO HEADER INSPECTION
+# REQUEST CONTEXT
 # ============================================================
 
 def inspect_packet(raw):
-    """
-    This does NOT invent a response.
-
-    It only extracts useful information for logging.
-    """
 
     if len(raw) < 2:
         return None, None
 
     try:
+
         header_words = struct.unpack(
             "<H",
             raw[:2]
@@ -202,120 +346,200 @@ def inspect_packet(raw):
         return msg, session
 
     except Exception:
+
         return None, None
 
 
 # ============================================================
-# APK INDEX SEARCH
+# AUTOMATIC SOURCE RESOLVER
 # ============================================================
 
-def search_index_for_tag(msg):
-    """
-    Search textual/string extracts for references to TAG/msg.
+def resolve_source(msg):
 
-    This is intentionally only a lookup.
-    It does NOT fabricate an Sproto response.
+    """
+    Find everything the local dec&normal-derived index
+    knows about this numeric value.
+
+    No ATG-specific message list exists here.
     """
 
-    if not APK_INDEX:
+    if msg is None:
         return []
 
-    needle1 = f"tag {msg}"
-    needle2 = f"tag={msg}"
-    needle3 = f"msg={msg}"
-    needle4 = f"msg {msg}"
+    return search_source_number(msg)
 
-    results = []
-
-    for entry in APK_INDEX.get("files", []):
-
-        path = entry.get("path", "")
-
-        text_path = entry.get("text_extract")
-        strings_path = entry.get("strings_extract")
-
-        candidates = []
-
-        if text_path:
-            candidates.append(
-                os.path.join(BASE_DIR, text_path)
-            )
-
-        if strings_path:
-            candidates.append(
-                os.path.join(BASE_DIR, strings_path)
-            )
-
-        for candidate in candidates:
-
-            if not os.path.exists(candidate):
-                continue
-
-            try:
-
-                with open(
-                    candidate,
-                    "r",
-                    encoding="utf-8",
-                    errors="ignore"
-                ) as f:
-
-                    text = f.read()
-
-                low = text.lower()
-
-                if (
-                    needle1 in low
-                    or needle2 in low
-                    or needle3 in low
-                    or needle4 in low
-                ):
-
-                    results.append({
-                        "path": path,
-                        "extract": candidate
-                    })
-
-                    break
-
-            except Exception:
-                pass
-
-    return results
-
-
-# ============================================================
-# RESPONSE RESOLVER
-# ============================================================
 
 def resolve_response(msg, session, raw_request):
-    """
-    IMPORTANT:
 
-    apk_indexer.py currently creates an INDEX.
-    It does not contain a database of ready-made server
-    responses.
-
-    Therefore this function currently returns None instead
-    of inventing fake protocol data.
-    """
-
-    matches = search_index_for_tag(msg)
+    matches = resolve_source(msg)
 
     print(
-        f"[INDEX LOOKUP] MSG={msg} "
+        f"[RESOLVE] MSG={msg} "
         f"SESSION={session} "
-        f"MATCHES={len(matches)}",
+        f"SOURCE_MATCHES={len(matches)}",
         flush=True
     )
 
     for match in matches[:10]:
+
+        name = match.get("name")
+
         print(
-            f"    -> {match['path']}",
+            f"    -> {match.get('path')}"
+            + (
+                f" | name={name}"
+                if name
+                else ""
+            ),
             flush=True
         )
 
+    # --------------------------------------------------------
+    # IMPORTANT
+    #
+    # The source index describes the CLIENT source/data.
+    # It does not automatically contain live server state
+    # or ready-made response packets.
+    #
+    # Therefore do not fabricate bytes here.
+    # --------------------------------------------------------
+
     return None
+
+
+# ============================================================
+# TCP FRAME
+# ============================================================
+
+def recv_exact(sock, size):
+
+    data = bytearray()
+
+    while len(data) < size:
+
+        chunk = sock.recv(
+            size - len(data)
+        )
+
+        if not chunk:
+            return None
+
+        data.extend(chunk)
+
+    return bytes(data)
+
+
+def recv_frame(sock):
+
+    header = recv_exact(
+        sock,
+        2
+    )
+
+    if header is None:
+        return None
+
+    size = struct.unpack(
+        ">H",
+        header
+    )[0]
+
+    if size == 0:
+        return b""
+
+    return recv_exact(
+        sock,
+        size
+    )
+
+
+def send_frame(sock, payload):
+
+    if payload is None:
+        return
+
+    if len(payload) > 65535:
+
+        raise ValueError(
+            f"Payload too large: {len(payload)}"
+        )
+
+    sock.sendall(
+        struct.pack(
+            ">H",
+            len(payload)
+        )
+        + payload
+    )
+
+
+# ============================================================
+# SPROTO
+# ============================================================
+
+def sproto_unpack(data):
+
+    out = bytearray()
+    pos = 0
+
+    while pos < len(data):
+
+        bitmap = data[pos]
+        pos += 1
+
+        for i in range(8):
+
+            if bitmap & (1 << i):
+
+                if pos >= len(data):
+
+                    raise ValueError(
+                        "Invalid sproto packed data"
+                    )
+
+                out.append(
+                    data[pos]
+                )
+
+                pos += 1
+
+            else:
+
+                out.append(0)
+
+    return bytes(out)
+
+
+def sproto_pack(data):
+
+    out = bytearray()
+    pos = 0
+
+    while pos < len(data):
+
+        chunk = data[
+            pos:pos + 8
+        ]
+
+        pos += len(chunk)
+
+        bitmap = 0
+        values = bytearray()
+
+        for i, value in enumerate(chunk):
+
+            if value != 0:
+
+                bitmap |= (
+                    1 << i
+                )
+
+                values.append(value)
+
+        out.append(bitmap)
+        out.extend(values)
+
+    return bytes(out)
 
 
 # ============================================================
@@ -347,7 +571,10 @@ def client_thread(conn, addr):
             )
 
             try:
-                raw = sproto_unpack(packet)
+
+                raw = sproto_unpack(
+                    packet
+                )
 
             except Exception as e:
 
@@ -358,10 +585,13 @@ def client_thread(conn, addr):
 
                 continue
 
-            msg, session = inspect_packet(raw)
+            msg, session = inspect_packet(
+                raw
+            )
 
             print(
-                f"[RX] MSG={msg} SESSION={session}",
+                f"[RX] MSG={msg} "
+                f"SESSION={session}",
                 flush=True
             )
 
@@ -374,13 +604,16 @@ def client_thread(conn, addr):
             if response is None:
 
                 print(
-                    f"[NO RESPONSE] MSG={msg}",
+                    f"[NO RESPONSE] "
+                    f"MSG={msg}",
                     flush=True
                 )
 
                 continue
 
-            packed = sproto_pack(response)
+            packed = sproto_pack(
+                response
+            )
 
             send_frame(
                 conn,
@@ -388,8 +621,7 @@ def client_thread(conn, addr):
             )
 
             print(
-                f"[TX] MSG={msg} "
-                f"SIZE={len(packed)}",
+                f"[TX] SIZE={len(packed)}",
                 flush=True
             )
 
@@ -400,6 +632,7 @@ def client_thread(conn, addr):
         pass
 
     except Exception:
+
         traceback.print_exc()
 
     finally:
@@ -422,10 +655,18 @@ def client_thread(conn, addr):
 def main():
 
     print("=" * 60)
-    print("ATG 9555 APK-INDEX SERVER")
+    print("ATG 9555 SOURCE-INDEX SERVER")
     print("=" * 60)
 
+    # --------------------------------------------------------
+    # IMPORTANT:
+    # This happens BEFORE accept().
+    #
+    # dec&normal -> apk_index -> RAM
+    # --------------------------------------------------------
+
     if not load_index():
+
         raise SystemExit(1)
 
     server = socket.socket(
@@ -440,18 +681,28 @@ def main():
     )
 
     server.bind(
-        (HOST, PORT)
+        (
+            HOST,
+            PORT
+        )
     )
 
     server.listen(128)
 
     print(
-        f"[LISTENING] {HOST}:{PORT}",
+        f"[LISTENING] "
+        f"{HOST}:{PORT}",
         flush=True
     )
 
     print(
-        f"[INDEX] {INDEX_FILE}",
+        f"[INDEX] "
+        f"{INDEX_FILE}",
+        flush=True
+    )
+
+    print(
+        "[READY] Source data is cached in RAM.",
         flush=True
     )
 
@@ -461,14 +712,15 @@ def main():
 
         conn, addr = server.accept()
 
-        t = threading.Thread(
+        thread = threading.Thread(
             target=client_thread,
             args=(conn, addr),
             daemon=True
         )
 
-        t.start()
+        thread.start()
 
 
 if __name__ == "__main__":
+
     main()
