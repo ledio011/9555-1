@@ -12,22 +12,22 @@ def _server_log(*args, **kwargs):
 
     # Always keep connection lifecycle messages.
     if (
-        msg.startswith("[CONNECT]") or
-        msg.startswith("[DISCONNECT]") or
-        "Client connected:" in msg or
-        "Client disconnected:" in msg
+            msg.startswith("[CONNECT]") or
+            msg.startswith("[DISCONNECT]") or
+            "Client connected:" in msg or
+            "Client disconnected:" in msg
     ):
         _ORIGINAL_PRINT(msg, **kwargs)
         return
 
     # Only anomaly/error diagnostics are allowed through.
     anomaly = (
-        msg.startswith("[ANOMALY]") or
-        msg.startswith("[ERROR]") or
-        msg.startswith("[!]") or
-        "WRONG/UNEXPECTED" in msg or
-        "TIMEOUT" in msg or
-        "INCONSISTENT" in msg
+            msg.startswith("[ANOMALY]") or
+            msg.startswith("[ERROR]") or
+            msg.startswith("[!]") or
+            "WRONG/UNEXPECTED" in msg or
+            "TIMEOUT" in msg or
+            "INCONSISTENT" in msg
     )
     if anomaly:
         if msg.startswith("[!]"):
@@ -104,36 +104,21 @@ def validate_player_state(ch):
     if not isinstance(ch,dict):
         anomaly(None,"PLAYER_STATE_MISSING")
         return
-    # These are persisted/authoritative character fields in this server.
-    for field in ("id","level","exp","cash"):
+    for field in ("id","level","exp","cash","gold","hp","max_hp","map_id","pos"):
         if field not in ch:
             anomaly(None,"PLAYER_VALUE_MISSING",field=field,player_id=ch.get("id"))
     if ch.get("level",1) < 1:
         anomaly(None,"PLAYER_LEVEL_INVALID",value=ch.get("level"))
-    if ch.get("cash",0) < 0 or ch.get("exp",0) < 0:
-        anomaly(None,"PLAYER_RESOURCE_INVALID",cash=ch.get("cash"),exp=ch.get("exp"))
-    try:
-        stats = get_character_stats(ch)
-        hp_max = stats.get("hp_max", 0)
-        if hp_max <= 0:
-            anomaly(None,"PLAYER_MAX_HP_INVALID",player_id=ch.get("id"),max_hp=hp_max)
-        hp = ch.get("hp", hp_max)
-        if hp < 0 or hp > hp_max:
-            anomaly(None,"PLAYER_HP_INVALID",player_id=ch.get("id"),hp=hp,max_hp=hp_max)
-    except Exception as exc:
-        anomaly(None,"PLAYER_STATS_CALC_FAILED",player_id=ch.get("id"),error=str(exc))
+    if ch.get("hp",0) < 0 or ch.get("max_hp",0) < 0:
+        anomaly(None,"PLAYER_HP_INVALID",hp=ch.get("hp"),max_hp=ch.get("max_hp"))
 
 def validate_inventory(ch):
-    # Inventory is represented by item_pack/equip packs, not a single inventory key.
-    if not isinstance(ch,dict):
-        return
-    if "item_pack" not in ch and "equip_pack" not in ch:
-        anomaly(None,"PLAYER_ITEM_STATE_MISSING",player_id=ch.get("id"))
+    if isinstance(ch,dict) and ch.get("inventory") is None:
+        anomaly(None,"INVENTORY_MISSING",player_id=ch.get("id"))
 
 def validate_missions(ch):
-    # Mission state is maintained by the mission subsystem, not necessarily on the character dict.
-    if not isinstance(ch,dict):
-        return
+    if isinstance(ch,dict) and ch.get("missions") is None:
+        anomaly(None,"MISSION_STATE_MISSING",player_id=ch.get("id"))
 
 
 # ============================================================
@@ -2872,6 +2857,11 @@ def serve_resource_http(conn, initial_data):
     except Exception as exc:
         print(f"[HTTP 9555] failed: {exc}")
     finally:
+        anomaly_check_missing(truth_audit)
+        if picked_char:
+            validate_player_state(picked_char)
+            validate_inventory(picked_char)
+            validate_missions(picked_char)
         try:
             for _timer in protocol_debug.get("timers", {}).values():
                 try: _timer.cancel()
@@ -4013,7 +4003,7 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 225: # request_daily_active
-                send_rpc_push(619, encode_sproto([(0, 0), (1, 0), (2, {})]))
+                send_rpc_push(649, encode_sproto([(0, {}), (1, {}), (2, 0)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4025,25 +4015,25 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 295: # request_sign_30_day_info
-                send_rpc_push(668, encode_sproto([(0, 1), (1, 0)]))
+                send_rpc_push(640, encode_sproto([(0, False), (1, False)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 288: # request_sign_week_info
-                send_rpc_push(661, encode_sproto([(0, 1), (1, 0)]))
+                send_rpc_push(641, encode_sproto([(0, False), (1, 1), (2, False), (3, False)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 210: # request_first_buy
-                send_rpc_push(582, encode_sproto([(0, 0)]))
+                send_rpc_push(647, encode_sproto([(0, 0)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 202: # request_daily_buy
-                send_rpc_push(575, encode_sproto([(0, {})]))
+                send_rpc_push(646, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4062,7 +4052,7 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 242: # request_activity_info
-                send_rpc_push(633, encode_sproto([(0, {})]))
+                send_rpc_push(619, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4074,7 +4064,7 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 257: # request_retrieve_info
-                send_rpc_push(648, encode_sproto([(0, {})]))
+                send_rpc_push(658, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4092,25 +4082,25 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 278: # request_invest_pack
-                send_rpc_push(662, encode_sproto([(0, {})]))
+                send_rpc_push(645, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 258: # request_level_pack
-                send_rpc_push(649, encode_sproto([(0, {})]))
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-            elif msg == 253: # request_big_pack
                 send_rpc_push(644, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif msg == 253: # request_big_pack
+                send_rpc_push(648, encode_sproto([(0, {})]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
             elif msg == 299: # request_special_big_pack
-                send_rpc_push(671, encode_sproto([(0, {})]))
+                send_rpc_push(656, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -5213,11 +5203,6 @@ def client_handler(conn, addr):
     except Exception as exc:
         print(f"[!] Client handler exception for {addr}: {exc}")
     finally:
-        anomaly_check_missing(truth_audit)
-        if picked_char:
-            validate_player_state(picked_char)
-            validate_inventory(picked_char)
-            validate_missions(picked_char)
         try:
             if picked_char and ONLINE_CHAR_MAP.get(picked_char['id']) == send_rpc_push:
                 del ONLINE_CHAR_MAP[picked_char['id']]
@@ -5234,7 +5219,7 @@ def start_server():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("0.0.0.0", PORT))
     server.listen(20)
-    
+
     while True:
         try:
             cl, ad = server.accept()
