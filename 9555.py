@@ -2493,7 +2493,8 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
     try:
         ph_p = encode_sproto([(0, 503)])
         # mapInfoId(0), line_index(1), line_count(2)
-        data = encode_sproto([(0, target_map_id), (1, 0), (2, 1)])
+        # enter_map.response schema: field 0 = mapInfoId
+        data = encode_sproto([(0, target_map_id)])
         pf_p = sproto_pack(ph_p + data)
         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
         print(f"[M1003 DEBUG] TX 503 map_id={target_map_id}")
@@ -2855,9 +2856,9 @@ def client_handler(conn, addr):
                     # 534: friend_sync (Tag 534 delivers friends & pending requests)
                     send_social_update_rpc(send_rpc_push, picked_char)
 
-                    # 603: mail_sync
+                    # 531: mail_update
                     for m_id, m_data in picked_char.get('mails', {}).items():
-                        send_rpc_push(603, build_mail_update_obj(m_data))
+                        send_rpc_push(531, build_mail_update_obj(m_data))
 
                     # Correct spawn pos for map 11
                     mid = str(picked_char.get('map_id', '11'))
@@ -2873,7 +2874,8 @@ def client_handler(conn, addr):
                     print("[DEBUG] BEFORE MAP ENTER")
                     try:
                         ph_p = encode_sproto([(0, 503)])
-                        data = encode_sproto([(0, mid), (1, 0), (2, 1)])
+                        # enter_map.response schema: field 0 = mapInfoId
+                        data = encode_sproto([(0, mid)])
                         pf_p = sproto_pack(ph_p + data)
                         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
                         print(f"[M1003 DEBUG] TX 503 map_id={mid}")
