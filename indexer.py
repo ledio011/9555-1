@@ -1,377 +1,176 @@
 import os
 import re
 import json
-import hashlib
-import struct
 from pathlib import Path
 from collections import defaultdict
 
 OUTPUT = Path("apk_index")
-
-MAX_TEXT_SIZE = 50 * 1024 * 1024
-MAX_BINARY_SCAN = 25 * 1024 * 1024
-MIN_STRING_LENGTH = 4
-
-for directory in [
-    OUTPUT,
-    OUTPUT / "text",
-    OUTPUT / "strings",
-    OUTPUT / "metadata",
-    OUTPUT / "protocol",
-]:
+for directory in [OUTPUT, OUTPUT / "protocol"]:
     directory.mkdir(parents=True, exist_ok=True)
 
 
-def choose_source():
-    print("=" * 70)
-    print("GENERIC dec&normal INDEXER")
-    print("=" * 70)
-    print()
-    print("Jep folderin dec&normal ose Atg_Auto/Decompiled.")
-    print()
+def extract_sproto_from_csharp(source_dir):
+    """
+    Parses Protocol.cs and all C# files inside SprotoType/ to extract 100% 
+    of Sproto protocols and field types directly from decompiled C# code.
+    """
+    protocols = {}
+    types = {}
 
-    while True:
-        value = input("Source folder: ").strip().strip('"')
-        if not value:
-            print("[!] Jep nje folder.")
+    # 1. Locate Protocol.cs
+    protocol_cs_files = list(Path(source_dir).rglob("Protocol.cs"))
+    if not protocol_cs_files:
+        print("[!] Protocol.cs not found in source directory.")
+        return protocols, types
+
+    protocol_cs = protocol_cs_files[0]
+    content = protocol_cs.read_text(encoding="utf-8", errors="replace")
+
+    print(f"[+] Found Protocol.cs at {protocol_cs.relative_to(source_dir)}")
+
+    # Parse SetProtocol, SetRequest, SetResponse from Protocol.cs
+    proto_tag_map = {}  # tag_str -> {"name": ..., "request": ..., "response": ...}
+
+    # Match base.Protocol.SetProtocol<Protocol.name>(tag);
+    for m in re.finditer(r"SetProtocol<Protocol\.([A-Za-z0-9_]+)>\((\d+)\)", content):
+        pname, tag = m.group(1), m.group(2)
+        if tag not in proto_tag_map:
+            proto_tag_map[tag] = {"name": pname, "tag": int(tag), "request": None, "response": None}
+
+    # Match base.Protocol.SetRequest<SprotoType.type_name>(tag);
+    for m in re.finditer(r"SetRequest<SprotoType\.([A-Za-z0-9_.]+)\.request>\((\d+)\)", content):
+        req_type, tag = m.group(1), m.group(2)
+        if tag in proto_tag_map:
+            proto_tag_map[tag]["request"] = f"{req_type}.request"
+
+    # Match base.Protocol.SetResponse<SprotoType.type_name>(tag);
+    for m in re.finditer(r"SetResponse<SprotoType\.([A-Za-z0-9_.]+)\.response>\((\d+)\)", content):
+        resp_type, tag = m.group(1), m.group(2)
+        if tag in proto_tag_map:
+            proto_tag_map[tag]["response"] = f"{resp_type}.response"
+
+    protocols = proto_tag_map
+
+    # 2. Parse all C# files in SprotoType/
+    sproto_type_files = list(Path(source_dir).rglob("SprotoType/*.cs"))
+    print(f"[+] Found {len(sproto_type_files)} C# files in SprotoType/")
+
+    for cs_file in sproto_type_files:
+        text = cs_file.read_text(encoding="utf-8", errors="replace")
+        
+        # Match class declarations (e.g., class character_list or class response : SprotoTypeBase)
+        # Or top level class inside SprotoType namespace
+        parent_class_match = re.search(r"public class ([A-Za-z0-9_]+)", text)
+        if not parent_class_match:
             continue
-        path = Path(value).expanduser()
-        if not path.exists():
-            print("[!] Folderi nuk ekziston.")
-            continue
-        if not path.is_dir():
-            print("[!] Nuk eshte folder.")
-            continue
-        return path.resolve()
 
+        parent_name = parent_class_match.group(1)
 
-def sha256_file(path):
-    digest = hashlib.sha256()
-    try:
-        with open(path, "rb") as f:
-            while True:
-                chunk = f.read(1024 * 1024)
-                if not chunk:
-                    break
-                digest.update(chunk)
-        return digest.hexdigest()
-    except Exception:
-        return None
+        # Look for nested classes (e.g., request / response) or single class
+        # Parse fields from encode() method in C#
+        # Matches: this.serialize.write_integer(this.field_name, tag)
+        # Matches: this.serialize.write_string(this.field_name, tag)
+        # Matches: this.serialize.write_obj(this.field_name, tag)
+        # Matches: this.serialize.write_map(this.field_name, tag)
+        # Matches: this.serialize.write_boolean(this.field_name, tag)
 
+        def parse_class_fields(class_text):
+            fields = []
+            # Extract serialize.write_... calls
+            write_pattern = re.compile(
+                r"write_([A-Za-z0-9_<>]+)\s*\(\s*this\.([A-Za-z0-9_]+)\s*,\s*(\d+)\s*\)"
+            )
+            for wm in write_pattern.finditer(class_text):
+                wtype = wm.group(1)
+                fname = wm.group(2)
+                ftag = int(wm.group(3))
 
-def detect_type(path, header):
-    suffix = path.suffix.lower()
-    if header.startswith(b"\x7fELF"):
-        return "ELF"
-    if header.startswith(b"dex\n"):
-        return "DEX"
-    if header.startswith(b"UnityFS"):
-        return "UNITYFS"
-    if header.startswith(b"UnityWeb"):
-        return "UNITYWEB"
-    if header.startswith(b"UnityRaw"):
-        return "UNITYRAW"
-    if header.startswith(b"PK\x03\x04"):
-        return "ZIP"
-    if header.startswith(b"MZ"):
-        return "PE"
-
-    extension_types = {
-        ".cs": "C_SHARP",
-        ".json": "JSON",
-        ".xml": "XML",
-        ".txt": "TEXT",
-        ".dll": "DLL",
-        ".so": "SO",
-        ".dex": "DEX",
-        ".arsc": "ARSC",
-        ".bundle": "UNITY_BUNDLE",
-        ".unity3d": "UNITY_BUNDLE",
-        ".assets": "UNITY_ASSETS",
-        ".shader": "SHADER",
-        ".prefab": "PREFAB",
-        ".scene": "SCENE",
-        ".bytes": "BYTES",
-        ".bin": "BINARY",
-    }
-    return extension_types.get(suffix, "UNKNOWN")
-
-
-def extract_ascii_strings(data):
-    pattern = rb"[\x20-\x7e]{%d,}" % MIN_STRING_LENGTH
-    result = []
-    try:
-        for match in re.finditer(pattern, data):
-            result.append(match.group(0).decode("utf-8", errors="replace"))
-    except Exception:
-        pass
-    return result
-
-
-def extract_utf16_strings(data):
-    pattern = rb"(?:[\x20-\x7e]\x00){%d,}" % MIN_STRING_LENGTH
-    result = []
-    try:
-        for match in re.finditer(pattern, data):
-            try:
-                result.append(match.group(0).decode("utf-8", errors="replace"))
-            except Exception:
-                pass
-    except Exception:
-        pass
-    return result
-
-
-def looks_like_text(data):
-    if not data:
-        return False
-    sample = data[:100000]
-    nulls = sample.count(b"\x00")
-    if nulls > len(sample) * 0.05:
-        return False
-    printable = sum(1 for byte in sample if byte in (9, 10, 13) or 32 <= byte <= 126)
-    ratio = printable / max(1, len(sample))
-    return ratio > 0.80
-
-
-def extract_numeric_relations(text):
-    records = []
-    patterns = [
-        r"\b([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(-?\d{1,9})\b",
-        r"\b([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(-?\d{1,9})\b",
-        r"\b(?:id|ID|tag|Tag|msg|MSG|message|Message)\s*=\s*(-?\d{1,9})\b"
-    ]
-    for pattern in patterns:
-        for match in re.finditer(pattern, text):
-            try:
-                if match.lastindex == 2:
-                    name = match.group(1)
-                    value = int(match.group(2))
+                if "integer" in wtype or "int" in wtype:
+                    stype = "integer"
+                elif "boolean" in wtype or "bool" in wtype:
+                    stype = "boolean"
+                elif "string" in wtype:
+                    stype = "string"
+                elif "map" in wtype or "vector" in wtype or "obj" in wtype:
+                    stype = "*string"  # List/map/obj
                 else:
-                    name = None
-                    value = int(match.group(1))
-            except Exception:
-                continue
-            start = max(0, match.start() - 500)
-            end = min(len(text), match.end() + 1000)
-            records.append({
-                "name": name,
-                "value": value,
-                "context": text[start:end]
-            })
-    return records
+                    stype = "string"
 
+                fields.append({"name": fname, "tag": ftag, "type": stype})
 
-def extract_sproto_source(text):
-    result = {"types": {}, "protocols": {}}
-    if not text:
-        return result
+            return sorted(fields, key=lambda x: x["tag"])
 
-    clean = re.sub(r"//.*?$|#.*?$", "", text, flags=re.MULTILINE)
+        # Check if file has request/response nested classes
+        if "public class request" in text or "public class response" in text:
+            # Parse request
+            req_match = re.search(r"public class request[^{]*\{([\s\S]*?)\n\t\t\}", text)
+            if req_match:
+                req_fields = parse_class_fields(req_match.group(1))
+                if req_fields:
+                    types[f"{parent_name}.request"] = {
+                        "name": f"{parent_name}.request",
+                        "fields": req_fields
+                    }
 
-    block_pattern = re.compile(
-        r"(?:^|\n)\s*\.?([A-Za-z_][A-Za-z0-9_.]*)\s*\{",
-        re.MULTILINE
-    )
-    starts = list(block_pattern.finditer(clean))
+            # Parse response
+            resp_match = re.search(r"public class response[^{]*\{([\s\S]*?)\n\t\t\}", text)
+            if resp_match:
+                resp_fields = parse_class_fields(resp_match.group(1))
+                if resp_fields:
+                    types[f"{parent_name}.response"] = {
+                        "name": f"{parent_name}.response",
+                        "fields": resp_fields
+                    }
+        else:
+            # Standalone type (e.g. character_overview, gameitem, general)
+            standalone_fields = parse_class_fields(text)
+            if standalone_fields:
+                types[parent_name] = {
+                    "name": parent_name,
+                    "fields": standalone_fields
+                }
 
-    for i, match in enumerate(starts):
-        name = match.group(1)
-        start = match.end()
-        depth = 1
-        pos = start
-
-        while pos < len(clean) and depth:
-            if clean[pos] == "{":
-                depth += 1
-            elif clean[pos] == "}":
-                depth -= 1
-            pos += 1
-
-        if depth:
-            continue
-
-        body = clean[start:pos - 1]
-        fields = []
-        field_pattern = re.compile(
-            r"^\s*([A-Za-z_][A-Za-z0-9_.]*)\s+"
-            r"(-?\d+)\s*:\s*"
-            r"(\*?[A-Za-z_][A-Za-z0-9_.]*(?:\([^)]*\))?)",
-            re.MULTILINE
-        )
-
-        for fm in field_pattern.finditer(body):
-            fields.append({
-                "name": fm.group(1),
-                "tag": int(fm.group(2)),
-                "type": fm.group(3)
-            })
-
-        if fields:
-            result["types"][name] = {
-                "name": name,
-                "fields": sorted(fields, key=lambda x: x["tag"])
-            }
-
-    protocol_pattern = re.compile(
-        r"(?:^|\n)\s*([A-Za-z_][A-Za-z0-9_.]*)\s+(-?\d+)\s*\{",
-        re.MULTILINE
-    )
-
-    for match in protocol_pattern.finditer(clean):
-        name = match.group(1)
-        tag = int(match.group(2))
-        start = match.end()
-        depth = 1
-        pos = start
-
-        while pos < len(clean) and depth:
-            if clean[pos] == "{":
-                depth += 1
-            elif clean[pos] == "}":
-                depth -= 1
-            pos += 1
-
-        if depth:
-            continue
-
-        body = clean[start:pos - 1]
-        req = re.search(r"\brequest\s+([A-Za-z_][A-Za-z0-9_.]*)", body)
-        resp = re.search(r"\bresponse\s+([A-Za-z_][A-Za-z0-9_.]*)", body)
-
-        result["protocols"][str(tag)] = {
-            "name": name,
-            "tag": tag,
-            "request": req.group(1) if req else None,
-            "response": resp.group(1) if resp else None
-        }
-
-    return result
-
-
-def analyze_file(path, source):
-    result = {
-        "path": str(path),
-        "relative_path": str(path.relative_to(source)),
-        "name": path.name,
-        "extension": path.suffix.lower(),
-        "size": 0,
-        "sha256": None,
-        "type": "UNKNOWN",
-        "metadata": {},
-        "strings_file": None,
-        "text_file": None,
-        "protocol_candidates": []
-    }
-
-    try:
-        result["size"] = path.stat().st_size
-    except Exception:
-        return result
-
-    try:
-        result["sha256"] = sha256_file(path)
-        with open(path, "rb") as f:
-            header = f.read(4096)
-        result["type"] = detect_type(path, header)
-    except Exception as error:
-        result["metadata"]["error"] = str(error)
-        return result
-
-    text = None
-    data = None
-
-    if result["extension"] in (".cs", ".json", ".xml", ".txt", ".shader", ".prefab", ".scene"):
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            text = None
-
-    if text is None and result["size"] <= MAX_BINARY_SCAN:
-        try:
-            with open(path, "rb") as f:
-                data = f.read(MAX_BINARY_SCAN)
-            if looks_like_text(data):
-                text = data.decode("utf-8", errors="replace")
-        except Exception:
-            pass
-
-    if text is not None:
-        result["protocol_candidates"] = extract_numeric_relations(text)
-        result["metadata"]["sproto"] = extract_sproto_source(text)
-
-    return result
+    return protocols, types
 
 
 def main():
-    source = choose_source()
-    print(f"\n[+] Source: {source}\n")
+    # Auto-detect source directory if not provided
+    script_dir = Path(__file__).resolve().parent
+    potential_sources = [
+        script_dir / "Decompiled",
+        script_dir / "Atg_Auto" / "Decompiled",
+        Path("C:/Users/User/Downloads/dec&normal/Decompiled"),
+        Path("C:/Users/User/Downloads/Atg_Auto/Decompiled")
+    ]
 
-    files = [item for item in source.rglob("*") if item.is_file()]
-    files.sort(key=lambda item: str(item).lower())
-    print(f"[+] Found {len(files)} files.\n")
+    source_dir = None
+    for p in potential_sources:
+        if p.exists() and p.is_dir():
+            source_dir = p
+            break
 
-    inventory = []
-    type_counts = defaultdict(int)
-    numeric_index = defaultdict(list)
-    sproto_types = {}
-    sproto_protocols = {}
+    if not source_dir:
+        val = input("Source folder (e.g. Decompiled or Atg_Auto/Decompiled): ").strip().strip('"')
+        source_dir = Path(val).resolve()
 
-    for index, path in enumerate(files, start=1):
-        print(f"[{index}/{len(files)}] {path.relative_to(source)}")
-        try:
-            record = analyze_file(path, source)
-        except Exception as error:
-            record = {
-                "path": str(path),
-                "relative_path": str(path.relative_to(source)),
-                "name": path.name,
-                "extension": path.suffix.lower(),
-                "size": 0,
-                "sha256": None,
-                "type": "ERROR",
-                "metadata": {"error": str(error)},
-                "protocol_candidates": []
-            }
+    print(f"[+] Scanning decompiled source: {source_dir}")
 
-        inventory.append(record)
-        type_counts[record["type"]] += 1
-
-        for relation in record.get("protocol_candidates", []):
-            val = relation.get("value")
-            if val is not None:
-                numeric_index[str(val)].append({
-                    "source": record["relative_path"],
-                    "name": relation.get("name"),
-                    "context": relation.get("context", "")
-                })
-
-        sproto = record.get("metadata", {}).get("sproto", {})
-        for name, item in sproto.get("types", {}).items():
-            sproto_types[name] = item
-        for tag, item in sproto.get("protocols", {}).items():
-            sproto_protocols[tag] = item
+    protocols, types = extract_sproto_from_csharp(source_dir)
 
     # Save output JSON files
-    with open(OUTPUT / "index.json", "w", encoding="utf-8") as f:
-        json.dump({"files": inventory}, f, indent=2, ensure_ascii=False)
-
-    with open(OUTPUT / "protocol" / "numeric_relations.json", "w", encoding="utf-8") as f:
-        json.dump(dict(numeric_index), f, indent=2, ensure_ascii=False)
+    with open(OUTPUT / "protocol" / "sproto_protocols.json", "w", encoding="utf-8") as f:
+        json.dump(protocols, f, indent=2, ensure_ascii=False)
 
     with open(OUTPUT / "protocol" / "sproto_types.json", "w", encoding="utf-8") as f:
-        json.dump(sproto_types, f, indent=2, ensure_ascii=False)
-
-    with open(OUTPUT / "protocol" / "sproto_protocols.json", "w", encoding="utf-8") as f:
-        json.dump(sproto_protocols, f, indent=2, ensure_ascii=False)
+        json.dump(types, f, indent=2, ensure_ascii=False)
 
     print("\n" + "=" * 70)
     print("INDEX COMPLETE")
     print("=" * 70)
-    print(f"Files Processed   : {len(inventory)}")
-    print(f"Sproto Protocols  : {len(sproto_protocols)}")
-    print(f"Sproto Types      : {len(sproto_types)}")
-    print(f"Index Output      : {OUTPUT / 'index.json'}\n")
+    print(f"Sproto Protocols Extracted : {len(protocols)}")
+    print(f"Sproto Types Extracted     : {len(types)}")
+    print(f"Output: {OUTPUT / 'protocol' / 'sproto_protocols.json'}")
+    print(f"Output: {OUTPUT / 'protocol' / 'sproto_types.json'}\n")
 
 
 if __name__ == "__main__":
