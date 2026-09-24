@@ -646,7 +646,7 @@ try:
                     v2 = int(parts[6]) if parts[6].isdigit() else 0
                     BADGE_STATS_CONFIG[parts[1]] = {'s1': s1, 'v1': v1, 's2': s2, 'v2': v2}
         print(f"[BADGE STATS CONFIG LOADED] count={len(BADGE_STATS_CONFIG)}")
-except: traceback.print_exc()
+except Exception as _exc: print(f"[ANOMALY] CONFIG_LOAD_EXCEPTION: {_exc}")
 
 BAK_DB = CHAR_DB + ".bak"
 TMP_DB = CHAR_DB + ".tmp"
@@ -2803,7 +2803,7 @@ def serve_resource_http(conn, initial_data):
             pass
 
 def client_handler(conn, addr):
-    print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
+    print(f"[CONNECT] {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
     truth_audit = truth_audit_new_state()
     protocol_debug = protocol_debug_new_state()
     global server_session_counter
