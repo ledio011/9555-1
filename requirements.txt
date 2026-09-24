@@ -1,1 +1,2 @@
-# Python standard library only.
+# com.doodlemobile.vicecity 9555 Game Server
+# Python 3.8+ Standard Library Only (No external pip packages required)
