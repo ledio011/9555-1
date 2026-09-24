@@ -5203,6 +5203,11 @@ def client_handler(conn, addr):
     except Exception as exc:
         print(f"[!] Client handler exception for {addr}: {exc}")
     finally:
+        anomaly_check_missing(truth_audit)
+        if picked_char:
+            validate_player_state(picked_char)
+            validate_inventory(picked_char)
+            validate_missions(picked_char)
         try:
             if picked_char and ONLINE_CHAR_MAP.get(picked_char['id']) == send_rpc_push:
                 del ONLINE_CHAR_MAP[picked_char['id']]
