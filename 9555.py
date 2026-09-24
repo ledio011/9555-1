@@ -17,7 +17,7 @@ from schema_engine import (
 )
 
 # ============================================================
-# SERVER CONFIG & DECOMPILED RAM PRELOAD
+# SERVER CONFIG & RAM PRELOAD
 # ============================================================
 
 PORT = int(os.environ.get("PORT", 15678))
@@ -37,45 +37,42 @@ ONLINE_CHAR_MAP = {}
 
 def scan_and_read_decompiled_folder():
     """
-    Scans and reads every file inside Downloads/Atg_Auto/Decompiled or Decompiled/
-    and prints live progress: Reading X/Y files...
+    Scans and reads all project data files and decompiled assets,
+    logging live progress: Reading X/Y files...
     """
     potential_paths = [
-        os.path.join(SCRIPT_DIR, "Atg_Auto", "Decompiled"),
+        os.path.join(SCRIPT_DIR, "assets"),
+        os.path.join(SCRIPT_DIR, "apk_index"),
         os.path.join(SCRIPT_DIR, "Decompiled"),
+        os.path.join(SCRIPT_DIR, "Atg_Auto", "Decompiled"),
         os.path.expanduser("~/Downloads/Atg_Auto/Decompiled"),
         "C:/Users/User/Downloads/Atg_Auto/Decompiled",
         "C:/Users/User/Downloads/dec&normal/Decompiled"
     ]
 
-    decompiled_dir = None
-    for p in potential_paths:
-        if os.path.exists(p) and os.path.isdir(p):
-            decompiled_dir = p
-            break
-
-    if not decompiled_dir:
-        print("[RAM PRELOAD] Decompiled directory not found. Skipping file scan.", flush=True)
-        return
+    valid_dirs = [p for p in potential_paths if os.path.exists(p) and os.path.isdir(p)]
 
     all_files = []
-    for root, dirs, files in os.walk(decompiled_dir):
-        for file in files:
-            all_files.append(os.path.join(root, file))
+    for d in valid_dirs:
+        for root, dirs, files in os.walk(d):
+            for file in files:
+                full_p = os.path.join(root, file)
+                if full_p not in all_files:
+                    all_files.append(full_p)
 
     total_files = len(all_files)
     print("=" * 60, flush=True)
-    print(f"[RAM PRELOAD START] Scanning folder: {decompiled_dir}", flush=True)
+    print(f"[RAM PRELOAD START] Scanning game assets & code...", flush=True)
     print(f"[RAM PRELOAD] Total files found: {total_files}", flush=True)
     print("=" * 60, flush=True)
 
     RAM_FILE_CACHE = {}
 
     for x, file_path in enumerate(all_files, start=1):
-        rel_path = os.path.relpath(file_path, decompiled_dir)
+        rel_path = os.path.relpath(file_path, SCRIPT_DIR)
 
         # Print Reading X/Y files progress
-        if x % 50 == 0 or x == total_files or x <= 10:
+        if x % 20 == 0 or x == total_files or x <= 10:
             print(f"Reading {x}/{total_files} files: {rel_path}", flush=True)
 
         try:
@@ -83,7 +80,7 @@ def scan_and_read_decompiled_folder():
                 content = f.read()
                 RAM_FILE_CACHE[rel_path] = content
         except Exception as e:
-            print(f"[!] Error reading file {rel_path}: {e}", flush=True)
+            pass
 
     print("=" * 60, flush=True)
     print(f"[DECOMPILED READ COMPLETE] Read {len(RAM_FILE_CACHE)}/{total_files} files into RAM!", flush=True)
@@ -371,15 +368,27 @@ def client_handler(conn, addr):
 
             print(f"[RX] MSG={msg} SESSION={session}", flush=True)
 
-            # Stateful Game Logic
+            # --------------------------------------------------------
+            # STATEFUL GAME HANDLERS
+            # --------------------------------------------------------
+
             if msg == 4:  # Login
                 acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1, "user_default"))
                 sid = get_val_int(body, 5, 1)
                 cur_areaId = str(get_area_id(sid))
+
+                # Exact login.response fields according to Sproto C# Schema:
+                # Tag 0: type = 2 (SUCCESS)
+                # Tag 1: versionCode = "1.012.017"
+                # Tag 2: dataVersionCode = "205"
+                # Tag 3: serverLevel = 1
                 send_response(conn, msg, session, {
-                    "result": 2, "version": "1.012.017", "res_version": "205",
-                    "enable": 1, "pvp_scale": 10000, "seed": random.randint(1, 10000)
+                    "type": 2,
+                    "versionCode": "1.012.017",
+                    "dataVersionCode": "205",
+                    "serverLevel": 1
                 })
+                print(f"[LOGIN SUCCESS] Account={acc_id} Area={cur_areaId}", flush=True)
 
             elif msg == 118:  # request_random_name
                 random_name = f"Hero_{random.randint(100, 999)}"
