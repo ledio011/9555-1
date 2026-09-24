@@ -821,7 +821,7 @@ def sync_main_player_visual(picked_char, send_rpc_push):
 def get_boss_char(inst_id, did):
     # Domin 1 boss stats and visual (XD profession)
     # These names are server placeholders, not names supplied by the APK data.
-    name = "XK7NQ2VJ"
+    name = "Thaddeus Barrow"
     prof = 0
 
     # VERIFIED ORIGINAL BOSS DATA: Level 3
@@ -1131,7 +1131,7 @@ def get_full_char(c):
                 if encoded:
                     fashion_equip_map[int(item.get('indexId', slot))] = encoded
 
-    download_state = 2 if c.get('download_complete') else 1
+    download_state = 2 if c.get('download_complete', True) else 1
     potion_idx = int(c.get('potion_index', 0))
     return encode_sproto([
         (0, char_id),
@@ -2442,7 +2442,7 @@ def init_character_fields(c):
         'pos': [7007, 100, 5033, 0],
         'map_id': "11",
         'tutorial': 0,
-        'download_complete': False,
+        'download_complete': True,
         'mounts': {},
         'equipped_mount_id': '',
         'mount_riding': False,
@@ -2455,6 +2455,15 @@ def init_character_fields(c):
     }
     for k, v in fields.items():
         if k not in c: c[k] = v
+
+    # Auto-grant expansion car voucher (9301) for download_complete characters
+    if c.get('download_complete', True):
+        inv = c.setdefault('inventory', [])
+        if not any(str(item.get('id')) == "9301" for item in inv):
+            add_to_inventory(c, "9301", 1)
+            add_to_inventory(c, "9011", 10)
+            add_to_inventory(c, "9001", 20)
+            add_to_inventory(c, "5026", 5)
 
     epack = c.setdefault('equip_pack', {})
     prof_str = str(c.get('prof', 0))
