@@ -1,5 +1,46 @@
 import socket, struct, threading, random, json, os, time, traceback, math
 
+import builtins
+
+_ORIGINAL_PRINT = builtins.print
+
+def _server_log(*args, **kwargs):
+    try:
+        msg = " ".join(str(x) for x in args)
+    except Exception:
+        msg = str(args)
+
+    # Always keep connection lifecycle messages.
+    if (
+        msg.startswith("[CONNECT]") or
+        msg.startswith("[DISCONNECT]") or
+        "Client connected:" in msg or
+        "Client disconnected:" in msg
+    ):
+        _ORIGINAL_PRINT(msg, **kwargs)
+        return
+
+    # Only anomaly/error diagnostics are allowed through.
+    anomaly = (
+        msg.startswith("[ANOMALY]") or
+        msg.startswith("[ERROR]") or
+        msg.startswith("[!]") or
+        "WRONG/UNEXPECTED" in msg or
+        "TIMEOUT" in msg or
+        "INCONSISTENT" in msg
+    )
+    if anomaly:
+        if msg.startswith("[!]"):
+            msg = "[ANOMALY]" + msg[3:]
+        elif msg.startswith("[ERROR]"):
+            msg = "[ANOMALY]" + msg[7:]
+        elif not msg.startswith("[ANOMALY]"):
+            msg = "[ANOMALY] " + msg
+        _ORIGINAL_PRINT(msg, **kwargs)
+
+builtins.print = _server_log
+
+
 PORT = int(os.environ.get("PORT", 15678))
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CHAR_DB = os.path.join(SCRIPT_DIR, "characters_final.json")
@@ -43,7 +84,7 @@ def protocol_debug_timeout(state, tag, direction, stage):
         return
     elapsed = time.time() - state["pending_since"].get(tag, time.time())
     print(
-        f"[PROTOCOL DEBUG] TIMEOUT {direction} TAG={tag} "
+        f"[ANOMALY] PROTOCOL_TIMEOUT {direction} TAG={tag} "
         f"stage={stage} waited={elapsed:.1f}s "
         f"last_success={state.get('last_success')}",
         flush=True
@@ -91,7 +132,7 @@ def protocol_debug_rx(state, tag):
     if state["pending"]:
         expected = ",".join(str(x) for x in sorted(state["pending"]))
         print(
-            f"[PROTOCOL DEBUG] WRONG/UNEXPECTED RX TAG={tag} "
+            f"[ANOMALY] PROTOCOL_WRONG/UNEXPECTED RX TAG={tag} "
             f"pending={expected} stage={state['stage']}",
             flush=True
         )
@@ -2402,7 +2443,6 @@ def give_mission_rewards(picked_char, mid):
         # that UI cover the SimpleRewardRoot popup.
         return added_exp, added_cash, granted_items, popup_items
     except:
-        traceback.print_exc()
         return 0, 0, [], []
 
 def accept_mission_logic(picked_char, mid):
@@ -2691,7 +2731,6 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
 
     except Exception:
         print("[!] FAILED TO SEND MAP ENTER TRANSITION")
-        traceback.print_exc()
     print("[DEBUG] AFTER MAP ENTER")
 
 def is_skill_locked(sid, level, prof):
@@ -2783,7 +2822,6 @@ def client_handler(conn, addr):
             print(f"[TX] PUSH TAG={tag} SIZE={len(data)}")
         except Exception:
             print(f"[!] FAILED TO SEND PUSH TAG={tag}")
-            traceback.print_exc()
 
     send_rpc_push.protocol_debug = protocol_debug
 
@@ -3024,7 +3062,6 @@ def client_handler(conn, addr):
 
                     except Exception:
                         print("[!] FAILED TO SEND INITIAL MAP ENTER")
-                        traceback.print_exc()
                     print("[DEBUG] AFTER MAP ENTER")
 
             elif msg == 100: # map_ready
@@ -5088,7 +5125,6 @@ def client_handler(conn, addr):
 
     except Exception as exc:
         print(f"[!] Client handler exception for {addr}: {exc}")
-        traceback.print_exc()
     finally:
         try:
             if picked_char and ONLINE_CHAR_MAP.get(picked_char['id']) == send_rpc_push:
@@ -5099,14 +5135,14 @@ def client_handler(conn, addr):
             conn.close()
         except Exception:
             pass
-        print(f"[-] Client disconnected: {addr}")
+        print(f"[DISCONNECT] {addr}")
 
 def start_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("0.0.0.0", PORT))
     server.listen(20)
-    print(f"GAME SERVER 9555 READY ON PORT {PORT}")
+    
     while True:
         try:
             cl, ad = server.accept()
