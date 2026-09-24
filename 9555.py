@@ -799,7 +799,7 @@ def build_main_player_visual(c):
     f_weapon_item = fpack.get(5) or fpack.get('5')
 
     f_head_id = EQUIP_MODEL_CONFIG.get(str(f_head_item.get('itemId')), head_id) if f_head_item else head_id
-    f_body_id = EQUIP_MODEL_CONFIG.get(str(f_body_item.get('itemId')), body_id) if f_body_id else body_id
+    f_body_id = EQUIP_MODEL_CONFIG.get(str(f_body_item.get('itemId')), body_id) if f_body_item else body_id
     f_leg_id = EQUIP_MODEL_CONFIG.get(str(f_leg_item.get('itemId')), leg_id) if f_leg_item else leg_id
     f_weapon_id = EQUIP_MODEL_CONFIG.get(str(f_weapon_item.get('itemId')), weapon_id) if f_weapon_item else weapon_id
 
@@ -1096,7 +1096,7 @@ def get_full_char(c):
     char_level = int(stats['lv'])
     skill_levels = c.get('skill_levels', {})
     skills_map = build_skills_map(c.get('prof', 0), char_level, skill_levels)
-    
+
     # Tag 9: equip (Dictionary<long, gameitem>)
     equip_map = {}
     epack = c.get('equip_pack', {})
@@ -2032,7 +2032,7 @@ def add_to_inventory(picked_char, item_id, amount):
 
     cfg = ITEM_CONFIG.get(item_id, {})
     itype = cfg.get('type', 0)
-    
+
     if itype == 2 or itype == 3 or itype == 4:
         ckey = 'equip_backpack'
     elif itype in (15, 16):
@@ -2635,10 +2635,10 @@ def serve_resource_http(conn, initial_data):
             return
         size = os.path.getsize(local_path)
         headers = (
-            b"HTTP/1.1 200 OK\r\n"
-            + b"Content-Length: " + str(size).encode("ascii") + b"\r\n"
-            + b"Content-Type: application/octet-stream\r\n"
-            + b"Connection: close\r\n\r\n"
+                b"HTTP/1.1 200 OK\r\n"
+                + b"Content-Length: " + str(size).encode("ascii") + b"\r\n"
+                + b"Content-Type: application/octet-stream\r\n"
+                + b"Connection: close\r\n\r\n"
         )
         conn.sendall(headers)
         if parts[0] == "GET":
@@ -3261,7 +3261,7 @@ def client_handler(conn, addr):
                                 stats = get_character_stats(picked_char)
                                 picked_char['hp'] = stats['hp_max']
                                 sync_char_attrs_rpc(conn, picked_char)
-                            
+
                             item['amount'] -= 1
                             if item['amount'] < 1:
                                 inventory.pop(item_index)
@@ -3372,14 +3372,14 @@ def client_handler(conn, addr):
                             item_found = c_dict[target_key]
                             ctype = container_code
                             break
-                    
+
                     if not item_found:
                         inventory = picked_char.get('inventory', [])
                         item_index = index_id - 10000
                         if 0 <= item_index < len(inventory):
                             raw = inventory[item_index]
                             item_found = {'itemId': str(raw['id']), 'stack': raw['amount']}
-                    
+
                     if item_found:
                         item_id = str(item_found.get('itemId', ''))
                         item_cfg = ITEM_CONFIG.get(item_id, {})
@@ -3392,7 +3392,7 @@ def client_handler(conn, addr):
                                 send_update_item_push(send_rpc_push, ctype, index_id, None)
                             else:
                                 send_update_item_push(send_rpc_push, ctype, index_id, item_found)
-                        
+
                         inv = picked_char.get('inventory', [])
                         for inv_item in list(inv):
                             if str(inv_item.get('id')) == item_id:
@@ -3400,7 +3400,7 @@ def client_handler(conn, addr):
                                 if inv_item['amount'] <= 0:
                                     inv.remove(inv_item)
                                 break
-                        
+
                         picked_char['cash'] = picked_char.get('cash', 0) + earned_cash
                         save_chars(all_accounts_chars)
                         sync_char_attrs_rpc(conn, picked_char)
@@ -3434,14 +3434,14 @@ def client_handler(conn, addr):
                             item_found = c_dict[target_key]
                             ctype = container_code
                             break
-                    
+
                     if not item_found:
                         inventory = picked_char.get('inventory', [])
                         item_index = index_id - 10000
                         if 0 <= item_index < len(inventory):
                             raw = inventory[item_index]
                             item_found = {'itemId': str(raw['id']), 'stack': raw['amount']}
-                    
+
                     if item_found:
                         box_id = str(item_found.get('itemId', ''))
                         count = min(count, item_found.get('stack', 1))
@@ -3452,11 +3452,11 @@ def client_handler(conn, addr):
                                 send_update_item_push(send_rpc_push, ctype, index_id, None)
                             else:
                                 send_update_item_push(send_rpc_push, ctype, index_id, item_found)
-                        
+
                         reward_cash = 20000 * count
                         reward_exp = 5000 * count
                         grant_item_rewards(picked_char, [("1001", 0, reward_cash), ("2001", 0, reward_exp)], conn, send_rpc_push)
-                        
+
                         reward_items = [
                             encode_sproto([(0, "1001"), (1, reward_cash)]),
                             encode_sproto([(0, "2001"), (1, reward_exp)])
@@ -3986,7 +3986,7 @@ def client_handler(conn, addr):
                         4: 'badge_backpack',
                         6: 'fashion_backpack'
                     }.get(container_type, 'equip_backpack')
-                    
+
                     c_map = picked_char.setdefault(container_key, {})
                     if index_id in c_map:
                         item = c_map[index_id]
