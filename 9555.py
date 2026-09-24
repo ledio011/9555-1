@@ -40,6 +40,37 @@ def _server_log(*args, **kwargs):
 
 builtins.print = _server_log
 
+# ============================================================
+# COMPREHENSIVE ANOMALY TRACKING
+# ============================================================
+ANOMALY_TRACKING_ENABLED = True
+ANOMALY_TIMEOUT = 8.0
+
+def anomaly(state, code, **detail):
+    if not ANOMALY_TRACKING_ENABLED:
+        return
+    extra = " ".join(f"{k}={v!r}" for k,v in detail.items())
+    print(f"[ANOMALY] {code}" + (f" {extra}" if extra else ""), flush=True)
+
+def anomaly_expect(state, key, timeout=ANOMALY_TIMEOUT):
+    if state is not None:
+        state.setdefault("_anomaly_expected", {})[key] = time.time() + timeout
+
+def anomaly_seen(state, key):
+    if state is not None:
+        state.setdefault("_anomaly_seen", set()).add(key)
+        state.setdefault("_anomaly_expected", {}).pop(key, None)
+
+def anomaly_check_missing(state):
+    if state is None:
+        return
+    now = time.time()
+    for key, deadline in list(state.get("_anomaly_expected", {}).items()):
+        if now >= deadline:
+            anomaly(state, "MISSING_EXPECTED_EVENT", event=key)
+            state["_anomaly_expected"].pop(key, None)
+
+
 
 PORT = int(os.environ.get("PORT", 15678))
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -54,6 +85,41 @@ NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 DEAD_NPC_SET = set() # duplicate death/reward prevention set
 ONLINE_CHAR_MAP = {} # char_id -> send_rpc_push
+
+def validate_npc_data(nid, inst_id=None, hp=None, damage=None):
+    cfg = NPC_CONFIG.get(str(nid))
+    if cfg is None:
+        anomaly(None, "NPC_CONFIG_MISSING", npc_id=nid, inst_id=inst_id)
+        return False
+    if hp is not None and (not isinstance(hp,(int,float)) or hp < 0):
+        anomaly(None, "NPC_HP_INVALID", npc_id=nid, inst_id=inst_id, hp=hp)
+    if damage is not None and (not isinstance(damage,(int,float)) or damage < 0):
+        anomaly(None, "NPC_DAMAGE_INVALID", npc_id=nid, inst_id=inst_id, damage=damage)
+    for field in ("level","atk_coe","hp_coe","def_coe"):
+        if field not in cfg:
+            anomaly(None, "NPC_VALUE_MISSING", npc_id=nid, field=field)
+    return True
+
+def validate_player_state(ch):
+    if not isinstance(ch,dict):
+        anomaly(None,"PLAYER_STATE_MISSING")
+        return
+    for field in ("id","level","exp","cash","gold","hp","max_hp","map_id","pos"):
+        if field not in ch:
+            anomaly(None,"PLAYER_VALUE_MISSING",field=field,player_id=ch.get("id"))
+    if ch.get("level",1) < 1:
+        anomaly(None,"PLAYER_LEVEL_INVALID",value=ch.get("level"))
+    if ch.get("hp",0) < 0 or ch.get("max_hp",0) < 0:
+        anomaly(None,"PLAYER_HP_INVALID",hp=ch.get("hp"),max_hp=ch.get("max_hp"))
+
+def validate_inventory(ch):
+    if isinstance(ch,dict) and ch.get("inventory") is None:
+        anomaly(None,"INVENTORY_MISSING",player_id=ch.get("id"))
+
+def validate_missions(ch):
+    if isinstance(ch,dict) and ch.get("missions") is None:
+        anomaly(None,"MISSION_STATE_MISSING",player_id=ch.get("id"))
+
 
 # ============================================================
 # PROTOCOL FLOW DEBUGGER
@@ -2366,6 +2432,7 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None)
     if exp_gained > 0:
         picked_char['exp'] = picked_char.get('exp', 0) + exp_gained
         while True:
+            anomaly_check_missing(truth_audit)
             lv = picked_char.get('level', 1)
             rd = LEVEL_DATA.get(lv)
             if rd and picked_char['exp'] >= rd['exp']:
@@ -2790,6 +2857,11 @@ def serve_resource_http(conn, initial_data):
     except Exception as exc:
         print(f"[HTTP 9555] failed: {exc}")
     finally:
+        anomaly_check_missing(truth_audit)
+        if picked_char:
+            validate_player_state(picked_char)
+            validate_inventory(picked_char)
+            validate_missions(picked_char)
         try:
             for _timer in protocol_debug.get("timers", {}).values():
                 try: _timer.cancel()
@@ -2974,6 +3046,9 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
+                    validate_player_state(picked_char)
+                    validate_inventory(picked_char)
+                    validate_missions(picked_char)
                     ONLINE_CHAR_MAP[picked_char['id']] = send_rpc_push
                     picked_char['last_played'] = int(time.time())
                     print(f"[CHARACTER PICK] id={picked_char['id']} level={picked_char.get('level')}")
@@ -4980,9 +5055,10 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 270: # download_finish
+                anomaly_seen(truth_audit, "download_finish_270")
                 if picked_char and not picked_char.get('download_complete'):
                     picked_char['download_complete'] = True
-                    truth_audit_register(truth_audit, 654, "download_complete", 1, int(bool(picked_char.get("download_complete"))))
+                    truth_audit_register(truth_audit, 270, "download_complete", 1, int(bool(picked_char.get("download_complete"))))
                     # Expansion Rewards: Mount 9301 (Chevrolet voucher), 9011 (10), 9001 (20), 5026 (5)
                     add_to_inventory(picked_char, "9301", 1)
                     add_to_inventory(picked_char, "9011", 10)
@@ -5005,6 +5081,7 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 306: # tutorial_finish
+                anomaly_seen(truth_audit, "tutorial_finish_306")
                 if picked_char:
                     picked_char['tutorial'] = 1
                     truth_audit_register(truth_audit, 592, "tutorial", 1, int(picked_char.get("tutorial", 0)))
