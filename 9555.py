@@ -197,63 +197,6 @@ def load_game_assets():
                         'def_abs': int(parts[46]) if len(parts) > 46 and parts[46].isdigit() else 0
                     }
 
-    # Load MonsterData
-    mon_path = os.path.join(text_asset_root, "MonsterData")
-    if os.path.exists(mon_path):
-        with open(mon_path, "r", encoding='utf-8') as f:
-            for line in f:
-                parts = line.strip().split(",")
-                if len(parts) > 6 and parts[1].isdigit():
-                    mid = parts[1]
-                    group = int(parts[2]) if parts[2].isdigit() else 0
-                    nid = parts[3]
-                    entry = {
-                        'nid': nid,
-                        'x': int(parts[4]),
-                        'z': int(parts[5]),
-                        'o': int(parts[6]),
-                        'group': group
-                    }
-                    if group == 9999:
-                        if mid not in STATIC_NPC_DATA:
-                            STATIC_NPC_DATA[mid] = []
-                        STATIC_NPC_DATA[mid].append(entry)
-                    else:
-                        if mid not in MONSTER_DATA:
-                            MONSTER_DATA[mid] = []
-                        MONSTER_DATA[mid].append(entry)
-
-    # Load MountData
-    mount_path = os.path.join(text_asset_root, "MountData")
-    if os.path.exists(mount_path):
-        with open(mount_path, "r", encoding='utf-8') as f:
-            for line in f:
-                parts = line.strip().split(",")
-                if len(parts) > 36 and parts[0] == "*" and parts[1]:
-                    if parts[36] == "1":
-                        colors = [x for x in parts[28].split("#") if x]
-                        MOUNT_CONFIG[parts[1]] = {
-                            'colors': colors,
-                            'default_color': parts[29] if parts[29] else (colors[0] if colors else "1"),
-                            'item_id': parts[4]
-                        }
-
-    # Load CopySceneData
-    copy_path = os.path.join(text_asset_root, "CopySceneData")
-    if os.path.exists(copy_path):
-        with open(copy_path, "r", encoding='utf-8') as f:
-            for line in f:
-                parts = line.strip().split(",")
-                if len(parts) > 19 and parts[0] == "*" and parts[1].isdigit() and parts[11] == "1":
-                    COPY_SCENE_CONFIG[parts[1]] = {
-                        'map_id': parts[5],
-                        'subtype': int(parts[12]) if parts[12].isdigit() else 0,
-                        'exist_time': int(parts[13]) if parts[13].isdigit() else 0,
-                        'end_time': int(parts[10]) if parts[10].isdigit() else 0,
-                        'max_plays': int(parts[18]) if parts[18].isdigit() else 0,
-                        'min_level': int(parts[19]) if parts[19].isdigit() else 1
-                    }
-
     # Load ItemData
     item_path = os.path.join(text_asset_root, "ItemData")
     if os.path.exists(item_path):
@@ -407,7 +350,6 @@ def client_handler(conn, addr):
             print(f"[!] Push error tag={tag}: {e}")
 
     try:
-        # Check HTTP vs Binary Sproto
         initial = conn.recv(4, socket.MSG_PEEK)
         if initial.startswith(b"GET ") or initial.startswith(b"HEAD"):
             conn.sendall(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n")
@@ -453,6 +395,50 @@ def client_handler(conn, addr):
                     pf = sproto_pack(ph + resp)
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif msg == 118:  # request_random_name
+                random_name = f"Hero_{random.randint(100, 999)}"
+                resp = encode_sproto([(0, random_name)])
+                if session is not None:
+                    ph = encode_sproto([(1, session)])
+                    pf = sproto_pack(ph + resp)
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 104:  # character_create
+                c_data_raw = body.get(0)
+                c_name = "Hero"
+                c_prof = 0
+                if c_data_raw:
+                    c_data = decode_sproto(c_data_raw)
+                    c_name_val = c_data.get(0)
+                    if isinstance(c_name_val, bytes):
+                        c_name = c_name_val.decode('utf-8', errors='replace')
+                    elif isinstance(c_name_val, str):
+                        c_name = c_name_val
+                    c_prof = get_val_int(c_data, 1, 0)
+
+                cid = int(time.time() * 1000) % 1000000000
+                area_key = str(cur_areaId)
+                if area_key not in all_accounts_chars or not isinstance(all_accounts_chars[area_key], dict):
+                    all_accounts_chars[area_key] = {}
+                if acc_id not in all_accounts_chars[area_key] or not isinstance(all_accounts_chars[area_key][acc_id], list):
+                    all_accounts_chars[area_key][acc_id] = []
+
+                nc = {'id': cid, 'name': c_name, 'prof': c_prof, 'level': 1, 'hp': 1000, 'map_id': "11", 'pos': [7007, 100, 5033, 0]}
+                all_accounts_chars[area_key][acc_id].append(nc)
+                save_chars(all_accounts_chars)
+
+                gen = encode_sproto([(0, c_name), (1, c_prof), (2, 1), (3, "11")])
+                attr = encode_sproto([(0, 1), (1, 3000)])
+                v = encode_sproto([(0, c_name), (1, "104"), (2, "QJ_A_T"), (3, "QJ_A_S"), (4, "QJ_A_X"), (5, "QJ_A_WQ")])
+                ov = encode_sproto([(0, cid), (1, gen), (2, attr), (3, v), (4, 0), (5, 0)])
+
+                resp = encode_sproto([(0, ov), (1, 0)])
+                if session is not None:
+                    ph = encode_sproto([(1, session)])
+                    pf = sproto_pack(ph + resp)
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+                print(f"[CHARACTER CREATED] id={cid} name={c_name} prof={c_prof}")
+
             elif msg == 103:  # character_list
                 chars = get_account_chars(all_accounts_chars, cur_areaId, acc_id)
                 ov_list = []
@@ -495,7 +481,7 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif session is not None:
-                # Automatic Sproto Schema Fallback for All Other Messages
+                # Automatic Sproto Schema Fallback
                 response_frame = schema_engine.create_response_frame(msg, session)
                 if response_frame:
                     conn.sendall(response_frame)
