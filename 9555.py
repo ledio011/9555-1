@@ -14,6 +14,102 @@ NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 DEAD_NPC_SET = set() # duplicate death/reward prevention set
 ONLINE_CHAR_MAP = {} # char_id -> send_rpc_push
 
+# ============================================================
+# PROTOCOL FLOW DEBUGGER
+# Logs only protocol anomalies/timeouts around character-pick
+# and map-entry flow. It does not alter gameplay responses.
+# ============================================================
+PROTOCOL_DEBUG_TIMEOUT = 5.0
+
+def protocol_debug_new_state():
+    return {
+        "pending": set(),
+        "pending_since": {},
+        "timers": {},
+        "stage": "login",
+        "last_success": None,
+    }
+
+def protocol_debug_cancel_timer(state, tag):
+    timer = state["timers"].pop(tag, None)
+    if timer:
+        try:
+            timer.cancel()
+        except Exception:
+            pass
+
+def protocol_debug_timeout(state, tag, direction, stage):
+    if tag not in state["pending"]:
+        return
+    elapsed = time.time() - state["pending_since"].get(tag, time.time())
+    print(
+        f"[PROTOCOL DEBUG] TIMEOUT {direction} TAG={tag} "
+        f"stage={stage} waited={elapsed:.1f}s "
+        f"last_success={state.get('last_success')}",
+        flush=True
+    )
+
+def protocol_debug_expect(state, tag, direction, stage):
+    state["pending"].add(tag)
+    state["pending_since"][tag] = time.time()
+    protocol_debug_cancel_timer(state, tag)
+    timer = threading.Timer(
+        PROTOCOL_DEBUG_TIMEOUT,
+        protocol_debug_timeout,
+        args=(state, tag, direction, stage)
+    )
+    timer.daemon = True
+    state["timers"][tag] = timer
+    timer.start()
+
+def protocol_debug_mark(state, tag, direction):
+    if tag not in state["pending"]:
+        return
+    state["pending"].discard(tag)
+    state["pending_since"].pop(tag, None)
+    protocol_debug_cancel_timer(state, tag)
+    state["last_success"] = f"{direction} TAG={tag}"
+
+def protocol_debug_rx(state, tag):
+    # TAG 105 = character_pick. The following initial gameplay pushes
+    # are expected before the map transition.
+    if tag == 105:
+        state["stage"] = "character_pick"
+        state["last_success"] = "RX TAG=105"
+        for required in (614, 611, 540, 519):
+            protocol_debug_expect(state, required, "TX", "character_pick")
+        return
+
+    if tag == 100:
+        protocol_debug_mark(state, 100, "RX")
+        if state["stage"] == "map_enter":
+            state["stage"] = "map_ready"
+        return
+
+    # If a packet arrives while required pushes are still missing, show the
+    # mismatch. This is diagnostic only; it never blocks the packet.
+    if state["pending"]:
+        expected = ",".join(str(x) for x in sorted(state["pending"]))
+        print(
+            f"[PROTOCOL DEBUG] WRONG/UNEXPECTED RX TAG={tag} "
+            f"pending={expected} stage={state['stage']}",
+            flush=True
+        )
+
+def protocol_debug_tx(state, tag):
+    if tag in state["pending"]:
+        protocol_debug_mark(state, tag, "TX")
+
+    if tag == 503:
+        state["stage"] = "map_enter"
+        protocol_debug_expect(state, 504, "TX", "enter_map")
+        protocol_debug_expect(state, 100, "RX", "enter_map")
+        return
+
+    if tag == 504:
+        protocol_debug_mark(state, 504, "TX")
+
+
 # Load Mission Data
 missions_data = {}
 rewards_data = {}
@@ -2465,6 +2561,9 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         data = encode_sproto([(0, target_map_id), (1, 0), (2, 1)])
         pf_p = sproto_pack(ph_p + data)
         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+        debug_state = getattr(send_rpc_push, "protocol_debug", None)
+        if debug_state is not None:
+            protocol_debug_tx(debug_state, 503)
         print(f"[M1003 DEBUG] TX 503 map_id={target_map_id}")
         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
         print(f"[MAP ENTER SEND] map_id={target_map_id} scene={scene_name} pos={picked_char['pos']}")
@@ -2554,16 +2653,25 @@ def serve_resource_http(conn, initial_data):
         print(f"[HTTP 9555] failed: {exc}")
     finally:
         try:
+            for _timer in protocol_debug.get("timers", {}).values():
+                try: _timer.cancel()
+                except Exception: pass
+            protocol_debug.get("timers", {}).clear()
+        except Exception:
+            pass
+        try:
             conn.close()
         except Exception:
             pass
 
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
+    protocol_debug = protocol_debug_new_state()
     global server_session_counter
     send_lock = threading.Lock()
 
     def send_rpc_push(tag, data):
+        protocol_debug_tx(protocol_debug, tag)
         try:
             ph_p = encode_sproto([(0, tag)])
             pf_p = sproto_pack(ph_p + data)
@@ -2575,6 +2683,8 @@ def client_handler(conn, addr):
         except Exception:
             print(f"[!] FAILED TO SEND PUSH TAG={tag}")
             traceback.print_exc()
+
+    send_rpc_push.protocol_debug = protocol_debug
 
     def schedule_domin_return(restore_hp=False):
         """Return after the Capture mission's APK-localized five-second exit notice."""
@@ -2672,6 +2782,7 @@ def client_handler(conn, addr):
 
             raw = sproto_unpack(data); pkg = decode_sproto(raw, 0)
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
+            protocol_debug_rx(protocol_debug, msg)
             if msg in (100, 105, 115, 116, 117, 121, 122, 129, 167, 168, 170, 171, 172, 199, 223, 224, 303) or (picked_char and picked_char.get('map_ready_done')):
                 print(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
