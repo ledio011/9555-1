@@ -380,6 +380,37 @@ try:
                         'function': int(parts[13]) if len(parts) > 13 and parts[13].isdigit() else 0
                     }
         print(f"[ITEM CONFIG LOADED] items={len(ITEM_CONFIG)}")
+    # Load ShopData
+    SHOP_CONFIG = {} # (shop_type, class_type) -> list of shop_item dicts
+    shop_data_path = os.path.join(text_asset_root, "ShopData")
+    if os.path.exists(shop_data_path):
+        with open(shop_data_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 10 and parts[0] == "*" and parts[1].isdigit():
+                    item_id = parts[1]
+                    shop_type = int(parts[2]) if parts[2].isdigit() else 0
+                    real_item_id = parts[3]
+                    quality = int(parts[4]) if parts[4].isdigit() else 1
+                    price_type = int(parts[6]) if parts[6].isdigit() else 1
+                    price = int(parts[7]) if parts[7].isdigit() else 100
+                    reset_cycle = int(parts[8]) if parts[8].isdigit() else 1
+                    limit = int(parts[9]) if parts[9].isdigit() else 0
+                    discount = int(parts[11]) if parts[11].isdigit() else 100
+                    class_type = int(parts[21]) if len(parts) > 21 and parts[21].isdigit() else 1
+
+                    key = (shop_type, class_type)
+                    if key not in SHOP_CONFIG: SHOP_CONFIG[key] = []
+                    SHOP_CONFIG[key].append({
+                        'id': item_id,
+                        'item_id': real_item_id,
+                        'quality': quality,
+                        'price_type': price_type,
+                        'price': price,
+                        'limit': limit,
+                        'discount': discount
+                    })
+        print(f"[SHOP CONFIG LOADED] categories={len(SHOP_CONFIG)}")
 except: traceback.print_exc()
 
 BAK_DB = CHAR_DB + ".bak"
@@ -4596,6 +4627,84 @@ def client_handler(conn, addr):
                 if session is not None:
                     resp_data = encode_sproto([(0, client_time), (1, int(time.time()))])
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp_data)
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 143: # ask_shop_list (Sproto Tag 143)
+                shop_type = get_val_int(body, 0, 0)
+                page = get_val_int(body, 1, 1)
+                sub_type = get_val_int(body, 3, 0)
+                class1 = get_val_int(body, 4, 1)
+
+                key = (shop_type, class1)
+                items_data = SHOP_CONFIG.get(key, [])
+                if not items_data:
+                    items_data = [v for k, v in SHOP_CONFIG.items() if k[0] == shop_type]
+                    if items_data and isinstance(items_data[0], list):
+                        items_data = items_data[0]
+
+                sproto_shop_items = []
+                for item in items_data:
+                    s_item = encode_sproto([
+                        (0, str(item['id'])),
+                        (1, str(item['item_id'])),
+                        (2, item['quality']),
+                        (3, item['price_type']),
+                        (4, item['price']),
+                        (5, item['limit']),
+                        (6, 0),
+                        (7, item['discount'])
+                    ])
+                    sproto_shop_items.append(s_item)
+
+                send_rpc_push(554, encode_sproto([
+                    (0, shop_type),
+                    (1, 1),
+                    (2, 1),
+                    (3, sproto_shop_items),
+                    (4, sub_type)
+                ]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 144: # buy_shop_item (Sproto Tag 144)
+                shop_item_id = field_text(body, 0)
+                buy_count = get_val_int(body, 1, 1)
+                if picked_char:
+                    matched_item = None
+                    for cat_items in SHOP_CONFIG.values():
+                        for item in cat_items:
+                            if str(item['id']) == str(shop_item_id):
+                                matched_item = item
+                                break
+                        if matched_item: break
+
+                    if matched_item:
+                        cost = matched_item['price'] * buy_count
+                        ptype = matched_item['price_type']
+                        can_buy = False
+                        if ptype == 0 and picked_char.get('cash', 0) >= cost:
+                            picked_char['cash'] -= cost
+                            can_buy = True
+                        elif ptype == 1 and picked_char.get('gold', 0) >= cost:
+                            picked_char['gold'] -= cost
+                            can_buy = True
+                        elif ptype == 2 and picked_char.get('diamonds', 0) >= cost:
+                            picked_char['diamonds'] -= cost
+                            can_buy = True
+                        else:
+                            can_buy = True
+
+                        if can_buy:
+                            add_to_inventory(picked_char, matched_item['item_id'], buy_count)
+                            save_chars(all_accounts_chars)
+                            send_rpc_push(611, sync_item_pack_rpc(picked_char))
+                            sync_char_attrs_rpc(conn, picked_char)
+                            print(f"[SHOP BUY] Player {picked_char['id']} bought {buy_count}x item {matched_item['item_id']} for {cost} cost")
+
+                send_rpc_push(652, encode_sproto([(0, 1)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg in [118, 145, 225, 258, 261, 278, 296, 299, 319]:
