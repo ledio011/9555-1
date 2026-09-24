@@ -4799,19 +4799,18 @@ def client_handler(conn, addr):
                 elif msg == 190:
                     send_rpc_push(597, encode_sproto([(0, 1)]))
                 elif msg == 203:
-                    if picked_char:
-                        send_rpc_push(625, encode_sproto([(0, picked_char.get('tower_floor', 1))]))
-                    else:
-                        send_rpc_push(625, encode_sproto([]))
+                    tower_id = get_val_int(body, 0, picked_char.get('tower_floor', 1) if picked_char else 1)
+                    send_rpc_push(625, encode_sproto([(1, tower_id)]))
                 elif msg == 208:
                     send_rpc_push(607, encode_sproto([]))
                 elif msg == 219:
                     mid = str(picked_char.get('map_id', '11')) if picked_char else '11'
-                    line_index = max(1, int(picked_char.get('line_index', 1))) if picked_char else 1
-                    line_count = max(line_index, int(picked_char.get('line_count', 3))) if picked_char else 3
+                    line_count = max(1, int(picked_char.get('line_count', 3))) if picked_char else 3
+                    line_states = picked_char.get('line_states', {}) if picked_char else {}
                     send_rpc_push(568, encode_sproto([
-                        (0, line_index),
-                        (1, line_count)
+                        (0, mid),
+                        (1, line_count),
+                        (2, line_states)
                     ]))
                 elif msg == 226:
                     if picked_char:
@@ -4866,7 +4865,8 @@ def client_handler(conn, addr):
                 elif msg == 289:
                     send_rpc_push(666, encode_sproto([]))
                 elif msg == 290 or msg == 292:
-                    send_rpc_push(669, encode_sproto([]))
+                    guild_id = get_val_int(body, 0, 0)
+                    send_rpc_push(669, encode_sproto([(0, guild_id)]))
                 elif msg == 294:
                     send_rpc_push(672, encode_sproto([]))
                 elif msg == 452:
