@@ -2746,10 +2746,9 @@ def client_handler(conn, addr):
             elif msg == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
                 sid = get_val_int(body, 5, 1); cur_areaId = str(get_area_id(sid))
-                # sync_common_data: serverTime(0), time_offset(2), func_info(9), pvp_scale(4), seed(12), server_level(13), start_time(14)
+                # login.response (max_field_count=4): type(0), versionCode(1), dataVersionCode(2), serverLevel(3)
                 resp = encode_sproto([
-                    (0, 2), (1, "1.012.017"), (2, "205"), (3, 1),
-                    (4, 10000), (12, random.randint(1, 10000))
+                    (0, 2), (1, "1.012.017"), (2, "205"), (3, 1)
                 ])
                 print(f"[LOGIN] Login request for acc_id={acc_id} area={cur_areaId}")
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
@@ -2769,14 +2768,15 @@ def client_handler(conn, addr):
 
             elif msg == 103: # character_list
                 chars = get_account_chars(all_accounts_chars, cur_areaId, acc_id)
-                # Sort in creation order (1st created to 4th created)
                 chars.sort(key=lambda x: x.get('createtime', x.get('id', 0)))
 
-                ov_list = []
+                # character_list.response: Dictionary<long, character_overview> (Sproto Map)
+                ov_dict = {}
                 for i, c in enumerate(chars):
-                    ov_list.append(get_char_ov(c, i))
+                    ov_dict[c['id']] = get_char_ov(c, i)
 
-                resp = encode_sproto([(0, ov_list)])
+                resp = encode_sproto([(0, ov_dict)])
+                print(f"[CHARACTER LIST] Sent character_list count={len(ov_dict)} for acc_id={acc_id}")
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
@@ -2797,7 +2797,8 @@ def client_handler(conn, addr):
             elif msg == 105: # character_pick
                 char_id = get_val_int(body, 0)
                 picked_char = next((c for c in get_account_chars(all_accounts_chars, cur_areaId, acc_id) if c['id'] == char_id), None)
-                resp = encode_sproto([]) if picked_char else encode_sproto([(0, 1)])
+                # character_pick.response: errno(0) -> 0=Success
+                resp = encode_sproto([(0, 0)]) if picked_char else encode_sproto([(0, 1)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
