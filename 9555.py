@@ -2703,21 +2703,69 @@ def client_handler(conn, addr):
 
             raw = sproto_unpack(data); pkg = decode_sproto(raw, 0)
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
-            if msg in (100, 105, 115, 116, 117, 121, 122, 129, 167, 168, 170, 171, 172, 199, 223, 224, 303) or (picked_char and picked_char.get('map_ready_done')):
+            if msg in (2, 3, 4, 5, 6, 100, 105, 115, 116, 117, 121, 122, 129, 167, 168, 170, 171, 172, 199, 223, 224, 303) or (picked_char and picked_char.get('map_ready_done')):
                 print(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
 
-            if msg == 4: # login
+            if msg == 2: # visitor
+                uid = "68" + "".join(str(random.randint(0, 9)) for _ in range(12))
+                key = "".join(str(random.randint(0, 9)) for _ in range(12))
+                resp = encode_sproto([
+                    (0, uid),
+                    (1, key),
+                    (2, 0)
+                ])
+                print(f"[VISITOR] Created guest account uid={uid} key={key}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 3: # verfiy
+                server_id = get_val_int(body, 5, 302)
+                game_srv = encode_sproto([
+                    (0, 302), (1, "EU-001"), (2, "s16.serv00.com"), (3, 15678),
+                    (4, 1), (5, -4), (6, 1), (7, 1), (8, 1), (9, 1), (10, 0)
+                ])
+                server_bytes = struct.pack("<I", len(game_srv)) + game_srv
+                resp = encode_sproto([
+                    (0, 0),
+                    (1, session or 123456),
+                    (2, [server_bytes]),
+                    (3, "302#303"),
+                    (5, "1.012.017"),
+                    (6, "205"),
+                    (7, 0),
+                    (8, "Welcome to Auto Theft Revival!"),
+                    (9, "1")
+                ])
+                print(f"[VERIFY] Account verified on 9555 for server_id={server_id}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
                 sid = get_val_int(body, 5, 1); cur_areaId = str(get_area_id(sid))
                 # sync_common_data: serverTime(0), time_offset(2), func_info(9), pvp_scale(4), seed(12), server_level(13), start_time(14)
                 resp = encode_sproto([
                     (0, 2), (1, "1.012.017"), (2, "205"), (3, 1),
-                    # pvp_scale = 1.0 (10000), seed = random
                     (4, 10000), (12, random.randint(1, 10000))
                 ])
+                print(f"[LOGIN] Login request for acc_id={acc_id} area={cur_areaId}")
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 5: # facebook_link
+                resp = encode_sproto([(0, 0)])
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 6: # facebook_unlink
+                resp = encode_sproto([(0, 0)])
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 103: # character_list
                 chars = get_account_chars(all_accounts_chars, cur_areaId, acc_id)
