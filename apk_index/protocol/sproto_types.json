@@ -1,1 +1,8332 @@
-{}
+{
+  "abandon_mission.request": {
+    "name": "abandon_mission.request",
+    "fields": [
+      {
+        "name": "missionId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "parm",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "acceptdamge": {
+    "name": "acceptdamge",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "damage",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "skillId",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "effinfoId",
+        "tag": 3,
+        "type": "string"
+      },
+      {
+        "name": "cri",
+        "tag": 4,
+        "type": "boolean"
+      },
+      {
+        "name": "parm",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "parm2",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "parm3",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "parm4",
+        "tag": 8,
+        "type": "integer"
+      }
+    ]
+  },
+  "accept_damge.request": {
+    "name": "accept_damge.request",
+    "fields": [
+      {
+        "name": "damges",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "accept_mission.request": {
+    "name": "accept_mission.request",
+    "fields": [
+      {
+        "name": "missionId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "onlineId",
+        "tag": 1,
+        "type": "string"
+      }
+    ]
+  },
+  "activity_info": {
+    "name": "activity_info",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "CurNum",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "Type",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "State",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "Parm",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "Parmstr",
+        "tag": 5,
+        "type": "string"
+      },
+      {
+        "name": "sign",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "time",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "next",
+        "tag": 8,
+        "type": "integer"
+      }
+    ]
+  },
+  "add_friend.request": {
+    "name": "add_friend.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "type",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "aoi_add.request": {
+    "name": "aoi_add.request",
+    "fields": [
+      {
+        "name": "character",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "aoi_relife_player.request": {
+    "name": "aoi_relife_player.request",
+    "fields": [
+      {
+        "name": "character",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "aoi_remove.request": {
+    "name": "aoi_remove.request",
+    "fields": [
+      {
+        "name": "character",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "aoi_social_dance.request": {
+    "name": "aoi_social_dance.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "danceId",
+        "tag": 1,
+        "type": "string"
+      }
+    ]
+  },
+  "aoi_stop_move.request": {
+    "name": "aoi_stop_move.request",
+    "fields": [
+      {
+        "name": "character",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "aoi_update_attribute.request": {
+    "name": "aoi_update_attribute.request",
+    "fields": [
+      {
+        "name": "character",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "aoi_update_move.request": {
+    "name": "aoi_update_move.request",
+    "fields": [
+      {
+        "name": "character",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "apply_join_result.request": {
+    "name": "apply_join_result.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "isAgree",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "apply_join_state.request": {
+    "name": "apply_join_state.request",
+    "fields": [
+      {
+        "name": "teamid",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "isAgree",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "apply_join_team.request": {
+    "name": "apply_join_team.request",
+    "fields": [
+      {
+        "name": "member",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "approve_resverve_friend.request": {
+    "name": "approve_resverve_friend.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "isAgree",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ask_character_info.request": {
+    "name": "ask_character_info.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "ask_character_info.response": {
+    "name": "ask_character_info.response",
+    "fields": [
+      {
+        "name": "character",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "ask_confirm.request": {
+    "name": "ask_confirm.request",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "id",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "parm1",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "param2",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "ask_confirm.response": {
+    "name": "ask_confirm.response",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "ask_confirm_multi_copy_scene.request": {
+    "name": "ask_confirm_multi_copy_scene.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "type1",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "session",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "ask_pickup_item.request": {
+    "name": "ask_pickup_item.request",
+    "fields": [
+      {
+        "name": "serverId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "ask_shop_list.request": {
+    "name": "ask_shop_list.request",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "curPage",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "itemId",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "subType",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "class1",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "special",
+        "tag": 5,
+        "type": "integer"
+      }
+    ]
+  },
+  "attack_list": {
+    "name": "attack_list",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "value",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "attack_local_npc.request": {
+    "name": "attack_local_npc.request",
+    "fields": [
+      {
+        "name": "damge",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "effinfoId",
+        "tag": 1,
+        "type": "string"
+      }
+    ]
+  },
+  "attribute": {
+    "name": "attribute",
+    "fields": [
+      {
+        "name": "max_hp",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "exp",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "atk",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "def",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "hit",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "eva",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "cri",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "res",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "exd",
+        "tag": 8,
+        "type": "integer"
+      },
+      {
+        "name": "exr",
+        "tag": 9,
+        "type": "integer"
+      },
+      {
+        "name": "crd",
+        "tag": 10,
+        "type": "integer"
+      },
+      {
+        "name": "crr",
+        "tag": 11,
+        "type": "integer"
+      },
+      {
+        "name": "defa",
+        "tag": 12,
+        "type": "integer"
+      },
+      {
+        "name": "mov",
+        "tag": 13,
+        "type": "integer"
+      },
+      {
+        "name": "rec",
+        "tag": 14,
+        "type": "integer"
+      },
+      {
+        "name": "anti_stun",
+        "tag": 15,
+        "type": "integer"
+      },
+      {
+        "name": "anti_knock_down",
+        "tag": 16,
+        "type": "integer"
+      },
+      {
+        "name": "dgea",
+        "tag": 17,
+        "type": "integer"
+      },
+      {
+        "name": "resa",
+        "tag": 18,
+        "type": "integer"
+      },
+      {
+        "name": "hita",
+        "tag": 19,
+        "type": "integer"
+      },
+      {
+        "name": "cria",
+        "tag": 20,
+        "type": "integer"
+      },
+      {
+        "name": "ate",
+        "tag": 21,
+        "type": "integer"
+      },
+      {
+        "name": "satm",
+        "tag": 22,
+        "type": "integer"
+      },
+      {
+        "name": "satc",
+        "tag": 23,
+        "type": "integer"
+      },
+      {
+        "name": "satp",
+        "tag": 24,
+        "type": "integer"
+      }
+    ]
+  },
+  "attribute_aoi": {
+    "name": "attribute_aoi",
+    "fields": [
+      {
+        "name": "hp",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "exp",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "level",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "combValue",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "title_level",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "title_exp",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "refineNeckLevel",
+        "tag": 9,
+        "type": "integer"
+      },
+      {
+        "name": "refineRing1Level",
+        "tag": 10,
+        "type": "integer"
+      },
+      {
+        "name": "refineRing2Level",
+        "tag": 11,
+        "type": "integer"
+      },
+      {
+        "name": "refineBeltLevel",
+        "tag": 12,
+        "type": "integer"
+      },
+      {
+        "name": "refineLevel",
+        "tag": 13,
+        "type": "integer"
+      }
+    ]
+  },
+  "attribute_inhert.request": {
+    "name": "attribute_inhert.request",
+    "fields": [
+      {
+        "name": "index1",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "index2",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "attribute_index1",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "attribute_index2",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "attribute_other": {
+    "name": "attribute_other",
+    "fields": [
+      {
+        "name": "hp",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "exp",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "level",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "combValue",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "title_level",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "title_exp",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "guildId",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "guildJob",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "guildName",
+        "tag": 8,
+        "type": "string"
+      },
+      {
+        "name": "refineNeckLevel",
+        "tag": 9,
+        "type": "integer"
+      },
+      {
+        "name": "refineRing1Level",
+        "tag": 10,
+        "type": "integer"
+      },
+      {
+        "name": "refineRing2Level",
+        "tag": 11,
+        "type": "integer"
+      },
+      {
+        "name": "refineBeltLevel",
+        "tag": 12,
+        "type": "integer"
+      },
+      {
+        "name": "refineLevel",
+        "tag": 13,
+        "type": "integer"
+      },
+      {
+        "name": "vip",
+        "tag": 14,
+        "type": "integer"
+      },
+      {
+        "name": "camp",
+        "tag": 15,
+        "type": "integer"
+      },
+      {
+        "name": "pkMode",
+        "tag": 16,
+        "type": "integer"
+      },
+      {
+        "name": "dance_state",
+        "tag": 17,
+        "type": "integer"
+      },
+      {
+        "name": "dance_id",
+        "tag": 18,
+        "type": "string"
+      }
+    ]
+  },
+  "attribute_overview": {
+    "name": "attribute_overview",
+    "fields": [
+      {
+        "name": "level",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "combValue",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "badge_merge.request": {
+    "name": "badge_merge.request",
+    "fields": [
+      {
+        "name": "indexId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "nextItemId",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "count",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "badge_merge.response": {
+    "name": "badge_merge.response",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "bar_fight_notify.request": {
+    "name": "bar_fight_notify.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "battle_info": {
+    "name": "battle_info",
+    "fields": [
+      {
+        "name": "damage_list",
+        "tag": 0,
+        "type": "*string"
+      },
+      {
+        "name": "my_rank",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "my_damage",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "all_damage",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "lastKill",
+        "tag": 4,
+        "type": "string"
+      },
+      {
+        "name": "end_time",
+        "tag": 5,
+        "type": "integer"
+      }
+    ]
+  },
+  "be_deleted_friend.request": {
+    "name": "be_deleted_friend.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "buff": {
+    "name": "buff",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "effinfoId",
+        "tag": 1,
+        "type": "string"
+      }
+    ]
+  },
+  "buy_big_pack.request": {
+    "name": "buy_big_pack.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "buy_car_shop.request": {
+    "name": "buy_car_shop.request",
+    "fields": [
+      {
+        "name": "mountId",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "buy_invest_pack.request": {
+    "name": "buy_invest_pack.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "buy_shop_item.request": {
+    "name": "buy_shop_item.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "itemCount",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "type",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "cancel_apply_join_team.request": {
+    "name": "cancel_apply_join_team.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "car_chase_result.request": {
+    "name": "car_chase_result.request",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "boolean"
+      },
+      {
+        "name": "param1",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "param2",
+        "tag": 2,
+        "type": "string"
+      }
+    ]
+  },
+  "car_copy_result.request": {
+    "name": "car_copy_result.request",
+    "fields": [
+      {
+        "name": "win",
+        "tag": 0,
+        "type": "boolean"
+      },
+      {
+        "name": "items",
+        "tag": 1,
+        "type": "*string"
+      },
+      {
+        "name": "rankPos1",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "rankPos2",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "parm",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "new_record",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "id",
+        "tag": 6,
+        "type": "string"
+      }
+    ]
+  },
+  "change_item_state.request": {
+    "name": "change_item_state.request",
+    "fields": [
+      {
+        "name": "indexId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "type",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "change_mount_state.request": {
+    "name": "change_mount_state.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "change_potion.request": {
+    "name": "change_potion.request",
+    "fields": [
+      {
+        "name": "indexId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "change_scene_line.request": {
+    "name": "change_scene_line.request",
+    "fields": [
+      {
+        "name": "line_index",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "change_show_type.request": {
+    "name": "change_show_type.request",
+    "fields": [
+      {
+        "name": "showType",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "change_skill_index.request": {
+    "name": "change_skill_index.request",
+    "fields": [
+      {
+        "name": "index",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "change_skill_position.request": {
+    "name": "change_skill_position.request",
+    "fields": [
+      {
+        "name": "skillId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "indexPos",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "character": {
+    "name": "character",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "general",
+        "tag": 1,
+        "type": "*string"
+      },
+      {
+        "name": "attribute_other",
+        "tag": 2,
+        "type": "*string"
+      },
+      {
+        "name": "property",
+        "tag": 5,
+        "type": "*string"
+      },
+      {
+        "name": "visual",
+        "tag": 6,
+        "type": "*string"
+      },
+      {
+        "name": "movement",
+        "tag": 7,
+        "type": "*string"
+      },
+      {
+        "name": "potionIndex",
+        "tag": 12,
+        "type": "integer"
+      },
+      {
+        "name": "runtime",
+        "tag": 13,
+        "type": "*string"
+      },
+      {
+        "name": "download",
+        "tag": 15,
+        "type": "integer"
+      },
+      {
+        "name": "skill_index",
+        "tag": 16,
+        "type": "integer"
+      }
+    ]
+  },
+  "characterVisual": {
+    "name": "characterVisual",
+    "fields": [
+      {
+        "name": "name",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "ModeId",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "HeadId",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "BodyId",
+        "tag": 3,
+        "type": "string"
+      },
+      {
+        "name": "LegId",
+        "tag": 4,
+        "type": "string"
+      },
+      {
+        "name": "WeaponId",
+        "tag": 5,
+        "type": "string"
+      },
+      {
+        "name": "Fashion_HeadId",
+        "tag": 6,
+        "type": "string"
+      },
+      {
+        "name": "Fashion_BodyId",
+        "tag": 7,
+        "type": "string"
+      },
+      {
+        "name": "Fashion_LegId",
+        "tag": 8,
+        "type": "string"
+      },
+      {
+        "name": "Fashion_WeaponId",
+        "tag": 9,
+        "type": "string"
+      },
+      {
+        "name": "showType",
+        "tag": 10,
+        "type": "integer"
+      },
+      {
+        "name": "MountId",
+        "tag": 12,
+        "type": "string"
+      },
+      {
+        "name": "mount_state",
+        "tag": 13,
+        "type": "integer"
+      },
+      {
+        "name": "mount_color",
+        "tag": 14,
+        "type": "string"
+      },
+      {
+        "name": "WeaponItemId",
+        "tag": 15,
+        "type": "string"
+      },
+      {
+        "name": "FashionItemId",
+        "tag": 16,
+        "type": "string"
+      }
+    ]
+  },
+  "character_aoi": {
+    "name": "character_aoi",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "visual",
+        "tag": 1,
+        "type": "*string"
+      },
+      {
+        "name": "general",
+        "tag": 2,
+        "type": "*string"
+      },
+      {
+        "name": "attribute_other",
+        "tag": 3,
+        "type": "*string"
+      },
+      {
+        "name": "movement",
+        "tag": 5,
+        "type": "*string"
+      },
+      {
+        "name": "runtime",
+        "tag": 6,
+        "type": "*string"
+      }
+    ]
+  },
+  "character_aoi_attribute": {
+    "name": "character_aoi_attribute",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "attribute_other",
+        "tag": 1,
+        "type": "*string"
+      },
+      {
+        "name": "attribute",
+        "tag": 2,
+        "type": "*string"
+      },
+      {
+        "name": "attribute_all",
+        "tag": 3,
+        "type": "*string"
+      },
+      {
+        "name": "visual",
+        "tag": 4,
+        "type": "*string"
+      },
+      {
+        "name": "property",
+        "tag": 5,
+        "type": "*string"
+      }
+    ]
+  },
+  "character_aoi_move": {
+    "name": "character_aoi_move",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "movement",
+        "tag": 1,
+        "type": "*string"
+      },
+      {
+        "name": "walk",
+        "tag": 2,
+        "type": "boolean"
+      }
+    ]
+  },
+  "character_create.request": {
+    "name": "character_create.request",
+    "fields": [
+      {
+        "name": "character",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "character_create.response": {
+    "name": "character_create.response",
+    "fields": [
+      {
+        "name": "character",
+        "tag": 0,
+        "type": "*string"
+      },
+      {
+        "name": "errno",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "character_look": {
+    "name": "character_look",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "general",
+        "tag": 1,
+        "type": "*string"
+      },
+      {
+        "name": "attribute",
+        "tag": 2,
+        "type": "*string"
+      },
+      {
+        "name": "attribute_other",
+        "tag": 3,
+        "type": "*string"
+      },
+      {
+        "name": "visual",
+        "tag": 4,
+        "type": "*string"
+      },
+      {
+        "name": "movement",
+        "tag": 9,
+        "type": "*string"
+      }
+    ]
+  },
+  "character_overview": {
+    "name": "character_overview",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "general",
+        "tag": 1,
+        "type": "*string"
+      },
+      {
+        "name": "attribute_other",
+        "tag": 2,
+        "type": "*string"
+      },
+      {
+        "name": "visual",
+        "tag": 3,
+        "type": "*string"
+      },
+      {
+        "name": "createtime",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "forbidden",
+        "tag": 5,
+        "type": "integer"
+      }
+    ]
+  },
+  "character_pick.request": {
+    "name": "character_pick.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "character_pick.response": {
+    "name": "character_pick.response",
+    "fields": [
+      {
+        "name": "errno",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "character_relife": {
+    "name": "character_relife",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "attribute_other",
+        "tag": 1,
+        "type": "*string"
+      },
+      {
+        "name": "movement",
+        "tag": 2,
+        "type": "*string"
+      }
+    ]
+  },
+  "chat.request": {
+    "name": "chat.request",
+    "fields": [
+      {
+        "name": "tellId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "tellName",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "chatInfo",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "chattype",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "linktype",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "intdata",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "stringdata",
+        "tag": 6,
+        "type": "string"
+      }
+    ]
+  },
+  "chat_item": {
+    "name": "chat_item",
+    "fields": [
+      {
+        "name": "senderId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "senderName",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "tellId",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "tellName",
+        "tag": 3,
+        "type": "string"
+      },
+      {
+        "name": "chatInfo",
+        "tag": 4,
+        "type": "string"
+      },
+      {
+        "name": "chattype",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "linktype",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "intdata",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "stringdata",
+        "tag": 8,
+        "type": "string"
+      },
+      {
+        "name": "senderProfession",
+        "tag": 9,
+        "type": "integer"
+      },
+      {
+        "name": "level",
+        "tag": 10,
+        "type": "integer"
+      },
+      {
+        "name": "combValue",
+        "tag": 11,
+        "type": "integer"
+      },
+      {
+        "name": "guildId",
+        "tag": 12,
+        "type": "integer"
+      },
+      {
+        "name": "guildName",
+        "tag": 13,
+        "type": "string"
+      },
+      {
+        "name": "chatInfo2",
+        "tag": 14,
+        "type": "string"
+      }
+    ]
+  },
+  "check_purchase.request": {
+    "name": "check_purchase.request",
+    "fields": [
+      {
+        "name": "productId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "token",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "payload",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "packageName",
+        "tag": 3,
+        "type": "string"
+      }
+    ]
+  },
+  "color": {
+    "name": "color",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "comb_value_up_tip.request": {
+    "name": "comb_value_up_tip.request",
+    "fields": [
+      {
+        "name": "current",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "next",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "complete_mission.request": {
+    "name": "complete_mission.request",
+    "fields": [
+      {
+        "name": "missionId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "parm",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "consign_ask_items_info.request": {
+    "name": "consign_ask_items_info.request",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "subType",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "quality",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "levelRange",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "use",
+        "tag": 4,
+        "type": "boolean"
+      },
+      {
+        "name": "curPage",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "profession",
+        "tag": 6,
+        "type": "integer"
+      }
+    ]
+  },
+  "consign_buy_item.request": {
+    "name": "consign_buy_item.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "itemId",
+        "tag": 1,
+        "type": "string"
+      }
+    ]
+  },
+  "consign_cancel_sale.request": {
+    "name": "consign_cancel_sale.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "consign_item": {
+    "name": "consign_item",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "characterId",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "itemId",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "quality",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "stack",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "price",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "time",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "startTime",
+        "tag": 7,
+        "type": "integer"
+      }
+    ]
+  },
+  "consign_sale_item.request": {
+    "name": "consign_sale_item.request",
+    "fields": [
+      {
+        "name": "indexId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "itemCount",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "price",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "timeType",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "itemType",
+        "tag": 4,
+        "type": "integer"
+      }
+    ]
+  },
+  "copyscene_info": {
+    "name": "copyscene_info",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "CurNum",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "BestGrade",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "Type",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "str",
+        "tag": 4,
+        "type": "string"
+      },
+      {
+        "name": "enable",
+        "tag": 5,
+        "type": "boolean"
+      },
+      {
+        "name": "state",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "Type2",
+        "tag": 7,
+        "type": "integer"
+      }
+    ]
+  },
+  "copy_scene_result.request": {
+    "name": "copy_scene_result.request",
+    "fields": [
+      {
+        "name": "subType",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "id",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "win",
+        "tag": 2,
+        "type": "boolean"
+      },
+      {
+        "name": "gradeFlag",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "grade",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "items",
+        "tag": 5,
+        "type": "*string"
+      },
+      {
+        "name": "swipe",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "parm",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "type",
+        "tag": 8,
+        "type": "integer"
+      }
+    ]
+  },
+  "copy_swipe_out.request": {
+    "name": "copy_swipe_out.request",
+    "fields": [
+      {
+        "name": "copyInfoId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "reaminItem",
+        "tag": 1,
+        "type": "boolean"
+      }
+    ]
+  },
+  "count_down.request": {
+    "name": "count_down.request",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "count_value",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "dailymission": {
+    "name": "dailymission",
+    "fields": [
+      {
+        "name": "missionId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "missionstate",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "daily_active": {
+    "name": "daily_active",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "count",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "Type",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "daily_buy": {
+    "name": "daily_buy",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "daily_reward": {
+    "name": "daily_reward",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "damage_list": {
+    "name": "damage_list",
+    "fields": [
+      {
+        "name": "name",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "damage",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "id",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "dance_info": {
+    "name": "dance_info",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "enable",
+        "tag": 1,
+        "type": "boolean"
+      },
+      {
+        "name": "useType",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "endTime",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "dance_state_info": {
+    "name": "dance_state_info",
+    "fields": [
+      {
+        "name": "uuid",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "ID",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "start_time",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "end_time",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "state",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "parm",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "duration",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "reset_time",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "parm2",
+        "tag": 8,
+        "type": "integer"
+      }
+    ]
+  },
+  "del_friend.request": {
+    "name": "del_friend.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "type",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "dict_hash": {
+    "name": "dict_hash",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "parm",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "domin_info": {
+    "name": "domin_info",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "max_donmin",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "donmin_time",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "end_time",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "res_time1",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "res_count1",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "res_time2",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "res_count2",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "state",
+        "tag": 8,
+        "type": "integer"
+      },
+      {
+        "name": "serverId",
+        "tag": 9,
+        "type": "integer"
+      },
+      {
+        "name": "serverType",
+        "tag": 10,
+        "type": "integer"
+      },
+      {
+        "name": "res_end_time1",
+        "tag": 11,
+        "type": "integer"
+      },
+      {
+        "name": "res_end_time2",
+        "tag": 12,
+        "type": "integer"
+      }
+    ]
+  },
+  "donate_record": {
+    "name": "donate_record",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "DonateCount",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "drop_item_info.request": {
+    "name": "drop_item_info.request",
+    "fields": [
+      {
+        "name": "serverId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "pos_x",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "pos_z",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "type",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "item",
+        "tag": 4,
+        "type": "*string"
+      },
+      {
+        "name": "ownServerId",
+        "tag": 7,
+        "type": "integer"
+      }
+    ]
+  },
+  "enhance_info": {
+    "name": "enhance_info",
+    "fields": [
+      {
+        "name": "level",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "subType",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "enter_bar_fight.request": {
+    "name": "enter_bar_fight.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "enter_copy_scene.request": {
+    "name": "enter_copy_scene.request",
+    "fields": [
+      {
+        "name": "mapInfoId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "reaminItem",
+        "tag": 1,
+        "type": "boolean"
+      }
+    ]
+  },
+  "enter_domin_pk_scene.request": {
+    "name": "enter_domin_pk_scene.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "enter_empty_scene.request": {
+    "name": "enter_empty_scene.request",
+    "fields": [
+      {
+        "name": "mapInfoId",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "enter_guild_boss_scene.request": {
+    "name": "enter_guild_boss_scene.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "enter_guild_city_scene.request": {
+    "name": "enter_guild_city_scene.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "enter_map.request": {
+    "name": "enter_map.request",
+    "fields": [
+      {
+        "name": "mapInfoId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "line_index",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "line_count",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "enter_multi_copy_scene_confirm.request": {
+    "name": "enter_multi_copy_scene_confirm.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "type1",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "reaminItem",
+        "tag": 2,
+        "type": "boolean"
+      }
+    ]
+  },
+  "enter_new_map.request": {
+    "name": "enter_new_map.request",
+    "fields": [
+      {
+        "name": "mapInfoId",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "enter_scuffle_batttle.request": {
+    "name": "enter_scuffle_batttle.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "floor",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "enter_single_exp_scene.request": {
+    "name": "enter_single_exp_scene.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "enter_survive_batttle.request": {
+    "name": "enter_survive_batttle.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "floor",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "type",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "enter_teleport_point.request": {
+    "name": "enter_teleport_point.request",
+    "fields": [
+      {
+        "name": "x",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "y",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "z",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "index",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "enter_tower_copy_info.request": {
+    "name": "enter_tower_copy_info.request",
+    "fields": [
+      {
+        "name": "floorID",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "enter_wild_boss.request": {
+    "name": "enter_wild_boss.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "equip_appraise.request": {
+    "name": "equip_appraise.request",
+    "fields": [
+      {
+        "name": "index",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "equip_badge.request": {
+    "name": "equip_badge.request",
+    "fields": [
+      {
+        "name": "indexId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "pos",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "equip_enhance.request": {
+    "name": "equip_enhance.request",
+    "fields": [
+      {
+        "name": "indexId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "level",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "equip_fashion_item.request": {
+    "name": "equip_fashion_item.request",
+    "fields": [
+      {
+        "name": "indexId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "equip_inhert.request": {
+    "name": "equip_inhert.request",
+    "fields": [
+      {
+        "name": "indexId1",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "containertype1",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "indexId2",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "containertype2",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "equip_inhert.response": {
+    "name": "equip_inhert.response",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "containertype1",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "containertype2",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "item1",
+        "tag": 3,
+        "type": "*string"
+      },
+      {
+        "name": "item2",
+        "tag": 4,
+        "type": "*string"
+      }
+    ]
+  },
+  "equip_inlay.request": {
+    "name": "equip_inlay.request",
+    "fields": [
+      {
+        "name": "index1",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "index2",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "diamond_index1",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "diamond_index2",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "equip_item.request": {
+    "name": "equip_item.request",
+    "fields": [
+      {
+        "name": "indexId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "inhert",
+        "tag": 1,
+        "type": "boolean"
+      }
+    ]
+  },
+  "equip_refine.request": {
+    "name": "equip_refine.request",
+    "fields": [
+      {
+        "name": "Id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "preId",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "curId",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "partId",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "level",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "safe",
+        "tag": 5,
+        "type": "boolean"
+      }
+    ]
+  },
+  "equip_refine.response": {
+    "name": "equip_refine.response",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "partId",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "level",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "allstar",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "facebook_link.request": {
+    "name": "facebook_link.request",
+    "fields": [
+      {
+        "name": "facebook_id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "facebook_token",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "id",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "key",
+        "tag": 3,
+        "type": "string"
+      },
+      {
+        "name": "confirm",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "bindType",
+        "tag": 5,
+        "type": "integer"
+      }
+    ]
+  },
+  "facebook_link.response": {
+    "name": "facebook_link.response",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "id",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "key",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "bindType",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "facebook_unlink.request": {
+    "name": "facebook_unlink.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "key",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "facebook_id",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "facebook_token",
+        "tag": 3,
+        "type": "string"
+      },
+      {
+        "name": "bindType",
+        "tag": 4,
+        "type": "integer"
+      }
+    ]
+  },
+  "facebook_unlink.response": {
+    "name": "facebook_unlink.response",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "bindType",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "friend_info": {
+    "name": "friend_info",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "friendId",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "name",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "level",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "profession",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "combValue",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "state",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "timeInfo",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "friendType",
+        "tag": 8,
+        "type": "integer"
+      },
+      {
+        "name": "guildId",
+        "tag": 9,
+        "type": "integer"
+      },
+      {
+        "name": "guildName",
+        "tag": 10,
+        "type": "string"
+      },
+      {
+        "name": "friendScore",
+        "tag": 11,
+        "type": "integer"
+      }
+    ]
+  },
+  "function_info": {
+    "name": "function_info",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "gameitem": {
+    "name": "gameitem",
+    "fields": [
+      {
+        "name": "indexId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "itemId",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "bindflag",
+        "tag": 2,
+        "type": "boolean"
+      },
+      {
+        "name": "level",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "flags",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "stack",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "quality",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "parm",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "appraise",
+        "tag": 8,
+        "type": "integer"
+      }
+    ]
+  },
+  "game_check.request": {
+    "name": "game_check.request",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "game_server": {
+    "name": "game_server",
+    "fields": [
+      {
+        "name": "serverId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "serverName",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "serverIP",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "serverPort",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "serverState",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "serverPlayerState",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "serverArea",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "serverRank",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "serverTimeZone",
+        "tag": 8,
+        "type": "integer"
+      },
+      {
+        "name": "serverWeight",
+        "tag": 9,
+        "type": "integer"
+      },
+      {
+        "name": "newServer",
+        "tag": 10,
+        "type": "integer"
+      }
+    ]
+  },
+  "gather_other_player.request": {
+    "name": "gather_other_player.request",
+    "fields": [
+      {
+        "name": "characterid",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "general": {
+    "name": "general",
+    "fields": [
+      {
+        "name": "name",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "profession",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "lineIndex",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "mapInfoId",
+        "tag": 3,
+        "type": "string"
+      },
+      {
+        "name": "tutorial",
+        "tag": 4,
+        "type": "integer"
+      }
+    ]
+  },
+  "get_level_reward.request": {
+    "name": "get_level_reward.request",
+    "fields": [
+      {
+        "name": "items",
+        "tag": 1,
+        "type": "*string"
+      }
+    ]
+  },
+  "get_team_list.request": {
+    "name": "get_team_list.request",
+    "fields": [
+      {
+        "name": "goalId",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "grant_activity_reward.request": {
+    "name": "grant_activity_reward.request",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "win",
+        "tag": 2,
+        "type": "boolean"
+      },
+      {
+        "name": "items",
+        "tag": 3,
+        "type": "*string"
+      },
+      {
+        "name": "battle_info",
+        "tag": 4,
+        "type": "*string"
+      },
+      {
+        "name": "ID",
+        "tag": 5,
+        "type": "string"
+      },
+      {
+        "name": "items2",
+        "tag": 6,
+        "type": "*string"
+      }
+    ]
+  },
+  "grant_daily_mission_reward.request": {
+    "name": "grant_daily_mission_reward.request",
+    "fields": [
+      {
+        "name": "items",
+        "tag": 0,
+        "type": "*string"
+      },
+      {
+        "name": "items2",
+        "tag": 1,
+        "type": "*string"
+      }
+    ]
+  },
+  "grant_tower_reward.request": {
+    "name": "grant_tower_reward.request",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "id",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_approve_resverve.request": {
+    "name": "guild_approve_resverve.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "isAgree",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_battle_finish_info.request": {
+    "name": "guild_battle_finish_info.request",
+    "fields": [
+      {
+        "name": "guild_battle_score_info",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "guild_battle_guess.request": {
+    "name": "guild_battle_guess.request",
+    "fields": [
+      {
+        "name": "guildId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_battle_info": {
+    "name": "guild_battle_info",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "battle_round_1",
+        "tag": 1,
+        "type": "*string"
+      },
+      {
+        "name": "battle_round_2",
+        "tag": 2,
+        "type": "*string"
+      },
+      {
+        "name": "battle_round_3",
+        "tag": 3,
+        "type": "*string"
+      },
+      {
+        "name": "time",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "ID",
+        "tag": 5,
+        "type": "string"
+      },
+      {
+        "name": "guildId",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "championName",
+        "tag": 7,
+        "type": "string"
+      }
+    ]
+  },
+  "guild_battle_item_info": {
+    "name": "guild_battle_item_info",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "name",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "guildId",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "guildName",
+        "tag": 3,
+        "type": "string"
+      },
+      {
+        "name": "killNum",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "continueKill",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "score",
+        "tag": 6,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_battle_round": {
+    "name": "guild_battle_round",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_battle_score_info": {
+    "name": "guild_battle_score_info",
+    "fields": [
+      {
+        "name": "item_info",
+        "tag": 0,
+        "type": "*string"
+      },
+      {
+        "name": "score1",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "score2",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "selfKillNum",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "selfScore",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "guildName1",
+        "tag": 5,
+        "type": "string"
+      },
+      {
+        "name": "guildName2",
+        "tag": 6,
+        "type": "string"
+      },
+      {
+        "name": "win",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "guildIcon1",
+        "tag": 8,
+        "type": "integer"
+      },
+      {
+        "name": "guildIcon2",
+        "tag": 9,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_battle_team": {
+    "name": "guild_battle_team",
+    "fields": [
+      {
+        "name": "guildId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "guildName",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "index",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "state",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_boss": {
+    "name": "guild_boss",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "time",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "curNum",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "sort_item",
+        "tag": 4,
+        "type": "*string"
+      }
+    ]
+  },
+  "guild_create.request": {
+    "name": "guild_create.request",
+    "fields": [
+      {
+        "name": "guildName",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "Icon",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "notice",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "costType",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_donate.request": {
+    "name": "guild_donate.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "guild_info": {
+    "name": "guild_info",
+    "fields": [
+      {
+        "name": "guildId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "guildName",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "guildChiefName",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "guildChiefId",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "guildExp",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "guildSkillPoint",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "guildLevel",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "guildMemberNum",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "guildCombo",
+        "tag": 8,
+        "type": "integer"
+      },
+      {
+        "name": "guildApplyNum",
+        "tag": 9,
+        "type": "integer"
+      },
+      {
+        "name": "guildApplyMaxNum",
+        "tag": 10,
+        "type": "integer"
+      },
+      {
+        "name": "guildMaxPlayer",
+        "tag": 11,
+        "type": "integer"
+      },
+      {
+        "name": "notice",
+        "tag": 12,
+        "type": "string"
+      },
+      {
+        "name": "isNeedAppro",
+        "tag": 13,
+        "type": "boolean"
+      },
+      {
+        "name": "createTime",
+        "tag": 14,
+        "type": "integer"
+      },
+      {
+        "name": "guildBoss",
+        "tag": 16,
+        "type": "boolean"
+      },
+      {
+        "name": "guildBattle",
+        "tag": 17,
+        "type": "boolean"
+      },
+      {
+        "name": "viceNum",
+        "tag": 18,
+        "type": "integer"
+      },
+      {
+        "name": "elderNum",
+        "tag": 19,
+        "type": "integer"
+      },
+      {
+        "name": "playerJob",
+        "tag": 20,
+        "type": "integer"
+      },
+      {
+        "name": "icon",
+        "tag": 21,
+        "type": "integer"
+      },
+      {
+        "name": "disactiveState",
+        "tag": 22,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_invite.request": {
+    "name": "guild_invite.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_invite_accept.request": {
+    "name": "guild_invite_accept.request",
+    "fields": [
+      {
+        "name": "name",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "guildId",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "guildName",
+        "tag": 2,
+        "type": "string"
+      }
+    ]
+  },
+  "guild_job_change.request": {
+    "name": "guild_job_change.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "jobId",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_join.request": {
+    "name": "guild_join.request",
+    "fields": [
+      {
+        "name": "guildId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_kick.request": {
+    "name": "guild_kick.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_leave.request": {
+    "name": "guild_leave.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "isCancel",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_map_info": {
+    "name": "guild_map_info",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "guildId",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "guildName",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "guildIcon",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "requireState",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "state",
+        "tag": 5,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_member_info": {
+    "name": "guild_member_info",
+    "fields": [
+      {
+        "name": "guildId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "characterId",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "name",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "vip",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "profession",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "level",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "contribute",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "lastLogout",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "state",
+        "tag": 8,
+        "type": "integer"
+      },
+      {
+        "name": "job",
+        "tag": 9,
+        "type": "integer"
+      },
+      {
+        "name": "combValue",
+        "tag": 10,
+        "type": "integer"
+      },
+      {
+        "name": "all_contribute",
+        "tag": 11,
+        "type": "integer"
+      },
+      {
+        "name": "battle",
+        "tag": 12,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_req_info.request": {
+    "name": "guild_req_info.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_req_list.request": {
+    "name": "guild_req_list.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "curPage",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_skill": {
+    "name": "guild_skill",
+    "fields": [
+      {
+        "name": "skillType",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "level",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_skill_level.request": {
+    "name": "guild_skill_level.request",
+    "fields": [
+      {
+        "name": "guildSkillType",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "guild_star": {
+    "name": "guild_star",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "heart_beat.request": {
+    "name": "heart_beat.request",
+    "fields": [
+      {
+        "name": "time",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "time2",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "heart_beat.response": {
+    "name": "heart_beat.response",
+    "fields": [
+      {
+        "name": "time",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "serverTime",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "hit_action.request": {
+    "name": "hit_action.request",
+    "fields": [
+      {
+        "name": "targetid",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "senderId",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "effinfoId",
+        "tag": 2,
+        "type": "string"
+      }
+    ]
+  },
+  "impact_npc.request": {
+    "name": "impact_npc.request",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "inlay": {
+    "name": "inlay",
+    "fields": [
+      {
+        "name": "index",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "itemId",
+        "tag": 1,
+        "type": "string"
+      }
+    ]
+  },
+  "invest_pack": {
+    "name": "invest_pack",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "invite_join_team.request": {
+    "name": "invite_join_team.request",
+    "fields": [
+      {
+        "name": "teamid",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "member",
+        "tag": 1,
+        "type": "*string"
+      },
+      {
+        "name": "goalId",
+        "tag": 2,
+        "type": "string"
+      }
+    ]
+  },
+  "item": {
+    "name": "item",
+    "fields": [
+      {
+        "name": "itemId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "itemCount",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "quality",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "id",
+        "tag": 4,
+        "type": "string"
+      },
+      {
+        "name": "count2",
+        "tag": 5,
+        "type": "integer"
+      }
+    ]
+  },
+  "leave_team.request": {
+    "name": "leave_team.request",
+    "fields": [
+      {
+        "name": "teamid",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "characterId",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "level_pack": {
+    "name": "level_pack",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "level_reward": {
+    "name": "level_reward",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "local_character_attack.request": {
+    "name": "local_character_attack.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "damage",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "effinfoId",
+        "tag": 2,
+        "type": "string"
+      }
+    ]
+  },
+  "local_npc_die.request": {
+    "name": "local_npc_die.request",
+    "fields": [
+      {
+        "name": "npcid",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "x",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "z",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "type",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "login.request": {
+    "name": "login.request",
+    "fields": [
+      {
+        "name": "session",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "id",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "logintype",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "version",
+        "tag": 3,
+        "type": "string"
+      },
+      {
+        "name": "unityVersion",
+        "tag": 4,
+        "type": "string"
+      },
+      {
+        "name": "serverId",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "time",
+        "tag": 6,
+        "type": "integer"
+      }
+    ]
+  },
+  "login.response": {
+    "name": "login.response",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "versionCode",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "dataVersionCode",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "serverLevel",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "mail_delete.request": {
+    "name": "mail_delete.request",
+    "fields": [
+      {
+        "name": "mailId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "mail_operation.request": {
+    "name": "mail_operation.request",
+    "fields": [
+      {
+        "name": "mailId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "operation",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "mail_update.request": {
+    "name": "mail_update.request",
+    "fields": [
+      {
+        "name": "mailId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "sendertype",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "title",
+        "tag": 3,
+        "type": "string"
+      },
+      {
+        "name": "senderTime",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "receiveId",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "readTime",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "context",
+        "tag": 7,
+        "type": "string"
+      },
+      {
+        "name": "mailState",
+        "tag": 8,
+        "type": "integer"
+      },
+      {
+        "name": "sortTime",
+        "tag": 9,
+        "type": "integer"
+      },
+      {
+        "name": "expireday",
+        "tag": 11,
+        "type": "integer"
+      }
+    ]
+  },
+  "main_player_create.request": {
+    "name": "main_player_create.request",
+    "fields": [
+      {
+        "name": "character",
+        "tag": 0,
+        "type": "*string"
+      },
+      {
+        "name": "movement",
+        "tag": 1,
+        "type": "*string"
+      }
+    ]
+  },
+  "mount": {
+    "name": "mount",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "select",
+        "tag": 3,
+        "type": "string"
+      }
+    ]
+  },
+  "mount_equip.request": {
+    "name": "mount_equip.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "mount_unequip.request": {
+    "name": "mount_unequip.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "mount_use_color.request": {
+    "name": "mount_use_color.request",
+    "fields": [
+      {
+        "name": "mountId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "colorId",
+        "tag": 1,
+        "type": "string"
+      }
+    ]
+  },
+  "move.request": {
+    "name": "move.request",
+    "fields": [
+      {
+        "name": "pos",
+        "tag": 0,
+        "type": "*string"
+      },
+      {
+        "name": "moving",
+        "tag": 1,
+        "type": "boolean"
+      },
+      {
+        "name": "index",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "parm",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "move.response": {
+    "name": "move.response",
+    "fields": [
+      {
+        "name": "pos",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "movement": {
+    "name": "movement",
+    "fields": [
+      {
+        "name": "pos",
+        "tag": 0,
+        "type": "*string"
+      },
+      {
+        "name": "pos2",
+        "tag": 1,
+        "type": "*string"
+      }
+    ]
+  },
+  "next_wave.request": {
+    "name": "next_wave.request",
+    "fields": [
+      {
+        "name": "waveid",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "notice.request": {
+    "name": "notice.request",
+    "fields": [
+      {
+        "name": "notice",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "repeate",
+        "tag": 1,
+        "type": "boolean"
+      }
+    ]
+  },
+  "notice_add_friend.request": {
+    "name": "notice_add_friend.request",
+    "fields": [
+      {
+        "name": "friend",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "notice_copy_scene_info.request": {
+    "name": "notice_copy_scene_info.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "index",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "time",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "parm1",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "parm2",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "parm3",
+        "tag": 5,
+        "type": "integer"
+      }
+    ]
+  },
+  "notice_guild_battle_rank.request": {
+    "name": "notice_guild_battle_rank.request",
+    "fields": [
+      {
+        "name": "guildId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "notice_money_copy_reward.request": {
+    "name": "notice_money_copy_reward.request",
+    "fields": [
+      {
+        "name": "items",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "notice_relife_player.request": {
+    "name": "notice_relife_player.request",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "cost",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "itemId",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "characterid",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "name",
+        "tag": 4,
+        "type": "string"
+      }
+    ]
+  },
+  "notice_urge_team_leader.request": {
+    "name": "notice_urge_team_leader.request",
+    "fields": [
+      {
+        "name": "name",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "id",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "notify_confirm_state.request": {
+    "name": "notify_confirm_state.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "notify_copy_start_info.request": {
+    "name": "notify_copy_start_info.request",
+    "fields": [
+      {
+        "name": "end_time",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "type",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "wave_time",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "curWave",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "npc_attribute": {
+    "name": "npc_attribute",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "npcdataid",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "hp",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "max_hp",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "atk",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "def",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "hit",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "eva",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "cri",
+        "tag": 8,
+        "type": "integer"
+      },
+      {
+        "name": "exd",
+        "tag": 9,
+        "type": "integer"
+      },
+      {
+        "name": "exr",
+        "tag": 10,
+        "type": "integer"
+      },
+      {
+        "name": "res",
+        "tag": 11,
+        "type": "integer"
+      },
+      {
+        "name": "crd",
+        "tag": 12,
+        "type": "integer"
+      },
+      {
+        "name": "crr",
+        "tag": 13,
+        "type": "integer"
+      },
+      {
+        "name": "defa",
+        "tag": 14,
+        "type": "integer"
+      },
+      {
+        "name": "x",
+        "tag": 15,
+        "type": "integer"
+      },
+      {
+        "name": "z",
+        "tag": 16,
+        "type": "integer"
+      },
+      {
+        "name": "o",
+        "tag": 17,
+        "type": "integer"
+      },
+      {
+        "name": "level",
+        "tag": 18,
+        "type": "integer"
+      },
+      {
+        "name": "anti_stun",
+        "tag": 19,
+        "type": "integer"
+      },
+      {
+        "name": "anti_knock_down",
+        "tag": 20,
+        "type": "integer"
+      },
+      {
+        "name": "player_name",
+        "tag": 21,
+        "type": "string"
+      },
+      {
+        "name": "guildId",
+        "tag": 22,
+        "type": "integer"
+      },
+      {
+        "name": "teamid",
+        "tag": 23,
+        "type": "integer"
+      },
+      {
+        "name": "dgea",
+        "tag": 24,
+        "type": "integer"
+      },
+      {
+        "name": "resa",
+        "tag": 25,
+        "type": "integer"
+      },
+      {
+        "name": "hita",
+        "tag": 26,
+        "type": "integer"
+      },
+      {
+        "name": "cria",
+        "tag": 27,
+        "type": "integer"
+      }
+    ]
+  },
+  "npc_create.request": {
+    "name": "npc_create.request",
+    "fields": [
+      {
+        "name": "npc_attribute",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "open_guild_boss.request": {
+    "name": "open_guild_boss.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "open_item_package.request": {
+    "name": "open_item_package.request",
+    "fields": [
+      {
+        "name": "indexId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "indexId2",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "count",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "open_multi_tower_reward.request": {
+    "name": "open_multi_tower_reward.request",
+    "fields": [
+      {
+        "name": "index",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "floor",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ownmission": {
+    "name": "ownmission",
+    "fields": [
+      {
+        "name": "missionId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "missionstate",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "missionquality",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "parm",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "Package": {
+    "name": "Package",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "session",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "play_social_dance.request": {
+    "name": "play_social_dance.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "danceId",
+        "tag": 1,
+        "type": "string"
+      }
+    ]
+  },
+  "position": {
+    "name": "position",
+    "fields": [
+      {
+        "name": "x",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "y",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "z",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "o",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "property": {
+    "name": "property",
+    "fields": [
+      {
+        "name": "money1",
+        "tag": 13,
+        "type": "integer"
+      },
+      {
+        "name": "money2",
+        "tag": 14,
+        "type": "integer"
+      },
+      {
+        "name": "money3",
+        "tag": 15,
+        "type": "integer"
+      },
+      {
+        "name": "money4",
+        "tag": 16,
+        "type": "integer"
+      },
+      {
+        "name": "money5",
+        "tag": 17,
+        "type": "integer"
+      },
+      {
+        "name": "money6",
+        "tag": 18,
+        "type": "integer"
+      }
+    ]
+  },
+  "put_item_storagepack.request": {
+    "name": "put_item_storagepack.request",
+    "fields": [
+      {
+        "name": "indexId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "random_attri": {
+    "name": "random_attri",
+    "fields": [
+      {
+        "name": "index",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "id",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "value",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "quality",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "skillId",
+        "tag": 4,
+        "type": "string"
+      },
+      {
+        "name": "qualityId",
+        "tag": 5,
+        "type": "string"
+      }
+    ]
+  },
+  "random_select_ok.request": {
+    "name": "random_select_ok.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "type1",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "random_select_team.request": {
+    "name": "random_select_team.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "type1",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "rank_pvp_create_zombie_user.request": {
+    "name": "rank_pvp_create_zombie_user.request",
+    "fields": [
+      {
+        "name": "character",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "rank_pvp_history.request": {
+    "name": "rank_pvp_history.request",
+    "fields": [
+      {
+        "name": "logs",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "rank_pvp_player_attack.request": {
+    "name": "rank_pvp_player_attack.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "damage",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "real_pvp_register.request": {
+    "name": "real_pvp_register.request",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "receive_level_reward.request": {
+    "name": "receive_level_reward.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "index",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "refresh_online_state.request": {
+    "name": "refresh_online_state.request",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "id",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "mapId",
+        "tag": 2,
+        "type": "string"
+      }
+    ]
+  },
+  "relife_player.request": {
+    "name": "relife_player.request",
+    "fields": [
+      {
+        "name": "isInplace",
+        "tag": 0,
+        "type": "boolean"
+      }
+    ]
+  },
+  "request_activity_info.request": {
+    "name": "request_activity_info.request",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "request_change_pk_mode.request": {
+    "name": "request_change_pk_mode.request",
+    "fields": [
+      {
+        "name": "pk",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "request_dance_info.request": {
+    "name": "request_dance_info.request",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "request_dance_state_info.request": {
+    "name": "request_dance_state_info.request",
+    "fields": [
+      {
+        "name": "detail",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "request_guild_map_domine_top.request": {
+    "name": "request_guild_map_domine_top.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "request_guild_map_reward.request": {
+    "name": "request_guild_map_reward.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "request_guild_reward.request": {
+    "name": "request_guild_reward.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "request_random_name.request": {
+    "name": "request_random_name.request",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "request_random_name.response": {
+    "name": "request_random_name.response",
+    "fields": [
+      {
+        "name": "name",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "request_retrieve.request": {
+    "name": "request_retrieve.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "Type",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "request_slot_reward.request": {
+    "name": "request_slot_reward.request",
+    "fields": [
+      {
+        "name": "uuid",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "request_top_rank_list.request": {
+    "name": "request_top_rank_list.request",
+    "fields": [
+      {
+        "name": "sortType",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "request_top_rank_pvp_list.request": {
+    "name": "request_top_rank_pvp_list.request",
+    "fields": [
+      {
+        "name": "curPage",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "request_update_friend_useinfo.request": {
+    "name": "request_update_friend_useinfo.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "type",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "require_daily_active_reward.request": {
+    "name": "require_daily_active_reward.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "require_domin_rewards.request": {
+    "name": "require_domin_rewards.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "index",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "cost",
+        "tag": 2,
+        "type": "boolean"
+      }
+    ]
+  },
+  "require_first_buy_reward.request": {
+    "name": "require_first_buy_reward.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "require_invest_reward.request": {
+    "name": "require_invest_reward.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "require_level_reward.request": {
+    "name": "require_level_reward.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "req_buy_guild_goods.request": {
+    "name": "req_buy_guild_goods.request",
+    "fields": [
+      {
+        "name": "itemId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "buyCount",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "req_change_team_goal.request": {
+    "name": "req_change_team_goal.request",
+    "fields": [
+      {
+        "name": "goalId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "minLevel",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "maxLevel",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "isVerfiy",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "recruit",
+        "tag": 4,
+        "type": "integer"
+      }
+    ]
+  },
+  "req_guild_member_info.request": {
+    "name": "req_guild_member_info.request",
+    "fields": [
+      {
+        "name": "guildId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "req_guild_notice.request": {
+    "name": "req_guild_notice.request",
+    "fields": [
+      {
+        "name": "notice",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "req_invite_team.request": {
+    "name": "req_invite_team.request",
+    "fields": [
+      {
+        "name": "characterid",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "goalId",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "minLevel",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "maxLevel",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "isVerfiy",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "recruit",
+        "tag": 5,
+        "type": "integer"
+      }
+    ]
+  },
+  "req_invite_team_result.request": {
+    "name": "req_invite_team_result.request",
+    "fields": [
+      {
+        "name": "ok",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "id",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "req_join_team.request": {
+    "name": "req_join_team.request",
+    "fields": [
+      {
+        "name": "teamid",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "isapply",
+        "tag": 1,
+        "type": "boolean"
+      }
+    ]
+  },
+  "req_other_team.request": {
+    "name": "req_other_team.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "req_random_online_character_list.request": {
+    "name": "req_random_online_character_list.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "req_seting_guild_appro.request": {
+    "name": "req_seting_guild_appro.request",
+    "fields": [
+      {
+        "name": "guildId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "isNeedAppro",
+        "tag": 1,
+        "type": "boolean"
+      }
+    ]
+  },
+  "retrieve_account.request": {
+    "name": "retrieve_account.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "retrieve_info": {
+    "name": "retrieve_info",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "count",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_abandon_mission.request": {
+    "name": "ret_abandon_mission.request",
+    "fields": [
+      {
+        "name": "missionId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "ret",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_accept_mission.request": {
+    "name": "ret_accept_mission.request",
+    "fields": [
+      {
+        "name": "missionId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "missionquality",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "ret",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "mission",
+        "tag": 3,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_add_friend.request": {
+    "name": "ret_add_friend.request",
+    "fields": [
+      {
+        "name": "friend",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_ask_confirm_multi_copy_scene.request": {
+    "name": "ret_ask_confirm_multi_copy_scene.request",
+    "fields": [
+      {
+        "name": "session",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_ask_shop_list.request": {
+    "name": "ret_ask_shop_list.request",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "curPage",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "maxPage",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "shop_list",
+        "tag": 3,
+        "type": "*string"
+      },
+      {
+        "name": "subType",
+        "tag": 4,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_battle_info.request": {
+    "name": "ret_battle_info.request",
+    "fields": [
+      {
+        "name": "battle_info",
+        "tag": 0,
+        "type": "*string"
+      },
+      {
+        "name": "type",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_buy_car_shop.request": {
+    "name": "ret_buy_car_shop.request",
+    "fields": [
+      {
+        "name": "mountId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_buy_guild_goods.request": {
+    "name": "ret_buy_guild_goods.request",
+    "fields": [
+      {
+        "name": "itemId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "buyCount",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "cost",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "leftNum",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_buy_shop_item.request": {
+    "name": "ret_buy_shop_item.request",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "shop_item",
+        "tag": 1,
+        "type": "*string"
+      },
+      {
+        "name": "type",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "count",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_chat.request": {
+    "name": "ret_chat.request",
+    "fields": [
+      {
+        "name": "chat_list",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_commercail_reward.request": {
+    "name": "ret_commercail_reward.request",
+    "fields": [
+      {
+        "name": "items",
+        "tag": 0,
+        "type": "*string"
+      },
+      {
+        "name": "type",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "parm1",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "parm2",
+        "tag": 3,
+        "type": "string"
+      },
+      {
+        "name": "productId",
+        "tag": 4,
+        "type": "string"
+      },
+      {
+        "name": "token",
+        "tag": 5,
+        "type": "string"
+      },
+      {
+        "name": "payload",
+        "tag": 6,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 7,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_complete_mission.request": {
+    "name": "ret_complete_mission.request",
+    "fields": [
+      {
+        "name": "missionId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "ret",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_consign_ask_items_info.request": {
+    "name": "ret_consign_ask_items_info.request",
+    "fields": [
+      {
+        "name": "curPage",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "maxPage",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "success",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "serverTime",
+        "tag": 4,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_consign_ask_my_items.request": {
+    "name": "ret_consign_ask_my_items.request",
+    "fields": [
+      {
+        "name": "success",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "serverTime",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_consign_buy_item.request": {
+    "name": "ret_consign_buy_item.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "success",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "itemId",
+        "tag": 2,
+        "type": "string"
+      }
+    ]
+  },
+  "ret_consign_cancel_sale.request": {
+    "name": "ret_consign_cancel_sale.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "success",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_consign_sale_item.request": {
+    "name": "ret_consign_sale_item.request",
+    "fields": [
+      {
+        "name": "indexId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "success",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "gameitem",
+        "tag": 2,
+        "type": "*string"
+      },
+      {
+        "name": "itemType",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_del_friend.request": {
+    "name": "ret_del_friend.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_enter_guild_battle.request": {
+    "name": "ret_enter_guild_battle.request",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_grant_tower_reward.request": {
+    "name": "ret_grant_tower_reward.request",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "id",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "items",
+        "tag": 2,
+        "type": "*string"
+      },
+      {
+        "name": "tower_info",
+        "tag": 3,
+        "type": "*string"
+      },
+      {
+        "name": "tower_special_reward",
+        "tag": 4,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_guild_approve_resverve.request": {
+    "name": "ret_guild_approve_resverve.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "isAgree",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "state",
+        "tag": 2,
+        "type": "boolean"
+      }
+    ]
+  },
+  "ret_guild_battle_guess.request": {
+    "name": "ret_guild_battle_guess.request",
+    "fields": [
+      {
+        "name": "guildId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_guild_battle_info.request": {
+    "name": "ret_guild_battle_info.request",
+    "fields": [
+      {
+        "name": "battle_info",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_guild_battle_member.request": {
+    "name": "ret_guild_battle_member.request",
+    "fields": [
+      {
+        "name": "guild_member_info",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_guild_battle_rank.request": {
+    "name": "ret_guild_battle_rank.request",
+    "fields": [
+      {
+        "name": "guild_info",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_guild_battle_state.request": {
+    "name": "ret_guild_battle_state.request",
+    "fields": [
+      {
+        "name": "battle_info",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_guild_create.request": {
+    "name": "ret_guild_create.request",
+    "fields": [
+      {
+        "name": "guild_info",
+        "tag": 0,
+        "type": "*string"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_guild_donate.request": {
+    "name": "ret_guild_donate.request",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "id",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "contribute",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "all_contribute",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "level",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "exp",
+        "tag": 5,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_guild_job_change.request": {
+    "name": "ret_guild_job_change.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "job",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "state",
+        "tag": 2,
+        "type": "boolean"
+      }
+    ]
+  },
+  "ret_guild_join.request": {
+    "name": "ret_guild_join.request",
+    "fields": [
+      {
+        "name": "guildId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_guild_kick.request": {
+    "name": "ret_guild_kick.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "boolean"
+      }
+    ]
+  },
+  "ret_guild_leave.request": {
+    "name": "ret_guild_leave.request",
+    "fields": [
+      {
+        "name": "guildId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "dismissTime",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_guild_log.request": {
+    "name": "ret_guild_log.request",
+    "fields": [
+      {
+        "name": "logs",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "ret_guild_map_domine_top.request": {
+    "name": "ret_guild_map_domine_top.request",
+    "fields": [
+      {
+        "name": "damage_list",
+        "tag": 0,
+        "type": "*string"
+      },
+      {
+        "name": "guild_damage_list",
+        "tag": 1,
+        "type": "*string"
+      },
+      {
+        "name": "my_rank",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "my_damage",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "my_rank2",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "my_damage2",
+        "tag": 5,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_guild_map_reward.request": {
+    "name": "ret_guild_map_reward.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_guild_req_info.request": {
+    "name": "ret_guild_req_info.request",
+    "fields": [
+      {
+        "name": "guild_info",
+        "tag": 0,
+        "type": "*string"
+      },
+      {
+        "name": "all_contribute",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "exist",
+        "tag": 3,
+        "type": "boolean"
+      },
+      {
+        "name": "contribute",
+        "tag": 4,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_guild_req_list.request": {
+    "name": "ret_guild_req_list.request",
+    "fields": [
+      {
+        "name": "applyGuildId",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "curPage",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "maxPage",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "leave_time",
+        "tag": 4,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_guild_score_info.request": {
+    "name": "ret_guild_score_info.request",
+    "fields": [
+      {
+        "name": "guild_battle_score_info",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_guild_skill_level.request": {
+    "name": "ret_guild_skill_level.request",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "guildSkillType",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "contribute",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "level",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_invite_join_team.request": {
+    "name": "ret_invite_join_team.request",
+    "fields": [
+      {
+        "name": "ok",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "id",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_mount_equip.request": {
+    "name": "ret_mount_equip.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 1,
+        "type": "string"
+      }
+    ]
+  },
+  "ret_mount_use_color.request": {
+    "name": "ret_mount_use_color.request",
+    "fields": [
+      {
+        "name": "mountId",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "colorId",
+        "tag": 2,
+        "type": "string"
+      }
+    ]
+  },
+  "ret_offline_chat.request": {
+    "name": "ret_offline_chat.request",
+    "fields": [
+      {
+        "name": "chat_list",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_open_guild_boss.request": {
+    "name": "ret_open_guild_boss.request",
+    "fields": [
+      {
+        "name": "ok",
+        "tag": 0,
+        "type": "boolean"
+      },
+      {
+        "name": "guild_boss",
+        "tag": 1,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_open_guild_shop.request": {
+    "name": "ret_open_guild_shop.request",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_open_item_package.request": {
+    "name": "ret_open_item_package.request",
+    "fields": [
+      {
+        "name": "items",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_random_online_character_list.request": {
+    "name": "ret_random_online_character_list.request",
+    "fields": [
+      {
+        "name": "friend_list",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_request_30_day_info.request": {
+    "name": "ret_request_30_day_info.request",
+    "fields": [
+      {
+        "name": "cur_sign",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "replenish",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "sys_sign",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "cur_sign_state",
+        "tag": 3,
+        "type": "boolean"
+      },
+      {
+        "name": "replenish_sign_state",
+        "tag": 4,
+        "type": "boolean"
+      },
+      {
+        "name": "count",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "str",
+        "tag": 6,
+        "type": "string"
+      }
+    ]
+  },
+  "ret_request_big_pack.request": {
+    "name": "ret_request_big_pack.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "end_time",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_request_daily_active.request": {
+    "name": "ret_request_daily_active.request",
+    "fields": [
+      {
+        "name": "score",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_request_dance_info.request": {
+    "name": "ret_request_dance_info.request",
+    "fields": [
+      {
+        "name": "curUse",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "type",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_request_first_buy.request": {
+    "name": "ret_request_first_buy.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_request_guild_boss.request": {
+    "name": "ret_request_guild_boss.request",
+    "fields": [
+      {
+        "name": "guild_battle_info",
+        "tag": 1,
+        "type": "*string"
+      },
+      {
+        "name": "level",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "dance_state_info",
+        "tag": 3,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_request_random_rank_pvp_opponent.request": {
+    "name": "ret_request_random_rank_pvp_opponent.request",
+    "fields": [
+      {
+        "name": "opponentNum",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "characters",
+        "tag": 1,
+        "type": "*string"
+      },
+      {
+        "name": "rankPos",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_request_sign_week_info.request": {
+    "name": "ret_request_sign_week_info.request",
+    "fields": [
+      {
+        "name": "cur_sign",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "cur_sign_state",
+        "tag": 1,
+        "type": "boolean"
+      },
+      {
+        "name": "complete",
+        "tag": 2,
+        "type": "boolean"
+      }
+    ]
+  },
+  "ret_request_survive_top.request": {
+    "name": "ret_request_survive_top.request",
+    "fields": [
+      {
+        "name": "score_infos",
+        "tag": 0,
+        "type": "*string"
+      },
+      {
+        "name": "my_rank",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "my_score",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "end_time",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_request_top_rank_pvp_list.request": {
+    "name": "ret_request_top_rank_pvp_list.request",
+    "fields": [
+      {
+        "name": "curPage",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "maxPage",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "sort_items",
+        "tag": 2,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_request_tower_copy_info.request": {
+    "name": "ret_request_tower_copy_info.request",
+    "fields": [
+      {
+        "name": "tower_info",
+        "tag": 0,
+        "type": "*string"
+      },
+      {
+        "name": "tower_special_reward",
+        "tag": 2,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_request_update_friend_useinfo.request": {
+    "name": "ret_request_update_friend_useinfo.request",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_require_vip_info.request": {
+    "name": "ret_require_vip_info.request",
+    "fields": [
+      {
+        "name": "vip",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_require_vip_reward.request": {
+    "name": "ret_require_vip_reward.request",
+    "fields": [
+      {
+        "name": "vip",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_re_name.request": {
+    "name": "ret_re_name.request",
+    "fields": [
+      {
+        "name": "name",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_search_guild.request": {
+    "name": "ret_search_guild.request",
+    "fields": [
+      {
+        "name": "guild",
+        "tag": 0,
+        "type": "*string"
+      },
+      {
+        "name": "rank",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_search_online_character_by_name.request": {
+    "name": "ret_search_online_character_by_name.request",
+    "fields": [
+      {
+        "name": "friend_list",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_set_guild_battle_member.request": {
+    "name": "ret_set_guild_battle_member.request",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_sign_30_day.request": {
+    "name": "ret_sign_30_day.request",
+    "fields": [
+      {
+        "name": "cur_sign",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "replenish",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "sys_sign",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "cur_sign_state",
+        "tag": 3,
+        "type": "boolean"
+      },
+      {
+        "name": "replenish_sign_state",
+        "tag": 4,
+        "type": "boolean"
+      },
+      {
+        "name": "count",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "str",
+        "tag": 6,
+        "type": "string"
+      }
+    ]
+  },
+  "ret_sign_week.request": {
+    "name": "ret_sign_week.request",
+    "fields": [
+      {
+        "name": "cur_sign",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "cur_sign_state",
+        "tag": 1,
+        "type": "boolean"
+      }
+    ]
+  },
+  "ret_skill_use.request": {
+    "name": "ret_skill_use.request",
+    "fields": [
+      {
+        "name": "sendderId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "targetId",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "skillId",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "attack_list",
+        "tag": 3,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_slot_info.request": {
+    "name": "ret_slot_info.request",
+    "fields": [
+      {
+        "name": "slot_info",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_slot_sum_reward.request": {
+    "name": "ret_slot_sum_reward.request",
+    "fields": [
+      {
+        "name": "items",
+        "tag": 0,
+        "type": "*string"
+      },
+      {
+        "name": "sumNum",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_spin_slot.request": {
+    "name": "ret_spin_slot.request",
+    "fields": [
+      {
+        "name": "slot_info",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_title_req_level_up.request": {
+    "name": "ret_title_req_level_up.request",
+    "fields": [
+      {
+        "name": "title_level",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "title_exp",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_top_rank_list.request": {
+    "name": "ret_top_rank_list.request",
+    "fields": [
+      {
+        "name": "sort_items",
+        "tag": 0,
+        "type": "*string"
+      },
+      {
+        "name": "sortType",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_tower_reset.request": {
+    "name": "ret_tower_reset.request",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "boolean"
+      }
+    ]
+  },
+  "ret_tower_wipe_out.request": {
+    "name": "ret_tower_wipe_out.request",
+    "fields": [
+      {
+        "name": "tower_info",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "ret_use_item.request": {
+    "name": "ret_use_item.request",
+    "fields": [
+      {
+        "name": "success",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "indexId",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "ret_watch_video_info.request": {
+    "name": "ret_watch_video_info.request",
+    "fields": [
+      {
+        "name": "cur_times",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "max_times",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "every_time",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "state",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "re_name.request": {
+    "name": "re_name.request",
+    "fields": [
+      {
+        "name": "name",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "runtime_agent": {
+    "name": "runtime_agent",
+    "fields": [
+      {
+        "name": "attribute",
+        "tag": 6,
+        "type": "*string"
+      },
+      {
+        "name": "attribute_all",
+        "tag": 7,
+        "type": "*string"
+      }
+    ]
+  },
+  "sample_activity_result.request": {
+    "name": "sample_activity_result.request",
+    "fields": [
+      {
+        "name": "win",
+        "tag": 0,
+        "type": "boolean"
+      },
+      {
+        "name": "type",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "id",
+        "tag": 2,
+        "type": "string"
+      }
+    ]
+  },
+  "sample_copy_result.request": {
+    "name": "sample_copy_result.request",
+    "fields": [
+      {
+        "name": "win",
+        "tag": 0,
+        "type": "boolean"
+      },
+      {
+        "name": "type",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "score_info": {
+    "name": "score_info",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "name",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "value",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "search_guild.request": {
+    "name": "search_guild.request",
+    "fields": [
+      {
+        "name": "name",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "guildId",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "rank",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "search_online_character_by_name.request": {
+    "name": "search_online_character_by_name.request",
+    "fields": [
+      {
+        "name": "name",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "select_pk_character.request": {
+    "name": "select_pk_character.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "sell_item.request": {
+    "name": "sell_item.request",
+    "fields": [
+      {
+        "name": "indexId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "itemCount",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "type",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "send_daily_mission.request": {
+    "name": "send_daily_mission.request",
+    "fields": [
+      {
+        "name": "mission",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "send_dialog_notify.request": {
+    "name": "send_dialog_notify.request",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "key",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "parm",
+        "tag": 2,
+        "type": "string"
+      }
+    ]
+  },
+  "send_escort_info.request": {
+    "name": "send_escort_info.request",
+    "fields": [
+      {
+        "name": "npcid",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "lineIndex",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "mapInfoId",
+        "tag": 2,
+        "type": "string"
+      }
+    ]
+  },
+  "send_mail.request": {
+    "name": "send_mail.request",
+    "fields": [
+      {
+        "name": "receiveId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "context",
+        "tag": 1,
+        "type": "string"
+      }
+    ]
+  },
+  "send_mail_box.request": {
+    "name": "send_mail_box.request",
+    "fields": [
+      {
+        "name": "subject",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "context",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "email",
+        "tag": 2,
+        "type": "string"
+      }
+    ]
+  },
+  "set_guild_battle_member.request": {
+    "name": "set_guild_battle_member.request",
+    "fields": [
+      {
+        "name": "list",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "set_mission_param.request": {
+    "name": "set_mission_param.request",
+    "fields": [
+      {
+        "name": "missionId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "paramindex",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "param",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "set_mission_state.request": {
+    "name": "set_mission_state.request",
+    "fields": [
+      {
+        "name": "missionId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "missionstate",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "shop_item": {
+    "name": "shop_item",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "ItemID",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "Quality",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "PriceType",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "Price",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "Limit",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "curNum",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "Discount",
+        "tag": 8,
+        "type": "integer"
+      },
+      {
+        "name": "Class",
+        "tag": 9,
+        "type": "integer"
+      }
+    ]
+  },
+  "show_damage_board.request": {
+    "name": "show_damage_board.request",
+    "fields": [
+      {
+        "name": "damges",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "show_player_damage_board.request": {
+    "name": "show_player_damage_board.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "hp",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "show_reward_items_tips.request": {
+    "name": "show_reward_items_tips.request",
+    "fields": [
+      {
+        "name": "items",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "sign_30_day.request": {
+    "name": "sign_30_day.request",
+    "fields": [
+      {
+        "name": "day",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "sign_bar_fight.request": {
+    "name": "sign_bar_fight.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "sign_week.request": {
+    "name": "sign_week.request",
+    "fields": [
+      {
+        "name": "day",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "single_copy_scene_npc_die.request": {
+    "name": "single_copy_scene_npc_die.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "npcdataid",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "pos_x",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "pos_z",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "type",
+        "tag": 4,
+        "type": "integer"
+      }
+    ]
+  },
+  "skill_info": {
+    "name": "skill_info",
+    "fields": [
+      {
+        "name": "skillId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "skillLevel",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "indexPos",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "unlockLevel",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "indexPos2",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "disable",
+        "tag": 5,
+        "type": "boolean"
+      }
+    ]
+  },
+  "skill_level_up.request": {
+    "name": "skill_level_up.request",
+    "fields": [
+      {
+        "name": "skillId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "curLevel",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "all",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "skill_use.request": {
+    "name": "skill_use.request",
+    "fields": [
+      {
+        "name": "targetId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "skillId",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "combo",
+        "tag": 2,
+        "type": "boolean"
+      },
+      {
+        "name": "attack_list",
+        "tag": 3,
+        "type": "*string"
+      },
+      {
+        "name": "parm",
+        "tag": 4,
+        "type": "integer"
+      }
+    ]
+  },
+  "slot_data": {
+    "name": "slot_data",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "RewardMap",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "RewardEffect",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "Desc",
+        "tag": 3,
+        "type": "string"
+      },
+      {
+        "name": "Rank",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "ShowRewardID",
+        "tag": 5,
+        "type": "string"
+      },
+      {
+        "name": "PriceType",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "PriceCost",
+        "tag": 7,
+        "type": "integer"
+      }
+    ]
+  },
+  "slot_info": {
+    "name": "slot_info",
+    "fields": [
+      {
+        "name": "curNum",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "sumNum",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "slot_item": {
+    "name": "slot_item",
+    "fields": [
+      {
+        "name": "uuid",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "ID",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "items",
+        "tag": 2,
+        "type": "*string"
+      }
+    ]
+  },
+  "sort_item": {
+    "name": "sort_item",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "score",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "name",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "profession",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "sortType",
+        "tag": 4,
+        "type": "string"
+      },
+      {
+        "name": "parm1",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "parm3",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "parm4",
+        "tag": 8,
+        "type": "integer"
+      }
+    ]
+  },
+  "special_big_pack": {
+    "name": "special_big_pack",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "remain_times",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "end_time",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "spin_slot.request": {
+    "name": "spin_slot.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "start_enter_game.request": {
+    "name": "start_enter_game.request",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "start_participate_dance.request": {
+    "name": "start_participate_dance.request",
+    "fields": [
+      {
+        "name": "curUse",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "stop_random_select_team.request": {
+    "name": "stop_random_select_team.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "type1",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "survive_battle_finish.request": {
+    "name": "survive_battle_finish.request",
+    "fields": [
+      {
+        "name": "info",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "sync_common_data.request": {
+    "name": "sync_common_data.request",
+    "fields": [
+      {
+        "name": "serverTime",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "time_offset",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "daily_mission_refresh_time",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "pvp_scale",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "first_buy",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "big_pack",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "adfree",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "tips",
+        "tag": 8,
+        "type": "integer"
+      },
+      {
+        "name": "push",
+        "tag": 10,
+        "type": "integer"
+      },
+      {
+        "name": "guildId",
+        "tag": 11,
+        "type": "integer"
+      },
+      {
+        "name": "seed",
+        "tag": 12,
+        "type": "integer"
+      },
+      {
+        "name": "server_level",
+        "tag": 13,
+        "type": "integer"
+      },
+      {
+        "name": "start_time",
+        "tag": 14,
+        "type": "integer"
+      }
+    ]
+  },
+  "sync_dance_state_info.request": {
+    "name": "sync_dance_state_info.request",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "open",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "sync_guild_new_member.request": {
+    "name": "sync_guild_new_member.request",
+    "fields": [
+      {
+        "name": "guild_member_info",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "sync_mission.request": {
+    "name": "sync_mission.request",
+    "fields": [
+      {
+        "name": "last_missionId",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "sidedone_mission",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "sync_random_team_state.request": {
+    "name": "sync_random_team_state.request",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "id",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "type",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "sync_skill_info.request": {
+    "name": "sync_skill_info.request",
+    "fields": [
+      {
+        "name": "isLevelUp",
+        "tag": 1,
+        "type": "boolean"
+      }
+    ]
+  },
+  "sync_skill_info.response": {
+    "name": "sync_skill_info.response",
+    "fields": [
+      {
+        "name": "isLevelUp",
+        "tag": 0,
+        "type": "boolean"
+      }
+    ]
+  },
+  "sync_watch_video_info.request": {
+    "name": "sync_watch_video_info.request",
+    "fields": [
+      {
+        "name": "cur_times",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "max_times",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "every_time",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "syn_friend_info.request": {
+    "name": "syn_friend_info.request",
+    "fields": [
+      {
+        "name": "friend",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "syn_rank_pvp_data.request": {
+    "name": "syn_rank_pvp_data.request",
+    "fields": [
+      {
+        "name": "combValue",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "times",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "rankPos",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "bestRankPos",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "rewards",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "preRankPos",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "winCount",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "winRewards",
+        "tag": 7,
+        "type": "integer"
+      }
+    ]
+  },
+  "take_item_storagepack.request": {
+    "name": "take_item_storagepack.request",
+    "fields": [
+      {
+        "name": "indexId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "team": {
+    "name": "team",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "teamleader",
+        "tag": 1,
+        "type": "*string"
+      },
+      {
+        "name": "count",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "isVerfiy",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "goalId",
+        "tag": 5,
+        "type": "string"
+      },
+      {
+        "name": "minLevel",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "maxLevel",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "recruit",
+        "tag": 8,
+        "type": "integer"
+      }
+    ]
+  },
+  "teammember": {
+    "name": "teammember",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "teamid",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "name",
+        "tag": 2,
+        "type": "string"
+      },
+      {
+        "name": "level",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "profession",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "combValue",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "mapInfoId",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "lineIndex",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "memberType",
+        "tag": 8,
+        "type": "integer"
+      },
+      {
+        "name": "hp",
+        "tag": 9,
+        "type": "integer"
+      },
+      {
+        "name": "max_hp",
+        "tag": 10,
+        "type": "integer"
+      },
+      {
+        "name": "vip",
+        "tag": 11,
+        "type": "integer"
+      },
+      {
+        "name": "time",
+        "tag": 12,
+        "type": "integer"
+      },
+      {
+        "name": "apply_time",
+        "tag": 13,
+        "type": "integer"
+      },
+      {
+        "name": "visual",
+        "tag": 14,
+        "type": "*string"
+      },
+      {
+        "name": "curNum",
+        "tag": 15,
+        "type": "integer"
+      },
+      {
+        "name": "guildId",
+        "tag": 16,
+        "type": "integer"
+      },
+      {
+        "name": "guildName",
+        "tag": 17,
+        "type": "string"
+      }
+    ]
+  },
+  "team_kick.request": {
+    "name": "team_kick.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "tianti_req_win_count_rewards.request": {
+    "name": "tianti_req_win_count_rewards.request",
+    "fields": [
+      {
+        "name": "index",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "tiantti_result.request": {
+    "name": "tiantti_result.request",
+    "fields": [
+      {
+        "name": "win",
+        "tag": 0,
+        "type": "boolean"
+      },
+      {
+        "name": "items",
+        "tag": 1,
+        "type": "*string"
+      },
+      {
+        "name": "rankPos1",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "rankPos2",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "bestRankPos",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "type",
+        "tag": 5,
+        "type": "integer"
+      }
+    ]
+  },
+  "tower_floor": {
+    "name": "tower_floor",
+    "fields": [
+      {
+        "name": "floorID",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "complete",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "tower_info": {
+    "name": "tower_info",
+    "fields": [
+      {
+        "name": "floor",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "cur_floor",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "times",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "sum_time",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "wipe_out_state",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "wipe_time",
+        "tag": 5,
+        "type": "integer"
+      },
+      {
+        "name": "max_floor",
+        "tag": 6,
+        "type": "integer"
+      }
+    ]
+  },
+  "tower_special_reward": {
+    "name": "tower_special_reward",
+    "fields": [
+      {
+        "name": "floor",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "tower_wipe_out.request": {
+    "name": "tower_wipe_out.request",
+    "fields": [
+      {
+        "name": "wipeType",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "tutorial_finish.request": {
+    "name": "tutorial_finish.request",
+    "fields": [
+      {
+        "name": "type",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "unequip_badge.request": {
+    "name": "unequip_badge.request",
+    "fields": [
+      {
+        "name": "indexId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "unequip_fashion_item.request": {
+    "name": "unequip_fashion_item.request",
+    "fields": [
+      {
+        "name": "indexId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "unequip_item.request": {
+    "name": "unequip_item.request",
+    "fields": [
+      {
+        "name": "indexId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "unlock_function_complete.request": {
+    "name": "unlock_function_complete.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "update_client_state.request": {
+    "name": "update_client_state.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "update_copyscene_info.request": {
+    "name": "update_copyscene_info.request",
+    "fields": [
+      {
+        "name": "copyscene",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "update_game_server.response": {
+    "name": "update_game_server.response",
+    "fields": [
+      {
+        "name": "game_server",
+        "tag": 2,
+        "type": "*string"
+      }
+    ]
+  },
+  "update_guild_dance_time.request": {
+    "name": "update_guild_dance_time.request",
+    "fields": [
+      {
+        "name": "index",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "update_guild_star.request": {
+    "name": "update_guild_star.request",
+    "fields": [
+      {
+        "name": "ID",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "update_item.request": {
+    "name": "update_item.request",
+    "fields": [
+      {
+        "name": "containertype",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "indexId",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "gameitem",
+        "tag": 2,
+        "type": "*string"
+      }
+    ]
+  },
+  "update_line_state.request": {
+    "name": "update_line_state.request",
+    "fields": [
+      {
+        "name": "mapInfoId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "line_count",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "line_states",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "update_misison_complete.request": {
+    "name": "update_misison_complete.request",
+    "fields": [
+      {
+        "name": "missionId",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "update_misison_parm.request": {
+    "name": "update_misison_parm.request",
+    "fields": [
+      {
+        "name": "missionId",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "paramType",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "paramValue",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "update_player_map_info.request": {
+    "name": "update_player_map_info.request",
+    "fields": [
+      {
+        "name": "characterId",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "update_player_map_info.response": {
+    "name": "update_player_map_info.response",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "mapid",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "pos",
+        "tag": 2,
+        "type": "*string"
+      }
+    ]
+  },
+  "update_queue_rank.request": {
+    "name": "update_queue_rank.request",
+    "fields": [
+      {
+        "name": "rank",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "remain_time",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "update_sex_mini_score.request": {
+    "name": "update_sex_mini_score.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "score",
+        "tag": 1,
+        "type": "integer"
+      }
+    ]
+  },
+  "update_team.request": {
+    "name": "update_team.request",
+    "fields": [
+      {
+        "name": "team",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "update_team_member.request": {
+    "name": "update_team_member.request",
+    "fields": [
+      {
+        "name": "teamid",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "member",
+        "tag": 1,
+        "type": "*string"
+      }
+    ]
+  },
+  "update_team_setting.request": {
+    "name": "update_team_setting.request",
+    "fields": [
+      {
+        "name": "isVerfiy",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "use_dance.request": {
+    "name": "use_dance.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      }
+    ]
+  },
+  "use_dance_sound_box.request": {
+    "name": "use_dance_sound_box.request",
+    "fields": [
+      {
+        "name": "index",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "x",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "z",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "use_item.request": {
+    "name": "use_item.request",
+    "fields": [
+      {
+        "name": "indexId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "x",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "z",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "use_skill_buff.request": {
+    "name": "use_skill_buff.request",
+    "fields": [
+      {
+        "name": "buffs",
+        "tag": 0,
+        "type": "*string"
+      }
+    ]
+  },
+  "verfiy.request": {
+    "name": "verfiy.request",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "key",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "versionCode",
+        "tag": 2,
+        "type": "string"
+      }
+    ]
+  },
+  "verfiy.response": {
+    "name": "verfiy.response",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "session",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "game_server",
+        "tag": 2,
+        "type": "*string"
+      },
+      {
+        "name": "user_server",
+        "tag": 3,
+        "type": "string"
+      },
+      {
+        "name": "facebook_bind",
+        "tag": 4,
+        "type": "integer"
+      },
+      {
+        "name": "versionCode",
+        "tag": 5,
+        "type": "string"
+      },
+      {
+        "name": "dataVersionCode",
+        "tag": 6,
+        "type": "string"
+      },
+      {
+        "name": "downloadFlag",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "notice",
+        "tag": 8,
+        "type": "string"
+      },
+      {
+        "name": "notice_version",
+        "tag": 9,
+        "type": "string"
+      },
+      {
+        "name": "facebook_bind1",
+        "tag": 10,
+        "type": "string"
+      },
+      {
+        "name": "google_bind",
+        "tag": 11,
+        "type": "string"
+      }
+    ]
+  },
+  "vip": {
+    "name": "vip",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "count",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "state",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "visitor.response": {
+    "name": "visitor.response",
+    "fields": [
+      {
+        "name": "id",
+        "tag": 0,
+        "type": "string"
+      },
+      {
+        "name": "key",
+        "tag": 1,
+        "type": "string"
+      },
+      {
+        "name": "state",
+        "tag": 2,
+        "type": "integer"
+      }
+    ]
+  },
+  "watch_video_info.request": {
+    "name": "watch_video_info.request",
+    "fields": [
+      {
+        "name": "state",
+        "tag": 0,
+        "type": "integer"
+      }
+    ]
+  },
+  "weapon_inhert.request": {
+    "name": "weapon_inhert.request",
+    "fields": [
+      {
+        "name": "index1",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "index2",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "attribute_index1",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "attribute_index2",
+        "tag": 3,
+        "type": "integer"
+      }
+    ]
+  },
+  "wild_boss": {
+    "name": "wild_boss",
+    "fields": [
+      {
+        "name": "bossId",
+        "tag": 0,
+        "type": "integer"
+      },
+      {
+        "name": "state",
+        "tag": 1,
+        "type": "integer"
+      },
+      {
+        "name": "refreshTime",
+        "tag": 2,
+        "type": "integer"
+      },
+      {
+        "name": "killId",
+        "tag": 3,
+        "type": "integer"
+      },
+      {
+        "name": "killName",
+        "tag": 4,
+        "type": "string"
+      },
+      {
+        "name": "mapInfoId",
+        "tag": 5,
+        "type": "string"
+      },
+      {
+        "name": "lineIndex",
+        "tag": 6,
+        "type": "integer"
+      },
+      {
+        "name": "posx",
+        "tag": 7,
+        "type": "integer"
+      },
+      {
+        "name": "posz",
+        "tag": 8,
+        "type": "integer"
+      }
+    ]
+  }
+}
