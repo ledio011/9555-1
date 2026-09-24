@@ -651,35 +651,45 @@ def encode_sproto(fields, fn=None):
             if isinstance(val, str):
                 v = val.encode('utf-8')
             elif isinstance(val, list):
-                if val and isinstance(val[0], int):
-                    # Use 8-byte integers (long) for compatibility with List<long>
-                    v = b"\x08" + b"".join([struct.pack("<q", item) for item in val])
+                # Match SprotoTypeSerialize.write_integer(List<long>) and
+                # write_boolean(List<bool>): fixed-width raw elements inside
+                # one field-length prefix.
+                if val and all(isinstance(item, bool) for item in val):
+                    v = b"".join(struct.pack("<i", 1 if item else 0) for item in val)
+                elif val and all(isinstance(item, int) and not isinstance(item, bool) for item in val):
+                    width = 8 if any(item < -2147483648 or item > 2147483647 for item in val) else 4
+                    if width == 8:
+                        v = b"".join(struct.pack("<q", int(item)) for item in val)
+                    else:
+                        v = b"".join(struct.pack("<i", int(item)) for item in val)
                 else:
+                    # write_string(List<string>) and write_obj(List<T>) use a
+                    # 4-byte byte-length before every element.
                     items = []
                     for item in val:
                         if isinstance(item, (bytes, bytearray)):
-                            pass
+                            raw_item = bytes(item)
                         elif isinstance(item, str):
-                            item = item.encode('utf-8')
+                            raw_item = item.encode('utf-8')
                         else:
-                            item = str(item).encode('utf-8')
-                        items.append(struct.pack("<I", len(item)) + item)
+                            raw_item = str(item).encode('utf-8')
+                        items.append(struct.pack("<I", len(raw_item)) + raw_item)
                     v = b"".join(items)
             elif isinstance(val, dict):
-                # A Sproto map is encoded as an array of its elements
+                # Sproto map writer serializes values only; the map key is
+                # supplied separately by the generated protocol type.
                 items = []
                 for item in val.values():
                     if isinstance(item, (bytes, bytearray)):
-                        items.append(struct.pack("<I", len(item)) + item)
+                        raw_item = bytes(item)
                     elif isinstance(item, str):
-                        encoded_item = item.encode('utf-8')
-                        items.append(struct.pack("<I", len(encoded_item)) + encoded_item)
+                        raw_item = item.encode('utf-8')
                     else:
-                        encoded_item = str(item).encode('utf-8')
-                        items.append(struct.pack("<I", len(encoded_item)) + encoded_item)
+                        raw_item = str(item).encode('utf-8')
+                    items.append(struct.pack("<I", len(raw_item)) + raw_item)
                 v = b"".join(items)
             else:
-                v = val
+                v = bytes(val)
             body += struct.pack("<I", len(v)) + v
         last_tag = tag
 
