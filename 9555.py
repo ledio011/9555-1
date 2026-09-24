@@ -3670,45 +3670,20 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 170: # req_guild_member_info
-                eq_idx = get_val_int(body, 0)
-                if picked_char:
-                    ebp = picked_char.setdefault('equip_backpack', {})
-                    epack = picked_char.setdefault('equip_pack', {})
-                    item_dict = ebp.get(eq_idx) or epack.get(eq_idx)
-                    if item_dict:
-                        parm = item_dict.setdefault('parm', [0]*8)
-                        parm[1] = min(10, parm[1] + 1)
-                        save_chars(all_accounts_chars)
-                        ctype = 0 if eq_idx in ebp else 1
-                        send_update_item_push(send_rpc_push, ctype, eq_idx, item_dict)
-                        sync_char_attrs_rpc(conn, picked_char)
-                    send_rpc_push(581, encode_sproto([(0, {})])) # ret_guild_member_info Tag 581
+                # Request schema: guildId(0). Never mutate equipment here.
+                guild_id = get_val_int(body, 0, 0)
+                print(f"[GUILD MEMBER INFO] request guild_id={guild_id}")
+                # ret_guild_member_info.member list is optional; send an empty map until
+                # a persistent guild-member database is available.
+                send_rpc_push(581, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 171: # req_open_guild_shop
-                src_idx = get_val_int(body, 0)
-                dst_idx = get_val_int(body, 1)
-                if picked_char:
-                    ebp = picked_char.setdefault('equip_backpack', {})
-                    epack = picked_char.setdefault('equip_pack', {})
-                    src_item = ebp.get(src_idx) or epack.get(src_idx)
-                    dst_item = ebp.get(dst_idx) or epack.get(dst_idx)
-                    if src_item and dst_item:
-                        dst_item['level'] = src_item.get('level', 1)
-                        dst_parm = dst_item.setdefault('parm', [0]*8)
-                        src_parm = src_item.setdefault('parm', [0]*8)
-                        dst_parm[1] = src_parm[1]
-                        src_item['level'] = 1
-                        src_parm[1] = 0
-                        save_chars(all_accounts_chars)
-                        c_src = 0 if src_idx in ebp else 1
-                        c_dst = 0 if dst_idx in ebp else 1
-                        send_update_item_push(send_rpc_push, c_src, src_idx, src_item)
-                        send_update_item_push(send_rpc_push, c_dst, dst_idx, dst_item)
-                        sync_char_attrs_rpc(conn, picked_char)
-                    send_rpc_push(582, encode_sproto([(0, {})])) # ret_open_guild_shop Tag 582
+                # Guild shop request; do not treat its fields as equipment indexes.
+                print("[GUILD SHOP] open request")
+                send_rpc_push(582, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
