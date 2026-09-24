@@ -1,19 +1,9 @@
-# Local/generated data
 __pycache__/
 *.pyc
-*.pyo
 *.log
 .env
-
-# Large/local source material
 com.doodlemobile.vicecity.apk
 dec&normal/
-
-# Generated index artifacts
-apk_index/index.json
-apk_index/protocol/*.json
 apk_index/text/
 apk_index/strings/
-
-# Local character state
 characters_final.json.tmp

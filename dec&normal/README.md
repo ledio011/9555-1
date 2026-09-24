@@ -1,5 +1,5 @@
-# Local client source material
+# Local mixed-format client source
 
-This directory is intentionally kept as a local source tree. It may contain mixed formats such as managed/native code, DEX/ELF data, Unity assets/bundles, XML/JSON and binary resources.
+Keep the original local source here when deploying/building the index. It may contain managed/native code, DEX/ELF data, Unity assets/bundles, XML/JSON and binary resources.
 
-Large original source material is not committed automatically.
+Large source material is intentionally not committed automatically.

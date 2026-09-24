@@ -1,2 +1,1 @@
-# Runtime dependencies
-# The server/indexer currently use Python standard library only.
+# Python standard library only.
