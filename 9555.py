@@ -495,7 +495,7 @@ def encode_sproto(fields, fn=None):
         skip = tag - last_tag - 1
         if skip > 0: header.append(2 * (skip - 1) + 1)
 
-        if val is None:
+        if val is None or (isinstance(val, (list, dict)) and not val):
             header.append(1)
         elif isinstance(val, bool):
             header.append((1 if val else 0) * 2 + 2)
@@ -519,9 +519,12 @@ def encode_sproto(fields, fn=None):
                 else:
                     items = []
                     for item in val:
-                        if isinstance(item, str): item = item.encode('utf-8')
-                        elif isinstance(item, (bytes, bytearray)): pass
-                        else: item = str(item).encode('utf-8')
+                        if isinstance(item, (bytes, bytearray)):
+                            pass
+                        elif isinstance(item, str):
+                            item = item.encode('utf-8')
+                        else:
+                            item = str(item).encode('utf-8')
                         items.append(struct.pack("<I", len(item)) + item)
                     v = b"".join(items)
             elif isinstance(val, dict):
@@ -530,8 +533,12 @@ def encode_sproto(fields, fn=None):
                 for item in val.values():
                     if isinstance(item, (bytes, bytearray)):
                         items.append(struct.pack("<I", len(item)) + item)
+                    elif isinstance(item, str):
+                        encoded_item = item.encode('utf-8')
+                        items.append(struct.pack("<I", len(encoded_item)) + encoded_item)
                     else:
-                        items.append(struct.pack("<I", 1) + (b'\x01' if item else b'\x00'))
+                        encoded_item = str(item).encode('utf-8')
+                        items.append(struct.pack("<I", len(encoded_item)) + encoded_item)
                 v = b"".join(items)
             else:
                 v = val
@@ -886,7 +893,7 @@ def get_full_char(c):
     char_level = int(stats['lv'])
     skill_levels = c.get('skill_levels', {})
     skills_map = build_skills_map(c.get('prof', 0), char_level, skill_levels)
-    
+
     # Tag 9: equip (Dictionary<long, gameitem>)
     equip_map = {}
     epack = c.get('equip_pack', {})
@@ -1822,7 +1829,7 @@ def add_to_inventory(picked_char, item_id, amount):
 
     cfg = ITEM_CONFIG.get(item_id, {})
     itype = cfg.get('type', 0)
-    
+
     if itype == 2 or itype == 3 or itype == 4:
         ckey = 'equip_backpack'
     elif itype in (15, 16):
@@ -2422,10 +2429,10 @@ def serve_resource_http(conn, initial_data):
             return
         size = os.path.getsize(local_path)
         headers = (
-            b"HTTP/1.1 200 OK\r\n"
-            + b"Content-Length: " + str(size).encode("ascii") + b"\r\n"
-            + b"Content-Type: application/octet-stream\r\n"
-            + b"Connection: close\r\n\r\n"
+                b"HTTP/1.1 200 OK\r\n"
+                + b"Content-Length: " + str(size).encode("ascii") + b"\r\n"
+                + b"Content-Type: application/octet-stream\r\n"
+                + b"Connection: close\r\n\r\n"
         )
         conn.sendall(headers)
         if parts[0] == "GET":
@@ -3036,7 +3043,7 @@ def client_handler(conn, addr):
                                 stats = get_character_stats(picked_char)
                                 picked_char['hp'] = stats['hp_max']
                                 sync_char_attrs_rpc(conn, picked_char)
-                            
+
                             item['amount'] -= 1
                             if item['amount'] < 1:
                                 inventory.pop(item_index)
@@ -3146,14 +3153,14 @@ def client_handler(conn, addr):
                             item_found = c_dict[target_key]
                             ctype = container_code
                             break
-                    
+
                     if not item_found:
                         inventory = picked_char.get('inventory', [])
                         item_index = index_id - 10000
                         if 0 <= item_index < len(inventory):
                             raw = inventory[item_index]
                             item_found = {'itemId': str(raw['id']), 'stack': raw['amount']}
-                    
+
                     if item_found:
                         item_id = str(item_found.get('itemId', ''))
                         item_cfg = ITEM_CONFIG.get(item_id, {})
@@ -3166,7 +3173,7 @@ def client_handler(conn, addr):
                                 send_update_item_push(send_rpc_push, ctype, index_id, None)
                             else:
                                 send_update_item_push(send_rpc_push, ctype, index_id, item_found)
-                        
+
                         inv = picked_char.get('inventory', [])
                         for inv_item in list(inv):
                             if str(inv_item.get('id')) == item_id:
@@ -3174,7 +3181,7 @@ def client_handler(conn, addr):
                                 if inv_item['amount'] <= 0:
                                     inv.remove(inv_item)
                                 break
-                        
+
                         picked_char['cash'] = picked_char.get('cash', 0) + earned_cash
                         save_chars(all_accounts_chars)
                         sync_char_attrs_rpc(conn, picked_char)
@@ -3208,14 +3215,14 @@ def client_handler(conn, addr):
                             item_found = c_dict[target_key]
                             ctype = container_code
                             break
-                    
+
                     if not item_found:
                         inventory = picked_char.get('inventory', [])
                         item_index = index_id - 10000
                         if 0 <= item_index < len(inventory):
                             raw = inventory[item_index]
                             item_found = {'itemId': str(raw['id']), 'stack': raw['amount']}
-                    
+
                     if item_found:
                         box_id = str(item_found.get('itemId', ''))
                         count = min(count, item_found.get('stack', 1))
@@ -3226,11 +3233,11 @@ def client_handler(conn, addr):
                                 send_update_item_push(send_rpc_push, ctype, index_id, None)
                             else:
                                 send_update_item_push(send_rpc_push, ctype, index_id, item_found)
-                        
+
                         reward_cash = 20000 * count
                         reward_exp = 5000 * count
                         grant_item_rewards(picked_char, [("1001", 0, reward_cash), ("2001", 0, reward_exp)], conn, send_rpc_push)
-                        
+
                         reward_items = [
                             encode_sproto([(0, "1001"), (1, reward_cash)]),
                             encode_sproto([(0, "2001"), (1, reward_exp)])
@@ -3490,7 +3497,9 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 225: # request_daily_active
-                send_rpc_push(619, encode_sproto([(0, 0), (1, 0), (2, {})]))
+                daily_actives = { '101': encode_sproto([(0, "101"), (1, 1)]) }
+                daily_rewards = { '1': encode_sproto([(0, "1"), (1, 0)]) }
+                send_rpc_push(649, encode_sproto([(0, daily_actives), (1, daily_rewards), (2, 0)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3502,25 +3511,26 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 295: # request_sign_30_day_info
-                send_rpc_push(668, encode_sproto([(0, 1), (1, 0)]))
+                send_rpc_push(640, encode_sproto([(0, False), (1, False)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 288: # request_sign_week_info
-                send_rpc_push(661, encode_sproto([(0, 1), (1, 0)]))
+                send_rpc_push(641, encode_sproto([(0, False), (1, 1), (2, False), (3, False)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 210: # request_first_buy
-                send_rpc_push(582, encode_sproto([(0, 0)]))
+                send_rpc_push(647, encode_sproto([(0, 0)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 202: # request_daily_buy
-                send_rpc_push(575, encode_sproto([(0, {})]))
+                daily_buys = { '1': encode_sproto([(0, "1"), (1, 0)]) }
+                send_rpc_push(646, encode_sproto([(0, daily_buys)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3533,13 +3543,14 @@ def client_handler(conn, addr):
 
             elif msg == 195: # request_slot_info
                 s_info = encode_sproto([(1, 0), (2, 10)])
-                send_rpc_push(568, encode_sproto([(0, s_info), (1, {}), (2, {})]))
+                send_rpc_push(568, encode_sproto([(0, s_info), (1, {})], (2, {})))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 242: # request_activity_info
-                send_rpc_push(633, encode_sproto([(0, {})]))
+                activity_info = { '1': encode_sproto([(0, "1"), (1, 1)]) }
+                send_rpc_push(619, encode_sproto([(0, activity_info)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3551,7 +3562,8 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 257: # request_retrieve_info
-                send_rpc_push(648, encode_sproto([(0, {})]))
+                retrieve_info = { '1': encode_sproto([(0, "1"), (1, 0)]) }
+                send_rpc_push(658, encode_sproto([(0, retrieve_info)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3569,25 +3581,29 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 278: # request_invest_pack
-                send_rpc_push(662, encode_sproto([(0, 0)]))
+                invest_pack = { '0': encode_sproto([(0, "0"), (1, -1)]) }
+                send_rpc_push(645, encode_sproto([(0, invest_pack)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 258: # request_level_pack
-                send_rpc_push(649, encode_sproto([(0, {})]))
+                level_pack = { '1': encode_sproto([(0, "1"), (1, 0)]) }
+                send_rpc_push(644, encode_sproto([(0, level_pack)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 253: # request_big_pack
-                send_rpc_push(644, encode_sproto([(0, {})]))
+                special_big_packs = { '1': encode_sproto([(0, "1"), (1, 0)]) }
+                send_rpc_push(648, encode_sproto([(0, special_big_packs)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 299: # request_special_big_pack
-                send_rpc_push(671, encode_sproto([(0, {})]))
+                special_big_packs = { '1': encode_sproto([(0, "1"), (1, 0)]) }
+                send_rpc_push(656, encode_sproto([(0, special_big_packs)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3689,7 +3705,7 @@ def client_handler(conn, addr):
                         4: 'badge_backpack',
                         6: 'fashion_backpack'
                     }.get(container_type, 'equip_backpack')
-                    
+
                     c_map = picked_char.setdefault(container_key, {})
                     if index_id in c_map:
                         item = c_map[index_id]
