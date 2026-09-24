@@ -1,100 +1,64 @@
+import os
 import socket
 import struct
-import subprocess
-import sys
-import os
 import threading
+import json
 import traceback
-
-# ============================================================
-# CONFIG
-# ============================================================
 
 HOST = "0.0.0.0"
 PORT = int(os.environ.get("PORT", "15678"))
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-INDEXER = os.path.join(BASE_DIR, "ask-game-apk_indexer.py")
-
-# ============================================================
-# SPROTO PACK / UNPACK
-# ============================================================
-
-def sproto_pack(data: bytes) -> bytes:
-    out = bytearray()
-    pos = 0
-
-    while pos < len(data):
-        chunk = data[pos:pos + 8]
-        pos += len(chunk)
-
-        n = len(chunk)
-
-        if n == 0:
-            break
-
-        # sproto packed header
-        out.append(n)
-
-        # 0-byte compression
-        bitmap = 0
-        payload = bytearray()
-
-        for i in range(8):
-            if i < n and chunk[i] != 0:
-                bitmap |= (1 << i)
-                payload.append(chunk[i])
-
-        out[-1] = bitmap
-        out.extend(payload)
-
-    return bytes(out)
-
-
-def sproto_unpack(data: bytes) -> bytes:
-    out = bytearray()
-    pos = 0
-
-    while pos < len(data):
-        if pos >= len(data):
-            break
-
-        bitmap = data[pos]
-        pos += 1
-
-        if bitmap == 0:
-            out.extend(b"\x00" * 8)
-            continue
-
-        for i in range(8):
-            if bitmap & (1 << i):
-                if pos >= len(data):
-                    raise ValueError("Invalid sproto packed data")
-
-                out.append(data[pos])
-                pos += 1
-            else:
-                out.append(0)
-
-    return bytes(out)
+INDEX_FILE = os.path.join(BASE_DIR, "apk_index", "index.json")
 
 
 # ============================================================
-# FRAME
+# LOAD APK INDEX
+# ============================================================
+
+APK_INDEX = None
+
+
+def load_index():
+    global APK_INDEX
+
+    if not os.path.exists(INDEX_FILE):
+        print(f"[ERROR] Missing index: {INDEX_FILE}", flush=True)
+        return False
+
+    try:
+        with open(INDEX_FILE, "r", encoding="utf-8") as f:
+            APK_INDEX = json.load(f)
+
+        print(
+            f"[+] APK index loaded: "
+            f"{len(APK_INDEX.get('files', []))} files",
+            flush=True
+        )
+
+        return True
+
+    except Exception as e:
+        print(f"[ERROR] Cannot load APK index: {e}", flush=True)
+        return False
+
+
+# ============================================================
+# TCP FRAME
 # ============================================================
 
 def recv_exact(sock, size):
-    buf = bytearray()
+    data = bytearray()
 
-    while len(buf) < size:
-        chunk = sock.recv(size - len(buf))
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
 
         if not chunk:
             return None
 
-        buf.extend(chunk)
+        data.extend(chunk)
 
-    return bytes(buf)
+    return bytes(data)
 
 
 def recv_frame(sock):
@@ -105,7 +69,7 @@ def recv_frame(sock):
 
     size = struct.unpack(">H", header)[0]
 
-    if size <= 0:
+    if size == 0:
         return b""
 
     return recv_exact(sock, size)
@@ -115,6 +79,11 @@ def send_frame(sock, payload):
     if payload is None:
         return
 
+    if len(payload) > 65535:
+        raise ValueError(
+            f"Payload too large: {len(payload)}"
+        )
+
     sock.sendall(
         struct.pack(">H", len(payload)) +
         payload
@@ -122,244 +91,229 @@ def send_frame(sock, payload):
 
 
 # ============================================================
-# SPROTO HEADER
+# SPROTO PACK
 # ============================================================
 
-def read_sproto_header(payload):
+def sproto_unpack(data):
     """
-    Normal RPC packet:
-
-        [sproto header]
-        [body]
-
-    First field is normally:
-        0 = type/message
-        1 = session
+    Decode sproto's 8-byte zero-compressed blocks.
     """
 
-    if len(payload) < 2:
-        return None, None, payload
+    out = bytearray()
+    pos = 0
+
+    while pos < len(data):
+
+        bitmap = data[pos]
+        pos += 1
+
+        for i in range(8):
+
+            if bitmap & (1 << i):
+
+                if pos >= len(data):
+                    raise ValueError(
+                        "Invalid sproto packed data"
+                    )
+
+                out.append(data[pos])
+                pos += 1
+
+            else:
+                out.append(0)
+
+    return bytes(out)
+
+
+def sproto_pack(data):
+    """
+    Encode raw sproto data using zero compression.
+    """
+
+    out = bytearray()
+    pos = 0
+
+    while pos < len(data):
+
+        chunk = data[pos:pos + 8]
+        pos += len(chunk)
+
+        bitmap = 0
+        values = bytearray()
+
+        for i, value in enumerate(chunk):
+
+            if value != 0:
+                bitmap |= (1 << i)
+                values.append(value)
+
+        out.append(bitmap)
+        out.extend(values)
+
+    return bytes(out)
+
+
+# ============================================================
+# BASIC SPROTO HEADER INSPECTION
+# ============================================================
+
+def inspect_packet(raw):
+    """
+    This does NOT invent a response.
+
+    It only extracts useful information for logging.
+    """
+
+    if len(raw) < 2:
+        return None, None
 
     try:
-        header_size = struct.unpack("<H", payload[:2])[0]
+        header_words = struct.unpack(
+            "<H",
+            raw[:2]
+        )[0]
 
-        if header_size < 0:
-            return None, None, payload
+        header_size = 2 + header_words * 2
 
-        header_end = 2 + header_size * 2
-
-        if header_end > len(payload):
-            return None, None, payload
+        if header_size > len(raw):
+            return None, None
 
         fields = {}
 
-        pos = 2
-        body_pos = header_end
-        last_tag = -1
+        p = 2
 
-        for tag in range(header_size):
-            if pos + 2 > len(payload):
+        for tag in range(header_words):
+
+            if p + 2 > len(raw):
                 break
 
-            h = struct.unpack("<H", payload[pos:pos + 2])[0]
-            pos += 2
+            value = struct.unpack(
+                "<H",
+                raw[p:p + 2]
+            )[0]
 
-            if h == 0:
-                continue
+            p += 2
 
-            # field header encoding
-            if h & 1:
-                skip = (h - 1) // 2 + 1
-                tag = last_tag + skip
-
-            else:
-                tag = last_tag + 1
-
-            value = h >> 1
-
-            if value == 0:
-                if body_pos + 4 > len(payload):
-                    break
-
-                length = struct.unpack(
-                    "<I",
-                    payload[body_pos:body_pos + 4]
-                )[0]
-
-                body_pos += 4
-
-                if body_pos + length > len(payload):
-                    break
-
-                raw = payload[body_pos:body_pos + length]
-                body_pos += length
-
-                fields[tag] = raw
-
-            else:
-                fields[tag] = value - 1
-
-            last_tag = tag
+            fields[tag] = value
 
         msg = fields.get(0)
         session = fields.get(1)
 
-        return msg, session, payload[body_pos:]
+        return msg, session
 
     except Exception:
-        return None, None, payload
+        return None, None
 
 
 # ============================================================
-# INDEXER
+# APK INDEX SEARCH
 # ============================================================
 
-def call_indexer(msg, session, body):
+def search_index_for_tag(msg):
     """
-    Sends the request to:
+    Search textual/string extracts for references to TAG/msg.
 
-        ask-game-apk_indexer.py -response
-
-    stdin format:
-
-        JSON
-
-    Expected indexer output:
-
-        JSON containing response data.
-
+    This is intentionally only a lookup.
+    It does NOT fabricate an Sproto response.
     """
 
-    request = {
-        "msg": msg,
-        "session": session,
-        "body_hex": body.hex()
-    }
+    if not APK_INDEX:
+        return []
 
-    try:
-        proc = subprocess.run(
-            [
-                sys.executable,
-                INDEXER,
-                "-response"
-            ],
-            input=(json_dump(request) + "\n").encode("utf-8"),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=BASE_DIR,
-            timeout=30
-        )
+    needle1 = f"tag {msg}"
+    needle2 = f"tag={msg}"
+    needle3 = f"msg={msg}"
+    needle4 = f"msg {msg}"
 
-    except subprocess.TimeoutExpired:
-        print(
-            f"[INDEXER TIMEOUT] MSG={msg}",
-            flush=True
-        )
-        return None
+    results = []
 
-    except Exception as e:
-        print(
-            f"[INDEXER ERROR] {e}",
-            flush=True
-        )
-        return None
+    for entry in APK_INDEX.get("files", []):
 
-    stderr = proc.stderr.decode(
-        "utf-8",
-        errors="replace"
-    ).strip()
+        path = entry.get("path", "")
 
-    if stderr:
-        print(
-            "[INDEXER STDERR]",
-            stderr,
-            flush=True
-        )
+        text_path = entry.get("text_extract")
+        strings_path = entry.get("strings_extract")
 
-    output = proc.stdout.decode(
-        "utf-8",
-        errors="replace"
-    ).strip()
+        candidates = []
 
-    if not output:
-        print(
-            f"[INDEXER EMPTY] MSG={msg}",
-            flush=True
-        )
-        return None
+        if text_path:
+            candidates.append(
+                os.path.join(BASE_DIR, text_path)
+            )
 
-    return parse_indexer_response(output)
+        if strings_path:
+            candidates.append(
+                os.path.join(BASE_DIR, strings_path)
+            )
+
+        for candidate in candidates:
+
+            if not os.path.exists(candidate):
+                continue
+
+            try:
+
+                with open(
+                    candidate,
+                    "r",
+                    encoding="utf-8",
+                    errors="ignore"
+                ) as f:
+
+                    text = f.read()
+
+                low = text.lower()
+
+                if (
+                    needle1 in low
+                    or needle2 in low
+                    or needle3 in low
+                    or needle4 in low
+                ):
+
+                    results.append({
+                        "path": path,
+                        "extract": candidate
+                    })
+
+                    break
+
+            except Exception:
+                pass
+
+    return results
 
 
 # ============================================================
-# JSON
+# RESPONSE RESOLVER
 # ============================================================
 
-def json_dump(obj):
-    import json
-    return json.dumps(
-        obj,
-        separators=(",", ":")
+def resolve_response(msg, session, raw_request):
+    """
+    IMPORTANT:
+
+    apk_indexer.py currently creates an INDEX.
+    It does not contain a database of ready-made server
+    responses.
+
+    Therefore this function currently returns None instead
+    of inventing fake protocol data.
+    """
+
+    matches = search_index_for_tag(msg)
+
+    print(
+        f"[INDEX LOOKUP] MSG={msg} "
+        f"SESSION={session} "
+        f"MATCHES={len(matches)}",
+        flush=True
     )
 
-
-def parse_indexer_response(output):
-    """
-    Accept several response formats so the indexer can evolve.
-
-    Supported:
-
-        {"response_hex":"...."}
-
-    or:
-
-        {"hex":"...."}
-
-    or:
-
-        {"data":"...."}
-
-    or raw hex:
-
-        00ff....
-    """
-
-    import json
-
-    # JSON response
-    try:
-        obj = json.loads(output)
-
-        if isinstance(obj, dict):
-
-            for key in (
-                "response_hex",
-                "hex",
-                "data",
-                "payload"
-            ):
-                value = obj.get(key)
-
-                if isinstance(value, str):
-                    try:
-                        return bytes.fromhex(value)
-                    except ValueError:
-                        pass
-
-            # response already represented as integer list
-            value = obj.get("bytes")
-
-            if isinstance(value, list):
-                return bytes(value)
-
-    except Exception:
-        pass
-
-    # Raw HEX
-    try:
-        return bytes.fromhex(output)
-    except ValueError:
-        pass
+    for match in matches[:10]:
+        print(
+            f"    -> {match['path']}",
+            flush=True
+        )
 
     return None
 
@@ -368,7 +322,7 @@ def parse_indexer_response(output):
 # CLIENT
 # ============================================================
 
-def handle_client(conn, addr):
+def client_thread(conn, addr):
 
     print(
         f"[CONNECTED] {addr}",
@@ -387,39 +341,34 @@ def handle_client(conn, addr):
             if not packet:
                 continue
 
-            # ------------------------------------------------
-            # Unpack network Sproto
-            # ------------------------------------------------
-
-            try:
-                raw = sproto_unpack(packet)
-            except Exception as e:
-                print(
-                    f"[SPROTO UNPACK ERROR] {e}",
-                    flush=True
-                )
-                continue
-
-            # ------------------------------------------------
-            # Read MSG / SESSION
-            # ------------------------------------------------
-
-            msg, session, body = read_sproto_header(raw)
-
             print(
-                f"[RX] MSG={msg} SESSION={session} "
-                f"SIZE={len(packet)}",
+                f"[RX] FRAME SIZE={len(packet)}",
                 flush=True
             )
 
-            # ------------------------------------------------
-            # Ask APK indexer
-            # ------------------------------------------------
+            try:
+                raw = sproto_unpack(packet)
 
-            response = call_indexer(
+            except Exception as e:
+
+                print(
+                    f"[SPROTO ERROR] {e}",
+                    flush=True
+                )
+
+                continue
+
+            msg, session = inspect_packet(raw)
+
+            print(
+                f"[RX] MSG={msg} SESSION={session}",
+                flush=True
+            )
+
+            response = resolve_response(
                 msg,
                 session,
-                body
+                raw
             )
 
             if response is None:
@@ -431,26 +380,7 @@ def handle_client(conn, addr):
 
                 continue
 
-            # ------------------------------------------------
-            # If indexer returned a complete packed frame,
-            # send it directly.
-            #
-            # Otherwise pack the Sproto response.
-            # ------------------------------------------------
-
-            try:
-
-                packed = sproto_pack(response)
-
-            except Exception as e:
-
-                print(
-                    f"[SPROTO PACK ERROR] "
-                    f"MSG={msg}: {e}",
-                    flush=True
-                )
-
-                continue
+            packed = sproto_pack(response)
 
             send_frame(
                 conn,
@@ -458,7 +388,7 @@ def handle_client(conn, addr):
             )
 
             print(
-                f"[TX] RESPONSE MSG={msg} "
+                f"[TX] MSG={msg} "
                 f"SIZE={len(packed)}",
                 flush=True
             )
@@ -489,17 +419,14 @@ def handle_client(conn, addr):
 # SERVER
 # ============================================================
 
-def start_server():
+def main():
 
-    if not os.path.exists(INDEXER):
+    print("=" * 60)
+    print("ATG 9555 APK-INDEX SERVER")
+    print("=" * 60)
 
-        print(
-            "[ERROR] ask-game-apk_indexer.py not found:",
-            INDEXER,
-            flush=True
-        )
-
-        sys.exit(1)
+    if not load_index():
+        raise SystemExit(1)
 
     server = socket.socket(
         socket.AF_INET,
@@ -519,47 +446,29 @@ def start_server():
     server.listen(128)
 
     print(
-        "==========================================",
-        flush=True
-    )
-
-    print(
-        " ATG APK RESPONSE SERVER",
-        flush=True
-    )
-
-    print(
-        "==========================================",
-        flush=True
-    )
-
-    print(
         f"[LISTENING] {HOST}:{PORT}",
         flush=True
     )
 
     print(
-        f"[INDEXER] {INDEXER}",
+        f"[INDEX] {INDEX_FILE}",
         flush=True
     )
 
-    print(
-        "==========================================",
-        flush=True
-    )
+    print("=" * 60)
 
     while True:
 
         conn, addr = server.accept()
 
-        thread = threading.Thread(
-            target=handle_client,
+        t = threading.Thread(
+            target=client_thread,
             args=(conn, addr),
             daemon=True
         )
 
-        thread.start()
+        t.start()
 
 
 if __name__ == "__main__":
-    start_server()
+    main()
