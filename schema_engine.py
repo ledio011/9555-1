@@ -11,6 +11,7 @@ def encode_sproto(fields, fn=None):
     if not fields:
         return struct.pack("<H", 0)
 
+    # Sort fields by tag
     fields = sorted(fields, key=lambda x: x[0])
     header = []
     body = bytearray()
@@ -73,6 +74,9 @@ def encode_sproto(fields, fn=None):
 
 
 def sproto_pack(data):
+    """
+    Sproto byte packer (zero-byte mask packing).
+    """
     out = bytearray()
     for i in range(0, len(data), 8):
         chunk = data[i:i + 8]
@@ -95,6 +99,9 @@ def sproto_pack(data):
 
 
 def sproto_unpack(data):
+    """
+    Sproto byte unpacker.
+    """
     out = bytearray()
     i = 0
     n = len(data)
@@ -120,6 +127,9 @@ def sproto_unpack(data):
 
 
 class SchemaResponseEngine:
+    """
+    In-memory RAM Sproto Schema & Response Engine for com.doodlemobile.vicecity.
+    """
     def __init__(self, index_dir="apk_index"):
         self.protocols = {}
         self.types = {}
@@ -147,6 +157,9 @@ class SchemaResponseEngine:
         print(f"[SCHEMA LOADED] Protocols: {len(self.protocols)} | Types: {len(self.types)}")
 
     def auto_build_type(self, type_name, custom_values=None):
+        """
+        Recursively generates a Sproto field list matching the exact type schema.
+        """
         if not type_name or type_name not in self.types:
             return []
 
@@ -187,6 +200,9 @@ class SchemaResponseEngine:
         return None
 
     def create_response_frame(self, msg_tag, session_id, custom_data=None):
+        """
+        Generates a packed Sproto response frame for ANY incoming MSG tag & SESSION ID.
+        """
         msg_str = str(msg_tag)
         proto_info = self.protocols.get(msg_str)
 
@@ -196,6 +212,7 @@ class SchemaResponseEngine:
             return None
 
         response_type_name = proto_info.get("response")
+        proto_name = proto_info.get("name", "Unknown")
 
         if not response_type_name:
             return None
