@@ -4763,31 +4763,46 @@ def client_handler(conn, addr):
                     if picked_char:
                         send_rpc_push(550, sync_backpack_item_rpc(picked_char))
                 elif msg == 146:
-                    send_rpc_push(567, encode_sproto([]))
+                    send_rpc_push(567, encode_sproto([(0, 0)]))
                 elif msg == 147:
-                    send_rpc_push(566, encode_sproto([]))
+                    send_rpc_push(566, encode_sproto([(0, 0)]))
                 elif msg == 148:
-                    send_rpc_push(565, encode_sproto([]))
+                    send_rpc_push(565, encode_sproto([(0, 0)]))
                 elif msg == 149:
-                    send_rpc_push(590, encode_sproto([]))
+                    char_id = get_val_int(body, 0, picked_char.get('id', 0) if picked_char else 0)
+                    send_rpc_push(590, encode_sproto([(0, char_id), (1, True)]))
                 elif msg == 150:
-                    send_rpc_push(589, encode_sproto([]))
+                    char_id = get_val_int(body, 0, picked_char.get('id', 0) if picked_char else 0)
+                    job = get_val_int(body, 1, 0)
+                    send_rpc_push(589, encode_sproto([(0, char_id), (1, job), (2, True)]))
                 elif msg == 151:
-                    send_rpc_push(564, encode_sproto([]))
+                    skill_type = get_val_int(body, 0, 0)
+                    level = get_val_int(body, 1, 0)
+                    send_rpc_push(564, encode_sproto([(0, 0), (1, 0), (2, skill_type), (3, level)]))
                 elif msg == 152:
-                    send_rpc_push(562, encode_sproto([]))
+                    send_rpc_push(562, encode_sproto([(1, 0), (2, 0)]))
                 elif msg == 153:
                     send_rpc_push(563, encode_sproto([]))
                 elif msg == 154:
-                    send_rpc_push(591, encode_sproto([]))
+                    char_id = get_val_int(body, 0, picked_char.get('id', 0) if picked_char else 0)
+                    agree = bool(get_val_int(body, 1, 1))
+                    send_rpc_push(591, encode_sproto([(0, char_id), (1, agree)]))
                 elif msg == 156:
-                    send_rpc_push(569, encode_sproto([]))
+                    send_rpc_push(569, encode_sproto([(0, 0), (1, 1)]))
                 elif msg == 174:
-                    send_rpc_push(584, encode_sproto([]))
+                    send_rpc_push(584, encode_sproto([(0, [])]))
                 elif msg == 175:
-                    send_rpc_push(585, encode_sproto([(0, 1)]))
+                    donate_id = body.get(0, b"1")
+                    if isinstance(donate_id, bytes):
+                        donate_id = donate_id.decode("utf-8", "ignore") or "1"
+                    else:
+                        donate_id = str(donate_id)
+                    send_rpc_push(585, encode_sproto([
+                        (0, 0), (1, donate_id), (2, 1),
+                        (3, 0), (4, 0), (5, 0)
+                    ]))
                 elif msg == 176:
-                    send_rpc_push(586, encode_sproto([]))
+                    send_rpc_push(586, encode_sproto([(0, {}), (1, [])]))
                 elif msg == 186:
                     send_rpc_push(593, encode_sproto([(0, 1)]))
                 elif msg == 187:
