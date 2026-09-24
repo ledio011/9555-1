@@ -7,3 +7,4 @@ dec&normal/
 apk_index/text/
 apk_index/strings/
 characters_final.json.tmp
+*.bak
