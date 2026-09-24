@@ -1230,7 +1230,7 @@ def get_full_char(c):
                 if encoded:
                     fashion_equip_map[int(item.get('indexId', slot))] = encoded
 
-    download_state = 2 if c.get('download_complete', True) else 1
+    download_state = 2 if c.get('download_complete', False) else 1
     potion_idx = int(c.get('potion_index', 0))
     return encode_sproto([
         (0, char_id),
@@ -2541,7 +2541,7 @@ def init_character_fields(c):
         'pos': [7007, 100, 5033, 0],
         'map_id': "11",
         'tutorial': 0,
-        'download_complete': True,
+        'download_complete': False,
         'mounts': {},
         'equipped_mount_id': '',
         'mount_riding': False,
@@ -2554,15 +2554,6 @@ def init_character_fields(c):
     }
     for k, v in fields.items():
         if k not in c: c[k] = v
-
-    # Auto-grant expansion car voucher (9301) for download_complete characters
-    if c.get('download_complete', True):
-        inv = c.setdefault('inventory', [])
-        if not any(str(item.get('id')) == "9301" for item in inv):
-            add_to_inventory(c, "9301", 1)
-            add_to_inventory(c, "9011", 10)
-            add_to_inventory(c, "9001", 20)
-            add_to_inventory(c, "5026", 5)
 
     epack = c.setdefault('equip_pack', {})
     prof_str = str(c.get('prof', 0))
@@ -2893,7 +2884,7 @@ def client_handler(conn, addr):
             raw = sproto_unpack(data); pkg = decode_sproto(raw, 0)
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
             protocol_debug_rx(protocol_debug, msg)
-            if msg != 101 and (msg in (100, 105, 115, 116, 117, 121, 122, 129, 167, 168, 170, 171, 172, 199, 223, 224, 303) or (picked_char and picked_char.get('map_ready_done'))):
+            if msg in (100, 105, 115, 116, 117, 121, 122, 129, 167, 168, 170, 171, 172, 199, 223, 224, 303) or (picked_char and picked_char.get('map_ready_done')):
                 print(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
             truth_audit_rx(truth_audit, msg, body)
