@@ -7,6 +7,7 @@ from pathlib import Path
 def encode_sproto(fields, fn=None):
     """
     Sproto encoder. Formats a list of (tag, value) tuples into binary Sproto format.
+    Handles ints, bools, strings, lists, dicts, and nested Sproto structures.
     """
     if not fields:
         return struct.pack("<H", 0)
@@ -75,7 +76,7 @@ def encode_sproto(fields, fn=None):
 
 def sproto_pack(data):
     """
-    Sproto byte packer (zero-byte mask packing).
+    Sproto 0-pack compression function.
     """
     out = bytearray()
     for i in range(0, len(data), 8):
@@ -157,9 +158,6 @@ class SchemaResponseEngine:
         print(f"[SCHEMA LOADED] Protocols: {len(self.protocols)} | Types: {len(self.types)}")
 
     def auto_build_type(self, type_name, custom_values=None):
-        """
-        Recursively generates a Sproto field list matching the exact type schema.
-        """
         if not type_name or type_name not in self.types:
             return []
 
@@ -200,9 +198,6 @@ class SchemaResponseEngine:
         return None
 
     def create_response_frame(self, msg_tag, session_id, custom_data=None):
-        """
-        Generates a packed Sproto response frame for ANY incoming MSG tag & SESSION ID.
-        """
         msg_str = str(msg_tag)
         proto_info = self.protocols.get(msg_str)
 
@@ -212,7 +207,6 @@ class SchemaResponseEngine:
             return None
 
         response_type_name = proto_info.get("response")
-        proto_name = proto_info.get("name", "Unknown")
 
         if not response_type_name:
             return None
