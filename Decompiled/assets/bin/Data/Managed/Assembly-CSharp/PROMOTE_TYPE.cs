@@ -1,0 +1,14 @@
+﻿using System;
+
+// Token: 0x0200094E RID: 2382
+public enum PROMOTE_TYPE
+{
+	// Token: 0x04002EEA RID: 12010
+	NORMAL,
+	// Token: 0x04002EEB RID: 12011
+	HONOR_LIMIT,
+	// Token: 0x04002EEC RID: 12012
+	LEVEL_GET,
+	// Token: 0x04002EED RID: 12013
+	LEVEL_LIMIT
+}

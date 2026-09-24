@@ -1,0 +1,4 @@
+,ID,,,废弃了的数据表,,,,,,,,
+,STRING,STRING,STRING,,,,,,,,,INT
+*,ID,ItemID1,ItemCount1,ItemID2,ItemCount2,ItemID3,ItemCount3,ItemID4,ItemCount4,ItemID5,ItemCount5,LvTarget
+*,2,1001,5000,3001,15,,,,,,,10

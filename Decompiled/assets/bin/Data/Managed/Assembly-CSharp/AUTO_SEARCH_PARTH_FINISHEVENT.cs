@@ -1,0 +1,16 @@
+﻿using System;
+
+// Token: 0x0200020B RID: 523
+public enum AUTO_SEARCH_PARTH_FINISHEVENT
+{
+	// Token: 0x0400177E RID: 6014
+	INVALID = -1,
+	// Token: 0x0400177F RID: 6015
+	MISSION,
+	// Token: 0x04001780 RID: 6016
+	CITY_DANCE,
+	// Token: 0x04001781 RID: 6017
+	CHANGE_MAP,
+	// Token: 0x04001782 RID: 6018
+	FIND_NPC
+}

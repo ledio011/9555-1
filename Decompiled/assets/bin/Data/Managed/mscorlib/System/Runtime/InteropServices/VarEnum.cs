@@ -1,0 +1,99 @@
+﻿using System;
+
+namespace System.Runtime.InteropServices
+{
+	// Token: 0x02000253 RID: 595
+	[ComVisible(true)]
+	[Serializable]
+	public enum VarEnum
+	{
+		// Token: 0x04000A3F RID: 2623
+		VT_EMPTY,
+		// Token: 0x04000A40 RID: 2624
+		VT_NULL,
+		// Token: 0x04000A41 RID: 2625
+		VT_I2,
+		// Token: 0x04000A42 RID: 2626
+		VT_I4,
+		// Token: 0x04000A43 RID: 2627
+		VT_R4,
+		// Token: 0x04000A44 RID: 2628
+		VT_R8,
+		// Token: 0x04000A45 RID: 2629
+		VT_CY,
+		// Token: 0x04000A46 RID: 2630
+		VT_DATE,
+		// Token: 0x04000A47 RID: 2631
+		VT_BSTR,
+		// Token: 0x04000A48 RID: 2632
+		VT_DISPATCH,
+		// Token: 0x04000A49 RID: 2633
+		VT_ERROR,
+		// Token: 0x04000A4A RID: 2634
+		VT_BOOL,
+		// Token: 0x04000A4B RID: 2635
+		VT_VARIANT,
+		// Token: 0x04000A4C RID: 2636
+		VT_UNKNOWN,
+		// Token: 0x04000A4D RID: 2637
+		VT_DECIMAL,
+		// Token: 0x04000A4E RID: 2638
+		VT_I1 = 16,
+		// Token: 0x04000A4F RID: 2639
+		VT_UI1,
+		// Token: 0x04000A50 RID: 2640
+		VT_UI2,
+		// Token: 0x04000A51 RID: 2641
+		VT_UI4,
+		// Token: 0x04000A52 RID: 2642
+		VT_I8,
+		// Token: 0x04000A53 RID: 2643
+		VT_UI8,
+		// Token: 0x04000A54 RID: 2644
+		VT_INT,
+		// Token: 0x04000A55 RID: 2645
+		VT_UINT,
+		// Token: 0x04000A56 RID: 2646
+		VT_VOID,
+		// Token: 0x04000A57 RID: 2647
+		VT_HRESULT,
+		// Token: 0x04000A58 RID: 2648
+		VT_PTR,
+		// Token: 0x04000A59 RID: 2649
+		VT_SAFEARRAY,
+		// Token: 0x04000A5A RID: 2650
+		VT_CARRAY,
+		// Token: 0x04000A5B RID: 2651
+		VT_USERDEFINED,
+		// Token: 0x04000A5C RID: 2652
+		VT_LPSTR,
+		// Token: 0x04000A5D RID: 2653
+		VT_LPWSTR,
+		// Token: 0x04000A5E RID: 2654
+		VT_RECORD = 36,
+		// Token: 0x04000A5F RID: 2655
+		VT_FILETIME = 64,
+		// Token: 0x04000A60 RID: 2656
+		VT_BLOB,
+		// Token: 0x04000A61 RID: 2657
+		VT_STREAM,
+		// Token: 0x04000A62 RID: 2658
+		VT_STORAGE,
+		// Token: 0x04000A63 RID: 2659
+		VT_STREAMED_OBJECT,
+		// Token: 0x04000A64 RID: 2660
+		VT_STORED_OBJECT,
+		// Token: 0x04000A65 RID: 2661
+		VT_BLOB_OBJECT,
+		// Token: 0x04000A66 RID: 2662
+		VT_CF,
+		// Token: 0x04000A67 RID: 2663
+		VT_CLSID,
+		// Token: 0x04000A68 RID: 2664
+		VT_VECTOR = 4096,
+		// Token: 0x04000A69 RID: 2665
+		VT_ARRAY = 8192,
+		// Token: 0x04000A6A RID: 2666
+		VT_BYREF = 16384
+	}
+}

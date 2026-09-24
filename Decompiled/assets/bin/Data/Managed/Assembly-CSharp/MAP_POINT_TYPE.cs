@@ -1,0 +1,12 @@
+﻿using System;
+
+// Token: 0x02000956 RID: 2390
+public enum MAP_POINT_TYPE
+{
+	// Token: 0x04002F50 RID: 12112
+	NPC,
+	// Token: 0x04002F51 RID: 12113
+	TELEPORT,
+	// Token: 0x04002F52 RID: 12114
+	MONSTER
+}

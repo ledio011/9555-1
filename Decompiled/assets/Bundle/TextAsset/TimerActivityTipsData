@@ -1,0 +1,4 @@
+,活动ID,活动名称,活动说明,出现开始时间,截止时间,图片名字,出现排序权重,跳转方式,跳转按钮内容
+,STRING,,,STRING,STRING,STRING,INT,INT,string
+*,ID,EventName,EventDialog,StartTime,EndTime,PicName,Weight,JumpType,JumpLabel
+*,1,Christmas Event,,2017-12-11-10-00-00,2017-12-28-14-59-59,huoDong_shengDan,1,1,

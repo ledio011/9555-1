@@ -1,0 +1,16 @@
+﻿using System;
+
+// Token: 0x02000945 RID: 2373
+public enum JUMP_PATH
+{
+	// Token: 0x04002E1B RID: 11803
+	SHOP,
+	// Token: 0x04002E1C RID: 11804
+	SLOT,
+	// Token: 0x04002E1D RID: 11805
+	RACE,
+	// Token: 0x04002E1E RID: 11806
+	SCUFFLE,
+	// Token: 0x04002E1F RID: 11807
+	EQUIP_COPY
+}

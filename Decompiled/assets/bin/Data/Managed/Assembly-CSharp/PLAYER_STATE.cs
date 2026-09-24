@@ -1,0 +1,14 @@
+﻿using System;
+
+// Token: 0x0200082A RID: 2090
+public enum PLAYER_STATE
+{
+	// Token: 0x04002289 RID: 8841
+	NORMAL,
+	// Token: 0x0400228A RID: 8842
+	DRIVING,
+	// Token: 0x0400228B RID: 8843
+	DANCE,
+	// Token: 0x0400228C RID: 8844
+	SOCIAL_DANCE
+}

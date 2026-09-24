@@ -1,0 +1,12 @@
+﻿using System;
+
+// Token: 0x02000944 RID: 2372
+public enum ITEM_SHOW_TYPE
+{
+	// Token: 0x04002E17 RID: 11799
+	EQUIPPACK,
+	// Token: 0x04002E18 RID: 11800
+	BACKPACK,
+	// Token: 0x04002E19 RID: 11801
+	REWARD_TIPS
+}

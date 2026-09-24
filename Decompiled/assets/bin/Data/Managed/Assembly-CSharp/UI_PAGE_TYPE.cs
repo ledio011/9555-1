@@ -1,0 +1,14 @@
+﻿using System;
+
+// Token: 0x02000A5E RID: 2654
+public enum UI_PAGE_TYPE
+{
+	// Token: 0x04003BFF RID: 15359
+	INVALID = -1,
+	// Token: 0x04003C00 RID: 15360
+	BACK_PACK_ITEM,
+	// Token: 0x04003C01 RID: 15361
+	ENHANCE_EQUIP,
+	// Token: 0x04003C02 RID: 15362
+	REFINE
+}
