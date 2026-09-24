@@ -1,77 +1,5 @@
 import socket, struct, threading, random, json, os, time, traceback, math
 
-import builtins
-
-_ORIGINAL_PRINT = builtins.print
-
-def _server_log(*args, **kwargs):
-    try:
-        msg = " ".join(str(x) for x in args)
-    except Exception:
-        msg = str(args)
-
-    # Always keep connection lifecycle messages.
-    if (
-            msg.startswith("[CONNECT]") or
-            msg.startswith("[DISCONNECT]") or
-            "Client connected:" in msg or
-            "Client disconnected:" in msg
-    ):
-        _ORIGINAL_PRINT(msg, **kwargs)
-        return
-
-    # Only anomaly/error diagnostics are allowed through.
-    anomaly = (
-            msg.startswith("[ANOMALY]") or
-            msg.startswith("[ERROR]") or
-            msg.startswith("[!]") or
-            "WRONG/UNEXPECTED" in msg or
-            "TIMEOUT" in msg or
-            "INCONSISTENT" in msg
-    )
-    if anomaly:
-        if msg.startswith("[!]"):
-            msg = "[ANOMALY]" + msg[3:]
-        elif msg.startswith("[ERROR]"):
-            msg = "[ANOMALY]" + msg[7:]
-        elif not msg.startswith("[ANOMALY]"):
-            msg = "[ANOMALY] " + msg
-        _ORIGINAL_PRINT(msg, **kwargs)
-
-builtins.print = _server_log
-
-# ============================================================
-# COMPREHENSIVE ANOMALY TRACKING
-# ============================================================
-ANOMALY_TRACKING_ENABLED = True
-ANOMALY_TIMEOUT = 8.0
-
-def anomaly(state, code, **detail):
-    if not ANOMALY_TRACKING_ENABLED:
-        return
-    extra = " ".join(f"{k}={v!r}" for k,v in detail.items())
-    print(f"[ANOMALY] {code}" + (f" {extra}" if extra else ""), flush=True)
-
-def anomaly_expect(state, key, timeout=ANOMALY_TIMEOUT):
-    if state is not None:
-        state.setdefault("_anomaly_expected", {})[key] = time.time() + timeout
-
-def anomaly_seen(state, key):
-    if state is not None:
-        state.setdefault("_anomaly_seen", set()).add(key)
-        state.setdefault("_anomaly_expected", {}).pop(key, None)
-
-def anomaly_check_missing(state):
-    if state is None:
-        return
-    now = time.time()
-    for key, deadline in list(state.get("_anomaly_expected", {}).items()):
-        if now >= deadline:
-            anomaly(state, "MISSING_EXPECTED_EVENT", event=key)
-            state["_anomaly_expected"].pop(key, None)
-
-
-
 PORT = int(os.environ.get("PORT", 15678))
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CHAR_DB = os.path.join(SCRIPT_DIR, "characters_final.json")
@@ -85,236 +13,6 @@ NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 DEAD_NPC_SET = set() # duplicate death/reward prevention set
 ONLINE_CHAR_MAP = {} # char_id -> send_rpc_push
-
-def validate_npc_data(nid, inst_id=None, hp=None, damage=None):
-    cfg = NPC_CONFIG.get(str(nid))
-    if cfg is None:
-        anomaly(None, "NPC_CONFIG_MISSING", npc_id=nid, inst_id=inst_id)
-        return False
-    if hp is not None and (not isinstance(hp,(int,float)) or hp < 0):
-        anomaly(None, "NPC_HP_INVALID", npc_id=nid, inst_id=inst_id, hp=hp)
-    if damage is not None and (not isinstance(damage,(int,float)) or damage < 0):
-        anomaly(None, "NPC_DAMAGE_INVALID", npc_id=nid, inst_id=inst_id, damage=damage)
-    for field in ("level","atk_coe","hp_coe","def_coe"):
-        if field not in cfg:
-            anomaly(None, "NPC_VALUE_MISSING", npc_id=nid, field=field)
-    return True
-
-def validate_player_state(ch):
-    if not isinstance(ch,dict):
-        anomaly(None,"PLAYER_STATE_MISSING")
-        return
-    for field in ("id","level","exp","cash","gold","hp","max_hp","map_id","pos"):
-        if field not in ch:
-            anomaly(None,"PLAYER_VALUE_MISSING",field=field,player_id=ch.get("id"))
-    if ch.get("level",1) < 1:
-        anomaly(None,"PLAYER_LEVEL_INVALID",value=ch.get("level"))
-    if ch.get("hp",0) < 0 or ch.get("max_hp",0) < 0:
-        anomaly(None,"PLAYER_HP_INVALID",hp=ch.get("hp"),max_hp=ch.get("max_hp"))
-
-def validate_inventory(ch):
-    if isinstance(ch,dict) and ch.get("inventory") is None:
-        anomaly(None,"INVENTORY_MISSING",player_id=ch.get("id"))
-
-def validate_missions(ch):
-    # Mission state is maintained by the mission subsystem, not required as a character field.
-    return
-
-
-# ============================================================
-# PROTOCOL FLOW DEBUGGER
-# Logs only protocol anomalies/timeouts around character-pick
-# and map-entry flow. It does not alter gameplay responses.
-# ============================================================
-PROTOCOL_DEBUG_TIMEOUT = 5.0
-
-def protocol_debug_new_state():
-    return {
-        "pending": set(),
-        "pending_since": {},
-        "timers": {},
-        "stage": "login",
-        "last_success": None,
-    }
-
-def protocol_debug_cancel_timer(state, tag):
-    timer = state["timers"].pop(tag, None)
-    if timer:
-        try:
-            timer.cancel()
-        except Exception:
-            pass
-
-def protocol_debug_timeout(state, tag, direction, stage):
-    if tag not in state["pending"]:
-        return
-    elapsed = time.time() - state["pending_since"].get(tag, time.time())
-    print(
-        f"[ANOMALY] PROTOCOL_TIMEOUT {direction} TAG={tag} "
-        f"stage={stage} waited={elapsed:.1f}s "
-        f"last_success={state.get('last_success')}",
-        flush=True
-    )
-
-def protocol_debug_expect(state, tag, direction, stage):
-    state["pending"].add(tag)
-    state["pending_since"][tag] = time.time()
-    protocol_debug_cancel_timer(state, tag)
-    timer = threading.Timer(
-        PROTOCOL_DEBUG_TIMEOUT,
-        protocol_debug_timeout,
-        args=(state, tag, direction, stage)
-    )
-    timer.daemon = True
-    state["timers"][tag] = timer
-    timer.start()
-
-def protocol_debug_mark(state, tag, direction):
-    if tag not in state["pending"]:
-        return
-    state["pending"].discard(tag)
-    state["pending_since"].pop(tag, None)
-    protocol_debug_cancel_timer(state, tag)
-    state["last_success"] = f"{direction} TAG={tag}"
-
-def protocol_debug_rx(state, tag):
-    # TAG 105 = character_pick. The following initial gameplay pushes
-    # are expected before the map transition.
-    if tag == 105:
-        state["stage"] = "character_pick"
-        state["last_success"] = "RX TAG=105"
-        for required in (614, 611, 540, 519):
-            protocol_debug_expect(state, required, "TX", "character_pick")
-        return
-
-    if tag == 100:
-        protocol_debug_mark(state, 100, "RX")
-        if state["stage"] == "map_enter":
-            state["stage"] = "map_ready"
-        return
-
-    # If a packet arrives while required pushes are still missing, show the
-    # mismatch. This is diagnostic only; it never blocks the packet.
-    if state["pending"]:
-        expected = ",".join(str(x) for x in sorted(state["pending"]))
-        print(
-            f"[ANOMALY] PROTOCOL_WRONG/UNEXPECTED RX TAG={tag} "
-            f"pending={expected} stage={state['stage']}",
-            flush=True
-        )
-
-def protocol_debug_tx(state, tag):
-    if tag in state["pending"]:
-        protocol_debug_mark(state, tag, "TX")
-
-    if tag == 503:
-        state["stage"] = "map_enter"
-        protocol_debug_expect(state, 504, "TX", "enter_map")
-        protocol_debug_expect(state, 100, "RX", "enter_map")
-        return
-
-    if tag == 504:
-        protocol_debug_mark(state, 504, "TX")
-
-
-# ============================================================
-# UNIVERSAL TRUTH / CONSISTENCY AUDIT
-# Records every RX/TX protocol event and compares declared
-# values against the authoritative server-side state when a
-# semantic mapping is registered. Unknown mappings are logged
-# as UNKNOWN instead of being falsely called valid/fake.
-# ============================================================
-TRUTH_AUDIT_ENABLED = True
-TRUTH_AUDIT_MAX_EVENTS = 500
-
-def truth_audit_new_state():
-    return {
-        "events": [],
-        "claims": [],
-        "semantic": {},
-        "last_state": None,
-    }
-
-def truth_audit_trim(state):
-    if not state:
-        return
-    for key in ("events", "claims"):
-        if len(state.get(key, [])) > TRUTH_AUDIT_MAX_EVENTS:
-            del state[key][:-TRUTH_AUDIT_MAX_EVENTS]
-
-def truth_audit_event(state, direction, kind, tag=None, detail=None):
-    if not TRUTH_AUDIT_ENABLED or state is None:
-        return
-    item = {
-        "ts": round(time.time(), 3),
-        "direction": direction,
-        "kind": kind,
-        "tag": tag,
-        "detail": detail if detail is not None else {}
-    }
-    state.setdefault("events", []).append(item)
-    truth_audit_trim(state)
-    print(
-        f"[TRUTH AUDIT] {direction} {kind}"
-        f"{' TAG='+str(tag) if tag is not None else ''}"
-        f" {detail if detail is not None else ''}",
-        flush=True
-    )
-
-def truth_audit_state_snapshot(picked_char):
-    if not isinstance(picked_char, dict):
-        return None
-    # Keep a stable, JSON-safe snapshot of the authoritative server state.
-    try:
-        return json.loads(json.dumps(picked_char, sort_keys=True, default=str))
-    except Exception:
-        return dict(picked_char)
-
-def truth_audit_compare(state, tag, claim_name, claimed, actual, source="server"):
-    if not TRUTH_AUDIT_ENABLED or state is None:
-        return
-    result = "UNKNOWN"
-    if actual is not None:
-        result = "VALID" if claimed == actual else "INCONSISTENT"
-    item = {
-        "ts": round(time.time(), 3),
-        "tag": tag,
-        "claim": claim_name,
-        "claimed": claimed,
-        "actual": actual,
-        "source": source,
-        "result": result,
-    }
-    state.setdefault("claims", []).append(item)
-    truth_audit_trim(state)
-    if result != "VALID":
-        print(
-            f"[TRUTH AUDIT] {result} TAG={tag} "
-            f"{claim_name}: claimed={claimed!r} actual={actual!r}",
-            flush=True
-        )
-
-def truth_audit_register(state, tag, name, claimed, actual):
-    """Register a semantic claim. Use this at the point a response is built."""
-    truth_audit_compare(state, tag, name, claimed, actual)
-
-def truth_audit_rx(state, tag, body):
-    if not TRUTH_AUDIT_ENABLED or state is None:
-        return
-    truth_audit_event(
-        state, "RX", "REQUEST", tag,
-        {"field_count": len(body) if isinstance(body, dict) else None}
-    )
-
-def truth_audit_tx(state, tag, data):
-    if not TRUTH_AUDIT_ENABLED or state is None:
-        return
-    truth_audit_event(
-        state, "TX", "RESPONSE",
-        tag,
-        {"payload_size": len(data) if data is not None else 0}
-    )
-
 
 # Load Mission Data
 missions_data = {}
@@ -682,37 +380,7 @@ try:
                         'function': int(parts[13]) if len(parts) > 13 and parts[13].isdigit() else 0
                     }
         print(f"[ITEM CONFIG LOADED] items={len(ITEM_CONFIG)}")
-
-    EQUIP_MODEL_CONFIG = {}
-    EQUIP_STATS_CONFIG = {}
-    equip_data_path = os.path.join(text_asset_root, "EquipData")
-    if os.path.exists(equip_data_path):
-        with open(equip_data_path, "r", encoding='utf-8') as f:
-            for line in f:
-                parts = line.strip().split(',')
-                if len(parts) > 16 and parts[0] == '*' and parts[1].isdigit():
-                    EQUIP_MODEL_CONFIG[parts[1]] = parts[16]
-                    s1 = int(parts[8]) if parts[8].isdigit() else 0
-                    v1 = int(parts[9]) if parts[9].isdigit() else 0
-                    s2 = int(parts[10]) if parts[10].isdigit() else 0
-                    v2 = int(parts[11]) if parts[11].isdigit() else 0
-                    EQUIP_STATS_CONFIG[parts[1]] = {'s1': s1, 'v1': v1, 's2': s2, 'v2': v2}
-        print(f"[EQUIP MODEL CONFIG LOADED] count={len(EQUIP_MODEL_CONFIG)}")
-
-    BADGE_STATS_CONFIG = {}
-    badge_data_path = os.path.join(text_asset_root, "BadgeData")
-    if os.path.exists(badge_data_path):
-        with open(badge_data_path, "r", encoding='utf-8') as f:
-            for line in f:
-                parts = line.strip().split(',')
-                if len(parts) > 7 and parts[0] == '*' and parts[1].isdigit():
-                    s1 = int(parts[3]) if parts[3].isdigit() else 0
-                    v1 = int(parts[4]) if parts[4].isdigit() else 0
-                    s2 = int(parts[5]) if parts[5].isdigit() else 0
-                    v2 = int(parts[6]) if parts[6].isdigit() else 0
-                    BADGE_STATS_CONFIG[parts[1]] = {'s1': s1, 'v1': v1, 's2': s2, 'v2': v2}
-        print(f"[BADGE STATS CONFIG LOADED] count={len(BADGE_STATS_CONFIG)}")
-except Exception as _exc: print(f"[ANOMALY] CONFIG_LOAD_EXCEPTION: {_exc}")
+except: traceback.print_exc()
 
 BAK_DB = CHAR_DB + ".bak"
 TMP_DB = CHAR_DB + ".tmp"
@@ -940,29 +608,17 @@ def decode_sproto_list(data):
         ptr += 4 + l
     return res
 
-def get_visual(name, prof, mount_id='', mount_color='', mount_state=0, is_show_fashion=False, head_id=None, body_id=None, leg_id=None, weapon_id=None, f_head_id=None, f_body_id=None, f_leg_id=None, f_weapon_id=None):
+def get_visual(name, prof, mount_id='', mount_color='', mount_state=0, is_show_fashion=False):
     m = {0:{"m":"100","h":"XD_A_T","b":"XD_A_S","l":"XD_A_X","w":"XD_A_WQ"},
          1:{"m":"104","h":"QJ_A_T","b":"QJ_A_S","l":"QJ_A_X","w":"QJ_A_WQ"},
          2:{"m":"105","h":"NQS_A_T","b":"NQS_A_S","l":"NQS_A_X","w":"NQS_A_WQ"}}
     v = m.get(prof, m[1])
     show_type = 1 if is_show_fashion else 0
-    h_id = head_id or v["h"]
-    b_id = body_id or v["b"]
-    l_id = leg_id or v["l"]
-    w_id = weapon_id or v["w"]
-    fh_id = f_head_id or h_id
-    fb_id = f_body_id or b_id
-    fl_id = f_leg_id or l_id
-    fw_id = f_weapon_id or w_id
-
-    fields = [
-        (0, name), (1, v["m"]), (2, h_id), (3, b_id),
-        (4, l_id), (5, w_id), (6, fh_id), (7, fb_id),
-        (8, fl_id), (9, fw_id), (10, show_type)
-    ]
+    fields = [(0, name), (1, v["m"]), (2, v["h"]), (3, v["b"]),
+              (4, v["l"]), (5, v["w"]), (10, show_type)]
     if mount_id:
-        fields.extend([(11, str(mount_id)), (12, int(mount_state)),
-                       (13, str(mount_color or ''))])
+        fields.extend([(12, str(mount_id)), (13, int(mount_state)),
+                       (14, str(mount_color or ''))])
     return encode_sproto(fields)
 
 def get_equipped_mount(c):
@@ -981,40 +637,10 @@ def get_equipped_mount(c):
     return mount_id, color, 1 if c.get('mount_riding', False) else 0
 
 def build_main_player_visual(c):
-    prof = c.get('prof', 0)
-    default_m = {0:{"m":"100","h":"XD_A_T","b":"XD_A_S","l":"XD_A_X","w":"XD_A_WQ"},
-                 1:{"m":"104","h":"QJ_A_T","b":"QJ_A_S","l":"QJ_A_X","w":"QJ_A_WQ"},
-                 2:{"m":"105","h":"NQS_A_T","b":"NQS_A_S","l":"NQS_A_X","w":"NQS_A_WQ"}}
-    def_v = default_m.get(prof, default_m[1])
-
-    epack = c.get('equip_pack', {})
-    head_item = epack.get(0) or epack.get('0')
-    body_item = epack.get(1) or epack.get('1')
-    leg_item = epack.get(3) or epack.get('3')
-    weapon_item = epack.get(5) or epack.get('5')
-
-    head_id = EQUIP_MODEL_CONFIG.get(str(head_item.get('itemId')), def_v["h"]) if head_item else def_v["h"]
-    body_id = EQUIP_MODEL_CONFIG.get(str(body_item.get('itemId')), def_v["b"]) if body_item else def_v["b"]
-    leg_id = EQUIP_MODEL_CONFIG.get(str(leg_item.get('itemId')), def_v["l"]) if leg_item else def_v["l"]
-    weapon_id = EQUIP_MODEL_CONFIG.get(str(weapon_item.get('itemId')), def_v["w"]) if weapon_item else def_v["w"]
-
-    fpack = c.get('fashion_equip_pack', {})
-    f_head_item = fpack.get(0) or fpack.get('0')
-    f_body_item = fpack.get(1) or fpack.get('1')
-    f_leg_item = fpack.get(3) or fpack.get('3')
-    f_weapon_item = fpack.get(5) or fpack.get('5')
-
-    f_head_id = EQUIP_MODEL_CONFIG.get(str(f_head_item.get('itemId')), head_id) if f_head_item else head_id
-    f_body_id = EQUIP_MODEL_CONFIG.get(str(f_body_item.get('itemId')), body_id) if f_body_item else body_id
-    f_leg_id = EQUIP_MODEL_CONFIG.get(str(f_leg_item.get('itemId')), leg_id) if f_leg_item else leg_id
-    f_weapon_id = EQUIP_MODEL_CONFIG.get(str(f_weapon_item.get('itemId')), weapon_id) if f_weapon_item else weapon_id
-
     mount_id, mount_color, mount_state = get_equipped_mount(c)
     return get_visual(c.get('name', 'Hero'), c.get('prof', 0),
                       mount_id, mount_color, mount_state,
-                      c.get('is_show_fashion', False),
-                      head_id, body_id, leg_id, weapon_id,
-                      f_head_id, f_body_id, f_leg_id, f_weapon_id)
+                      c.get('is_show_fashion', False))
 
 def sync_main_player_visual(picked_char, send_rpc_push):
     """Push the normal APK AOI visual update after a garage change."""
@@ -1027,7 +653,7 @@ def sync_main_player_visual(picked_char, send_rpc_push):
 def get_boss_char(inst_id, did):
     # Domin 1 boss stats and visual (XD profession)
     # These names are server placeholders, not names supplied by the APK data.
-    name = "Thaddeus Barrow"
+    name = "XK7NQ2VJ"
     prof = 0
 
     # VERIFIED ORIGINAL BOSS DATA: Level 3
@@ -1163,7 +789,7 @@ def get_level_data(level):
     return LEVEL_DATA[min(valid_levels, key=lambda key: abs(key - level))]
 
 def get_character_stats(c):
-    """Calculates all character attributes and Power dynamically based on level, equip_pack, badge_equip_pack, and fashion_equip_pack."""
+    """Calculates all character attributes and Power based on profession and level."""
     lv = c.get('level', 1)
     prof = c.get('prof', 0)
     ld = get_level_data(lv)
@@ -1177,61 +803,19 @@ def get_character_stats(c):
     cri = ld['cri'][prof]
     res = ld['res'][prof]
 
-    def apply_stat_bonus(stat_id, val):
-        nonlocal atk, hp_max, df, hit, eva, cri, res
-        if stat_id == 1001: atk += val
-        elif stat_id == 1002: hp_max += val
-        elif stat_id == 1003: df += val
-        elif stat_id == 1004: hit += val
-        elif stat_id == 1005: eva += val
-        elif stat_id == 1006: cri += val
-        elif stat_id == 1007: res += val
+    # Add Weapon ATK (Level 1 weapon 10001/20001/30001 gives 180 ATK)
+    atk += 180
 
-    # Add Equipped Equipment Bonuses (equip_pack)
-    epack = c.get('equip_pack', {})
-    qual_mults = [1.0, 1.2, 1.5, 1.8, 2.2, 2.8]
-    for item in epack.values():
-        if item and isinstance(item, dict):
-            item_id = str(item.get('itemId', ''))
-            cfg = EQUIP_STATS_CONFIG.get(item_id)
-            if cfg:
-                qual = max(0, min(5, int(item.get('quality', 0))))
-                qual_m = qual_mults[qual]
-                lvl_m = 1.0 + (max(1, int(item.get('level', 1))) - 1) * 0.1
-                parm = item.get('parm', [0]*8)
-                star_m = 1.0 + (int(parm[1]) if len(parm) > 1 else 0) * 0.05
-                tot_m = qual_m * lvl_m * star_m
-
-                if cfg['s1'] > 0: apply_stat_bonus(cfg['s1'], int(cfg['v1'] * tot_m))
-                if cfg['s2'] > 0: apply_stat_bonus(cfg['s2'], int(cfg['v2'] * tot_m))
-
-    # Add Equipped Badge Bonuses (badge_equip_pack)
-    bpack = c.get('badge_equip_pack', {})
-    for item in bpack.values():
-        if item and isinstance(item, dict):
-            item_id = str(item.get('itemId', ''))
-            cfg = BADGE_STATS_CONFIG.get(item_id)
-            if cfg:
-                if cfg['s1'] > 0: apply_stat_bonus(cfg['s1'], cfg['v1'])
-                if cfg['s2'] > 0: apply_stat_bonus(cfg['s2'], cfg['v2'])
-
-    # Add Equipped Fashion Bonuses (fashion_equip_pack)
-    fpack = c.get('fashion_equip_pack', {})
-    for item in fpack.values():
-        if item and isinstance(item, dict):
-            item_id = str(item.get('itemId', ''))
-            cfg = EQUIP_STATS_CONFIG.get(item_id)
-            if cfg:
-                if cfg['s1'] > 0: apply_stat_bonus(cfg['s1'], cfg['v1'])
-                if cfg['s2'] > 0: apply_stat_bonus(cfg['s2'], cfg['v2'])
-
-    # Profession-specific weighting coefficients for Power (ComboValue)
+    # Profession-specific coefficients from GameDefine.cs
+    # XD (0), QJ (1), NQS (2)
     coeffs = [
         {"atk":16, "hp":1, "def":11, "hit":2, "eva":5.5, "cri":10, "res":10},
         {"atk":20, "hp":1, "def":12, "hit":1, "eva":6, "cri":5, "res":10},
         {"atk":7, "hp":1, "def":7.4, "hit":3, "eva":3.7, "cri":15, "res":10}
     ][prof]
 
+    # Calculate Power (ComboValue) using the real weighting system found in client coefficients
+    # Multiplied by 3.0 to match original gameplay scaling (approx 60k for starter)
     raw_power = (atk * coeffs['atk'] + hp_max * coeffs['hp'] + df * coeffs['def'] +
                  hit * coeffs['hit'] + eva * coeffs['eva'] + cri * coeffs['cri'] + res * coeffs['res'])
     power = int(raw_power * 3.0)
@@ -1302,7 +886,7 @@ def get_full_char(c):
     char_level = int(stats['lv'])
     skill_levels = c.get('skill_levels', {})
     skills_map = build_skills_map(c.get('prof', 0), char_level, skill_levels)
-
+    
     # Tag 9: equip (Dictionary<long, gameitem>)
     equip_map = {}
     epack = c.get('equip_pack', {})
@@ -1337,7 +921,7 @@ def get_full_char(c):
                 if encoded:
                     fashion_equip_map[int(item.get('indexId', slot))] = encoded
 
-    download_state = 2 if c.get('download_complete', False) else 1
+    download_state = 2 if c.get('download_complete') else 1
     potion_idx = int(c.get('potion_index', 0))
     return encode_sproto([
         (0, char_id),
@@ -2238,7 +1822,7 @@ def add_to_inventory(picked_char, item_id, amount):
 
     cfg = ITEM_CONFIG.get(item_id, {})
     itype = cfg.get('type', 0)
-
+    
     if itype == 2 or itype == 3 or itype == 4:
         ckey = 'equip_backpack'
     elif itype in (15, 16):
@@ -2432,7 +2016,7 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None)
     if exp_gained > 0:
         picked_char['exp'] = picked_char.get('exp', 0) + exp_gained
         while True:
-                lv = picked_char.get('level', 1)
+            lv = picked_char.get('level', 1)
             rd = LEVEL_DATA.get(lv)
             if rd and picked_char['exp'] >= rd['exp']:
                 picked_char['exp'] -= rd['exp']
@@ -2509,6 +2093,7 @@ def give_mission_rewards(picked_char, mid):
         # that UI cover the SimpleRewardRoot popup.
         return added_exp, added_cash, granted_items, popup_items
     except:
+        traceback.print_exc()
         return 0, 0, [], []
 
 def accept_mission_logic(picked_char, mid):
@@ -2766,9 +2351,6 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         data = encode_sproto([(0, target_map_id), (1, 0), (2, 1)])
         pf_p = sproto_pack(ph_p + data)
         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
-        debug_state = getattr(send_rpc_push, "protocol_debug", None)
-        if debug_state is not None:
-            protocol_debug_tx(debug_state, 503)
         print(f"[M1003 DEBUG] TX 503 map_id={target_map_id}")
         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
         print(f"[MAP ENTER SEND] map_id={target_map_id} scene={scene_name} pos={picked_char['pos']}")
@@ -2797,6 +2379,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
 
     except Exception:
         print("[!] FAILED TO SEND MAP ENTER TRANSITION")
+        traceback.print_exc()
     print("[DEBUG] AFTER MAP ENTER")
 
 def is_skill_locked(sid, level, prof):
@@ -2839,10 +2422,10 @@ def serve_resource_http(conn, initial_data):
             return
         size = os.path.getsize(local_path)
         headers = (
-                b"HTTP/1.1 200 OK\r\n"
-                + b"Content-Length: " + str(size).encode("ascii") + b"\r\n"
-                + b"Content-Type: application/octet-stream\r\n"
-                + b"Connection: close\r\n\r\n"
+            b"HTTP/1.1 200 OK\r\n"
+            + b"Content-Length: " + str(size).encode("ascii") + b"\r\n"
+            + b"Content-Type: application/octet-stream\r\n"
+            + b"Connection: close\r\n\r\n"
         )
         conn.sendall(headers)
         if parts[0] == "GET":
@@ -2856,32 +2439,17 @@ def serve_resource_http(conn, initial_data):
     except Exception as exc:
         print(f"[HTTP 9555] failed: {exc}")
     finally:
-        if picked_char:
-            validate_player_state(picked_char)
-            validate_inventory(picked_char)
-            validate_missions(picked_char)
-        try:
-            for _timer in protocol_debug.get("timers", {}).values():
-                try: _timer.cancel()
-                except Exception: pass
-            protocol_debug.get("timers", {}).clear()
-        except Exception:
-            pass
         try:
             conn.close()
         except Exception:
             pass
 
 def client_handler(conn, addr):
-    print(f"[CONNECT] {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
-    truth_audit = truth_audit_new_state()
-    protocol_debug = protocol_debug_new_state()
+    print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
     global server_session_counter
     send_lock = threading.Lock()
 
     def send_rpc_push(tag, data):
-        protocol_debug_tx(protocol_debug, tag)
-        truth_audit_tx(truth_audit, tag, data)
         try:
             ph_p = encode_sproto([(0, tag)])
             pf_p = sproto_pack(ph_p + data)
@@ -2892,8 +2460,7 @@ def client_handler(conn, addr):
             print(f"[TX] PUSH TAG={tag} SIZE={len(data)}")
         except Exception:
             print(f"[!] FAILED TO SEND PUSH TAG={tag}")
-
-    send_rpc_push.protocol_debug = protocol_debug
+            traceback.print_exc()
 
     def schedule_domin_return(restore_hp=False):
         """Return after the Capture mission's APK-localized five-second exit notice."""
@@ -2991,12 +2558,9 @@ def client_handler(conn, addr):
 
             raw = sproto_unpack(data); pkg = decode_sproto(raw, 0)
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
-            protocol_debug_rx(protocol_debug, msg)
             if msg in (100, 105, 115, 116, 117, 121, 122, 129, 167, 168, 170, 171, 172, 199, 223, 224, 303) or (picked_char and picked_char.get('map_ready_done')):
                 print(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
-            truth_audit_rx(truth_audit, msg, body)
-            truth_audit["last_state"] = truth_audit_state_snapshot(picked_char)
 
             if msg == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
@@ -3037,20 +2601,16 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 105:
+            elif msg == 105: # character_pick
                 char_id = get_val_int(body, 0)
                 picked_char = next((c for c in get_account_chars(all_accounts_chars, cur_areaId, acc_id) if c['id'] == char_id), None)
                 resp = encode_sproto([]) if picked_char else encode_sproto([(0, 1)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
-                    validate_player_state(picked_char)
-                    validate_inventory(picked_char)
-                    validate_missions(picked_char)
                     ONLINE_CHAR_MAP[picked_char['id']] = send_rpc_push
                     picked_char['last_played'] = int(time.time())
                     print(f"[CHARACTER PICK] id={picked_char['id']} level={picked_char.get('level')}")
-                    truth_audit_event(truth_audit, "STATE", "CHARACTER_PICKED", msg, {"char_id": picked_char.get("id"), "level": picked_char.get("level")})
                     init_character_fields(picked_char)
                     # Initial Mission Assignment for new characters
                     has_active_main = False
@@ -3135,6 +2695,7 @@ def client_handler(conn, addr):
 
                     except Exception:
                         print("[!] FAILED TO SEND INITIAL MAP ENTER")
+                        traceback.print_exc()
                     print("[DEBUG] AFTER MAP ENTER")
 
             elif msg == 100: # map_ready
@@ -3475,7 +3036,7 @@ def client_handler(conn, addr):
                                 stats = get_character_stats(picked_char)
                                 picked_char['hp'] = stats['hp_max']
                                 sync_char_attrs_rpc(conn, picked_char)
-
+                            
                             item['amount'] -= 1
                             if item['amount'] < 1:
                                 inventory.pop(item_index)
@@ -3494,9 +3055,8 @@ def client_handler(conn, addr):
                     ebp = picked_char.setdefault('equip_backpack', {})
                     epack = picked_char.setdefault('equip_pack', {})
                     item = None
-                    key = index_id if index_id in ebp else str(index_id) if str(index_id) in ebp else None
-                    if key is not None:
-                        item = ebp.pop(key)
+                    if index_id in ebp:
+                        item = ebp.pop(index_id)
                     else:
                         inventory = picked_char.get('inventory', [])
                         item_index = index_id - 10000
@@ -3586,14 +3146,14 @@ def client_handler(conn, addr):
                             item_found = c_dict[target_key]
                             ctype = container_code
                             break
-
+                    
                     if not item_found:
                         inventory = picked_char.get('inventory', [])
                         item_index = index_id - 10000
                         if 0 <= item_index < len(inventory):
                             raw = inventory[item_index]
                             item_found = {'itemId': str(raw['id']), 'stack': raw['amount']}
-
+                    
                     if item_found:
                         item_id = str(item_found.get('itemId', ''))
                         item_cfg = ITEM_CONFIG.get(item_id, {})
@@ -3606,7 +3166,7 @@ def client_handler(conn, addr):
                                 send_update_item_push(send_rpc_push, ctype, index_id, None)
                             else:
                                 send_update_item_push(send_rpc_push, ctype, index_id, item_found)
-
+                        
                         inv = picked_char.get('inventory', [])
                         for inv_item in list(inv):
                             if str(inv_item.get('id')) == item_id:
@@ -3614,7 +3174,7 @@ def client_handler(conn, addr):
                                 if inv_item['amount'] <= 0:
                                     inv.remove(inv_item)
                                 break
-
+                        
                         picked_char['cash'] = picked_char.get('cash', 0) + earned_cash
                         save_chars(all_accounts_chars)
                         sync_char_attrs_rpc(conn, picked_char)
@@ -3648,14 +3208,14 @@ def client_handler(conn, addr):
                             item_found = c_dict[target_key]
                             ctype = container_code
                             break
-
+                    
                     if not item_found:
                         inventory = picked_char.get('inventory', [])
                         item_index = index_id - 10000
                         if 0 <= item_index < len(inventory):
                             raw = inventory[item_index]
                             item_found = {'itemId': str(raw['id']), 'stack': raw['amount']}
-
+                    
                     if item_found:
                         box_id = str(item_found.get('itemId', ''))
                         count = min(count, item_found.get('stack', 1))
@@ -3666,11 +3226,11 @@ def client_handler(conn, addr):
                                 send_update_item_push(send_rpc_push, ctype, index_id, None)
                             else:
                                 send_update_item_push(send_rpc_push, ctype, index_id, item_found)
-
+                        
                         reward_cash = 20000 * count
                         reward_exp = 5000 * count
                         grant_item_rewards(picked_char, [("1001", 0, reward_cash), ("2001", 0, reward_exp)], conn, send_rpc_push)
-
+                        
                         reward_items = [
                             encode_sproto([(0, "1001"), (1, reward_cash)]),
                             encode_sproto([(0, "2001"), (1, reward_exp)])
@@ -3678,77 +3238,6 @@ def client_handler(conn, addr):
                         save_chars(all_accounts_chars)
                         send_rpc_push(617, encode_sproto([(0, reward_items)]))
                         print(f"[BAG OPEN BOX] Opened box {box_id} index={index_id} count={count} cash={reward_cash} exp={reward_exp}")
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-            elif msg == 140: # put_item_storagepack
-                index_id = get_val_int(body, 0)
-                if picked_char:
-                    ebp = picked_char.setdefault('equip_backpack', {})
-                    ibp = picked_char.setdefault('item_backpack', {})
-                    storage = picked_char.setdefault('storage_pack', {})
-                    item = ebp.pop(index_id, None) or ibp.pop(index_id, None)
-                    if item:
-                        s_idx = len(storage) + 10000
-                        item['indexId'] = s_idx
-                        storage[s_idx] = item
-                        save_chars(all_accounts_chars)
-                        send_update_item_push(send_rpc_push, 0, index_id, None)
-                        send_update_item_push(send_rpc_push, 3, s_idx, item)
-                        print(f"==================================================")
-                        print(f"[BAG / BANK ACTION] DEPOSITED ITEM TO STORAGE")
-                        print(f"  • Item ID           : {item.get('itemId')}")
-                        print(f"  • Storage Index     : {s_idx}")
-                        print(f"==================================================")
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-            elif msg == 141: # take_item_storagepack
-                index_id = get_val_int(body, 0)
-                if picked_char:
-                    storage = picked_char.setdefault('storage_pack', {})
-                    if index_id in storage:
-                        item = storage.pop(index_id)
-                        item_id = str(item.get('itemId', ''))
-                        add_to_inventory(picked_char, item_id, item.get('stack', 1))
-                        save_chars(all_accounts_chars)
-                        send_update_item_push(send_rpc_push, 3, index_id, None)
-                        send_rpc_push(611, sync_item_pack_rpc(picked_char))
-                        send_rpc_push(592, sync_backpack_item_rpc(picked_char))
-                        print(f"==================================================")
-                        print(f"[BAG / BANK ACTION] WITHDREW ITEM FROM STORAGE")
-                        print(f"  • Item ID           : {item_id}")
-                        print(f"==================================================")
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-            elif msg == 143: # ask_shop_list
-                stype = get_val_int(body, 0)
-                send_rpc_push(574, encode_sproto([(0, {}), (1, stype)]))
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-            elif msg == 144: # buy_shop_item
-                shop_item_id = field_text(body, 0)
-                count = get_val_int(body, 1, 1)
-                stype = get_val_int(body, 2, 0)
-                if picked_char:
-                    add_to_inventory(picked_char, shop_item_id, count)
-                    save_chars(all_accounts_chars)
-                    send_rpc_push(611, sync_item_pack_rpc(picked_char))
-                    send_rpc_push(592, sync_backpack_item_rpc(picked_char))
-                    s_item = encode_sproto([(0, shop_item_id), (1, shop_item_id)])
-                    send_rpc_push(577, encode_sproto([(0, 1), (1, s_item), (2, stype), (3, count)]))
-                    print(f"==================================================")
-                    print(f"[BAG / SHOP ACTION] BOUGHT SHOP ITEM")
-                    print(f"  • Item ID           : {shop_item_id}")
-                    print(f"  • Count Bought      : {count}")
-                    print(f"  • Shop Type         : {stype}")
-                    print(f"==================================================")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4001,7 +3490,7 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 225: # request_daily_active
-                send_rpc_push(649, encode_sproto([(0, {}), (1, {}), (2, 0)]))
+                send_rpc_push(619, encode_sproto([(0, 0), (1, 0), (2, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4013,25 +3502,25 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 295: # request_sign_30_day_info
-                send_rpc_push(640, encode_sproto([(0, False), (1, False)]))
+                send_rpc_push(668, encode_sproto([(0, 1), (1, 0)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 288: # request_sign_week_info
-                send_rpc_push(641, encode_sproto([(0, False), (1, 1), (2, False), (3, False)]))
+                send_rpc_push(661, encode_sproto([(0, 1), (1, 0)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 210: # request_first_buy
-                send_rpc_push(647, encode_sproto([(0, 0)]))
+                send_rpc_push(582, encode_sproto([(0, 0)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 202: # request_daily_buy
-                send_rpc_push(646, encode_sproto([(0, {})]))
+                send_rpc_push(575, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4050,7 +3539,7 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 242: # request_activity_info
-                send_rpc_push(619, encode_sproto([(0, {})]))
+                send_rpc_push(633, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4062,7 +3551,7 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 257: # request_retrieve_info
-                send_rpc_push(658, encode_sproto([(0, {})]))
+                send_rpc_push(648, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4080,25 +3569,25 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 278: # request_invest_pack
-                send_rpc_push(645, encode_sproto([(0, {})]))
+                send_rpc_push(662, encode_sproto([(0, 0)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 258: # request_level_pack
-                send_rpc_push(644, encode_sproto([(0, {})]))
+                send_rpc_push(649, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 253: # request_big_pack
-                send_rpc_push(648, encode_sproto([(0, {})]))
+                send_rpc_push(644, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 299: # request_special_big_pack
-                send_rpc_push(656, encode_sproto([(0, {})]))
+                send_rpc_push(671, encode_sproto([(0, {})]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4200,7 +3689,7 @@ def client_handler(conn, addr):
                         4: 'badge_backpack',
                         6: 'fashion_backpack'
                     }.get(container_type, 'equip_backpack')
-
+                    
                     c_map = picked_char.setdefault(container_key, {})
                     if index_id in c_map:
                         item = c_map[index_id]
@@ -5053,10 +4542,8 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 270: # download_finish
-                anomaly_seen(truth_audit, "download_finish_270")
                 if picked_char and not picked_char.get('download_complete'):
                     picked_char['download_complete'] = True
-                    truth_audit_register(truth_audit, 270, "download_complete", 1, int(bool(picked_char.get("download_complete"))))
                     # Expansion Rewards: Mount 9301 (Chevrolet voucher), 9011 (10), 9001 (20), 5026 (5)
                     add_to_inventory(picked_char, "9301", 1)
                     add_to_inventory(picked_char, "9011", 10)
@@ -5079,10 +4566,8 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 306: # tutorial_finish
-                anomaly_seen(truth_audit, "tutorial_finish_306")
                 if picked_char:
                     picked_char['tutorial'] = 1
-                    truth_audit_register(truth_audit, 592, "tutorial", 1, int(picked_char.get("tutorial", 0)))
                     save_chars(all_accounts_chars)
                     send_rpc_push(592, sync_common_data_rpc(picked_char))
                 print("[TUTORIAL] tutorial_finish acknowledged and persisted")
@@ -5200,6 +4685,7 @@ def client_handler(conn, addr):
 
     except Exception as exc:
         print(f"[!] Client handler exception for {addr}: {exc}")
+        traceback.print_exc()
     finally:
         try:
             if picked_char and ONLINE_CHAR_MAP.get(picked_char['id']) == send_rpc_push:
@@ -5210,14 +4696,14 @@ def client_handler(conn, addr):
             conn.close()
         except Exception:
             pass
-        print(f"[DISCONNECT] {addr}")
+        print(f"[-] Client disconnected: {addr}")
 
 def start_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("0.0.0.0", PORT))
     server.listen(20)
-
+    print(f"GAME SERVER 9555 READY ON PORT {PORT}")
     while True:
         try:
             cl, ad = server.accept()
