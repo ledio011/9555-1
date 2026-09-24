@@ -7,6 +7,7 @@ import os
 import time
 import traceback
 import math
+from pathlib import Path
 
 from schema_engine import (
     encode_sproto,
@@ -16,7 +17,7 @@ from schema_engine import (
 )
 
 # ============================================================
-# SERVER CONFIG & RAM PRELOAD
+# SERVER CONFIG & DECOMPILED RAM PRELOAD
 # ============================================================
 
 PORT = int(os.environ.get("PORT", 15678))
@@ -32,6 +33,65 @@ NPC_HP_MAP = {}
 NPC_SPAWNED_MAPS = {}
 DEAD_NPC_SET = set()
 ONLINE_CHAR_MAP = {}
+
+
+def scan_and_read_decompiled_folder():
+    """
+    Scans and reads every file inside Downloads/Atg_Auto/Decompiled or Decompiled/
+    and prints live progress: Reading X/Y files...
+    """
+    potential_paths = [
+        os.path.join(SCRIPT_DIR, "Atg_Auto", "Decompiled"),
+        os.path.join(SCRIPT_DIR, "Decompiled"),
+        os.path.expanduser("~/Downloads/Atg_Auto/Decompiled"),
+        "C:/Users/User/Downloads/Atg_Auto/Decompiled",
+        "C:/Users/User/Downloads/dec&normal/Decompiled"
+    ]
+
+    decompiled_dir = None
+    for p in potential_paths:
+        if os.path.exists(p) and os.path.isdir(p):
+            decompiled_dir = p
+            break
+
+    if not decompiled_dir:
+        print("[RAM PRELOAD] Decompiled directory not found. Skipping file scan.", flush=True)
+        return
+
+    all_files = []
+    for root, dirs, files in os.walk(decompiled_dir):
+        for file in files:
+            all_files.append(os.path.join(root, file))
+
+    total_files = len(all_files)
+    print("=" * 60, flush=True)
+    print(f"[RAM PRELOAD START] Scanning folder: {decompiled_dir}", flush=True)
+    print(f"[RAM PRELOAD] Total files found: {total_files}", flush=True)
+    print("=" * 60, flush=True)
+
+    RAM_FILE_CACHE = {}
+
+    for x, file_path in enumerate(all_files, start=1):
+        rel_path = os.path.relpath(file_path, decompiled_dir)
+
+        # Print Reading X/Y files progress
+        if x % 50 == 0 or x == total_files or x <= 10:
+            print(f"Reading {x}/{total_files} files: {rel_path}", flush=True)
+
+        try:
+            with open(file_path, "rb") as f:
+                content = f.read()
+                RAM_FILE_CACHE[rel_path] = content
+        except Exception as e:
+            print(f"[!] Error reading file {rel_path}: {e}", flush=True)
+
+    print("=" * 60, flush=True)
+    print(f"[DECOMPILED READ COMPLETE] Read {len(RAM_FILE_CACHE)}/{total_files} files into RAM!", flush=True)
+    print("=" * 60, flush=True)
+
+
+# Run full decompiled RAM preload on server startup
+scan_and_read_decompiled_folder()
 
 # Initialize Schema Engine for Auto-Responses
 schema_engine = SchemaResponseEngine(index_dir="apk_index")
@@ -55,10 +115,6 @@ COPY_SCENE_CONFIG = {}
 SHOW_REWARD_CONFIG = {}
 STREET_RACE_REWARD_BY_LEVEL = {}
 ITEM_CONFIG = {}
-EQUIP_MODEL_CONFIG = {}
-EQUIP_STATS_CONFIG = {}
-BADGE_STATS_CONFIG = {}
-DAILY_EXP_CONFIG = {}
 
 
 def load_game_assets():
@@ -66,8 +122,7 @@ def load_game_assets():
     global NPC_CONFIG, MAP_CONFIG, MAP_CONNECT_DATA, GUILD_CAPTURE_DATA
     global KILL_TARGET_SPAWNS, TARGET_CAR_SPAWNS, EFF_CONFIG, SKILL_CONFIG
     global MOUNT_CONFIG, COPY_SCENE_CONFIG, SHOW_REWARD_CONFIG
-    global STREET_RACE_REWARD_BY_LEVEL, ITEM_CONFIG, EQUIP_MODEL_CONFIG
-    global EQUIP_STATS_CONFIG, BADGE_STATS_CONFIG, DAILY_EXP_CONFIG
+    global STREET_RACE_REWARD_BY_LEVEL, ITEM_CONFIG
 
     md_path = os.path.join(SCRIPT_DIR, "missions.json")
     rd_path = os.path.join(SCRIPT_DIR, "mission_rewards.json")
@@ -85,40 +140,6 @@ def load_game_assets():
     if not os.path.isdir(text_asset_root):
         text_asset_root = os.path.join(SCRIPT_DIR, "assets", "Bundle", "TextAssets")
 
-    # Load EffInfoData
-    eff_path = os.path.join(text_asset_root, "EffInfoData")
-    if os.path.exists(eff_path):
-        with open(eff_path, "r", encoding='utf-8') as f:
-            for line in f:
-                parts = line.strip().split(",")
-                if len(parts) >= 30 and parts[1].isdigit():
-                    eid = parts[1]
-                    adds = {}
-                    for i in [22, 24, 26, 28]:
-                        if i + 1 < len(parts) and parts[i].isdigit():
-                            adds[int(parts[i])] = int(parts[i + 1])
-                    EFF_CONFIG[eid] = {
-                        'dmg_fixed': int(parts[3]) if parts[3].isdigit() else 0,
-                        'dmg_fixed_add': int(parts[4]) if parts[4].isdigit() else 0,
-                        'dmg_multi': int(parts[5]) if parts[5].isdigit() else 0,
-                        'dmg_multi_add': int(parts[6]) if parts[6].isdigit() else 0,
-                        'adds': adds
-                    }
-
-    # Load SkillData
-    skill_path = os.path.join(text_asset_root, "SkillData")
-    if os.path.exists(skill_path):
-        with open(skill_path, "r", encoding='utf-8') as f:
-            for line in f:
-                parts = line.strip().split(",")
-                if len(parts) >= 30 and parts[1].isdigit():
-                    sid = parts[1]
-                    SKILL_CONFIG[sid] = {
-                        'eff0': parts[24],
-                        'eff1': parts[26] if len(parts) > 26 else "",
-                        'eff2': parts[28] if len(parts) > 28 else ""
-                    }
-
     # Load BaseLvData
     lv_path = os.path.join(text_asset_root, "BaseLvData")
     if os.path.exists(lv_path):
@@ -134,17 +155,19 @@ def load_game_assets():
                             'atk': [int(parts[4]), int(parts[11]), int(parts[18])],
                             'hp': [int(parts[5]), int(parts[12]), int(parts[19])],
                             'def': [int(parts[6]), int(parts[13]), int(parts[20])],
-                            'hit': [int(parts[7]), int(parts[14]), int(parts[21])],
-                            'eva': [int(parts[8]), int(parts[15]), int(parts[22])],
-                            'cri': [int(parts[9]), int(parts[16]), int(parts[23])],
-                            'res': [int(parts[10]), int(parts[17]), int(parts[24])],
-                            'exd': [int(parts[25]), int(parts[25]), int(parts[25])],
-                            'exr': [int(parts[26]), int(parts[26]), int(parts[26])],
-                            'crd': [int(parts[27]), int(parts[27]), int(parts[27])],
-                            'crr': [int(parts[28]), int(parts[28]), int(parts[28])],
-                            'defa': int(parts[31]), 'dgea': int(parts[32]), 'resa': int(parts[33]),
-                            'hita': int(parts[34]), 'cria': int(parts[35])
                         }
+
+    # Load ItemData
+    item_path = os.path.join(text_asset_root, "ItemData")
+    if os.path.exists(item_path):
+        with open(item_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(',')
+                if len(parts) > 11 and parts[0] == '*' and parts[1]:
+                    ITEM_CONFIG[parts[1]] = {
+                        'type': int(parts[7]) if parts[7].isdigit() else 0,
+                        'subtype': int(parts[9]) if len(parts) > 9 and parts[9].isdigit() else 0,
+                    }
 
     # Load MapInfoData
     map_info_path = os.path.join(text_asset_root, "MapInfoData")
@@ -158,67 +181,17 @@ def load_game_assets():
                         'name': parts[2],
                         'scene': parts[3],
                         'type': int(parts[4]) if parts[4].isdigit() else 0,
-                        'width': int(parts[6]) if parts[6].isdigit() else 0,
-                        'height': int(parts[7]) if parts[7].isdigit() else 0,
                         'birth': parts[8],
-                        'teleport_pos': parts[10] if len(parts) > 10 else "",
-                        'open_lv': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 0
                     }
 
-    # Load NpcData
-    npc_path = os.path.join(text_asset_root, "NpcData")
-    if os.path.exists(npc_path):
-        with open(npc_path, "r", encoding='utf-8') as f:
-            for line in f:
-                parts = line.strip().split(",")
-                if len(parts) > 60 and parts[1].isdigit():
-                    nid = parts[1]
-                    lvl = int(parts[9]) if parts[9].isdigit() else 1
-                    is_abs = "绝对值" in parts[12]
-                    NPC_CONFIG[nid] = {
-                        'name': parts[2],
-                        'model': parts[4],
-                        'level': lvl,
-                        'is_abs': is_abs,
-                        'skill_group': parts[14] if len(parts) > 14 and parts[14] else '50001',
-                        'atk_coe': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 10000,
-                        'hp_coe': int(parts[27]) if len(parts) > 27 and parts[27].isdigit() else 10000,
-                        'def_coe': int(parts[28]) if len(parts) > 28 and parts[28].isdigit() else 10000,
-                        'hit_coe': int(parts[29]) if len(parts) > 29 and parts[29].isdigit() else 10000,
-                        'eva_coe': int(parts[30]) if len(parts) > 30 and parts[30].isdigit() else 10000,
-                        'cri_coe': int(parts[31]) if len(parts) > 31 and parts[31].isdigit() else 10000,
-                        'res_coe': int(parts[32]) if len(parts) > 32 and parts[32].isdigit() else 10000,
-                        'exd_coe': int(parts[33]) if len(parts) > 33 and parts[33].isdigit() else 10000,
-                        'exr_coe': int(parts[34]) if len(parts) > 34 and parts[34].isdigit() else 10000,
-                        'crd_coe': int(parts[35]) if len(parts) > 35 and parts[35].isdigit() else 10000,
-                        'crr_coe': int(parts[36]) if len(parts) > 36 and parts[36].isdigit() else 10000,
-                        'hp_abs': int(parts[45]) if len(parts) > 45 and parts[45].isdigit() else 0,
-                        'atk_abs': int(parts[44]) if len(parts) > 44 and parts[44].isdigit() else 0,
-                        'def_abs': int(parts[46]) if len(parts) > 46 and parts[46].isdigit() else 0
-                    }
-
-    # Load ItemData
-    item_path = os.path.join(text_asset_root, "ItemData")
-    if os.path.exists(item_path):
-        with open(item_path, "r", encoding='utf-8') as f:
-            for line in f:
-                parts = line.strip().split(',')
-                if len(parts) > 11 and parts[0] == '*' and parts[1]:
-                    ITEM_CONFIG[parts[1]] = {
-                        'type': int(parts[7]) if parts[7].isdigit() else 0,
-                        'subtype': int(parts[9]) if len(parts) > 9 and parts[9].isdigit() else 0,
-                        'function': int(parts[13]) if len(parts) > 13 and parts[13].isdigit() else 0
-                    }
-
-    print(f"[DATA LOADED] Levels={len(LEVEL_DATA)} Items={len(ITEM_CONFIG)} Maps={len(MAP_CONFIG)} Mounts={len(MOUNT_CONFIG)}")
+    print(f"[DATA LOADED] Levels={len(LEVEL_DATA)} Items={len(ITEM_CONFIG)} Maps={len(MAP_CONFIG)}", flush=True)
 
 
-# Load game assets into RAM on server startup
 load_game_assets()
 
 
 # ============================================================
-# DATABASE LOAD & SAVE (CRASH-SAFE DICTIONARY WRAPPER)
+# DATABASE LOAD & SAVE
 # ============================================================
 
 def load_chars():
@@ -233,7 +206,7 @@ def load_chars():
                 elif isinstance(raw, list):
                     data = {"1": {"user_default": raw}}
         except Exception as e:
-            print(f"[WARN] Error loading database: {e}")
+            print(f"[WARN] Error loading database: {e}", flush=True)
     return data
 
 
@@ -253,7 +226,7 @@ def save_chars(data):
                 pass
         os.replace(TMP_DB, CHAR_DB)
     except Exception as e:
-        print(f"[ERROR] save_chars failed: {e}")
+        print(f"[ERROR] save_chars failed: {e}", flush=True)
 
 
 all_accounts_chars = load_chars()
@@ -330,12 +303,30 @@ def get_account_chars(all_chars, area_id, acc_id):
     return []
 
 
+def send_response(conn, msg, session, custom_data=None):
+    if session is None:
+        return
+    frame = schema_engine.create_response_frame(msg, session, custom_data)
+    if frame:
+        conn.sendall(struct.pack(">H", len(frame)) + frame)
+
+
+def build_char_overview(c, idx=0):
+    c_name = c.get('name', 'Hero')
+    c_prof = c.get('prof', 0)
+    c_id = c.get('id', idx + 1)
+    gen = encode_sproto([(0, c_name), (1, c_prof), (2, 1), (3, str(c.get('map_id', '11')))])
+    attr = encode_sproto([(0, c.get('level', 1)), (1, 3000)])
+    v = encode_sproto([(0, c_name), (1, "104"), (2, "QJ_A_T"), (3, "QJ_A_S"), (4, "QJ_A_X"), (5, "QJ_A_WQ")])
+    return encode_sproto([(0, c_id), (1, gen), (2, attr), (3, v), (4, idx), (5, 0)])
+
+
 # ============================================================
 # CLIENT HANDLER THREAD
 # ============================================================
 
 def client_handler(conn, addr):
-    print(f"[+] Connected: {addr}")
+    print(f"[+] Connected: {addr}", flush=True)
     acc_id = "user_default"
     picked_char = None
     cur_areaId = "1"
@@ -345,9 +336,9 @@ def client_handler(conn, addr):
             ph_p = encode_sproto([(0, tag)])
             pf_p = sproto_pack(ph_p + data)
             conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
-            print(f"[TX PUSH] Tag={tag} Size={len(data)}")
+            print(f"[TX PUSH] Tag={tag} Size={len(data)}", flush=True)
         except Exception as e:
-            print(f"[!] Push error tag={tag}: {e}")
+            print(f"[!] Push error tag={tag}: {e}", flush=True)
 
     try:
         initial = conn.recv(4, socket.MSG_PEEK)
@@ -378,30 +369,22 @@ def client_handler(conn, addr):
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2)
             body = decode_sproto(raw, off)
 
-            print(f"[RX] MSG={msg} SESSION={session}")
+            print(f"[RX] MSG={msg} SESSION={session}", flush=True)
 
             # Stateful Game Logic
             if msg == 4:  # Login
                 acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1, "user_default"))
                 sid = get_val_int(body, 5, 1)
                 cur_areaId = str(get_area_id(sid))
-
-                resp = encode_sproto([
-                    (0, 2), (1, "1.012.017"), (2, "205"), (3, 1),
-                    (4, 10000), (12, random.randint(1, 10000))
-                ])
-                if session is not None:
-                    ph = encode_sproto([(1, session)])
-                    pf = sproto_pack(ph + resp)
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+                send_response(conn, msg, session, {
+                    "result": 2, "version": "1.012.017", "res_version": "205",
+                    "enable": 1, "pvp_scale": 10000, "seed": random.randint(1, 10000)
+                })
 
             elif msg == 118:  # request_random_name
                 random_name = f"Hero_{random.randint(100, 999)}"
-                resp = encode_sproto([(0, random_name)])
-                if session is not None:
-                    ph = encode_sproto([(1, session)])
-                    pf = sproto_pack(ph + resp)
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+                send_response(conn, msg, session, {"name": random_name})
+                print(f"[RANDOM NAME] Granted name: {random_name}", flush=True)
 
             elif msg == 104:  # character_create
                 c_data_raw = body.get(0)
@@ -427,47 +410,26 @@ def client_handler(conn, addr):
                 all_accounts_chars[area_key][acc_id].append(nc)
                 save_chars(all_accounts_chars)
 
-                gen = encode_sproto([(0, c_name), (1, c_prof), (2, 1), (3, "11")])
-                attr = encode_sproto([(0, 1), (1, 3000)])
-                v = encode_sproto([(0, c_name), (1, "104"), (2, "QJ_A_T"), (3, "QJ_A_S"), (4, "QJ_A_X"), (5, "QJ_A_WQ")])
-                ov = encode_sproto([(0, cid), (1, gen), (2, attr), (3, v), (4, 0), (5, 0)])
-
-                resp = encode_sproto([(0, ov), (1, 0)])
-                if session is not None:
-                    ph = encode_sproto([(1, session)])
-                    pf = sproto_pack(ph + resp)
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-                print(f"[CHARACTER CREATED] id={cid} name={c_name} prof={c_prof}")
+                ov = build_char_overview(nc, 0)
+                send_response(conn, msg, session, {"character": ov, "errno": 0})
+                print(f"[CHARACTER CREATED] id={cid} name={c_name} prof={c_prof}", flush=True)
 
             elif msg == 103:  # character_list
                 chars = get_account_chars(all_accounts_chars, cur_areaId, acc_id)
-                ov_list = []
-                for i, c in enumerate(chars):
-                    if isinstance(c, dict):
-                        gen = encode_sproto([(0, c.get('name', 'Hero')), (1, c.get('prof', 0)), (2, 1), (3, str(c.get('map_id', '11')))])
-                        attr = encode_sproto([(0, c.get('level', 1)), (1, 3000)])
-                        v = encode_sproto([(0, c.get('name', 'Hero')), (1, "104"), (2, "QJ_A_T"), (3, "QJ_A_S"), (4, "QJ_A_X"), (5, "QJ_A_WQ")])
-                        ov = encode_sproto([(0, c.get('id', i + 1)), (1, gen), (2, attr), (3, v), (4, i), (5, 0)])
-                        ov_list.append(ov)
-                resp = encode_sproto([(0, ov_list)])
-                if session is not None:
-                    ph = encode_sproto([(1, session)])
-                    pf = sproto_pack(ph + resp)
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+                ov_list = [build_char_overview(c, i) for i, c in enumerate(chars) if isinstance(c, dict)]
+                send_response(conn, msg, session, {"character": ov_list})
+                print(f"[CHARACTER LIST] Returned {len(ov_list)} characters.", flush=True)
 
             elif msg == 105:  # character_pick
                 char_id = get_val_int(body, 0)
                 chars = get_account_chars(all_accounts_chars, cur_areaId, acc_id)
                 picked_char = next((c for c in chars if isinstance(c, dict) and c.get('id') == char_id), None)
-                resp = encode_sproto([]) if picked_char else encode_sproto([(0, 1)])
-                if session is not None:
-                    ph = encode_sproto([(1, session)])
-                    pf = sproto_pack(ph + resp)
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+                send_response(conn, msg, session, {"result": 0 if picked_char else 1})
 
                 if picked_char:
                     send_rpc_push(614, encode_sproto([(0, int(time.time())), (2, 0), (4, 10000)]))
                     send_rpc_push(654, encode_sproto([(0, 1)]))
+                    print(f"[CHARACTER PICK] Picked character id={char_id}", flush=True)
 
             elif msg == 101:  # move
                 p_raw = body.get(0)
@@ -475,20 +437,15 @@ def client_handler(conn, addr):
                     pd = decode_sproto(p_raw)
                     picked_char['pos'] = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
                     save_chars(all_accounts_chars)
-                if session is not None:
-                    ph = encode_sproto([(1, session)])
-                    pf = sproto_pack(ph + encode_sproto([(0, p_raw)]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+                send_response(conn, msg, session, {"pos": p_raw})
 
             elif session is not None:
                 # Automatic Sproto Schema Fallback
-                response_frame = schema_engine.create_response_frame(msg, session)
-                if response_frame:
-                    conn.sendall(response_frame)
-                    print(f"[AUTO-RESPONSE] Fulfilled MSG={msg} SESSION={session} via Schema Engine.")
+                send_response(conn, msg, session)
+                print(f"[AUTO-RESPONSE] Fulfilled MSG={msg} SESSION={session} via Schema Engine.", flush=True)
 
     except Exception as e:
-        print(f"[-] Client exception {addr}: {e}")
+        print(f"[-] Client exception {addr}: {e}", flush=True)
         traceback.print_exc()
     finally:
         conn.close()
@@ -499,17 +456,17 @@ def start_server():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind(("0.0.0.0", PORT))
     server.listen(128)
-    print("=" * 60)
-    print(f"GAME SERVER 9555 READY ON PORT {PORT}")
-    print("Zero-lag In-Memory Sproto Engine active!")
-    print("=" * 60)
+    print("=" * 60, flush=True)
+    print(f"GAME SERVER 9555 READY ON PORT {PORT}", flush=True)
+    print("Zero-lag In-Memory Sproto Engine active!", flush=True)
+    print("=" * 60, flush=True)
 
     while True:
         try:
             cl, ad = server.accept()
             threading.Thread(target=client_handler, args=(cl, ad), daemon=True).start()
         except Exception as e:
-            print(f"[!] Accept error: {e}")
+            print(f"[!] Accept error: {e}", flush=True)
 
 
 if __name__ == "__main__":
