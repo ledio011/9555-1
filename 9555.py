@@ -2896,6 +2896,8 @@ def client_handler(conn, addr):
             if msg in (100, 105, 115, 116, 117, 121, 122, 129, 167, 168, 170, 171, 172, 199, 223, 224, 303) or (picked_char and picked_char.get('map_ready_done')):
                 print(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
+            truth_audit_rx(truth_audit, msg, body)
+            truth_audit["last_state"] = truth_audit_state_snapshot(picked_char)
 
             if msg == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
@@ -2937,7 +2939,6 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 105:
-                truth_audit_event(truth_audit, "STATE", "CHARACTER_PICKED", msg, {"char_id": picked_char.get("id") if picked_char else None}) # character_pick
                 char_id = get_val_int(body, 0)
                 picked_char = next((c for c in get_account_chars(all_accounts_chars, cur_areaId, acc_id) if c['id'] == char_id), None)
                 resp = encode_sproto([]) if picked_char else encode_sproto([(0, 1)])
@@ -2947,6 +2948,7 @@ def client_handler(conn, addr):
                     ONLINE_CHAR_MAP[picked_char['id']] = send_rpc_push
                     picked_char['last_played'] = int(time.time())
                     print(f"[CHARACTER PICK] id={picked_char['id']} level={picked_char.get('level')}")
+                    truth_audit_event(truth_audit, "STATE", "CHARACTER_PICKED", msg, {"char_id": picked_char.get("id"), "level": picked_char.get("level")})
                     init_character_fields(picked_char)
                     # Initial Mission Assignment for new characters
                     has_active_main = False
