@@ -5055,6 +5055,7 @@ def client_handler(conn, addr):
                     # request_slot_reward has only uuid(0) and no matching response
                     # protocol registration. Do not send an unrelated ret_spin_slot packet.
                     # The generic request ACK below is the safe completion path.
+                    pass
                 elif msg == 254:
                     day30 = min(30, (int(time.time()) // 86400) % 30 + 1)
                     send_rpc_push(642, encode_sproto([
