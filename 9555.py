@@ -1024,13 +1024,15 @@ def get_full_char(c):
         ])
     attr_oth = encode_sproto(attr_pairs)
 
+    # SprotoType.property has exactly six currency fields, indexed 0..5.
+    # main_player_create_handler feeds these directly to GameMoneyHelper.UpdateMoney().
     prop = encode_sproto([
-        (13, int(c.get('cash', 1000))),
-        (14, int(c.get('gold', 100))),
-        (15, int(c.get('diamonds', 10))),
-        (16, int(c.get('guild_contrib', 0))),
-        (17, int(c.get('honor', 0))),
-        (18, int(c.get('tokens', 0)))
+        (0, int(c.get('cash', 1000))),
+        (1, int(c.get('gold', 100))),
+        (2, int(c.get('diamonds', 10))),
+        (3, int(c.get('guild_contrib', 0))),
+        (4, int(c.get('honor', 0))),
+        (5, int(c.get('tokens', 0)))
     ])
     pos = c.get('pos', [7007, 100, 5033, 0])
     if len(pos) >= 3 and pos[1] <= 0:
@@ -1441,7 +1443,15 @@ def sync_char_attrs_rpc(conn, picked_char):
         (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
     ])
 
-    prop = encode_sproto([(13, picked_char.get('cash', 0))])
+    # character_aoi_attribute.property uses the same property schema (0..5).
+    prop = encode_sproto([
+        (0, int(picked_char.get('cash', 0))),
+        (1, int(picked_char.get('gold', 0))),
+        (2, int(picked_char.get('diamonds', 0))),
+        (3, int(picked_char.get('guild_contrib', 0))),
+        (4, int(picked_char.get('honor', 0))),
+        (5, int(picked_char.get('tokens', 0)))
+    ])
 
     aoi_attr = encode_sproto([
         (0, picked_char['id']), (1, attr_oth), (2, attr_base), (3, attr_all), (5, prop)
