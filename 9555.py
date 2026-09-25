@@ -4998,6 +4998,22 @@ def client_handler(conn, addr):
                     char_id = get_val_int(body, 0, picked_char.get('id', 0) if picked_char else 0)
                     agree = bool(get_val_int(body, 1, 1))
                     send_rpc_push(591, encode_sproto([(0, char_id), (1, agree)]))
+                elif msg == 155:
+                    # change_scene_line is a one-way request (no RPC session).
+                    # The client expects the resulting line state through push 568.
+                    if picked_char:
+                        line_index = max(1, get_val_int(body, 0, picked_char.get('line_index', 1)))
+                        picked_char['line_index'] = line_index
+                        line_count = max(line_index, int(picked_char.get('line_count', 3)))
+                        picked_char['line_count'] = line_count
+                        save_chars(all_accounts_chars)
+                        line_states = picked_char.get('line_states', {})
+                        send_rpc_push(568, encode_sproto([
+                            (0, str(picked_char.get('map_id', '11'))),
+                            (1, line_count),
+                            (2, line_states)
+                        ]))
+                        print(f"[LINE CHANGE] map_id={picked_char.get('map_id')} line_index={line_index}/{line_count}")
                 elif msg == 156:
                     send_rpc_push(569, encode_sproto([(0, 0), (1, 1)]))
                 elif msg == 174:
