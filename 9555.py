@@ -2271,7 +2271,7 @@ def client_handler(conn, addr):
                     print("[DEBUG] BEFORE MAP ENTER")
                     try:
                         ph_p = encode_sproto([(0, 503)])
-                        data = encode_sproto([(0, mid), (1, 0), (2, 1)])
+                        data = encode_sproto([(0, mid), (1, 1), (2, 1)])
                         pf_p = sproto_pack(ph_p + data)
                         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
                         print(f"[M1003 DEBUG] TX 503 map_id={mid}")
@@ -2305,8 +2305,25 @@ def client_handler(conn, addr):
                     ]))
                     print(f"[MAIN PLAYER CREATE SEND] map_id={mid} after map_ready(100)")
 
+                    # 505: aoi_add for the main player. The APK registers this
+                    # protocol separately from npc_create(509).
+                    send_rpc_push(505, encode_sproto([(0, get_char_aoi(picked_char))]))
+                    print(f"[AOI ADD SEND] main_player map_id={mid} after map_ready(100)")
+
+                    # 509: actual NPC/traffic creation.
                     spawn_map_npcs(conn, mid, picked_char)
-                    print(f"[NPC AOI SEND] map_id={mid} after map_ready(100)")
+                    print(f"[NPC CREATE SEND] map_id={mid} after map_ready(100)")
+
+                    # 614 + 654 are the final world-entry synchronization packets.
+                    # The original client handler chain reaches normal gameplay only
+                    # after common-data sync and start_enter_game.
+                    send_rpc_push(614, encode_sproto([
+                        (0, int(time.time())),
+                        (13, 1),
+                        (14, int(time.time()))
+                    ]))
+                    send_rpc_push(654, encode_sproto([(0, 1)]))
+                    print(f"[WORLD ENTRY COMPLETE] map_id={mid}")
 
                     if mid in ["223", "224", "225", "226", "227", "228", "229"]:
                         exp_state = picked_char.get('exp_stage_state')
@@ -2346,6 +2363,17 @@ def client_handler(conn, addr):
                             arena_timer.daemon = True
                             arena_timer.start()
                     send_rpc_push(519, sync_mission_data(picked_char))
+
+            elif msg == 234: # leave_game
+                print(f"[LEAVE GAME] char_id={picked_char.get('id') if picked_char else None}")
+                if picked_char:
+                    picked_char['last_played'] = int(time.time())
+                    save_chars(all_accounts_chars)
+                if session is not None:
+                    ph = encode_sproto([(1, session)])
+                    pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+                break
 
             elif msg == 101: # move
                 p_raw = body.get(0)
