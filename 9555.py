@@ -3098,8 +3098,16 @@ def client_handler(conn, addr):
                     print("[DEBUG] BEFORE MAP ENTER")
                     try:
                         ph_p = encode_sproto([(0, 503)])
-                        # Protocol.enter_map.request encodes mapInfoId as field 0.
-                        data = encode_sproto([(0, mid)])
+                        # enter_map response: mapInfoId(0), line_index(1), line_count(2).
+                        line_index = max(1, int(picked_char.get('line_index', 1)))
+                        line_count = max(line_index, int(picked_char.get('line_count', 3)))
+                        picked_char['line_index'] = line_index
+                        picked_char['line_count'] = line_count
+                        data = encode_sproto([
+                            (0, mid),
+                            (1, line_index),
+                            (2, line_count)
+                        ])
                         pf_p = sproto_pack(ph_p + data)
                         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
                         print(f"[M1003 DEBUG] TX 503 map_id={mid}")
