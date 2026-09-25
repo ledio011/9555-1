@@ -505,13 +505,25 @@ def generate_auto_response(tag, request_fields, game_state=None):
     request_spec = REQUEST_CATALOG.get(tag)
     request_schema = request_spec["fields"] if request_spec else {}
     try:
-        response_fields, missing_fields = generate_request_derived_response(
+        producer_fields, producer_evidence = resolve_scanned_response_producers(
+            tag,
             spec["fields"],
+            request_schema,
+            request_fields,
+        )
+        fallback_schema = {
+            field_tag: descriptor
+            for field_tag, descriptor in spec["fields"].items()
+            if field_tag not in producer_fields
+        }
+        response_fields, missing_fields = generate_request_derived_response(
+            fallback_schema,
             request_schema,
             request_fields,
             path=spec["name"],
             field_budget=[0],
         )
+        response_fields = {**response_fields, **producer_fields}
         if missing_fields:
             return None, (
                 "Decompiled contains no authoritative producer for response fields: "
@@ -520,6 +532,8 @@ def generate_auto_response(tag, request_fields, game_state=None):
         encode_sproto_object(response_fields, spec["fields"])
     except (TypeError, ValueError, OverflowError) as exc:
         return None, f"request-derived response could not be safely encoded: {exc}"
+    if producer_evidence:
+        return response_fields, "scanned producers: " + "; ".join(producer_evidence)
     producer_note = ""
     producers = RESPONSE_PRODUCERS.get(tag, ())
     if producers and not any(
@@ -1006,126 +1020,204 @@ def build_rpc_catalogs(assets):
 
 def scan_response_producers(assets, responses, client_handlers):
     producers = {}
-    for tag, response_spec in responses.items():
-        handler_path = client_handlers.get(tag)
-        if not handler_path:
-            continue
-        handler_class, separator, method_name = handler_path.rpartition(".")
-        if not separator:
-            continue
+    responses_by_name = {}
+    for tag, spec in responses.items():
+        responses_by_name.setdefault(spec["name"], []).append((tag, spec))
 
-        source = find_asset(
-            assets,
-            f"Managed/Assembly-CSharp/{handler_class}.cs",
-        )
-        if source is None:
-            continue
-        source = source.decode("utf-8-sig", errors="replace")
-        method_match = re.search(
-            rf"\b{re.escape(method_name)}\s*\([^;{{}}]*\)\s*\{{",
-            source,
-        )
-        if method_match is None:
-            continue
-        opening_brace = source.find("{", method_match.start(), method_match.end())
-        method_body = extract_braced_block(source, opening_brace)
-        method_source = source[opening_brace + 1 : opening_brace + 1 + len(method_body)]
+    method_pattern = re.compile(
+        r"(?m)^[ \t]*(?:(?:public|private|protected|internal|static|virtual|"
+        r"override|sealed|async|new|partial|extern)\s+)+"
+        r"[\w.<>\[\],?]+\s+\w+\s*\([^;{}]*\)\s*\{"
+    )
 
-        response_name = response_spec["name"]
-        constructor = re.search(
-            rf"\b(?:[\w.]+\.)?{re.escape(response_name)}\.response\s+"
-            rf"(?P<variable>[A-Za-z_]\w*)\s*=\s*new\s+"
-            rf"(?:[\w.]+\.)?{re.escape(response_name)}\.response\s*\(",
-            method_source,
-        )
-        if constructor is None:
-            continue
-
-        variable = constructor.group("variable")
-        fields_by_name = {
-            field["name"]: field_tag
-            for field_tag, field in response_spec["fields"].items()
-        }
-        field_evidence = {}
-        assignment_pattern = re.compile(
-            rf"\b{re.escape(variable)}\.(?P<field>[A-Za-z_]\w*)\s*"
-            r"(?P<operator>\+=|=)\s*(?P<expression>[^;]+);"
-        )
-        for assignment in assignment_pattern.finditer(method_source):
-            field_name = assignment.group("field")
-            field_tag = fields_by_name.get(field_name)
-            if field_tag is None:
-                continue
-            expression = assignment.group("expression").strip()
-            request_match = re.fullmatch(
-                r"request\.(?P<field>[A-Za-z_]\w*)", expression
-            )
-            if request_match:
-                source_kind = "request_field"
-                source_field = request_match.group("field")
-            elif re.fullmatch(r"-?\d+[lL]?", expression):
-                source_kind = "literal_integer"
-                source_field = None
-            elif expression in ("true", "false"):
-                source_kind = "literal_boolean"
-                source_field = None
-            elif expression.startswith('"') and expression.endswith('"'):
-                source_kind = "literal_string"
-                source_field = None
-            elif re.search(r"\b(?:PlayerData|GameManager|DataManager|DB|player|mainPlayer)\b", expression):
-                source_kind = "client_state_or_computation"
-                source_field = None
-            else:
-                source_kind = "computed_or_unknown"
-                source_field = None
-            line = source.count(
-                "\n", 0, opening_brace + 1 + assignment.start()
-            ) + 1
-            field_evidence.setdefault(field_tag, []).append(
-                {
-                    "field": field_name,
-                    "operation": assignment.group("operator"),
-                    "expression": expression,
-                    "source_kind": source_kind,
-                    "source_field": source_field,
-                    "line": line,
-                }
-            )
-
-        for mutation in re.finditer(
-            rf"\b{re.escape(variable)}\.(?P<field>[A-Za-z_]\w*)\."
-            r"(?P<operation>Add|AddRange|Clear)\s*\(",
-            method_source,
+    for path, contents in assets.items():
+        normalized_path = path.replace("\\", "/")
+        if (
+            not normalized_path.endswith(".cs")
+            or "/SprotoType/" in normalized_path
+            or "Managed/Assembly-CSharp/" not in normalized_path
         ):
-            field_name = mutation.group("field")
-            field_tag = fields_by_name.get(field_name)
-            if field_tag is None:
-                continue
-            line = source.count(
-                "\n", 0, opening_brace + 1 + mutation.start()
-            ) + 1
-            field_evidence.setdefault(field_tag, []).append(
-                {
-                    "field": field_name,
-                    "operation": mutation.group("operation"),
-                    "expression": None,
-                    "source_kind": "collection_mutation",
-                    "source_field": None,
-                    "line": line,
-                }
-            )
-
-        if field_evidence:
-            producers[tag] = [
-                {
-                    "handler": handler_path,
-                    "file": f"Managed/Assembly-CSharp/{handler_class}.cs",
-                    "direction": "client_handler_reply_to_server_rpc",
-                    "server_reply_usable": False,
-                    "fields": field_evidence,
-                }
+            continue
+        source = contents.decode("utf-8-sig", errors="replace")
+        for method_match in method_pattern.finditer(source):
+            signature = method_match.group(0)[:-1]
+            opening_brace = source.find("{", method_match.start(), method_match.end())
+            method_body = extract_braced_block(source, opening_brace)
+            method_source = source[
+                opening_brace + 1 : opening_brace + 1 + len(method_body)
             ]
+            method_name_match = re.search(r"([A-Za-z_]\w*)\s*\([^()]*\)\s*$", signature)
+            method_name = method_name_match.group(1) if method_name_match else "unknown"
+            request_variables = {
+                match.group(1)
+                for match in re.finditer(
+                    r"\b[A-Za-z_]\w*\.request\s+([A-Za-z_]\w*)\b",
+                    signature + " " + method_source,
+                )
+            }
+            request_variables.update(
+                match.group(1)
+                for match in re.finditer(
+                    r"\b(?P<variable>[A-Za-z_]\w*)\s*=\s*\w+\s+as\s+"
+                    r"(?:[\w.]+\.)?[A-Za-z_]\w*\.request\b",
+                    method_source,
+                )
+            )
+            request_variables.add("request")
+
+            for response_name, tagged_specs in responses_by_name.items():
+                response_pattern = re.compile(
+                    rf"\b(?:[\w.]+\.response\s+)?"
+                    r"(?P<variable>[A-Za-z_]\w*)\s*=\s*new\s+"
+                    rf"(?:[\w.]+\.)?{re.escape(response_name)}\.response\s*\("
+                )
+                for construction in response_pattern.finditer(method_source):
+                    variable = construction.group("variable")
+                    for tag, response_spec in tagged_specs:
+                        fields_by_name = {
+                            field["name"]: field_tag
+                            for field_tag, field in response_spec["fields"].items()
+                        }
+                        field_evidence = {}
+                        assignment_pattern = re.compile(
+                            rf"\b{re.escape(variable)}\.(?P<field>[A-Za-z_]\w*)\s*"
+                            r"(?P<operator>\+=|=)\s*(?P<expression>[^;]+);"
+                        )
+                        for assignment in assignment_pattern.finditer(method_source):
+                            field_name = assignment.group("field")
+                            field_tag = fields_by_name.get(field_name)
+                            if field_tag is None:
+                                continue
+                            expression = assignment.group("expression").strip()
+                            source_kind, source_field = classify_response_expression(
+                                expression, request_variables
+                            )
+                            line = source.count(
+                                "\n", 0, opening_brace + 1 + assignment.start()
+                            ) + 1
+                            field_evidence.setdefault(field_tag, []).append(
+                                {
+                                    "field": field_name,
+                                    "operation": assignment.group("operator"),
+                                    "expression": expression,
+                                    "source_kind": source_kind,
+                                    "source_field": source_field,
+                                    "line": line,
+                                }
+                            )
+
+                        mutation_pattern = re.compile(
+                            rf"\b{re.escape(variable)}\.(?P<field>[A-Za-z_]\w*)\."
+                            r"(?P<operation>Add|AddRange|Clear)\s*"
+                            r"\((?P<arguments>[^;]*)\)\s*;"
+                        )
+                        for mutation in mutation_pattern.finditer(method_source):
+                            field_tag = fields_by_name.get(mutation.group("field"))
+                            if field_tag is None:
+                                continue
+                            line = source.count(
+                                "\n", 0, opening_brace + 1 + mutation.start()
+                            ) + 1
+                            field_evidence.setdefault(field_tag, []).append(
+                                {
+                                    "field": mutation.group("field"),
+                                    "operation": mutation.group("operation"),
+                                    "expression": mutation.group("arguments").strip(),
+                                    "source_kind": "COLLECTION",
+                                    "source_field": None,
+                                    "line": line,
+                                }
+                            )
+
+                        if field_evidence:
+                            producer = {
+                                "handler": f"{method_name}",
+                                "file": normalized_path,
+                                "direction": "decompiled_client_code",
+                                "server_reply_usable": False,
+                                "fields": field_evidence,
+                            }
+                            producers.setdefault(tag, []).append(producer)
     return producers
+
+
+def classify_response_expression(expression, request_variables):
+    request_match = re.fullmatch(
+        r"(?P<variable>[A-Za-z_]\w*)\.(?P<field>[A-Za-z_]\w*)",
+        expression,
+    )
+    if request_match and request_match.group("variable") in request_variables:
+        return "REQUEST", request_match.group("field")
+    if re.fullmatch(r"-?\d+[lL]?", expression) or expression in ("true", "false"):
+        return "CONSTANT", None
+    if re.fullmatch(r'"(?:[^"\\]|\\.)*"', expression):
+        return "CONSTANT", None
+    if re.search(r"\b(?:PlayerData|PlayerCommonData|ObjMainPlayer|PlayerData)\b", expression):
+        return "PLAYER_STATE", None
+    if re.search(r"\b(?:GameManager|SceneManager|ObjManager|NetManager)\b", expression):
+        return "GAME_STATE", None
+    if re.search(r"\b(?:DB|DataManager|Database|Sqlite)\b", expression, re.IGNORECASE):
+        return "DATABASE", None
+    if re.search(
+        r"\b(?:new\s+(?:List|Dictionary|HashSet)\s*<|Add|AddRange|Clear)\s*\(",
+        expression,
+    ):
+        return "COLLECTION", None
+    if any(token in expression for token in ("(", ")", "+", "-", "*", "/", "?")):
+        return "COMPUTED", None
+    if re.match(r"data\.", expression, re.IGNORECASE):
+        return "GAME_STATE", None
+    return "UNKNOWN", None
+
+
+def resolve_scanned_response_producers(tag, response_schema, request_schema, request_fields):
+    generated = {}
+    evidence = []
+    for producer in RESPONSE_PRODUCERS.get(tag, ()):
+        if not producer.get("server_reply_usable"):
+            continue
+        for field_tag, assignments in producer.get("fields", {}).items():
+            descriptor = response_schema.get(field_tag)
+            if descriptor is None:
+                continue
+            for assignment in assignments:
+                value = resolve_scanned_assignment(
+                    assignment, descriptor, request_schema, request_fields
+                )
+                if value is not None:
+                    generated[field_tag] = value
+                    evidence.append(
+                        f"{producer['file']}:{assignment['line']} "
+                        f"{assignment['source_kind']}"
+                    )
+                    break
+    return generated, evidence
+
+
+def resolve_scanned_assignment(assignment, descriptor, request_schema, request_fields):
+    source_kind = assignment.get("source_kind")
+    field_type = descriptor.get("type")
+    if source_kind == "REQUEST":
+        source_field = assignment.get("source_field")
+        for request_tag, request_descriptor in request_schema.items():
+            if (
+                request_descriptor["name"] == source_field
+                and request_descriptor["type"] == field_type
+                and request_tag in request_fields
+            ):
+                return request_fields[request_tag]
+        return None
+    if source_kind != "CONSTANT":
+        return None
+
+    expression = assignment.get("expression", "").strip()
+    if field_type == "integer" and re.fullmatch(r"-?\d+[lL]?", expression):
+        return int(expression.rstrip("lL"))
+    if field_type == "boolean" and expression in ("true", "false"):
+        return expression == "true"
+    if field_type == "string" and re.fullmatch(r'"(?:[^"\\]|\\.)*"', expression):
+        return bytes(expression[1:-1], "utf-8").decode("unicode_escape")
+    return None
 
 
 def scan_response_field_usage(assets, responses):
@@ -1288,6 +1380,15 @@ def read_game_assets(client_address):
         )
         GAME_METADATA = extract_game_metadata(assets)
         ASSET_CACHE_LOADED = True
+        producer_source_counts = {}
+        for producers in RESPONSE_PRODUCERS.values():
+            for producer in producers:
+                for assignments in producer["fields"].values():
+                    for assignment in assignments:
+                        source_kind = assignment["source_kind"]
+                        producer_source_counts[source_kind] = (
+                            producer_source_counts.get(source_kind, 0) + 1
+                        )
         print("\rPlease wait reading game assets 100/100%")
         print(
             f"[ASSETS] Cached {len(assets)} files ({bytes_read:,} bytes) in RAM; "
@@ -1296,7 +1397,8 @@ def read_game_assets(client_address):
             f"{sum(len(fields) for fields in RESPONSE_FIELD_USAGE.values())} "
             "response fields with client-side usage; "
             f"{sum(len(producers) for producers in RESPONSE_PRODUCERS.values())} "
-            "client-side response producers indexed; "
+            "response producer sites indexed "
+            f"(sources: {producer_source_counts}); "
             f"game version {GAME_METADATA['versionCode']} / data "
             f"{GAME_METADATA['dataVersionCode']}."
         )
