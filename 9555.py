@@ -14,6 +14,7 @@ ASSET_CACHE = {}
 ASSET_CACHE_LOADED = False
 ASSET_CACHE_LOCK = threading.Lock()
 RESPONSE_CATALOG = {}
+LOGIN_RESPONSE_FIELDS = None
 
 
 def sproto_pack(data):
@@ -169,21 +170,26 @@ def extract_braced_block(source, opening_brace):
     raise ValueError("Unclosed C# block")
 
 
-def build_response_catalog(assets):
-    protocol_key = next(
+def find_asset(assets, suffix):
+    normalized_suffix = suffix.replace("\\", "/").casefold()
+    return next(
         (
-            key
-            for key in assets
-            if key.replace("\\", "/").endswith(
-                "Managed/Assembly-CSharp/Protocol.cs"
-            )
+            contents
+            for path, contents in assets.items()
+            if path.replace("\\", "/").casefold().endswith(normalized_suffix)
         ),
         None,
     )
-    if protocol_key is None:
+
+
+def build_response_catalog(assets):
+    protocol_bytes = find_asset(
+        assets, "Managed/Assembly-CSharp/Protocol.cs"
+    )
+    if protocol_bytes is None:
         raise RuntimeError("Decompiled Protocol.cs was not found in the asset cache")
 
-    protocol_source = assets[protocol_key].decode("utf-8-sig")
+    protocol_source = protocol_bytes.decode("utf-8-sig")
     registrations = re.findall(
         r"SetResponse<SprotoType\.(\w+)\.response>\((\d+)\)",
         protocol_source,
@@ -221,18 +227,121 @@ def build_response_catalog(assets):
             raise RuntimeError(f"Response encoder missing from schema: {name}")
         encode_open = class_body.find("{", encode_match.end())
         encode_body = extract_braced_block(class_body, encode_open)
-        writes_fields = bool(re.search(r"\bthis\.serialize\.write_", encode_body))
+        decode_match = re.search(r"protected\s+override\s+void\s+decode\s*\(\s*\)", class_body)
+        if decode_match is None:
+            raise RuntimeError(f"Response decoder missing from schema: {name}")
+        decode_open = class_body.find("{", decode_match.end())
+        decode_body = extract_braced_block(class_body, decode_open)
+        fields = {}
+        for field_match in re.finditer(
+            r"case\s+(\d+)\s*:\s*this\.(\w+)\s*=\s*this\.deserialize\.read_(\w+)\s*\(",
+            decode_body,
+        ):
+            fields[int(field_match.group(1))] = {
+                "name": field_match.group(2),
+                "type": field_match.group(3),
+            }
 
         catalog[int(tag_text)] = {
             "name": name,
-            "has_fields": writes_fields,
+            "fields": fields,
+            "has_fields": bool(fields) or bool(re.search(r"\bthis\.serialize\.write_", encode_body)),
         }
 
     return catalog
 
 
+def infer_login_response(assets, catalog):
+    spec = catalog.get(4)
+    if spec is None or spec["name"] != "login":
+        raise RuntimeError("Login response schema (RPC tag 4) was not found")
+
+    fields_by_name = {
+        details["name"]: (tag, details)
+        for tag, details in spec["fields"].items()
+    }
+    required_names = {"type", "versionCode", "dataVersionCode"}
+    missing_schema_fields = required_names - fields_by_name.keys()
+    if missing_schema_fields:
+        raise RuntimeError(
+            "Login response schema is missing fields: "
+            + ", ".join(sorted(missing_schema_fields))
+        )
+
+    settings_bytes = find_asset(
+        assets, "Managed/Assembly-CSharp/GameSettingData.cs"
+    )
+    net_manager_bytes = find_asset(
+        assets, "Managed/Assembly-CSharp/NetManager.cs"
+    )
+    version_bytes = find_asset(assets, "assets/UpdateInfo/Version.info")
+    if settings_bytes is None or net_manager_bytes is None or version_bytes is None:
+        raise RuntimeError(
+            "Could not locate APK login/version source files needed to infer login response"
+        )
+
+    settings_source = settings_bytes.decode("utf-8-sig")
+    net_manager_source = net_manager_bytes.decode("utf-8-sig")
+    version_code = re.search(
+        r'public\s+static\s+string\s+GameVersion\s*=\s*"([^"]+)"',
+        settings_source,
+    )
+    if version_code is None:
+        raise RuntimeError("Could not infer GameVersion from GameSettingData.cs")
+
+    data_version = version_bytes.decode("ascii", errors="strict").strip()
+    if not data_version.isdigit():
+        raise RuntimeError("APK UpdateInfo/Version.info is not a numeric version")
+
+    success_threshold = re.search(
+        r"response\.type\s*>\s*(\d+)\s*L?",
+        net_manager_source,
+    )
+    if success_threshold is None:
+        raise RuntimeError("Could not infer login success condition from NetManager.cs")
+
+    values = {
+        "type": int(success_threshold.group(1)) + 1,
+        "versionCode": version_code.group(1),
+        "dataVersionCode": data_version,
+    }
+
+    value_sources = {
+        "type": "minimum value accepted by NetManager.LoginResponse",
+        "versionCode": "GameSettingData.GameVersion",
+        "dataVersionCode": "UpdateInfo/Version.info",
+    }
+    for name, (tag, schema) in fields_by_name.items():
+        if name in values:
+            continue
+        if schema["type"] == "integer":
+            values[name] = 0
+            value_sources[name] = "C# default for an unassigned integer response field"
+        elif schema["type"] == "boolean":
+            values[name] = False
+            value_sources[name] = "C# default for an unassigned boolean response field"
+
+    encoded_fields = []
+    for name, value in values.items():
+        if name not in fields_by_name:
+            continue
+        tag, schema = fields_by_name[name]
+        if schema["type"] == "integer" and isinstance(value, int):
+            encoded_fields.append((tag, value))
+        elif schema["type"] == "boolean" and isinstance(value, bool):
+            encoded_fields.append((tag, value))
+        elif schema["type"] == "string" and isinstance(value, str):
+            encoded_fields.append((tag, value))
+        else:
+            raise RuntimeError(
+                f"Inferred login field {name} does not match its Sproto schema type"
+            )
+
+    return encode_sproto(encoded_fields), values, value_sources
+
+
 def read_game_assets(client_address):
-    global ASSET_CACHE, ASSET_CACHE_LOADED, RESPONSE_CATALOG
+    global ASSET_CACHE, ASSET_CACHE_LOADED, RESPONSE_CATALOG, LOGIN_RESPONSE_FIELDS
 
     if ASSET_CACHE_LOADED:
         return
@@ -297,11 +406,19 @@ def read_game_assets(client_address):
 
         ASSET_CACHE = assets
         RESPONSE_CATALOG = build_response_catalog(assets)
+        LOGIN_RESPONSE_FIELDS = infer_login_response(assets, RESPONSE_CATALOG)
         ASSET_CACHE_LOADED = True
         print("\rPlease wait reading game assets 100/100%")
         print(
             f"[ASSETS] Cached {len(assets)} files ({bytes_read:,} bytes) in RAM; "
             f"indexed {len(RESPONSE_CATALOG)} RPC response schemas."
+        )
+        print(
+            "[APK] Inferred login.response from Decompiled: "
+            + ", ".join(
+                f"{key}={value} [{LOGIN_RESPONSE_FIELDS[2][key]}]"
+                for key, value in LOGIN_RESPONSE_FIELDS[1].items()
+            )
         )
 
 
@@ -337,14 +454,24 @@ def handle_client(connection, address):
                 continue
             if spec is None:
                 print(
-                    f"[RPC] No APK response schema for request tag={rpc_tag}, "
+                    f"[RPC] APK has no response schema for request tag={rpc_tag}, "
                     f"session={session}; no reply sent."
                 )
                 continue
+            if rpc_tag == 4:
+                response_data = LOGIN_RESPONSE_FIELDS[0]
+                response_package = encode_sproto([(1, session)])
+                response_frame = sproto_pack(response_package + response_data)
+                if len(response_frame) > MAX_FRAME_SIZE:
+                    raise ValueError("Generated login response exceeds the game frame limit")
+                connection.sendall(struct.pack(">H", len(response_frame)) + response_frame)
+                print(f"[RPC] Replied to {spec['name']} tag={rpc_tag} session={session}")
+                continue
             if spec["has_fields"]:
                 print(
-                    f"[RPC] {spec['name']} tag={rpc_tag} needs response data; "
-                    f"APK schema alone has no response values. No reply sent."
+                    f"[RPC] APK response schema for {spec['name']} tag={rpc_tag} "
+                    "was found, but no response values could be inferred from static "
+                    "APK data. No reply sent."
                 )
                 continue
 
