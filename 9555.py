@@ -1950,35 +1950,25 @@ def sync_mission_data(picked_char):
     return encode_sproto(data_list)
 
 def sync_inventory_data(picked_char):
-    items = {}
-    inv = picked_char.get('inventory', [])
-    for i in range(len(inv)):
-        item = inv[i]
-        guid = i + 10000
-        items[guid] = encode_sproto([
-            (0, guid),       # indexId
-            (1, item['id']), # itemId
-            (2, True),       # bindflag
-            (5, item['amount']) # stack
-        ])
-    return encode_sproto([(0, items)])
+    """Backward-compatible alias for the canonical Item Backpack sync (TAG 611)."""
+    return sync_item_pack_rpc(picked_char)
 
-def add_to_inventory(picked_char, item_id, amount):
+
+def add_to_inventory(picked_char, item_id, amount, quality=1, level=1, bindflag=True, parm=None):
+    """Add an item to exactly one canonical Backpack container.
+
+    The APK has separate containers for Equip/Fashion/Badge/Items. Keeping a
+    duplicate legacy inventory list makes Bag counts diverge, so the list is
+    no longer authoritative.
+    """
     item_id = str(item_id)
-    if 'inventory' not in picked_char: picked_char['inventory'] = []
-    found = False
-    for item in picked_char['inventory']:
-        if str(item['id']) == item_id:
-            item['amount'] += amount
-            found = True
-            break
-    if not found:
-        picked_char['inventory'].append({'id': item_id, 'amount': amount})
+    amount = int(amount)
+    if amount <= 0:
+        return None
 
     cfg = ITEM_CONFIG.get(item_id, {})
-    itype = cfg.get('type', 0)
-
-    if itype == 2 or itype == 3 or itype == 4:
+    itype = int(cfg.get('type', 0))
+    if itype in (2, 3, 4):
         ckey = 'equip_backpack'
     elif itype in (15, 16):
         ckey = 'fashion_backpack'
@@ -1988,25 +1978,20 @@ def add_to_inventory(picked_char, item_id, amount):
         ckey = 'item_backpack'
 
     container = picked_char.setdefault(ckey, {})
+    # Stack only normal item-backpack entries; equipment/fashion/badge items
+    # are individual GameItems with their own indexId.
     if ckey == 'item_backpack':
-        existing = False
-        for idx, item in container.items():
-            if str(item.get('itemId')) == item_id:
-                item['stack'] = item.get('stack', 1) + amount
-                existing = True
-                break
-        if not existing:
-            idx = int(time.time() * 1000) % 10000000 + len(container)
-            container[idx] = {
-                'indexId': idx, 'itemId': item_id, 'bindflag': True,
-                'quality': 1, 'level': 1, 'stack': amount, 'parm': [0]*8, 'appraise': 1
-            }
-    else:
-        idx = int(time.time() * 1000) % 10000000 + len(container)
-        container[idx] = {
-            'indexId': idx, 'itemId': item_id, 'bindflag': True,
-            'quality': 1, 'level': 1, 'stack': amount, 'parm': [0]*8, 'appraise': 1
-        }
+        for item in container.values():
+            if isinstance(item, dict) and str(item.get('itemId')) == item_id:
+                item['stack'] = max(1, int(item.get('stack', 1))) + amount
+                return int(item.get('indexId', 0))
+
+    idx = _next_item_index(container)
+    container[idx] = _new_gameitem(
+        idx, item_id, amount=amount, quality=quality, level=level,
+        bindflag=bindflag, parm=parm
+    )
+    return idx
 
 def build_mount_info(picked_char):
     """Build the exact mount map consumed by the APK garage handlers.
@@ -2506,23 +2491,15 @@ def normalize_backpack_state(c):
     # Character Page always has the six normal equipment slots available.
     epack = c['equip_pack']
     prof = int(c.get('prof', 0))
-    starter_set = {
-        0: ("10002", "20002", "30002"),
-        1: ("10003", "20003", "30003"),
-        2: ("10005", "20005", "30005"),
-        3: ("10004", "20004", "30004"),
-        4: ("10006", "20006", "30006"),
-        5: ("10001", "20001", "30001"),
+    profession_sets = {
+        0: ["10002", "10003", "10005", "10004", "10006", "10001"],
+        1: ["20002", "20003", "20005", "20004", "20006", "20001"],
+        2: ["30002", "30003", "30005", "30004", "30006", "30001"],
     }
-    wanted = starter_set.get(0, starter_set[0])
-    if prof in (0, 1, 2):
-        base_ids = (wanted[prof],) * 6
-    else:
-        base_ids = starter_set[5]
+    base_ids = profession_sets.get(prof, profession_sets[0])
     for slot in range(6):
         if slot not in epack or not epack[slot]:
-            item_id = base_ids[slot] if len(base_ids) > slot else starter_set[0][prof if prof < 3 else 0]
-            epack[slot] = _new_gameitem(slot, item_id, amount=1, quality=1, level=1)
+            epack[slot] = _new_gameitem(slot, base_ids[slot], amount=1, quality=1, level=1)
 
     return c
 
@@ -3764,6 +3741,8 @@ def client_handler(conn, addr):
 
             elif msg == 122: # sort_item
                 if picked_char:
+                    normalize_backpack_state(picked_char)
+                    save_chars(all_accounts_chars)
                     send_rpc_push(611, sync_item_pack_rpc(picked_char))
                     send_rpc_push(592, sync_backpack_item_rpc(picked_char))
                     send_rpc_push(604, sync_badgepack_item_rpc(picked_char))
@@ -4255,10 +4234,10 @@ def client_handler(conn, addr):
                         fpack[slot] = item
                         if old_item:
                             fbp[old_item['indexId']] = old_item
-                            send_update_item_push(send_rpc_push, 6, old_item['indexId'], old_item)
+                            send_update_item_push(send_rpc_push, 5, old_item['indexId'], old_item)
                         else:
-                            send_update_item_push(send_rpc_push, 6, index_id, None)
-                        send_update_item_push(send_rpc_push, 7, slot, item)
+                            send_update_item_push(send_rpc_push, 4, index_id, None)
+                        send_update_item_push(send_rpc_push, 6, slot, item)
                         save_chars(all_accounts_chars)
                         sync_main_player_visual(picked_char, send_rpc_push)
                 if session is not None:
@@ -4278,8 +4257,8 @@ def client_handler(conn, addr):
                     if slot_found is not None:
                         item = fpack.pop(slot_found)
                         fbp[item['indexId']] = item
-                        send_update_item_push(send_rpc_push, 7, slot_found, None)
-                        send_update_item_push(send_rpc_push, 6, item['indexId'], item)
+                        send_update_item_push(send_rpc_push, 6, slot_found, None)
+                        send_update_item_push(send_rpc_push, 5, item['indexId'], item)
                         save_chars(all_accounts_chars)
                         sync_main_player_visual(picked_char, send_rpc_push)
                 if session is not None:
@@ -4298,10 +4277,10 @@ def client_handler(conn, addr):
                         bpack[target_pos] = item
                         if old_item:
                             bbp[old_item['indexId']] = old_item
-                            send_update_item_push(send_rpc_push, 4, old_item['indexId'], old_item)
+                            send_update_item_push(send_rpc_push, 3, old_item['indexId'], old_item)
                         else:
                             send_update_item_push(send_rpc_push, 4, index_id, None)
-                        send_update_item_push(send_rpc_push, 5, target_pos, item)
+                        send_update_item_push(send_rpc_push, 4, target_pos, item)
                         save_chars(all_accounts_chars)
                         sync_char_attrs_rpc(conn, picked_char)
                 if session is not None:
