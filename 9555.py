@@ -2257,9 +2257,9 @@ def client_handler(conn, addr):
                     smap = build_skills_map(picked_char['prof'], picked_char['level'], picked_char.get('skill_levels', {}))
                     send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
 
-                    # 519: mission_sync
-                    send_rpc_push(519, sync_mission_data(picked_char))
-
+                    # 519 is sent only after map_ready(100).
+                    # The client initializes MissionManager against RunningMapIdStr,
+                    # which is populated by enter_map/scene loading.
                     # TAG 503: enter_map
                     mid = str(picked_char.get('map_id', '11'))
                     scene_name = "Unknown"
@@ -2271,15 +2271,26 @@ def client_handler(conn, addr):
                     print("[DEBUG] BEFORE MAP ENTER")
                     try:
                         ph_p = encode_sproto([(0, 503)])
-                        data = encode_sproto([(0, mid), (1, 1), (2, 1)])
+                        data = encode_sproto([(0, mid), (1, 0), (2, 1)])
                         pf_p = sproto_pack(ph_p + data)
                         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
                         print(f"[M1003 DEBUG] TX 503 map_id={mid}")
                         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
                         print(f"[MAP ENTER SEND] map_id={mid} scene={scene_name} pos={picked_char['pos']}")
 
-                        # TAG 504/505 are deferred until map_ready(100).
-                        # The scene must finish loading before ObjManager creates MainPlayer/AOI.
+                        # TAG 504: main_player_create
+                        # This MUST arrive after 503 so the client can instantiate
+                        # ObjManager.MainPlayer while the scene is loading.
+                        send_rpc_push(504, encode_sproto([
+                            (0, get_full_char(picked_char)),
+                            (1, get_movement(
+                                picked_char['pos'][0],
+                                picked_char['pos'][1],
+                                picked_char['pos'][2],
+                                picked_char['pos'][3]
+                            ))
+                        ]))
+                        print(f"[MAIN PLAYER CREATE SEND] map_id={mid} after enter_map(503)")
 
                     except Exception:
                         print("[!] FAILED TO SEND INITIAL MAP ENTER")
@@ -2291,20 +2302,8 @@ def client_handler(conn, addr):
                     mid = picked_char.get('map_id', '11')
                     print(f"[MAP READY RECEIVED] map_id={mid}")
 
-                    # Correct Unity flow: 503 starts scene load; client sends 100
-                    # only when the scene is ready; then server creates MainPlayer
-                    # and sends the initial NPC AOI.
-                    send_rpc_push(504, encode_sproto([
-                        (0, get_full_char(picked_char)),
-                        (1, get_movement(
-                            picked_char['pos'][0],
-                            picked_char['pos'][1],
-                            picked_char['pos'][2],
-                            picked_char['pos'][3]
-                        ))
-                    ]))
-                    print(f"[MAIN PLAYER CREATE SEND] map_id={mid} after map_ready(100)")
-
+                    # Main player was created by tag 504 immediately after 503.
+                    # At map_ready(100), release the queued scene-dependent AOI/world state.
                     # 505: aoi_add for the main player. The APK registers this
                     # protocol separately from npc_create(509).
                     send_rpc_push(505, encode_sproto([(0, get_char_aoi(picked_char))]))
@@ -2323,6 +2322,9 @@ def client_handler(conn, addr):
                         (14, int(time.time()))
                     ]))
                     send_rpc_push(654, encode_sproto([(0, 1)]))
+                    # MissionManager.SyncMissionList reads RunningMapIdStr and
+                    # must run only after map_ready/scene initialization.
+                    send_rpc_push(519, sync_mission_data(picked_char))
                     print(f"[WORLD ENTRY COMPLETE] map_id={mid}")
 
                     if mid in ["223", "224", "225", "226", "227", "228", "229"]:
