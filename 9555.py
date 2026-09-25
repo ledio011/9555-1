@@ -1963,15 +1963,8 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
         print(f"[MAP ENTER SEND] map_id={target_map_id} scene={scene_name} pos={picked_char['pos']}")
 
-        # TAG 504: main_player_create
-        send_rpc_push(504, encode_sproto([
-            (0, get_full_char(picked_char)),
-            (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
-        ]))
-        print(f"[MAIN PLAYER CREATE SEND] map_id={target_map_id}")
-
-        # TAG 505: aoi_add (NPCs)
-        spawn_map_npcs(conn, target_map_id, picked_char)
+        # TAG 504/505 are deferred until map_ready(100).
+        # Do not create MainPlayer or NPC AOI before the Unity scene is ready.
 
         # BOSS SPAWN for Dominance Map 502
         if target_map_id == "502":
@@ -2218,7 +2211,8 @@ def client_handler(conn, addr):
             elif msg == 105: # character_pick
                 char_id = get_val_int(body, 0)
                 picked_char = next((c for c in get_account_chars(all_accounts_chars, cur_areaId, acc_id) if c['id'] == char_id), None)
-                resp = encode_sproto([(0, 1 if picked_char else 0)])
+                # character_pick.response.errno: 0 means success.
+                resp = encode_sproto([(0, 0 if picked_char else 1)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
@@ -2284,15 +2278,8 @@ def client_handler(conn, addr):
                         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
                         print(f"[MAP ENTER SEND] map_id={mid} scene={scene_name} pos={picked_char['pos']}")
 
-                        # TAG 504: main_player_create
-                        send_rpc_push(504, encode_sproto([
-                            (0, get_full_char(picked_char)),
-                            (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
-                        ]))
-                        print(f"[MAIN PLAYER CREATE SEND] map_id={mid}")
-
-                        # TAG 505: aoi_add (NPCs)
-                        spawn_map_npcs(conn, mid, picked_char)
+                        # TAG 504/505 are deferred until map_ready(100).
+                        # The scene must finish loading before ObjManager creates MainPlayer/AOI.
 
                     except Exception:
                         print("[!] FAILED TO SEND INITIAL MAP ENTER")
@@ -2303,6 +2290,24 @@ def client_handler(conn, addr):
                 if picked_char:
                     mid = picked_char.get('map_id', '11')
                     print(f"[MAP READY RECEIVED] map_id={mid}")
+
+                    # Correct Unity flow: 503 starts scene load; client sends 100
+                    # only when the scene is ready; then server creates MainPlayer
+                    # and sends the initial NPC AOI.
+                    send_rpc_push(504, encode_sproto([
+                        (0, get_full_char(picked_char)),
+                        (1, get_movement(
+                            picked_char['pos'][0],
+                            picked_char['pos'][1],
+                            picked_char['pos'][2],
+                            picked_char['pos'][3]
+                        ))
+                    ]))
+                    print(f"[MAIN PLAYER CREATE SEND] map_id={mid} after map_ready(100)")
+
+                    spawn_map_npcs(conn, mid, picked_char)
+                    print(f"[NPC AOI SEND] map_id={mid} after map_ready(100)")
+
                     if mid in ["223", "224", "225", "226", "227", "228", "229"]:
                         exp_state = picked_char.get('exp_stage_state')
                         if exp_state:
