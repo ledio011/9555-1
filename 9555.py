@@ -1084,10 +1084,19 @@ def get_full_char(c):
 
     download_state = 2 if c.get('download_complete') else 1
     potion_idx = int(c.get('potion_index', 0))
+    # character.attribute is field 3; the client reads it directly when
+    # initializing CharacterAttributeData for the main player.
+    attr_base = encode_sproto([
+        (0, int(stats['hp_max'])),
+        (2, int(stats['atk'])),
+        (3, int(stats['def']))
+    ])
+
     return encode_sproto([
         (0, char_id),
         (1, gen),
         (2, attr_oth),
+        (3, attr_base),
         (5, prop),
         (6, build_main_player_visual(c)),
         (7, mv),
@@ -1344,7 +1353,7 @@ def send_enemy_update_rpc(send_rpc_push, picked_char):
     send_rpc_push(534, encode_sproto([(0, enemys_map), (1, 1)]))
 
 def build_mail_update_obj(mail_data):
-    """Build Sproto mail_update schema object for Sproto Tag 603."""
+    """Build Sproto mail_update schema object for Sproto Tag 531."""
     items_map = {}
     for i_id, i_info in mail_data.get('items', {}).items():
         if isinstance(i_info, dict):
@@ -5058,10 +5067,16 @@ def client_handler(conn, addr):
                     send_rpc_push(625, encode_sproto([(1, tower_id)]))
                 elif msg == 208:
                     send_rpc_push(607, encode_sproto([]))
-                elif msg == 219:
+                elif msg == 219: # request_line_state
                     mid = str(picked_char.get('map_id', '11')) if picked_char else '11'
                     line_count = max(1, int(picked_char.get('line_count', 3))) if picked_char else 3
+                    line_index = max(1, int(picked_char.get('line_index', 1))) if picked_char else 1
                     line_states = picked_char.get('line_states', {}) if picked_char else {}
+                    # update_line_state schema: mapInfoId(0), line_count(1), line_states(2).
+                    # Keep the selected line in the state map as well.
+                    if picked_char:
+                        line_states = dict(line_states)
+                        line_states[str(line_index)] = line_states.get(str(line_index), 0)
                     send_rpc_push(568, encode_sproto([
                         (0, mid),
                         (1, line_count),
@@ -5073,34 +5088,6 @@ def client_handler(conn, addr):
                         save_chars(all_accounts_chars)
                 elif msg == 230:
                     send_rpc_push(626, encode_sproto([(0, True)]))
-                elif msg == 243:
-                    # spin_slot: update local slot counters and return slot_info.
-                    if picked_char:
-                        slot_state = picked_char.setdefault('slot_state', {'curNum': 10, 'sumNum': 0})
-                        cur_num = max(0, int(slot_state.get('curNum', 10)))
-                        sum_num = max(0, int(slot_state.get('sumNum', 0)))
-                        if cur_num > 0:
-                            cur_num -= 1
-                        sum_num += 1
-                        slot_state['curNum'] = cur_num
-                        slot_state['sumNum'] = sum_num
-                        save_chars(all_accounts_chars)
-                        slot_info = encode_sproto([(0, cur_num), (1, sum_num)])
-                        send_rpc_push(634, encode_sproto([(0, slot_info), (1, {})]))
-                    else:
-                        send_rpc_push(634, encode_sproto([(0, encode_sproto([(0, 0), (1, 0)])), (1, {})]))
-                elif msg == 244:
-                    # request_slot_sum_reward: return current total and an empty reward list.
-                    slot_state = picked_char.get('slot_state', {'curNum': 0, 'sumNum': 0}) if picked_char else {'curNum': 0, 'sumNum': 0}
-                    send_rpc_push(635, encode_sproto([
-                        (0, []),
-                        (1, max(0, int(slot_state.get('sumNum', 0))))
-                    ]))
-                elif msg == 249:
-                    # request_slot_reward has only uuid(0) and no matching response
-                    # protocol registration. Do not send an unrelated ret_spin_slot packet.
-                    # The generic request ACK below is the safe completion path.
-                    pass
                 elif msg == 254:
                     day30 = min(30, (int(time.time()) // 86400) % 30 + 1)
                     send_rpc_push(642, encode_sproto([
