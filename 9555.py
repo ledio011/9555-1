@@ -2761,16 +2761,26 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         print(f"[MAP CONFIG MISSING] map_id={target_map_id}")
 
     # Reset the one-shot scene acknowledgement before every transition.
+    # A new 503 must always be followed by exactly one client MSG=100 -> 504/654/509 sequence.
     picked_char['map_ready_done'] = False
     picked_char['map_ready_map_id'] = ""
+    picked_char['main_player_created_sent'] = False
+    picked_char['map_ready_sent_at'] = 0
+    picked_char['line_index'] = max(1, int(picked_char.get('line_index', 1)))
+    picked_char['line_count'] = max(picked_char['line_index'], int(picked_char.get('line_count', 3)))
     save_chars(all_accounts_chars)
 
     # TAG 503: enter_map
     print("[DEBUG] BEFORE MAP ENTER")
     try:
         ph_p = encode_sproto([(0, 503)])
-        # enter_map is request-only in the APK; its schema contains only mapInfoId(0).
-        data = encode_sproto([(0, target_map_id)])
+        # enter_map payload used by the client scene handler:
+        # mapInfoId(0), line_index(1), line_count(2).
+        data = encode_sproto([
+            (0, target_map_id),
+            (1, picked_char['line_index']),
+            (2, picked_char['line_count'])
+        ])
         pf_p = sproto_pack(ph_p + data)
         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
         print(f"[M1003 DEBUG] TX 503 map_id={target_map_id}")
@@ -3098,6 +3108,8 @@ def client_handler(conn, addr):
                     save_chars(all_accounts_chars)
 
                     # Correct Sequence: 614 -> 611 -> 540 -> 534/531 -> 503 -> map_ready(100)
+                    picked_char['line_index'] = max(1, int(picked_char.get('line_index', 1)))
+                    picked_char['line_count'] = max(picked_char['line_index'], int(picked_char.get('line_count', 3)))
 
                     # 614: sync_common_data
                     fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3016", "3030", "4014", "4026", "4061", "4062", "4063", "4064", "4081", "4084"]
