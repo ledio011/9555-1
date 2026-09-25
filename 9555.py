@@ -2968,7 +2968,7 @@ def client_handler(conn, addr):
                 sid = get_val_int(body, 5, 1); cur_areaId = str(get_area_id(sid))
                 # login.response (max_field_count=4): type(0), versionCode(1), dataVersionCode(2), serverLevel(3)
                 resp = encode_sproto([
-                    (0, 2), (1, "1.012.017"), (2, "200"), (3, 1)
+                    (0, 2), (1, "1.012.017"), (2, "205"), (3, 1)
                 ])
                 print(f"[LOGIN] Login request for acc_id={acc_id} area={cur_areaId}")
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
