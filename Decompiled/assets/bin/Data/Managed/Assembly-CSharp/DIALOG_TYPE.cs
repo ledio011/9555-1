@@ -1,0 +1,12 @@
+﻿using System;
+
+// Token: 0x02000903 RID: 2307
+public enum DIALOG_TYPE
+{
+	// Token: 0x04002ACF RID: 10959
+	NONE,
+	// Token: 0x04002AD0 RID: 10960
+	ACCEPT,
+	// Token: 0x04002AD1 RID: 10961
+	COMPLETE
+}

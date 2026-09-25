@@ -1,0 +1,18 @@
+﻿using System;
+
+// Token: 0x02000154 RID: 340
+public enum BUFF_TYPE
+{
+	// Token: 0x04000D2F RID: 3375
+	INVALID = -1,
+	// Token: 0x04000D30 RID: 3376
+	CHANGE_ATTR,
+	// Token: 0x04000D31 RID: 3377
+	STUN,
+	// Token: 0x04000D32 RID: 3378
+	SLEEP,
+	// Token: 0x04000D33 RID: 3379
+	KNOCK_DOWN,
+	// Token: 0x04000D34 RID: 3380
+	INVINCIBLE
+}

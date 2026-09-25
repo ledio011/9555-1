@@ -1,0 +1,7 @@
+,STRING,STRING,STRING,FLOAT,FLOAT,FLOAT,INT,INT,INT,INT,STRING,INT,STRING,INT
+,ID,场景ID,模型ID,坐标X,坐标Y,坐标Z,道具自身数量,调查时间,是否自动刷新,自动刷新时间,任务ID,任务需要数量,UI显示文字,是否常驻场景
+*,ID,SceneID,ModelID,PosX,PosY,PosZ,Count,SurveyTime,IsAutoFresh,AutoFreshTime,MissionID,NeedNum,Text,IsAlwaysExist
+*,1,102,,19.399999999999999,0.68,-4.8099999999999996,1,10,1,10,8,1,find the bag…,0
+*,2,102,NPC_Nan_012,0.78,0.68,-46.14,1,10,1,10,14,1,propagate the confusion …,0
+*,3,102,,-41.44,0.68,2.57,1,10,1,10,18,1,look into the slum…,0
+*,4,102,NPC_Nan_012,-52.35,0.68,-25.1,1,10,1,10,6,1,get information…,0

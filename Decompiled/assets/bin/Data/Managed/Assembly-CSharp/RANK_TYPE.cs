@@ -1,0 +1,24 @@
+﻿using System;
+
+// Token: 0x0200097A RID: 2426
+public enum RANK_TYPE
+{
+	// Token: 0x04003139 RID: 12601
+	INVALID,
+	// Token: 0x0400313A RID: 12602
+	FIGHT,
+	// Token: 0x0400313B RID: 12603
+	LEVEL,
+	// Token: 0x0400313C RID: 12604
+	LADDER,
+	// Token: 0x0400313D RID: 12605
+	CASH,
+	// Token: 0x0400313E RID: 12606
+	TOWER,
+	// Token: 0x0400313F RID: 12607
+	GUILD,
+	// Token: 0x04003140 RID: 12608
+	CAR,
+	// Token: 0x04003141 RID: 12609
+	SEX
+}

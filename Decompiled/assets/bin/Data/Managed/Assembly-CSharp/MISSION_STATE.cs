@@ -1,0 +1,14 @@
+﻿using System;
+
+// Token: 0x02000214 RID: 532
+public enum MISSION_STATE
+{
+	// Token: 0x040017C9 RID: 6089
+	INVALID = -1,
+	// Token: 0x040017CA RID: 6090
+	FAIL,
+	// Token: 0x040017CB RID: 6091
+	ACCEPTED,
+	// Token: 0x040017CC RID: 6092
+	COMPLETE
+}

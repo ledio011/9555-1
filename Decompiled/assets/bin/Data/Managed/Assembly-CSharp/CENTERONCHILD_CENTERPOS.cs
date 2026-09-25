@@ -1,0 +1,16 @@
+﻿using System;
+
+// Token: 0x0200004A RID: 74
+public enum CENTERONCHILD_CENTERPOS
+{
+	// Token: 0x0400014E RID: 334
+	CENTER,
+	// Token: 0x0400014F RID: 335
+	LEFT,
+	// Token: 0x04000150 RID: 336
+	RIGHT,
+	// Token: 0x04000151 RID: 337
+	TOP,
+	// Token: 0x04000152 RID: 338
+	BOTTOM
+}

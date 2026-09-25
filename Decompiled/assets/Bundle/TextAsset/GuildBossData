@@ -1,0 +1,10 @@
+,副本ID,MapID,副本类型,副本子类型,次数,,存活持续时间,等待关闭时间,副本存活时间,最大人数,等级区间,等级区间,尾刀奖励ID,奖励1,奖励1,奖励2,奖励2,奖励3,奖励3,参与奖励,普惠奖励,显示掉落,BossID,描述,规则,副本背景图片,副本UI图片
+,STRING,STRING,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,STRING,STRING,STRING,STRING,STRING,STRING,STRING,STRING,STRING,STRING,STRING,STRING,STRING,STRING,STRING
+*,ID,MapID,Type,SubType,MaxPlayNum,StartTime,DurationTime,WaitTime,ExistTime,MaxPlayer,LevelMin,LevelMax,LastKillDropID,FirstDropID,FirstRank,SecondDropID,SecondRank,ThirdDropID,ThirdRank,ParticipateDropID,ExistDropID,ShowRewardID,BossID,Desc,Rule,Background,Icon
+*,1001,1001,1,10,1,64800,3600,10,10,50,2,10,_last_ghb,_one_ghb,1,_two_ghb,2,_three_ghb,3,_join_ghb,_every_ghb,_show_ghb,900101,#｛101619},#｛101620},gongHuiBOSS_PVE,CZ_gongHuiBOSS_PVE
+*,1002,1002,1,10,1,64800,3600,10,10,50,2,10,_last_ghb,_one_ghb,1,_two_ghb,2,_three_ghb,3,_join_ghb,_every_ghb,_show_ghb,900102,#｛101619},#｛101620},gongHuiBOSS_PVE,CZ_gongHuiBOSS_PVE
+*,1003,1003,1,10,1,64800,3600,10,10,50,2,10,_last_ghb,_one_ghb,1,_two_ghb,2,_three_ghb,3,_join_ghb,_every_ghb,_show_ghb,900103,#｛101619},#｛101620},gongHuiBOSS_PVE,CZ_gongHuiBOSS_PVE
+*,1004,1004,1,10,1,64800,3600,10,10,50,2,10,_last_ghb,_one_ghb,1,_two_ghb,2,_three_ghb,3,_join_ghb,_every_ghb,_show_ghb,900104,#｛101619},#｛101620},gongHuiBOSS_PVE,CZ_gongHuiBOSS_PVE
+*,1005,1005,1,10,1,64800,3600,10,10,50,2,10,_last_ghb,_one_ghb,1,_two_ghb,2,_three_ghb,3,_join_ghb,_every_ghb,_show_ghb,900105,#｛101619},#｛101620},gongHuiBOSS_PVE,CZ_gongHuiBOSS_PVE
+*,1006,1006,1,10,1,64800,3600,10,10,50,2,10,_last_ghb,_one_ghb,1,_two_ghb,2,_three_ghb,3,_join_ghb,_every_ghb,_show_ghb,900106,#｛101619},#｛101620},gongHuiBOSS_PVE,CZ_gongHuiBOSS_PVE
+*,1007,1007,1,10,1,64800,3600,10,10,50,2,10,_last_ghb,_one_ghb,1,_two_ghb,2,_three_ghb,3,_join_ghb,_every_ghb,_show_ghb,900107,#｛101619},#｛101620},gongHuiBOSS_PVE,CZ_gongHuiBOSS_PVE
