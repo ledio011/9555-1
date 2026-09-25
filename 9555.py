@@ -1001,6 +1001,7 @@ def get_char_ov(c, sort_index=None):
     ])
 
 def get_full_char(c):
+    normalize_backpack_state(c)
     char_id = int(c.get('id', 0))
     gen = get_general(c)
     stats = get_character_stats(c)
@@ -1155,56 +1156,48 @@ def encode_gameitem_sproto(item):
     return encode_sproto(fields)
 
 def sync_backpack_item_rpc(picked_char):
-    """Build Sproto Tag 592 (sync_backpack_item) for Equipment Backpack."""
+    """Build Tag 592 (sync_backpack_item) for Equipment Backpack."""
+    normalize_backpack_state(picked_char)
     items = {}
-    bp = picked_char.get('equip_backpack', {})
-    for index_id, item in bp.items():
+    for index_id, item in picked_char.get('equip_backpack', {}).items():
         encoded = encode_gameitem_sproto(item)
         if encoded:
             items[int(index_id)] = encoded
     return encode_sproto([(0, items)])
+
 
 def sync_badgepack_item_rpc(picked_char):
-    """Build Sproto Tag 604 (sync_badgepack_item) for Badge Backpack."""
+    """Build Tag 604 (sync_badgepack_item) for Badge Backpack."""
+    normalize_backpack_state(picked_char)
     items = {}
-    bp = picked_char.get('badge_backpack', {})
-    for index_id, item in bp.items():
+    for index_id, item in picked_char.get('badge_backpack', {}).items():
         encoded = encode_gameitem_sproto(item)
         if encoded:
             items[int(index_id)] = encoded
     return encode_sproto([(0, items)])
+
 
 def sync_fashion_backpack_item_rpc(picked_char):
-    """Build Sproto Tag 616 (sync_fashion_backpack_item) for Fashion Backpack."""
+    """Build Tag 616 (sync_fashion_backpack_item) for Fashion Backpack."""
+    normalize_backpack_state(picked_char)
     items = {}
-    bp = picked_char.get('fashion_backpack', {})
-    for index_id, item in bp.items():
+    for index_id, item in picked_char.get('fashion_backpack', {}).items():
         encoded = encode_gameitem_sproto(item)
         if encoded:
             items[int(index_id)] = encoded
     return encode_sproto([(0, items)])
 
+
 def sync_item_pack_rpc(picked_char):
-    """Build Sproto Tag 611 (sync_item_pack) for Item Backpack."""
+    """Build Tag 611 (sync_item_pack) for Item Backpack."""
+    normalize_backpack_state(picked_char)
     items = {}
-    ibp = picked_char.get('item_backpack', {})
-    if ibp:
-        for index_id, item in ibp.items():
-            encoded = encode_gameitem_sproto(item)
-            if encoded:
-                items[int(index_id)] = encoded
-    else:
-        inv = picked_char.get('inventory', [])
-        for i in range(len(inv)):
-            item = inv[i]
-            guid = i + 10000
-            items[guid] = encode_sproto([
-                (0, guid),
-                (1, str(item['id'])),
-                (2, True),
-                (5, int(item['amount']))
-            ])
+    for index_id, item in picked_char.get('item_backpack', {}).items():
+        encoded = encode_gameitem_sproto(item)
+        if encoded:
+            items[int(index_id)] = encoded
     return encode_sproto([(0, items)])
+
 
 def send_update_item_push(send_rpc_push, container_type, index_id, item_dict=None):
     """Send Sproto Tag 525 (update_item) to client."""
@@ -1215,6 +1208,56 @@ def send_update_item_push(send_rpc_push, container_type, index_id, item_dict=Non
     if item_dict:
         fields.append((2, encode_gameitem_sproto(item_dict)))
     send_rpc_push(525, encode_sproto(fields))
+
+def get_container_by_code(picked_char, container_type):
+    """Map ITEM_CONTAINER_TYPE numeric values used by the APK to server containers."""
+    mapping = {
+        0: 'equip_backpack',
+        1: 'equip_pack',
+        2: 'item_backpack',
+        3: 'badge_backpack',
+        4: 'badge_equip_pack',
+        5: 'fashion_backpack',
+        6: 'fashion_equip_pack',
+    }
+    key = mapping.get(int(container_type))
+    if key is None:
+        return None, None
+    return key, picked_char.setdefault(key, {})
+
+
+def find_gameitem(picked_char, index_id, allowed_codes=None):
+    """Find an item in one or more canonical ItemContainers."""
+    normalize_backpack_state(picked_char)
+    target = int(index_id)
+    codes = list(range(7)) if allowed_codes is None else [int(x) for x in allowed_codes]
+    for code in codes:
+        _, container = get_container_by_code(picked_char, code)
+        if container is None:
+            continue
+        if target in container:
+            return container, target, container[target], code
+        skey = str(target)
+        if skey in container:
+            return container, skey, container[skey], code
+        for key, item in container.items():
+            if isinstance(item, dict):
+                try:
+                    if int(item.get('indexId', -1)) == target:
+                        return container, key, item, code
+                except (TypeError, ValueError):
+                    continue
+    return None, None, None, None
+
+
+def sync_all_bag_containers(picked_char, send_rpc_push):
+    """Refresh every Backpack inventory container after a mutation."""
+    normalize_backpack_state(picked_char)
+    send_rpc_push(592, sync_backpack_item_rpc(picked_char))
+    send_rpc_push(604, sync_badgepack_item_rpc(picked_char))
+    send_rpc_push(616, sync_fashion_backpack_item_rpc(picked_char))
+    send_rpc_push(611, sync_item_pack_rpc(picked_char))
+
 
 def sync_dance_state_rpc(picked_char=None):
     """Build Sproto Tag 686 (sync_dance_state_info) for Single Dance & Guild Dance."""
@@ -2446,6 +2489,33 @@ def normalize_backpack_state(c):
     c['badge_backpack'] = _normalize_container(c.get('badge_backpack', {}))
     c['badge_equip_pack'] = _normalize_container(c.get('badge_equip_pack', {}), equipped=True)
     c['item_backpack'] = _normalize_container(c.get('item_backpack', {}))
+
+    # Equipped packs are indexed by slot in the original ItemContainer.
+    for slot, item in list(c['equip_pack'].items()):
+        if isinstance(item, dict):
+            try:
+                item['indexId'] = int(slot)
+            except (TypeError, ValueError):
+                pass
+
+    for slot, item in list(c['badge_equip_pack'].items()):
+        if isinstance(item, dict):
+            try:
+                item['indexId'] = int(slot)
+            except (TypeError, ValueError):
+                pass
+
+    for slot, item in list(c['fashion_equip_pack'].items()):
+        if isinstance(item, dict):
+            try:
+                item['indexId'] = int(slot)
+            except (TypeError, ValueError):
+                pass
+
+    for item in c['fashion_backpack'].values():
+        if isinstance(item, dict):
+            cfg = ITEM_CONFIG.get(str(item.get('itemId', '')), {})
+            item.setdefault('slot', int(cfg.get('subtype', 0) or 0))
 
     # Migrate the old list-based inventory exactly once into ItemContainer state.
     legacy = c.get('inventory', [])
