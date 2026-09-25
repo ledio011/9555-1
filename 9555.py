@@ -2271,26 +2271,23 @@ def client_handler(conn, addr):
                     print("[DEBUG] BEFORE MAP ENTER")
                     try:
                         ph_p = encode_sproto([(0, 503)])
-                        data = encode_sproto([(0, mid), (1, 0), (2, 1)])
+                        # enter_map.response: mapInfoId(0), line_index(1), line_count(2)
+                        line_index = max(1, int(picked_char.get('line_index', 1)))
+                        line_count = max(line_index, int(picked_char.get('line_count', 3)))
+                        data = encode_sproto([
+                            (0, mid),
+                            (1, line_index),
+                            (2, line_count)
+                        ])
                         pf_p = sproto_pack(ph_p + data)
                         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
                         print(f"[M1003 DEBUG] TX 503 map_id={mid}")
                         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
                         print(f"[MAP ENTER SEND] map_id={mid} scene={scene_name} pos={picked_char['pos']}")
 
-                        # TAG 504: main_player_create
-                        # This MUST arrive after 503 so the client can instantiate
-                        # ObjManager.MainPlayer while the scene is loading.
-                        send_rpc_push(504, encode_sproto([
-                            (0, get_full_char(picked_char)),
-                            (1, get_movement(
-                                picked_char['pos'][0],
-                                picked_char['pos'][1],
-                                picked_char['pos'][2],
-                                picked_char['pos'][3]
-                            ))
-                        ]))
-                        print(f"[MAIN PLAYER CREATE SEND] map_id={mid} after enter_map(503)")
+                        # TAG 504 is deferred until map_ready(100).
+                        # The APK's MainPlayer creation path depends on the loaded map scene.
+                        print(f"[MAIN PLAYER CREATE DEFERRED] map_id={mid} until map_ready(100)")
 
                     except Exception:
                         print("[!] FAILED TO SEND INITIAL MAP ENTER")
@@ -2302,12 +2299,21 @@ def client_handler(conn, addr):
                     mid = picked_char.get('map_id', '11')
                     print(f"[MAP READY RECEIVED] map_id={mid}")
 
-                    # Main player was created by tag 504 immediately after 503.
-                    # At map_ready(100), release the queued scene-dependent AOI/world state.
-                    # 505: aoi_add for the main player. The APK registers this
-                    # protocol separately from npc_create(509).
+                    # 504: main_player_create must be sent after the scene is actually ready.
+                    send_rpc_push(504, encode_sproto([
+                        (0, get_full_char(picked_char)),
+                        (1, get_movement(
+                            picked_char['pos'][0],
+                            picked_char['pos'][1],
+                            picked_char['pos'][2],
+                            picked_char['pos'][3]
+                        ))
+                    ]))
+                    print(f"[MAIN PLAYER CREATE SEND] map_id={mid} after map_ready(100)")
+
+                    # 505: aoi_add for the main player.
                     send_rpc_push(505, encode_sproto([(0, get_char_aoi(picked_char))]))
-                    print(f"[AOI ADD SEND] main_player map_id={mid} after map_ready(100)")
+                    print(f"[AOI ADD SEND] main_player map_id={mid} after main_player_create(504)")
 
                     # 509: actual NPC/traffic creation.
                     spawn_map_npcs(conn, mid, picked_char)
