@@ -6,12 +6,73 @@ CHAR_DB = os.path.join(SCRIPT_DIR, "characters_final.json")
 BAK_DB = CHAR_DB + ".bak"
 TMP_DB = CHAR_DB + ".tmp"
 RESOURCE_ROOT = os.path.join(SCRIPT_DIR, "assets")
+DECOMPILED_ROOT = os.path.join(SCRIPT_DIR, "Decompiled")
+GAME_ASSET_CACHE = {}
+GAME_ASSET_CACHE_LOCK = threading.Lock()
+GAME_ASSET_CACHE_LOADED = False
 server_session_counter = 8000
 GLOBAL_INST_COUNTER = 3000000
 NPC_INST_MAP = {} # inst_id -> nid (to resolve rewards)
 NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 DEAD_NPC_SET = set() # duplicate death/reward prevention set
+
+def load_decompiled_assets(connection):
+    """Read and keep the decompiled files in one shared, immutable-by-convention cache."""
+    global GAME_ASSET_CACHE, GAME_ASSET_CACHE_LOADED
+    if GAME_ASSET_CACHE_LOADED:
+        return
+
+    with GAME_ASSET_CACHE_LOCK:
+        if GAME_ASSET_CACHE_LOADED:
+            return
+        if not os.path.isdir(DECOMPILED_ROOT):
+            raise FileNotFoundError(f"Decompiled asset directory not found: {DECOMPILED_ROOT}")
+
+        asset_paths = []
+        for root, _, files in os.walk(DECOMPILED_ROOT):
+            asset_paths.extend(os.path.join(root, name) for name in files)
+        asset_paths.sort()
+        if not asset_paths:
+            raise RuntimeError(f"No files found under {DECOMPILED_ROOT}")
+
+        total_bytes = sum(os.path.getsize(path) for path in asset_paths)
+        if total_bytes <= 0:
+            raise RuntimeError(f"No readable asset bytes found under {DECOMPILED_ROOT}")
+
+        print(f"Please wait reading game assets 0/100%", end="", flush=True)
+        loaded_assets = {}
+        bytes_read = 0
+        last_percent = 0
+        try:
+            for path in asset_paths:
+                relative_path = os.path.relpath(path, DECOMPILED_ROOT)
+                contents = bytearray()
+                with open(path, "rb") as asset_file:
+                    while True:
+                        chunk = asset_file.read(1024 * 1024)
+                        if not chunk:
+                            break
+                        contents.extend(chunk)
+                        bytes_read += len(chunk)
+                        percent = min(100, bytes_read * 100 // total_bytes)
+                        if percent > last_percent:
+                            print(f"\rPlease wait reading game assets {percent}/100%", end="", flush=True)
+                            last_percent = percent
+                loaded_assets[relative_path] = bytes(contents)
+            if bytes_read != total_bytes:
+                raise RuntimeError(
+                    f"Asset files changed while reading: expected {total_bytes} bytes, read {bytes_read}"
+                )
+        except Exception as exc:
+            print("\r" + (" " * 80) + "\r", end="", flush=True)
+            print(f"[!] Failed reading Decompiled assets for {connection}: {exc}")
+            raise
+
+        GAME_ASSET_CACHE = loaded_assets
+        GAME_ASSET_CACHE_LOADED = True
+        print("\r" + (" " * 80) + "\r", end="", flush=True)
+        print(f"[ASSETS] Read {len(loaded_assets)} files ({bytes_read:,} bytes); shared cache ready.")
 
 # Load Mission Data
 missions_data = {}
@@ -2157,6 +2218,9 @@ def client_handler(conn, addr):
         if initial.startswith(b"GET ") or initial.startswith(b"HEAD"):
             serve_resource_http(conn, b"")
             return
+        if not initial:
+            return
+        load_decompiled_assets(addr)
         while True:
             h_bytes = conn.recv(2)
             if not h_bytes: break
