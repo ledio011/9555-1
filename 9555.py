@@ -2701,14 +2701,8 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
     print("[DEBUG] BEFORE MAP ENTER")
     try:
         ph_p = encode_sproto([(0, 503)])
-        # enter_map uses mapInfoId(0), line_index(1), line_count(2).
-        line_index = max(1, int(picked_char.get('line_index', 1)))
-        line_count = max(line_index, int(picked_char.get('line_count', 3)))
-        data = encode_sproto([
-            (0, target_map_id),
-            (1, line_index),
-            (2, line_count)
-        ])
+        # enter_map is request-only in the APK; its schema contains only mapInfoId(0).
+        data = encode_sproto([(0, target_map_id)])
         pf_p = sproto_pack(ph_p + data)
         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
         print(f"[M1003 DEBUG] TX 503 map_id={target_map_id}")
@@ -3098,16 +3092,8 @@ def client_handler(conn, addr):
                     print("[DEBUG] BEFORE MAP ENTER")
                     try:
                         ph_p = encode_sproto([(0, 503)])
-                        # enter_map response: mapInfoId(0), line_index(1), line_count(2).
-                        line_index = max(1, int(picked_char.get('line_index', 1)))
-                        line_count = max(line_index, int(picked_char.get('line_count', 3)))
-                        picked_char['line_index'] = line_index
-                        picked_char['line_count'] = line_count
-                        data = encode_sproto([
-                            (0, mid),
-                            (1, line_index),
-                            (2, line_count)
-                        ])
+                        # enter_map is request-only in the APK; its schema contains only mapInfoId(0).
+                        data = encode_sproto([(0, mid)])
                         pf_p = sproto_pack(ph_p + data)
                         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
                         print(f"[M1003 DEBUG] TX 503 map_id={mid}")
