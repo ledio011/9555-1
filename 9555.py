@@ -6,6 +6,7 @@ import socket
 import struct
 import threading
 import time
+import zipfile
 from datetime import datetime, timezone
 
 
@@ -17,6 +18,10 @@ MAX_COLLECTION_ITEMS = 100000
 UNKNOWN_REQUEST_LOG = os.environ.get(
     "UNKNOWN_REQUEST_LOG",
     os.path.join(SCRIPT_DIR, "unknown_requests.jsonl"),
+)
+ATG_SCAN_ZIP = os.environ.get(
+    "ATG_SCAN_ZIP",
+    os.path.join(SCRIPT_DIR, "Atg_Scan.zip"),
 )
 PACKAGE_SCHEMA = {
     0: {"name": "type", "type": "integer"},
@@ -33,6 +38,7 @@ CLIENT_REQUEST_HANDLERS = {}
 RESPONSE_FIELD_USAGE = {}
 RESPONSE_PRODUCERS = {}
 RESPONSE_EVIDENCE_GRAPH = {}
+ATG_SCAN_INDEX = {}
 REAL_RESPONSE_PRODUCERS = {}
 DATABASE_RESPONSE_PROVIDER = None
 SAFE_RESPONSE_DEFAULTS = {}
@@ -448,10 +454,15 @@ def find_game_state_value(
     field_name,
     descriptor,
     source_kinds=None,
+    aliases=(),
 ):
     if not isinstance(game_state, dict) or not field_name:
         return None
-    normalized_name = re.sub(r"[^a-z0-9]", "", field_name.casefold())
+    normalized_names = {
+        re.sub(r"[^a-z0-9]", "", str(name).casefold())
+        for name in (field_name, *aliases)
+        if name
+    }
     categories = {
         "CLIENT_STATE": (
             "account_player", "character", "map", "inventory", "skills",
@@ -481,7 +492,7 @@ def find_game_state_value(
             candidates.append(value)
     for candidate in candidates:
         for key, value in candidate.items():
-            if re.sub(r"[^a-z0-9]", "", str(key).casefold()) == normalized_name:
+            if re.sub(r"[^a-z0-9]", "", str(key).casefold()) in normalized_names:
                 if isinstance(value, dict) and descriptor.get("type") == "map":
                     for collection_key in ("catalog", "records", "values", "data"):
                         if collection_key in value:
@@ -625,6 +636,111 @@ def resolve_universal_schema_defaults(
     return generated
 
 
+def normalize_scan_path(path):
+    normalized = path.strip().replace("\\", "/")
+    normalized = re.sub(r"^(?:\./)+", "", normalized)
+    marker = "assets/"
+    marker_index = normalized.casefold().find(marker)
+    if marker_index >= 0:
+        normalized = normalized[marker_index:]
+    return normalized
+
+
+def load_atg_scan_index(path=None):
+    if path is None:
+        path = ATG_SCAN_ZIP
+    if not os.path.isfile(path):
+        return {}
+    reports = {
+        "ALL_TEXT_REFERENCES.txt",
+        "ALL_NUMERIC_REFERENCES.txt",
+        "POSSIBLE_FLOW.txt",
+        "POSSIBLE_HANDLERS.txt",
+        "POSSIBLE_REQUESTS.txt",
+        "POSSIBLE_RESPONSES.txt",
+        "POSSIBLE_SENDERS.txt",
+    }
+    reference_pattern = re.compile(
+        r"^(?P<path>(?:[A-Za-z]:)?[^\r\n]*?\.cs):"
+        r"(?P<line>\d+):(?P<excerpt>.*)$",
+        re.IGNORECASE,
+    )
+    index = {}
+    with zipfile.ZipFile(path) as archive:
+        names = set(archive.namelist())
+        for report_name in sorted(reports.intersection(names)):
+            with archive.open(report_name) as report_file:
+                for raw_line in report_file:
+                    line = raw_line.decode("utf-8-sig", errors="replace").rstrip()
+                    match = reference_pattern.match(line)
+                    if match is None:
+                        continue
+                    relative_path = normalize_scan_path(match.group("path"))
+                    if not relative_path.startswith("assets/"):
+                        continue
+                    item = {
+                        "report": report_name,
+                        "line": int(match.group("line")),
+                        "excerpt": match.group("excerpt").strip()[:500],
+                    }
+                    entries = index.setdefault(relative_path, [])
+                    if item not in entries:
+                        entries.append(item)
+    for entries in index.values():
+        entries.sort(key=lambda item: (item["report"], item["line"]))
+    return index
+
+
+def classify_scan_reference(text):
+    if re.search(
+        r"\b(?:PlayerData|PlayerCommonData|ObjMainPlayer)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return "PLAYER_STATE"
+    if re.search(
+        r"\b(?:DB|Database|Sqlite|Repository|DAO)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return "DATABASE"
+    if re.search(
+        r"\b(?:GameManager|SceneManager|ObjManager|NetManager|DataManager)\b",
+        text,
+        re.IGNORECASE,
+    ):
+        return "GAME_STATE"
+    return None
+
+
+def extract_data_aliases(assignments, report_references):
+    aliases = set()
+    for assignment in assignments:
+        expression = assignment.get("expression", "")
+        if assignment.get("source_kind") in {
+            "PLAYER_STATE",
+            "GAME_STATE",
+            "DATABASE",
+        }:
+            member_chain = re.findall(r"\b[A-Za-z_]\w*\b", expression)
+            if member_chain:
+                candidate = member_chain[-1]
+                if candidate.casefold() not in {"instance", "current", "value"}:
+                    aliases.add(candidate)
+    for reference in report_references:
+        excerpt = reference.get("excerpt", "")
+        source_kind = classify_scan_reference(excerpt)
+        if source_kind not in {"PLAYER_STATE", "GAME_STATE", "DATABASE"}:
+            continue
+        assignment_match = re.search(
+            r"=\s*(?:new\s+)?(?:[\w.]+\.)*([A-Za-z_]\w*)\s*(?:;|,|\))",
+            excerpt,
+        )
+        if assignment_match:
+            aliases.add(assignment_match.group(1))
+    return sorted(aliases)
+
+
 def generate_auto_response(tag, request_fields, game_state=None):
     spec = RESPONSE_CATALOG.get(tag)
     if spec is None:
@@ -704,6 +820,7 @@ def resolve_game_state_response(tag, response_schema, request_schema, request_fi
             source.get("source_kind")
             for source in field_evidence.get("sources", ())
         }
+        aliases = field_evidence.get("data_aliases", ())
         if not source_kinds.intersection(
             {
                 "CLIENT_STATE",
@@ -719,6 +836,7 @@ def resolve_game_state_response(tag, response_schema, request_schema, request_fi
             descriptor.get("name", ""),
             descriptor,
             source_kinds=source_kinds,
+            aliases=aliases,
         )
         if value is not None:
             result[field_tag] = value
@@ -2213,7 +2331,9 @@ def build_response_evidence_graph(
     producers,
     client_state_sources,
     database_sources,
+    scan_index=None,
 ):
+    scan_index = scan_index or {}
     source_evidence = client_state_sources + database_sources
     graph = {}
     for tag, response in responses.items():
@@ -2244,18 +2364,62 @@ def build_response_evidence_graph(
                 ):
                     related_sources.append(copy.deepcopy(source))
 
+            normalized_field = re.sub(
+                r"[^a-z0-9]", "", descriptor["name"].casefold()
+            )
+            report_references = []
+            for path, line in anchors:
+                for reference in scan_index.get(normalize_scan_path(path), ()):
+                    excerpt = reference.get("excerpt", "")
+                    field_match = re.search(
+                        rf"\b{re.escape(descriptor['name'])}\b",
+                        excerpt,
+                        re.IGNORECASE,
+                    )
+                    nearby_anchor = abs(reference["line"] - line) <= 80
+                    if field_match or nearby_anchor:
+                        item = {
+                            **copy.deepcopy(reference),
+                            "file": normalize_scan_path(path),
+                        }
+                        if item not in report_references:
+                            report_references.append(item)
+            report_references = report_references[:100]
+
             source_kinds = {
                 assignment["source_kind"]
                 for assignment in producer_assignments
             }
             source_kinds.update(source["source_kind"] for source in related_sources)
+            report_sources = []
+            for reference in report_references:
+                kind = classify_scan_reference(reference.get("excerpt", ""))
+                if kind is None:
+                    continue
+                source_kinds.add(kind)
+                report_sources.append(
+                    {
+                        "source_kind": kind,
+                        "file": reference["file"],
+                        "line": reference["line"],
+                        "symbol": reference["excerpt"],
+                        "origin": reference["report"],
+                    }
+                )
+            aliases = extract_data_aliases(
+                producer_assignments,
+                report_references,
+            )
             fields[field_tag] = {
                 "name": descriptor["name"],
                 "type": descriptor["type"],
+                "normalized_name": normalized_field,
                 "client_handler": client_handlers.get(tag),
                 "client_usage": usages,
                 "producer_assignments": producer_assignments,
-                "sources": related_sources
+                "scan_report_references": report_references,
+                "data_aliases": aliases,
+                "sources": related_sources + report_sources
                 + [
                     {
                         "source_kind": kind,
@@ -2279,6 +2443,7 @@ def read_game_assets(client_address):
     global RESPONSE_FIELD_USAGE, RESPONSE_PRODUCERS, GAME_METADATA
     global CHARACTER_STORE, CLIENT_STATE_SOURCES, DATABASE_SOURCES
     global RESPONSE_EVIDENCE_GRAPH
+    global ATG_SCAN_INDEX
 
     if ASSET_CACHE_LOADED:
         return
@@ -2364,6 +2529,7 @@ def read_game_assets(client_address):
         CHARACTER_STORE = load_character_store()
         CLIENT_STATE_SOURCES = scan_client_state_sources(assets)
         DATABASE_SOURCES = scan_database_sources(assets)
+        ATG_SCAN_INDEX = load_atg_scan_index()
         RESPONSE_EVIDENCE_GRAPH = build_response_evidence_graph(
             RESPONSE_CATALOG,
             CLIENT_REQUEST_HANDLERS,
@@ -2371,6 +2537,7 @@ def read_game_assets(client_address):
             RESPONSE_PRODUCERS,
             CLIENT_STATE_SOURCES,
             DATABASE_SOURCES,
+            ATG_SCAN_INDEX,
         )
         ASSET_CACHE_LOADED = True
         producer_source_counts = {}
@@ -2385,6 +2552,11 @@ def read_game_assets(client_address):
         evidence_field_count = sum(
             len(entry["fields"]) for entry in RESPONSE_EVIDENCE_GRAPH.values()
         )
+        scan_reference_count = sum(
+            len(field["scan_report_references"])
+            for entry in RESPONSE_EVIDENCE_GRAPH.values()
+            for field in entry["fields"].values()
+        )
         print("\rPlease wait reading game assets 100/100%")
         print(
             f"[ASSETS] Cached {len(assets)} files ({bytes_read:,} bytes) in RAM; "
@@ -2395,6 +2567,7 @@ def read_game_assets(client_address):
             f"indexed {len(CLIENT_STATE_SOURCES)} client-state and "
             f"{len(DATABASE_SOURCES)} database-source references; "
             f"linked evidence for {evidence_field_count} response fields; "
+            f"used {scan_reference_count} Atg_Scan report references; "
             f"{sum(len(producers) for producers in RESPONSE_PRODUCERS.values())} "
             "response producer sites indexed "
             f"(sources: {producer_source_counts}); "
