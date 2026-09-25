@@ -49,6 +49,8 @@ try:
     text_asset_root = os.path.join(script_dir, "assets", "Bundle", "TextAsset")
     if not os.path.isdir(text_asset_root):
         text_asset_root = os.path.join(script_dir, "assets", "Bundle", "TextAssets")
+    if not os.path.isdir(text_asset_root):
+        text_asset_root = os.path.join(script_dir, "Decompiled", "assets", "Bundle", "TextAsset")
 
     # Load EffInfoData
     eff_path = os.path.join(text_asset_root, "EffInfoData")
@@ -2035,10 +2037,10 @@ def serve_resource_http(conn, initial_data):
             return
         size = os.path.getsize(local_path)
         headers = (
-            b"HTTP/1.1 200 OK\r\n"
-            + b"Content-Length: " + str(size).encode("ascii") + b"\r\n"
-            + b"Content-Type: application/octet-stream\r\n"
-            + b"Connection: close\r\n\r\n"
+                b"HTTP/1.1 200 OK\r\n"
+                + b"Content-Length: " + str(size).encode("ascii") + b"\r\n"
+                + b"Content-Type: application/octet-stream\r\n"
+                + b"Connection: close\r\n\r\n"
         )
         conn.sendall(headers)
         if parts[0] == "GET":
