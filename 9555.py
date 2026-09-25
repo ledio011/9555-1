@@ -1,3 +1,4 @@
+import copy
 import os
 import re
 import socket
@@ -24,6 +25,10 @@ REQUEST_CATALOG = {}
 SCHEMA_CATALOG = {}
 CLIENT_REQUEST_HANDLERS = {}
 RESPONSE_FIELD_USAGE = {}
+RESPONSE_PRODUCERS = {}
+GAME_STATE = {}
+GAME_STATE_LOCK = threading.Lock()
+GAME_METADATA = {}
 
 
 def sproto_pack(data):
@@ -391,10 +396,71 @@ def send_server_rpc(connection, state, tag, body_fields):
     return session
 
 
-def generate_auto_response(tag, request_fields):
+def generate_auto_response(tag, request_fields, game_state=None):
     spec = RESPONSE_CATALOG.get(tag)
     if spec is None:
         return None, "APK has no response schema for this tag"
+
+    if game_state is not None:
+        authoritative_responses = game_state.get("authoritative_responses", {})
+        if tag in authoritative_responses:
+            response_fields = authoritative_responses[tag]
+            if not isinstance(response_fields, dict):
+                return None, "GAME_STATE authoritative response must be a field map"
+            if any(field_tag not in spec["fields"] for field_tag in response_fields):
+                return None, "GAME_STATE authoritative response contains unknown fields"
+            try:
+                encode_sproto_object(response_fields, spec["fields"])
+            except (TypeError, ValueError, OverflowError) as exc:
+                return None, f"GAME_STATE response does not match APK schema: {exc}"
+            return response_fields, "authoritative per-client GAME_STATE"
+
+    if spec["name"] == "login":
+        request_spec = REQUEST_CATALOG.get(tag)
+        request_logintype_tag = next(
+            (
+                field_tag
+                for field_tag, field in (request_spec or {}).get("fields", {}).items()
+                if field["name"] == "logintype" and field["type"] == "integer"
+            ),
+            None,
+        )
+        if (
+            request_logintype_tag is None
+            or request_fields.get(request_logintype_tag) not in (1, 2)
+        ):
+            return None, "login request has no supported logintype"
+
+        response_tags = {
+            field["name"]: field_tag for field_tag, field in spec["fields"].items()
+        }
+        required_metadata = ("versionCode", "dataVersionCode")
+        missing = [key for key in required_metadata if not GAME_METADATA.get(key)]
+        if missing:
+            return None, f"Decompiled metadata is missing {', '.join(missing)}"
+
+        configured_server_level = os.environ.get("SERVER_LEVEL")
+        if configured_server_level is None:
+            return None, "SERVER_LEVEL is required; Decompiled has no account server level"
+        try:
+            server_level = int(configured_server_level)
+        except ValueError:
+            return None, "SERVER_LEVEL must be an integer"
+        if server_level < 0:
+            return None, "SERVER_LEVEL must be non-negative"
+        if not all(key in response_tags for key in (*required_metadata, "type", "serverLevel")):
+            return None, "APK login response schema is missing a required field"
+
+        # NetManager.LoginResponse treats type > 1 as an accepted normal login.
+        return {
+            response_tags["type"]: 2,
+            response_tags["versionCode"]: GAME_METADATA["versionCode"],
+            response_tags["dataVersionCode"]: GAME_METADATA["dataVersionCode"],
+            response_tags["serverLevel"]: server_level,
+        }, (
+            "APK login acceptance branch; version metadata from Decompiled; "
+            f"SERVER_LEVEL={server_level} configuration"
+        )
 
     if spec["name"] == "heart_beat":
         request_spec = REQUEST_CATALOG.get(tag)
@@ -439,27 +505,66 @@ def generate_auto_response(tag, request_fields):
     request_spec = REQUEST_CATALOG.get(tag)
     request_schema = request_spec["fields"] if request_spec else {}
     try:
-        response_fields = generate_schema_defaults(
+        response_fields, missing_fields = generate_request_derived_response(
             spec["fields"],
             request_schema,
             request_fields,
-            depth=0,
+            path=spec["name"],
             field_budget=[0],
         )
+        if missing_fields:
+            return None, (
+                "Decompiled contains no authoritative producer for response fields: "
+                + ", ".join(missing_fields[:12])
+            )
         encode_sproto_object(response_fields, spec["fields"])
     except (TypeError, ValueError, OverflowError) as exc:
-        return None, f"schema fallback could not safely encode this response: {exc}"
-    return response_fields, "synthetic schema fallback; not authoritative game state"
+        return None, f"request-derived response could not be safely encoded: {exc}"
+    producer_note = ""
+    producers = RESPONSE_PRODUCERS.get(tag, ())
+    if producers and not any(
+        producer.get("server_reply_usable") for producer in producers
+    ):
+        producer_note = (
+            "; scanned APK producer is a client-side handler for server-originated "
+            "RPC, not an authoritative game-server response"
+        )
+    return response_fields, "values copied from matching request fields" + producer_note
 
 
-def generate_schema_defaults(
+def extract_game_metadata(assets):
+    settings = find_asset(
+        assets, "Managed/Assembly-CSharp/GameSettingData.cs"
+    )
+    if settings is None:
+        raise RuntimeError("Decompiled GameSettingData.cs was not found")
+    settings_source = settings.decode("utf-8-sig")
+    version_match = re.search(
+        r'\bGameVersion\s*=\s*"([^"]+)"', settings_source
+    )
+    if version_match is None:
+        raise RuntimeError("GameSettingData.GameVersion was not found")
+
+    version_data = find_asset(assets, "assets/UpdateInfo/Version.info")
+    if version_data is None:
+        raise RuntimeError("Decompiled UpdateInfo/Version.info was not found")
+    data_version = version_data.decode("utf-8-sig").strip()
+    if not data_version.isdecimal():
+        raise RuntimeError("UpdateInfo/Version.info is not a decimal version")
+    return {
+        "versionCode": version_match.group(1),
+        "dataVersionCode": data_version,
+    }
+
+
+def generate_request_derived_response(
     response_schema,
     request_schema=None,
     request_fields=None,
-    depth=0,
+    path="response",
     field_budget=None,
 ):
-    if depth > 24:
+    if path.count(".") > 24:
         raise ValueError("nested response schema exceeds depth limit")
     if field_budget is None:
         field_budget = [0]
@@ -470,6 +575,7 @@ def generate_schema_defaults(
         for tag, descriptor in request_schema.items()
     }
     generated = {}
+    missing_fields = []
 
     for response_tag, descriptor in response_schema.items():
         field_budget[0] += 1
@@ -488,69 +594,74 @@ def generate_schema_defaults(
 
         field_type = descriptor.get("type")
         value = None
+        field_path = f"{path}.{descriptor.get('name', response_tag)}"
         if field_type == "integer":
-            value = (
-                request_value
-                if isinstance(request_value, int) and not isinstance(request_value, bool)
-                else 0
-            )
+            if isinstance(request_value, int) and not isinstance(request_value, bool):
+                value = request_value
         elif field_type == "boolean":
-            value = request_value if isinstance(request_value, bool) else False
+            if isinstance(request_value, bool):
+                value = request_value
         elif field_type == "string":
-            value = request_value if isinstance(request_value, str) else ""
+            if isinstance(request_value, str):
+                value = request_value
         elif field_type == "bytes":
-            value = (
-                bytes(request_value)
-                if isinstance(request_value, (bytes, bytearray))
-                else b""
-            )
+            if isinstance(request_value, (bytes, bytearray)):
+                value = bytes(request_value)
         elif field_type == "object":
-            value = generate_schema_defaults(
+            nested, missing = generate_request_derived_response(
                 descriptor.get("object_schema", {}),
                 (request_descriptor or {}).get("object_schema", {}),
                 request_value if isinstance(request_value, dict) else {},
-                depth + 1,
+                field_path,
                 field_budget,
             )
+            if not missing:
+                value = nested
+            else:
+                missing_fields.extend(missing)
         elif field_type in ("integer_list", "boolean_list", "string_list"):
             if isinstance(request_value, list):
                 value = request_value
-            else:
-                value = []
         elif field_type == "object_list":
-            value = []
             if isinstance(request_value, list):
-                request_object_schema = (request_descriptor or {}).get(
-                    "object_schema", {}
-                )
-                for item in request_value:
-                    if isinstance(item, dict):
-                        value.append(
-                            generate_schema_defaults(
-                                descriptor.get("object_schema", {}),
-                                request_object_schema,
-                                item,
-                                depth + 1,
-                                field_budget,
-                            )
-                        )
+                value = []
+                request_object_schema = (request_descriptor or {}).get("object_schema", {})
+                for index, item in enumerate(request_value):
+                    if not isinstance(item, dict):
+                        missing_fields.append(f"{field_path}[{index}]")
+                        continue
+                    generated_item, missing = generate_request_derived_response(
+                        descriptor.get("object_schema", {}),
+                        request_object_schema,
+                        item,
+                        f"{field_path}[{index}]",
+                        field_budget,
+                    )
+                    if missing:
+                        missing_fields.extend(missing)
+                    else:
+                        value.append(generated_item)
         elif field_type == "map":
-            value = {}
             if isinstance(request_value, dict):
+                value = {}
                 request_object_schema = (request_descriptor or {}).get(
                     "object_schema", {}
                 )
                 response_key_tag = descriptor.get("key_tag")
                 for map_key, item in request_value.items():
                     if not isinstance(item, dict):
+                        missing_fields.append(f"{field_path}[{map_key!r}]")
                         continue
-                    generated_item = generate_schema_defaults(
+                    generated_item, missing = generate_request_derived_response(
                         descriptor.get("object_schema", {}),
                         request_object_schema,
                         item,
-                        depth + 1,
+                        f"{field_path}[{map_key!r}]",
                         field_budget,
                     )
+                    if missing:
+                        missing_fields.extend(missing)
+                        continue
                     if response_key_tag is not None:
                         generated_key = generated_item.get(response_key_tag, map_key)
                     else:
@@ -558,20 +669,33 @@ def generate_schema_defaults(
                     value[generated_key] = generated_item
         else:
             raise TypeError(
-                f"unsupported response field type {field_type!r} "
-                f"for {descriptor.get('name', response_tag)}"
+                f"unsupported response field type {field_type!r} for {field_path}"
             )
 
-        generated[response_tag] = value
-    return generated
+        if value is not None:
+            generated[response_tag] = value
+        elif not any(
+            missing == field_path
+            or missing.startswith(field_path + ".")
+            or missing.startswith(field_path + "[")
+            for missing in missing_fields
+        ):
+            missing_fields.append(field_path)
+    return generated, missing_fields
 
 
 class ClientConnectionState:
     def __init__(self):
+        self.state_id = id(self)
         self.next_server_session = 1
         self.pending_server_rpcs = {}
         self.pending_client_sessions = {}
         self.observed_requests = {}
+        self.game_state = {
+            "identity": None,
+            "observed_requests": {},
+            "authoritative_responses": {},
+        }
         self.lock = threading.Lock()
         self.send_lock = threading.Lock()
 
@@ -583,14 +707,47 @@ class ClientConnectionState:
         with self.lock:
             self.observed_requests.pop(tag, None)
             self.observed_requests[tag] = named_fields
+            self.game_state["observed_requests"].pop(tag, None)
+            self.game_state["observed_requests"][tag] = named_fields
+            if REQUEST_CATALOG.get(tag, {}).get("name") == "login":
+                identity_tag = next(
+                    (
+                        field_tag
+                        for field_tag, field in request_schema.items()
+                        if field["name"] == "id" and field["type"] == "string"
+                    ),
+                    None,
+                )
+                identity = request_fields.get(identity_tag)
+                if isinstance(identity, str):
+                    self.game_state["identity"] = identity
             while len(self.observed_requests) > 64:
-                self.observed_requests.pop(next(iter(self.observed_requests)))
+                oldest_tag = next(iter(self.observed_requests))
+                self.observed_requests.pop(oldest_tag)
+                self.game_state["observed_requests"].pop(oldest_tag, None)
+
+    def set_authoritative_response(self, tag, response_fields):
+        spec = RESPONSE_CATALOG.get(tag)
+        if spec is None:
+            raise KeyError(f"No APK response schema registered for RPC tag {tag}")
+        if not isinstance(response_fields, dict):
+            raise TypeError("Authoritative response must be a field map")
+        if any(field_tag not in spec["fields"] for field_tag in response_fields):
+            raise ValueError("Authoritative response contains unknown schema fields")
+        encode_sproto_object(response_fields, spec["fields"])
+        with self.lock:
+            self.game_state["authoritative_responses"][tag] = copy.deepcopy(
+                response_fields
+            )
 
     def clear(self):
         with self.lock:
             self.pending_server_rpcs.clear()
             self.pending_client_sessions.clear()
             self.observed_requests.clear()
+            self.game_state["identity"] = None
+            self.game_state["observed_requests"].clear()
+            self.game_state["authoritative_responses"].clear()
 
 
 def extract_braced_block(source, opening_brace):
@@ -847,6 +1004,130 @@ def build_rpc_catalogs(assets):
     return requests, responses, schemas, client_handlers
 
 
+def scan_response_producers(assets, responses, client_handlers):
+    producers = {}
+    for tag, response_spec in responses.items():
+        handler_path = client_handlers.get(tag)
+        if not handler_path:
+            continue
+        handler_class, separator, method_name = handler_path.rpartition(".")
+        if not separator:
+            continue
+
+        source = find_asset(
+            assets,
+            f"Managed/Assembly-CSharp/{handler_class}.cs",
+        )
+        if source is None:
+            continue
+        source = source.decode("utf-8-sig", errors="replace")
+        method_match = re.search(
+            rf"\b{re.escape(method_name)}\s*\([^;{{}}]*\)\s*\{{",
+            source,
+        )
+        if method_match is None:
+            continue
+        opening_brace = source.find("{", method_match.start(), method_match.end())
+        method_body = extract_braced_block(source, opening_brace)
+        method_source = source[opening_brace + 1 : opening_brace + 1 + len(method_body)]
+
+        response_name = response_spec["name"]
+        constructor = re.search(
+            rf"\b(?:[\w.]+\.)?{re.escape(response_name)}\.response\s+"
+            rf"(?P<variable>[A-Za-z_]\w*)\s*=\s*new\s+"
+            rf"(?:[\w.]+\.)?{re.escape(response_name)}\.response\s*\(",
+            method_source,
+        )
+        if constructor is None:
+            continue
+
+        variable = constructor.group("variable")
+        fields_by_name = {
+            field["name"]: field_tag
+            for field_tag, field in response_spec["fields"].items()
+        }
+        field_evidence = {}
+        assignment_pattern = re.compile(
+            rf"\b{re.escape(variable)}\.(?P<field>[A-Za-z_]\w*)\s*"
+            r"(?P<operator>\+=|=)\s*(?P<expression>[^;]+);"
+        )
+        for assignment in assignment_pattern.finditer(method_source):
+            field_name = assignment.group("field")
+            field_tag = fields_by_name.get(field_name)
+            if field_tag is None:
+                continue
+            expression = assignment.group("expression").strip()
+            request_match = re.fullmatch(
+                r"request\.(?P<field>[A-Za-z_]\w*)", expression
+            )
+            if request_match:
+                source_kind = "request_field"
+                source_field = request_match.group("field")
+            elif re.fullmatch(r"-?\d+[lL]?", expression):
+                source_kind = "literal_integer"
+                source_field = None
+            elif expression in ("true", "false"):
+                source_kind = "literal_boolean"
+                source_field = None
+            elif expression.startswith('"') and expression.endswith('"'):
+                source_kind = "literal_string"
+                source_field = None
+            elif re.search(r"\b(?:PlayerData|GameManager|DataManager|DB|player|mainPlayer)\b", expression):
+                source_kind = "client_state_or_computation"
+                source_field = None
+            else:
+                source_kind = "computed_or_unknown"
+                source_field = None
+            line = source.count(
+                "\n", 0, opening_brace + 1 + assignment.start()
+            ) + 1
+            field_evidence.setdefault(field_tag, []).append(
+                {
+                    "field": field_name,
+                    "operation": assignment.group("operator"),
+                    "expression": expression,
+                    "source_kind": source_kind,
+                    "source_field": source_field,
+                    "line": line,
+                }
+            )
+
+        for mutation in re.finditer(
+            rf"\b{re.escape(variable)}\.(?P<field>[A-Za-z_]\w*)\."
+            r"(?P<operation>Add|AddRange|Clear)\s*\(",
+            method_source,
+        ):
+            field_name = mutation.group("field")
+            field_tag = fields_by_name.get(field_name)
+            if field_tag is None:
+                continue
+            line = source.count(
+                "\n", 0, opening_brace + 1 + mutation.start()
+            ) + 1
+            field_evidence.setdefault(field_tag, []).append(
+                {
+                    "field": field_name,
+                    "operation": mutation.group("operation"),
+                    "expression": None,
+                    "source_kind": "collection_mutation",
+                    "source_field": None,
+                    "line": line,
+                }
+            )
+
+        if field_evidence:
+            producers[tag] = [
+                {
+                    "handler": handler_path,
+                    "file": f"Managed/Assembly-CSharp/{handler_class}.cs",
+                    "direction": "client_handler_reply_to_server_rpc",
+                    "server_reply_usable": False,
+                    "fields": field_evidence,
+                }
+            ]
+    return producers
+
+
 def scan_response_field_usage(assets, responses):
     usages = {tag: {} for tag in responses}
     method_pattern = re.compile(
@@ -929,7 +1210,7 @@ def scan_response_field_usage(assets, responses):
 def read_game_assets(client_address):
     global ASSET_CACHE, ASSET_CACHE_LOADED, RESPONSE_CATALOG
     global REQUEST_CATALOG, SCHEMA_CATALOG, CLIENT_REQUEST_HANDLERS
-    global RESPONSE_FIELD_USAGE
+    global RESPONSE_FIELD_USAGE, RESPONSE_PRODUCERS, GAME_METADATA
 
     if ASSET_CACHE_LOADED:
         return
@@ -1000,6 +1281,12 @@ def read_game_assets(client_address):
             CLIENT_REQUEST_HANDLERS,
         ) = build_rpc_catalogs(assets)
         RESPONSE_FIELD_USAGE = scan_response_field_usage(assets, RESPONSE_CATALOG)
+        RESPONSE_PRODUCERS = scan_response_producers(
+            assets,
+            RESPONSE_CATALOG,
+            CLIENT_REQUEST_HANDLERS,
+        )
+        GAME_METADATA = extract_game_metadata(assets)
         ASSET_CACHE_LOADED = True
         print("\rPlease wait reading game assets 100/100%")
         print(
@@ -1007,13 +1294,19 @@ def read_game_assets(client_address):
             f"indexed {len(REQUEST_CATALOG)} requests, {len(RESPONSE_CATALOG)} "
             f"responses, {len(SCHEMA_CATALOG)} Sproto structs, and "
             f"{sum(len(fields) for fields in RESPONSE_FIELD_USAGE.values())} "
-            "response fields with client-side usage."
+            "response fields with client-side usage; "
+            f"{sum(len(producers) for producers in RESPONSE_PRODUCERS.values())} "
+            "client-side response producers indexed; "
+            f"game version {GAME_METADATA['versionCode']} / data "
+            f"{GAME_METADATA['dataVersionCode']}."
         )
 
 
 def handle_client(connection, address, state=None):
     if state is None:
         state = ClientConnectionState()
+    with GAME_STATE_LOCK:
+        GAME_STATE[state.state_id] = state.game_state
     try:
         read_game_assets(address)
         print(f"[RPC] Listening for game requests from {address}")
@@ -1112,7 +1405,7 @@ def handle_client(connection, address, state=None):
             response_fields = tuple(response_fields)
             if response_spec:
                 generated_fields, source = generate_auto_response(
-                    rpc_tag, request_body
+                    rpc_tag, request_body, state.game_state
                 )
                 if generated_fields is not None:
                     send_rpc_response(
@@ -1141,6 +1434,8 @@ def handle_client(connection, address, state=None):
     except Exception as exc:
         print(f"[!] Failed handling game client {address}: {exc}")
     finally:
+        with GAME_STATE_LOCK:
+            GAME_STATE.pop(state.state_id, None)
         state.clear()
         connection.close()
         print(f"[-] Client disconnected: {address}")
