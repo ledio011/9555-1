@@ -2580,12 +2580,44 @@ def normalize_backpack_state(c):
     return c
 
 
+def normalize_line_states(c):
+    """Normalize PlayerData.LineStates-compatible state to a List<long>."""
+    try:
+        count = max(1, int(c.get('line_count', 3)))
+    except (TypeError, ValueError):
+        count = 3
+    raw = c.get('line_states')
+    if isinstance(raw, dict):
+        arr = [0] * count
+        for key, value in raw.items():
+            try:
+                idx = int(key)
+                # Accept both 0-based and 1-based legacy dictionary keys.
+                if 1 <= idx <= count:
+                    idx -= 1
+                if 0 <= idx < count:
+                    arr[idx] = int(value)
+            except (TypeError, ValueError):
+                continue
+    elif isinstance(raw, (list, tuple)):
+        arr = []
+        for value in list(raw)[:count]:
+            try:
+                arr.append(int(value))
+            except (TypeError, ValueError):
+                arr.append(0)
+        arr.extend([0] * (count - len(arr)))
+    else:
+        arr = [0] * count
+    c['line_states'] = arr
+    return arr
+
 def init_character_fields(c):
     fields = {
         'level': 1, 'exp': 0, 'cash': 1000,
         'gold': 100, 'diamonds': 10, 'guild_contrib': 0,
         'honor': 0, 'tokens': 0,
-        'line_index': 1, 'line_count': 3, 'line_states': {},
+        'line_index': 1, 'line_count': 3, 'line_states': [0, 0, 0],
         'pk': 0, 'guild_id': 0, 'guild_name': '', 'guild_job': 0,
         'skill_levels': {},
         'active_missions': {},
@@ -2658,6 +2690,9 @@ def init_character_fields(c):
             'items': {'1001': {'id': "1001", 'count': 50000}, '2001': {'id': "2001", 'count': 10000}},
             'expireday': 30
         }
+
+    # Keep line state compatible with PlayerData.LineStates = List<long>.
+    normalize_line_states(c)
 
     # Initialize or restore HP if not set or if dead
     stats = get_character_stats(c)
@@ -3049,6 +3084,7 @@ def client_handler(conn, addr):
                     # The scene has not acknowledged the new map yet.
                     picked_char['map_ready_done'] = False
                     picked_char['map_ready_map_id'] = ""
+                    picked_char['main_player_created_sent'] = False
                     save_chars(all_accounts_chars)
 
                     # Correct Sequence: 614 -> 611 -> 540 -> 534/531 -> 503 -> map_ready(100)
@@ -3123,9 +3159,20 @@ def client_handler(conn, addr):
                         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
                         print(f"[MAP ENTER SEND] map_id={mid} scene={scene_name} pos={picked_char['pos']}")
 
-                        # TAG 504 is sent after the client reports msg 100 (map_ready).
-                        # Sending it here races enter_map_handler / scene loading because 503
-                        # temporarily sets NetLogic.CanProcessPack = false.
+                        # Historical client flow sends main_player_create immediately after 503.
+                        # Keep one-shot state so a later map_ready(100) never duplicates tag 504.
+                        if not picked_char.get('main_player_created_sent', False):
+                            send_rpc_push(504, encode_sproto([
+                                (0, get_full_char(picked_char)),
+                                (1, get_movement(
+                                    picked_char['pos'][0],
+                                    picked_char['pos'][1],
+                                    picked_char['pos'][2],
+                                    picked_char['pos'][3]
+                                ))
+                            ]))
+                            picked_char['main_player_created_sent'] = True
+                            print(f"[MAIN PLAYER CREATE SEND] map_id={mid} (after 503)")
 
                     except Exception:
                         print("[!] FAILED TO SEND INITIAL MAP ENTER")
@@ -3148,17 +3195,22 @@ def client_handler(conn, addr):
                     print(f"==================================================")
 
                     # 1. TAG 504: main_player_create
-                    # main_player_create_handler.cs reads character/movement and creates ObjManager.MainPlayer.
-                    send_rpc_push(504, encode_sproto([
-                        (0, get_full_char(picked_char)),
-                        (1, get_movement(
-                            picked_char['pos'][0],
-                            picked_char['pos'][1],
-                            picked_char['pos'][2],
-                            picked_char['pos'][3]
-                        ))
-                    ]))
-                    print(f"[MAIN PLAYER CREATE SEND] map_id={mid}")
+                    # Normally sent immediately after 503. Keep a fallback here in case
+                    # a client reaches map_ready before the initial send is processed.
+                    if not picked_char.get('main_player_created_sent', False):
+                        send_rpc_push(504, encode_sproto([
+                            (0, get_full_char(picked_char)),
+                            (1, get_movement(
+                                picked_char['pos'][0],
+                                picked_char['pos'][1],
+                                picked_char['pos'][2],
+                                picked_char['pos'][3]
+                            ))
+                        ]))
+                        picked_char['main_player_created_sent'] = True
+                        print(f"[MAIN PLAYER CREATE SEND] map_id={mid} (map_ready fallback)")
+                    else:
+                        print(f"[MAIN PLAYER CREATE ALREADY SENT] map_id={mid}")
 
                     # 2. TAG 654: start_enter_game (Close loading box & enable HUD controls)
                     send_rpc_push(654, encode_sproto([(0, 1)]))
@@ -5024,7 +5076,7 @@ def client_handler(conn, addr):
                         line_count = max(line_index, int(picked_char.get('line_count', 3)))
                         picked_char['line_count'] = line_count
                         save_chars(all_accounts_chars)
-                        line_states = picked_char.get('line_states', {})
+                        line_states = normalize_line_states(picked_char)
                         send_rpc_push(568, encode_sproto([
                             (0, str(picked_char.get('map_id', '11'))),
                             (1, line_count),
@@ -5071,12 +5123,8 @@ def client_handler(conn, addr):
                     mid = str(picked_char.get('map_id', '11')) if picked_char else '11'
                     line_count = max(1, int(picked_char.get('line_count', 3))) if picked_char else 3
                     line_index = max(1, int(picked_char.get('line_index', 1))) if picked_char else 1
-                    line_states = picked_char.get('line_states', {}) if picked_char else {}
-                    # update_line_state schema: mapInfoId(0), line_count(1), line_states(2).
-                    # Keep the selected line in the state map as well.
-                    if picked_char:
-                        line_states = dict(line_states)
-                        line_states[str(line_index)] = line_states.get(str(line_index), 0)
+                    line_states = normalize_line_states(picked_char) if picked_char else [0] * line_count
+                    # update_line_state: mapInfoId(0), line_count(1), line_states(2).
                     send_rpc_push(568, encode_sproto([
                         (0, mid),
                         (1, line_count),
