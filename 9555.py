@@ -2372,6 +2372,161 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
         send_rpc_push(519, sync_mission_data(picked_char))
     return updated
 
+def _new_gameitem(index_id, item_id, amount=1, quality=1, level=1, bindflag=True, parm=None, flags=0, appraise=1, **extra):
+    """Create the server-side GameItem shape used by every Backpack container."""
+    idx = int(index_id)
+    item = {
+        'indexId': idx,
+        'itemId': str(item_id),
+        'bindflag': bool(bindflag),
+        'quality': int(quality),
+        'level': int(level),
+        'stack': max(1, int(amount)),
+        'parm': [int(x) for x in (parm if parm is not None else [0] * 8)],
+        'appraise': int(appraise),
+        'flags': int(flags)
+    }
+    if len(item['parm']) < 8:
+        item['parm'] += [0] * (8 - len(item['parm']))
+    elif len(item['parm']) > 8:
+        item['parm'] = item['parm'][:8]
+    item.update(extra)
+    return item
+
+
+def _next_item_index(container):
+    """Return a stable free GameItem index, avoiding timestamp collisions."""
+    if not container:
+        return 10000
+    used = set()
+    for key, item in container.items():
+        try:
+            used.add(int(item.get('indexId', key)) if isinstance(item, dict) else int(key))
+        except (TypeError, ValueError):
+            continue
+    return max(10000, max(used) + 1 if used else 10000)
+
+
+def _normalize_container(container, equipped=False):
+    """Normalize persisted JSON keys/GameItems while preserving equipped slot indexes."""
+    if not isinstance(container, dict):
+        container = {}
+    normalized = {}
+    for raw_key, raw_item in list(container.items()):
+        if not isinstance(raw_item, dict):
+            continue
+        try:
+            key = int(raw_key)
+        except (TypeError, ValueError):
+            try:
+                key = int(raw_item.get('indexId', 0))
+            except (TypeError, ValueError):
+                continue
+        try:
+            idx = key if equipped else int(raw_item.get('indexId', key))
+        except (TypeError, ValueError):
+            idx = key
+        if equipped:
+            raw_item['indexId'] = key
+            idx = key
+        else:
+            raw_item['indexId'] = idx
+        raw_item['itemId'] = str(raw_item.get('itemId', ''))
+        raw_item['bindflag'] = bool(raw_item.get('bindflag', True))
+        raw_item['quality'] = max(0, min(5, int(raw_item.get('quality', 0))))
+        raw_item['level'] = max(1, int(raw_item.get('level', 1)))
+        raw_item['stack'] = max(1, int(raw_item.get('stack', 1)))
+        parm = raw_item.get('parm', [0] * 8)
+        try:
+            parm = [int(x) for x in parm]
+        except (TypeError, ValueError):
+            parm = [0] * 8
+        raw_item['parm'] = (parm + [0] * 8)[:8]
+        raw_item['flags'] = int(raw_item.get('flags', 0))
+        raw_item['appraise'] = int(raw_item.get('appraise', 1))
+        normalized[idx] = raw_item
+    return normalized
+
+
+def normalize_backpack_state(c):
+    """Canonicalize Character/Equip/Fashion/Badge/Items state before Bag sync or mutation.
+    
+    The APK has seven ItemContainer instances behind the five Bag pages:
+    equipped and unequipped containers for Equip, Fashion and Badge, plus Item.
+    """
+    c['equip_pack'] = _normalize_container(c.get('equip_pack', {}), equipped=True)
+    c['equip_backpack'] = _normalize_container(c.get('equip_backpack', {}))
+    c['fashion_backpack'] = _normalize_container(c.get('fashion_backpack', {}))
+    c['fashion_equip_pack'] = _normalize_container(c.get('fashion_equip_pack', {}), equipped=True)
+    c['badge_backpack'] = _normalize_container(c.get('badge_backpack', {}))
+    c['badge_equip_pack'] = _normalize_container(c.get('badge_equip_pack', {}), equipped=True)
+    c['item_backpack'] = _normalize_container(c.get('item_backpack', {}))
+
+    # Migrate the old list-based inventory exactly once into ItemContainer state.
+    legacy = c.get('inventory', [])
+    if isinstance(legacy, list):
+        for pos, raw in enumerate(legacy):
+            if not isinstance(raw, dict):
+                continue
+            item_id = str(raw.get('id', raw.get('itemId', '')))
+            amount = max(1, int(raw.get('amount', raw.get('stack', 1))))
+            if not item_id:
+                continue
+            cfg = ITEM_CONFIG.get(item_id, {})
+            itype = int(cfg.get('type', 0))
+            # Old saves could contain equip/fashion/badge objects in inventory.
+            if itype in (2, 3, 4):
+                target = c['equip_backpack']
+            elif itype in (15, 16):
+                target = c['fashion_backpack']
+            elif itype in (13, 22):
+                target = c['badge_backpack']
+            else:
+                target = c['item_backpack']
+            existing = next((v for v in target.values() if str(v.get('itemId')) == item_id), None)
+            if existing and target is c['item_backpack']:
+                existing['stack'] = int(existing.get('stack', 1)) + amount
+            elif not existing:
+                idx = 10000 + pos
+                while idx in target:
+                    idx += 1
+                target[idx] = _new_gameitem(
+                    idx, item_id, amount=amount,
+                    quality=int(raw.get('quality', 1)),
+                    level=int(raw.get('level', 1)),
+                    bindflag=bool(raw.get('bindflag', True)),
+                    parm=raw.get('parm', [0] * 8),
+                    flags=int(raw.get('flags', 0)),
+                    appraise=int(raw.get('appraise', 1))
+                )
+    # Keep the legacy field only as a compatibility placeholder; all network
+    # inventory operations now use the canonical ItemContainer maps.
+    c['inventory'] = []
+
+    # Character Page always has the six normal equipment slots available.
+    epack = c['equip_pack']
+    prof = int(c.get('prof', 0))
+    starter_set = {
+        0: ("10002", "20002", "30002"),
+        1: ("10003", "20003", "30003"),
+        2: ("10005", "20005", "30005"),
+        3: ("10004", "20004", "30004"),
+        4: ("10006", "20006", "30006"),
+        5: ("10001", "20001", "30001"),
+    }
+    wanted = starter_set.get(0, starter_set[0])
+    if prof in (0, 1, 2):
+        base_ids = (wanted[prof],) * 6
+    else:
+        base_ids = starter_set[5]
+    for slot in range(6):
+        if slot not in epack or not epack[slot]:
+            item_id = base_ids[slot] if len(base_ids) > slot else starter_set[0][prof if prof < 3 else 0]
+            epack[slot] = _new_gameitem(slot, item_id, amount=1, quality=1, level=1)
+
+    return c
+
+
 def init_character_fields(c):
     fields = {
         'level': 1, 'exp': 0, 'cash': 1000,
@@ -2401,28 +2556,7 @@ def init_character_fields(c):
     for k, v in fields.items():
         if k not in c: c[k] = v
 
-    epack = c.setdefault('equip_pack', {})
-    prof_str = str(c.get('prof', 0))
-    starter_set = {
-        0: {"0": "10002", "1": "20002", "2": "30002"}.get(prof_str, "10002"),
-        1: {"0": "10003", "1": "20003", "2": "30003"}.get(prof_str, "10003"),
-        2: {"0": "10005", "1": "20005", "2": "30005"}.get(prof_str, "10005"),
-        3: {"0": "10004", "1": "20004", "2": "30004"}.get(prof_str, "10004"),
-        4: {"0": "10006", "1": "20006", "2": "30006"}.get(prof_str, "10006"),
-        5: {"0": "10001", "1": "20001", "2": "30001"}.get(prof_str, "10001"),
-    }
-    for s_idx, s_item_id in starter_set.items():
-        if s_idx not in epack or not epack[s_idx]:
-            epack[s_idx] = {
-                'indexId': s_idx,
-                'itemId': s_item_id,
-                'bindflag': True,
-                'quality': 1,
-                'level': 1,
-                'stack': 1,
-                'parm': [0]*8,
-                'appraise': 1
-            }
+    normalize_backpack_state(c)
 
     # Add System Welcome Mail for new characters
     if not c.get('mails'):
