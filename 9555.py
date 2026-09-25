@@ -3159,20 +3159,9 @@ def client_handler(conn, addr):
                         print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
                         print(f"[MAP ENTER SEND] map_id={mid} scene={scene_name} pos={picked_char['pos']}")
 
-                        # Historical client flow sends main_player_create immediately after 503.
-                        # Keep one-shot state so a later map_ready(100) never duplicates tag 504.
-                        if not picked_char.get('main_player_created_sent', False):
-                            send_rpc_push(504, encode_sproto([
-                                (0, get_full_char(picked_char)),
-                                (1, get_movement(
-                                    picked_char['pos'][0],
-                                    picked_char['pos'][1],
-                                    picked_char['pos'][2],
-                                    picked_char['pos'][3]
-                                ))
-                            ]))
-                            picked_char['main_player_created_sent'] = True
-                            print(f"[MAIN PLAYER CREATE SEND] map_id={mid} (after 503)")
+                        # Wait for client MSG=100 map_ready. Tag 504 creates ObjManager.MainPlayer.
+                        # Sending it before the scene is ready races the client's scene initialization.
+                        print(f"[MAP ENTER SENT] waiting for MSG=100 map_ready map_id={mid}")
 
                     except Exception:
                         print("[!] FAILED TO SEND INITIAL MAP ENTER")
