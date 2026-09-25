@@ -3515,101 +3515,80 @@ def client_handler(conn, addr):
                 index_id = get_val_int(body, 0, -1)
                 success = 0
                 if picked_char:
-                    inventory = picked_char.get('inventory', [])
-                    item_index = index_id - 10000
-                    if 0 <= item_index < len(inventory):
-                        item = inventory[item_index]
-                        mount_id = mount_id_from_voucher(item.get('id'))
+                    container, key, item, ctype = find_gameitem(picked_char, index_id, [2])
+                    if item:
+                        item_id = str(item.get('itemId', ''))
+                        mount_id = mount_id_from_voucher(item_id)
                         if mount_id:
                             mount = picked_char.setdefault('mounts', {}).setdefault(mount_id, {})
                             mount['state'] = max(1, int(mount.get('state', 0)))
                             mount.setdefault('select', MOUNT_CONFIG[mount_id]['default_color'])
                             mount.setdefault('unlocked_colors', [MOUNT_CONFIG[mount_id]['default_color']])
-                            item['amount'] -= 1
-                            if item['amount'] < 1:
-                                inventory.pop(item_index)
+                            item['stack'] = int(item.get('stack', 1)) - 1
+                            if item['stack'] <= 0:
+                                container.pop(key, None)
                             success = 1
-                            save_chars(all_accounts_chars)
-                            send_rpc_push(611, sync_inventory_data(picked_char))
                             send_rpc_push(630, encode_sproto([(0, build_mount_info(picked_char))]))
-                            print(f"[MOUNT] voucher redeemed item={item.get('id')} vehicle={mount_id}")
-                        elif item.get('id') in ITEM_CONFIG and ITEM_CONFIG[item['id']]['type'] == 18:
-                            cfg = ITEM_CONFIG[item['id']]
-                            subtype = cfg['function']
+                        elif ITEM_CONFIG.get(item_id, {}).get('type') == 18:
+                            subtype = int(ITEM_CONFIG[item_id].get('function', 0))
                             state = ensure_daily_copy_state(picked_char)
                             for copy_id, sc_cfg in COPY_SCENE_CONFIG.items():
-                                if sc_cfg['subtype'] == subtype:
-                                    state['remaining'][copy_id] = sc_cfg['max_plays']
-                            item['amount'] -= 1
-                            if item['amount'] < 1:
-                                inventory.pop(item_index)
+                                if int(sc_cfg.get('subtype', -1)) == subtype:
+                                    state['remaining'][copy_id] = int(sc_cfg.get('max_plays', 0))
+                            item['stack'] = int(item.get('stack', 1)) - 1
+                            if item['stack'] <= 0:
+                                container.pop(key, None)
                             success = 1
-                            save_chars(all_accounts_chars)
-                            send_rpc_push(611, sync_inventory_data(picked_char))
                             send_rpc_push(555, sync_copy_scenes(picked_char))
-                            print(f"[TICKET] used item={item['id']} for subtype={subtype}")
                         else:
-                            item_id = str(item.get('id', ''))
                             if item_id == "2001":
-                                add_exp = 1000
-                                grant_item_rewards(picked_char, [("2001", 0, add_exp)], conn, send_rpc_push)
+                                grant_item_rewards(picked_char, [("2001", 0, 1000)], conn, send_rpc_push)
                             elif item_id == "1001":
-                                add_cash = 10000
-                                picked_char['cash'] = picked_char.get('cash', 0) + add_cash
+                                picked_char['cash'] = int(picked_char.get('cash', 0)) + 10000
                                 sync_char_attrs_rpc(conn, picked_char)
                             else:
                                 stats = get_character_stats(picked_char)
-                                picked_char['hp'] = stats['hp_max']
+                                picked_char['hp'] = int(stats['hp_max'])
                                 sync_char_attrs_rpc(conn, picked_char)
-
-                            item['amount'] -= 1
-                            if item['amount'] < 1:
-                                inventory.pop(item_index)
+                            item['stack'] = int(item.get('stack', 1)) - 1
+                            if item['stack'] <= 0:
+                                container.pop(key, None)
                             success = 1
-                            save_chars(all_accounts_chars)
-                            send_rpc_push(611, sync_inventory_data(picked_char))
-                            print(f"[BAG USE ITEM] Used consumable item={item_id} from bag")
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(611, sync_item_pack_rpc(picked_char))
                 send_rpc_push(526, encode_sproto([(0, success), (1, index_id)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 116: # equip_item
-                index_id = get_val_int(body, 0)
+                index_id = get_val_int(body, 0, -1)
                 if picked_char:
-                    ebp = picked_char.setdefault('equip_backpack', {})
-                    epack = picked_char.setdefault('equip_pack', {})
-                    item = None
-                    if index_id in ebp:
-                        item = ebp.pop(index_id)
-                    else:
-                        inventory = picked_char.get('inventory', [])
-                        item_index = index_id - 10000
-                        if 0 <= item_index < len(inventory):
-                            raw = inventory.pop(item_index)
-                            item = {
-                                'indexId': index_id, 'itemId': str(raw['id']),
-                                'bindflag': True, 'quality': 1, 'level': 1, 'stack': 1, 'parm': [0]*8, 'appraise': 1
-                            }
+                    normalize_backpack_state(picked_char)
+                    ebp = picked_char['equip_backpack']
+                    epack = picked_char['equip_pack']
+                    item = ebp.get(index_id)
+                    key = index_id
+                    if item is None:
+                        key = str(index_id)
+                        item = ebp.get(key)
                     if item:
-                        item_id = str(item['itemId'])
-                        item_cfg = ITEM_CONFIG.get(item_id, {})
-                        subtype = item_cfg.get('subtype', 0)
+                        item_id = str(item.get('itemId', ''))
+                        subtype = int(ITEM_CONFIG.get(item_id, {}).get('subtype', 0))
                         slot = get_equip_slot_index(subtype)
                         old_item = epack.get(slot)
-                        item['indexId'] = slot
-                        epack[slot] = item
+                        ebp.pop(key, None)
                         if old_item:
-                            old_idx = int(time.time() * 1000) % 10000000 + len(ebp)
+                            old_idx = _next_item_index(ebp)
                             old_item['indexId'] = old_idx
                             ebp[old_idx] = old_item
                             send_update_item_push(send_rpc_push, 0, old_idx, old_item)
-                        else:
-                            send_update_item_push(send_rpc_push, 0, index_id, None)
+                        item['indexId'] = slot
+                        epack[slot] = item
+                        send_update_item_push(send_rpc_push, 0, int(index_id), None)
                         send_update_item_push(send_rpc_push, 1, slot, item)
                         save_chars(all_accounts_chars)
                         send_rpc_push(592, sync_backpack_item_rpc(picked_char))
-                        send_rpc_push(611, sync_item_pack_rpc(picked_char))
                         sync_char_attrs_rpc(conn, picked_char)
                         sync_main_player_visual(picked_char, send_rpc_push)
                 if session is not None:
@@ -3617,17 +3596,23 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 117: # unequip_item
-                index_id = get_val_int(body, 0)
+                index_id = get_val_int(body, 0, -1)
                 if picked_char:
-                    ebp = picked_char.setdefault('equip_backpack', {})
-                    epack = picked_char.setdefault('equip_pack', {})
-                    if index_id in epack:
-                        un_item = epack.pop(index_id)
-                        new_idx = int(time.time() * 1000) % 10000000 + len(ebp)
-                        un_item['indexId'] = new_idx
-                        ebp[new_idx] = un_item
-                        send_update_item_push(send_rpc_push, 1, index_id, None)
-                        send_update_item_push(send_rpc_push, 0, new_idx, un_item)
+                    normalize_backpack_state(picked_char)
+                    epack = picked_char['equip_pack']
+                    ebp = picked_char['equip_backpack']
+                    key = index_id
+                    item = epack.get(key)
+                    if item is None:
+                        key = str(index_id)
+                        item = epack.get(key)
+                    if item:
+                        epack.pop(key, None)
+                        new_idx = _next_item_index(ebp)
+                        item['indexId'] = new_idx
+                        ebp[new_idx] = item
+                        send_update_item_push(send_rpc_push, 1, int(index_id), None)
+                        send_update_item_push(send_rpc_push, 0, new_idx, item)
                         save_chars(all_accounts_chars)
                         send_rpc_push(592, sync_backpack_item_rpc(picked_char))
                         sync_char_attrs_rpc(conn, picked_char)
@@ -3637,104 +3622,52 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 129: # sell_item
-                index_id = get_val_int(body, 0)
-                item_count = get_val_int(body, 1, 1)
-                item_type = get_val_int(body, 2, 0)
+                index_id = get_val_int(body, 0, -1)
+                item_count = max(1, get_val_int(body, 1, 1))
                 if picked_char:
-                    target_container = None
-                    target_key = None
-                    item_found = None
-                    ctype = 2
-                    for ckey, container_code in [('item_backpack', 2), ('equip_backpack', 0), ('fashion_backpack', 5), ('badge_backpack', 3)]:
-                        c_dict = picked_char.get(ckey, {})
-                        if index_id in c_dict or str(index_id) in c_dict:
-                            target_container = c_dict
-                            target_key = index_id if index_id in c_dict else str(index_id)
-                            item_found = c_dict[target_key]
-                            ctype = container_code
-                            break
-
-                    if not item_found:
-                        inventory = picked_char.get('inventory', [])
-                        item_index = index_id - 10000
-                        if 0 <= item_index < len(inventory):
-                            raw = inventory[item_index]
-                            item_found = {'itemId': str(raw['id']), 'stack': raw['amount']}
-
-                    if item_found:
-                        item_id = str(item_found.get('itemId', ''))
-                        sold_cnt = min(item_count, item_found.get('stack', 1))
-                        earned_cash = sold_cnt * 100
-                        if target_container and target_key:
-                            item_found['stack'] = item_found.get('stack', 1) - sold_cnt
-                            if item_found['stack'] <= 0:
-                                target_container.pop(target_key, None)
-                                send_update_item_push(send_rpc_push, ctype, index_id, None)
-                            else:
-                                send_update_item_push(send_rpc_push, ctype, index_id, item_found)
-
-                        inv = picked_char.get('inventory', [])
-                        for inv_item in list(inv):
-                            if str(inv_item.get('id')) == item_id:
-                                inv_item['amount'] -= sold_cnt
-                                if inv_item['amount'] <= 0:
-                                    inv.remove(inv_item)
-                                break
-
-                        picked_char['cash'] = picked_char.get('cash', 0) + earned_cash
+                    normalize_backpack_state(picked_char)
+                    container, key, item, ctype = find_gameitem(picked_char, index_id, [0, 2, 3, 5])
+                    if item:
+                        sold_cnt = min(item_count, max(1, int(item.get('stack', 1))))
+                        item_id = str(item.get('itemId', ''))
+                        item['stack'] = int(item.get('stack', 1)) - sold_cnt
+                        if item['stack'] <= 0:
+                            container.pop(key, None)
+                            send_update_item_push(send_rpc_push, ctype, int(index_id), None)
+                        else:
+                            send_update_item_push(send_rpc_push, ctype, int(index_id), item)
+                        picked_char['cash'] = int(picked_char.get('cash', 0)) + sold_cnt * 100
                         save_chars(all_accounts_chars)
                         sync_char_attrs_rpc(conn, picked_char)
-                        send_rpc_push(611, sync_item_pack_rpc(picked_char))
-                        send_rpc_push(592, sync_backpack_item_rpc(picked_char))
+                        sync_all_bag_containers(picked_char, send_rpc_push)
+                        print(f"[BAG SELL] item={item_id} index={index_id} count={sold_cnt} cash=+{sold_cnt*100}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 224: # open_item_package
-                index_id = get_val_int(body, 0)
-                count = get_val_int(body, 2, 1)
+                index_id = get_val_int(body, 0, -1)
+                count = max(1, get_val_int(body, 2, 1))
                 if picked_char:
-                    item_found = None
-                    target_container = None
-                    target_key = None
-                    ctype = 2
-                    for ckey, container_code in [('item_backpack', 2), ('equip_backpack', 0)]:
-                        c_dict = picked_char.get(ckey, {})
-                        if index_id in c_dict or str(index_id) in c_dict:
-                            target_container = c_dict
-                            target_key = index_id if index_id in c_dict else str(index_id)
-                            item_found = c_dict[target_key]
-                            ctype = container_code
-                            break
-
-                    if not item_found:
-                        inventory = picked_char.get('inventory', [])
-                        item_index = index_id - 10000
-                        if 0 <= item_index < len(inventory):
-                            raw = inventory[item_index]
-                            item_found = {'itemId': str(raw['id']), 'stack': raw['amount']}
-
-                    if item_found:
-                        box_id = str(item_found.get('itemId', ''))
-                        count = min(count, item_found.get('stack', 1))
-                        if target_container and target_key:
-                            item_found['stack'] = item_found.get('stack', 1) - count
-                            if item_found['stack'] <= 0:
-                                target_container.pop(target_key, None)
-                                send_update_item_push(send_rpc_push, ctype, index_id, None)
-                            else:
-                                send_update_item_push(send_rpc_push, ctype, index_id, item_found)
-
+                    normalize_backpack_state(picked_char)
+                    container, key, item, ctype = find_gameitem(picked_char, index_id, [2])
+                    if item:
+                        box_id = str(item.get('itemId', ''))
+                        count = min(count, max(1, int(item.get('stack', 1))))
+                        item['stack'] = int(item.get('stack', 1)) - count
+                        if item['stack'] <= 0:
+                            container.pop(key, None)
                         reward_cash = 20000 * count
                         reward_exp = 5000 * count
                         grant_item_rewards(picked_char, [("1001", 0, reward_cash), ("2001", 0, reward_exp)], conn, send_rpc_push)
-
                         reward_items = [
                             encode_sproto([(0, "1001"), (1, reward_cash)]),
                             encode_sproto([(0, "2001"), (1, reward_exp)])
                         ]
                         save_chars(all_accounts_chars)
-                        send_rpc_push(617, encode_sproto([(0, reward_items)])) # ret_open_item_package Tag 617
+                        sync_all_bag_containers(picked_char, send_rpc_push)
+                        send_rpc_push(617, encode_sproto([(0, reward_items)]))
+                        print(f"[BAG OPEN PACKAGE] item={box_id} index={index_id} count={count}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3837,6 +3770,18 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 240: # change_item_state
+                container_type = get_val_int(body, 0, -1)
+                index_id = get_val_int(body, 1, -1)
+                state = get_val_int(body, 2, 0)
+                if picked_char and container_type in range(7):
+                    container, key, item, ctype = find_gameitem(picked_char, index_id, [container_type])
+                    if item:
+                        parm = [int(x) for x in item.get('parm', [0] * 8)]
+                        parm = (parm + [0] * 8)[:8]
+                        parm[5] = state
+                        item['parm'] = parm
+                        save_chars(all_accounts_chars)
+                        send_update_item_push(send_rpc_push, ctype, int(key), item)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3998,20 +3943,19 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 167: # equip_enhance
-                index_id = get_val_int(body, 0)
+                index_id = get_val_int(body, 0, -1)
                 if picked_char:
-                    ebp = picked_char.setdefault('equip_backpack', {})
-                    epack = picked_char.setdefault('equip_pack', {})
-                    target_item = ebp.get(index_id) or epack.get(index_id)
+                    normalize_backpack_state(picked_char)
+                    container, key, target_item, ctype = find_gameitem(picked_char, index_id, [0, 1])
                     if target_item:
-                        cost = (target_item.get('level', 1) + 1) * 2000
-                        if picked_char.get('cash', 0) >= cost:
-                            picked_char['cash'] -= cost
-                            target_item['level'] = target_item.get('level', 1) + 1
+                        cost = (int(target_item.get('level', 1)) + 1) * 2000
+                        if int(picked_char.get('cash', 0)) >= cost:
+                            picked_char['cash'] = int(picked_char.get('cash', 0)) - cost
+                            target_item['level'] = int(target_item.get('level', 1)) + 1
                             save_chars(all_accounts_chars)
-                            ctype = 1 if index_id in ebp else 2
-                            send_update_item_push(send_rpc_push, ctype, index_id, target_item)
+                            send_update_item_push(send_rpc_push, ctype, int(key), target_item)
                             sync_char_attrs_rpc(conn, picked_char)
+                            send_rpc_push(592, sync_backpack_item_rpc(picked_char))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4223,86 +4167,119 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 221: # equip_fashion_item
-                index_id = get_val_int(body, 0)
+                index_id = get_val_int(body, 0, -1)
+                requested_slot = get_val_int(body, 1, -1)
                 if picked_char:
-                    fbp = picked_char.setdefault('fashion_backpack', {})
-                    fpack = picked_char.setdefault('fashion_equip_pack', {})
-                    if index_id in fbp:
-                        item = fbp.pop(index_id)
-                        slot = item.get('slot', 0)
+                    normalize_backpack_state(picked_char)
+                    fbp = picked_char['fashion_backpack']
+                    fpack = picked_char['fashion_equip_pack']
+                    key = index_id if index_id in fbp else str(index_id)
+                    item = fbp.get(key)
+                    if item:
+                        item = fbp.pop(key)
+                        cfg = ITEM_CONFIG.get(str(item.get('itemId', '')), {})
+                        slot = requested_slot if requested_slot >= 0 else int(item.get('slot', cfg.get('subtype', 0) or 0))
                         old_item = fpack.get(slot)
-                        fpack[slot] = item
                         if old_item:
-                            fbp[old_item['indexId']] = old_item
-                            send_update_item_push(send_rpc_push, 5, old_item['indexId'], old_item)
-                        else:
-                            send_update_item_push(send_rpc_push, 4, index_id, None)
+                            old_idx = _next_item_index(fbp)
+                            old_item['indexId'] = old_idx
+                            fbp[old_idx] = old_item
+                            send_update_item_push(send_rpc_push, 5, old_idx, old_item)
+                        item['slot'] = slot
+                        item['indexId'] = slot
+                        fpack[slot] = item
+                        send_update_item_push(send_rpc_push, 5, int(index_id), None)
                         send_update_item_push(send_rpc_push, 6, slot, item)
                         save_chars(all_accounts_chars)
+                        send_rpc_push(616, sync_fashion_backpack_item_rpc(picked_char))
                         sync_main_player_visual(picked_char, send_rpc_push)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 222: # unequip_fashion_item
-                index_id = get_val_int(body, 0)
+                index_id = get_val_int(body, 0, -1)
                 if picked_char:
-                    fbp = picked_char.setdefault('fashion_backpack', {})
-                    fpack = picked_char.setdefault('fashion_equip_pack', {})
+                    normalize_backpack_state(picked_char)
+                    fbp = picked_char['fashion_backpack']
+                    fpack = picked_char['fashion_equip_pack']
                     slot_found = None
-                    for slot, item in list(fpack.items()):
-                        if item and int(item.get('indexId', -1)) == index_id:
-                            slot_found = slot
-                            break
+                    if index_id in fpack:
+                        slot_found = index_id
+                    elif str(index_id) in fpack:
+                        slot_found = str(index_id)
+                    else:
+                        for slot, item in fpack.items():
+                            if isinstance(item, dict) and int(item.get('indexId', -1)) == index_id:
+                                slot_found = slot
+                                break
                     if slot_found is not None:
                         item = fpack.pop(slot_found)
-                        fbp[item['indexId']] = item
-                        send_update_item_push(send_rpc_push, 6, slot_found, None)
-                        send_update_item_push(send_rpc_push, 5, item['indexId'], item)
+                        new_idx = _next_item_index(fbp)
+                        item['indexId'] = new_idx
+                        fbp[new_idx] = item
+                        send_update_item_push(send_rpc_push, 6, int(slot_found), None)
+                        send_update_item_push(send_rpc_push, 5, new_idx, item)
                         save_chars(all_accounts_chars)
+                        send_rpc_push(616, sync_fashion_backpack_item_rpc(picked_char))
                         sync_main_player_visual(picked_char, send_rpc_push)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 197: # equip_badge
-                index_id = get_val_int(body, 0)
-                target_pos = get_val_int(body, 1)
+                index_id = get_val_int(body, 0, -1)
+                target_pos = get_val_int(body, 1, 0)
                 if picked_char:
-                    bbp = picked_char.setdefault('badge_backpack', {})
-                    bpack = picked_char.setdefault('badge_equip_pack', {})
-                    if index_id in bbp:
-                        item = bbp.pop(index_id)
+                    normalize_backpack_state(picked_char)
+                    bbp = picked_char['badge_backpack']
+                    bpack = picked_char['badge_equip_pack']
+                    key = index_id if index_id in bbp else str(index_id)
+                    item = bbp.get(key)
+                    if item:
+                        item = bbp.pop(key)
                         old_item = bpack.get(target_pos)
-                        bpack[target_pos] = item
                         if old_item:
-                            bbp[old_item['indexId']] = old_item
-                            send_update_item_push(send_rpc_push, 3, old_item['indexId'], old_item)
-                        else:
-                            send_update_item_push(send_rpc_push, 4, index_id, None)
+                            old_idx = _next_item_index(bbp)
+                            old_item['indexId'] = old_idx
+                            bbp[old_idx] = old_item
+                            send_update_item_push(send_rpc_push, 3, old_idx, old_item)
+                        item['indexId'] = target_pos
+                        bpack[target_pos] = item
+                        send_update_item_push(send_rpc_push, 3, int(index_id), None)
                         send_update_item_push(send_rpc_push, 4, target_pos, item)
                         save_chars(all_accounts_chars)
+                        send_rpc_push(604, sync_badgepack_item_rpc(picked_char))
                         sync_char_attrs_rpc(conn, picked_char)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 198: # unequip_badge
-                index_id = get_val_int(body, 0)
+                index_id = get_val_int(body, 0, -1)
                 if picked_char:
-                    bbp = picked_char.setdefault('badge_backpack', {})
-                    bpack = picked_char.setdefault('badge_equip_pack', {})
+                    normalize_backpack_state(picked_char)
+                    bbp = picked_char['badge_backpack']
+                    bpack = picked_char['badge_equip_pack']
                     slot_found = None
-                    for slot, item in list(bpack.items()):
-                        if item and int(item.get('indexId', -1)) == index_id:
-                            slot_found = slot
-                            break
+                    if index_id in bpack:
+                        slot_found = index_id
+                    elif str(index_id) in bpack:
+                        slot_found = str(index_id)
+                    else:
+                        for slot, item in bpack.items():
+                            if isinstance(item, dict) and int(item.get('indexId', -1)) == index_id:
+                                slot_found = slot
+                                break
                     if slot_found is not None:
                         item = bpack.pop(slot_found)
-                        bbp[item['indexId']] = item
-                        send_update_item_push(send_rpc_push, 5, slot_found, None)
-                        send_update_item_push(send_rpc_push, 4, item['indexId'], item)
+                        new_idx = _next_item_index(bbp)
+                        item['indexId'] = new_idx
+                        bbp[new_idx] = item
+                        send_update_item_push(send_rpc_push, 4, int(slot_found), None)
+                        send_update_item_push(send_rpc_push, 3, new_idx, item)
                         save_chars(all_accounts_chars)
+                        sync_badgepack_item_rpc(picked_char)
                         sync_char_attrs_rpc(conn, picked_char)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
