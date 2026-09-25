@@ -2692,13 +2692,23 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
     else:
         print(f"[MAP CONFIG MISSING] map_id={target_map_id}")
 
+    # Reset the one-shot scene acknowledgement before every transition.
+    picked_char['map_ready_done'] = False
+    picked_char['map_ready_map_id'] = ""
     save_chars(all_accounts_chars)
+
     # TAG 503: enter_map
     print("[DEBUG] BEFORE MAP ENTER")
     try:
         ph_p = encode_sproto([(0, 503)])
-        # Protocol.enter_map.request encodes mapInfoId as field 0.
-        data = encode_sproto([(0, target_map_id)])
+        # enter_map uses mapInfoId(0), line_index(1), line_count(2).
+        line_index = max(1, int(picked_char.get('line_index', 1)))
+        line_count = max(line_index, int(picked_char.get('line_count', 3)))
+        data = encode_sproto([
+            (0, target_map_id),
+            (1, line_index),
+            (2, line_count)
+        ])
         pf_p = sproto_pack(ph_p + data)
         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
         print(f"[M1003 DEBUG] TX 503 map_id={target_map_id}")
@@ -3019,9 +3029,12 @@ def client_handler(conn, addr):
                         if accept_mission_logic(picked_char, "1001"):
                             print(f"[MISSION ACCEPT] mission_id=1001 (Starting mission)")
 
+                    # The scene has not acknowledged the new map yet.
+                    picked_char['map_ready_done'] = False
+                    picked_char['map_ready_map_id'] = ""
                     save_chars(all_accounts_chars)
 
-                    # Correct Sequence: 614 -> 611 -> 540 -> 519 -> 503
+                    # Correct Sequence: 614 -> 611 -> 540 -> 534/531 -> 503 -> map_ready(100)
 
                     # 614: sync_common_data
                     fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3016", "3030", "4014", "4026", "4061", "4062", "4063", "4064", "4081", "4084"]
@@ -3061,8 +3074,8 @@ def client_handler(conn, addr):
                     smap = build_skills_map(picked_char['prof'], picked_char['level'], picked_char.get('skill_levels', {}))
                     send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
 
-                    # 519: mission_sync
-                    send_rpc_push(519, sync_mission_data(picked_char))
+                    # Mission sync is emitted after map_ready(100), when RunningMapIdStr is
+                    # initialized by the client scene manager. Do not pre-empt it here.
 
                     # 534: friend_sync (Tag 534 delivers friends & pending requests)
                     send_social_update_rpc(send_rpc_push, picked_char)
@@ -3104,8 +3117,15 @@ def client_handler(conn, addr):
 
             elif msg == 100: # map_ready
                 if picked_char:
-                    picked_char['map_ready_done'] = True
                     mid = str(picked_char.get('map_id', '11'))
+                    # 100 is one-way. Ignore duplicate notifications for the same scene,
+                    # otherwise 504/509/519 would be delivered twice.
+                    if (picked_char.get('map_ready_done')
+                            and picked_char.get('map_ready_map_id') == mid):
+                        print(f"[MAP READY DUPLICATE] map_id={mid}; spawn sequence already sent")
+                        continue
+                    picked_char['map_ready_done'] = True
+                    picked_char['map_ready_map_id'] = mid
                     print(f"==================================================")
                     print(f"[MAP READY RECEIVED] Character is fully in map_id={mid}!")
                     print(f"==================================================")
@@ -3405,7 +3425,8 @@ def client_handler(conn, addr):
                 if picked_char:
                     picked_char['tutorial'] = 1
                     save_chars(all_accounts_chars)
-                    send_rpc_push(592, sync_common_data_rpc(picked_char))
+                    # tutorial_finish updates function/common-data state: response push is Tag 614.
+                    send_rpc_push(614, sync_common_data_rpc(picked_char))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
