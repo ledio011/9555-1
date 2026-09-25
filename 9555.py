@@ -1052,10 +1052,7 @@ def get_full_char(c):
                 encoded = encode_gameitem_sproto(item)
                 if encoded:
                     equip_map[int(item.get('indexId', slot))] = encoded
-    if not equip_map:
-        wid = "10001" if c.get('prof', 0) == 0 else "20001" if c.get('prof', 0) == 1 else "30001"
-        w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (4, 0), (5, 1), (6, 1), (7, [0]*8), (8, 1)])
-        equip_map = {5: w1}
+    # Empty equipped slots stay empty; ItemContainer exposes its fixed size client-side.
 
     # Tag 10: badge_equip (Dictionary<long, gameitem>)
     badge_equip_map = {}
@@ -2563,19 +2560,6 @@ def normalize_backpack_state(c):
     # inventory operations now use the canonical ItemContainer maps.
     c['inventory'] = []
 
-    # Character Page always has the six normal equipment slots available.
-    epack = c['equip_pack']
-    prof = int(c.get('prof', 0))
-    profession_sets = {
-        0: ["10002", "10003", "10005", "10004", "10006", "10001"],
-        1: ["20002", "20003", "20005", "20004", "20006", "20001"],
-        2: ["30002", "30003", "30005", "30004", "30006", "30001"],
-    }
-    base_ids = profession_sets.get(prof, profession_sets[0])
-    for slot in range(6):
-        if slot not in epack or not epack[slot]:
-            epack[slot] = _new_gameitem(slot, base_ids[slot], amount=1, quality=1, level=1)
-
     return c
 
 
@@ -2605,12 +2589,37 @@ def init_character_fields(c):
         'boss_inst_id': None,
         'pre_arena_pos': None
     }
+    bag_keys = (
+        'equip_pack', 'equip_backpack', 'item_backpack',
+        'badge_backpack', 'badge_equip_pack',
+        'fashion_backpack', 'fashion_equip_pack'
+    )
+    had_bag_state = any(isinstance(c.get(k), dict) and bool(c.get(k)) for k in bag_keys)
+    had_legacy_inventory = isinstance(c.get('inventory'), list) and bool(c.get('inventory'))
+
     for k, v in fields.items():
         if k not in c: c[k] = v
 
+    # Seed starter equipment only once, for genuinely new/legacy characters.
+    # Never refill an equipped slot after the player unequips it.
+    was_never_seeded = not bool(c.get('_bag_seeded', False))
     normalize_backpack_state(c)
+    if was_never_seeded and not had_bag_state:
+        prof = int(c.get('prof', 0))
+        profession_sets = {
+            0: ["10002", "10003", "10005", "10004", "10006", "10001"],
+            1: ["20002", "20003", "20005", "20004", "20006", "20001"],
+            2: ["30002", "30003", "30005", "30004", "30006", "30001"],
+        }
+        base_ids = profession_sets.get(prof, profession_sets[0])
+        for slot, item_id in enumerate(base_ids):
+            if slot not in c['equip_pack']:
+                c['equip_pack'][slot] = _new_gameitem(
+                    slot, item_id, amount=1, quality=1, level=1
+                )
+        c['_bag_seeded'] = True
 
-    # Add System Welcome Mail for new characters
+    # Add System Welcome Mail for new characters.
     if not c.get('mails'):
         now = int(time.time())
         c['mails']["1001"] = {
@@ -4370,7 +4379,7 @@ def client_handler(conn, addr):
                         send_update_item_push(send_rpc_push, 4, int(slot_found), None)
                         send_update_item_push(send_rpc_push, 3, new_idx, item)
                         save_chars(all_accounts_chars)
-                        sync_badgepack_item_rpc(picked_char)
+                        send_rpc_push(604, sync_badgepack_item_rpc(picked_char))
                         sync_char_attrs_rpc(conn, picked_char)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
