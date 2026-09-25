@@ -443,6 +443,9 @@ def resolve_universal_schema_defaults(
     request_fields,
     game_state,
 ):
+    protocol_name = RESPONSE_CATALOG.get(tag, {}).get("name")
+    if protocol_name in {"character_list", "character_create", "character_pick"}:
+        return {}
     generated = {}
     for field_tag, descriptor in response_schema.items():
         value = generate_schema_default(descriptor)
@@ -519,7 +522,50 @@ def resolve_real_response_producer(tag, response_schema, request_schema, request
 def resolve_game_state_response(tag, response_schema, request_schema, request_fields, game_state):
     if game_state is None:
         return {}
-    return game_state.get("authoritative_responses", {}).get(tag, {})
+    authoritative_responses = game_state.get("authoritative_responses", {})
+    protocol_name = RESPONSE_CATALOG.get(tag, {}).get("name")
+    if protocol_name == "character_list":
+        return authoritative_responses.get(tag, {})
+    if protocol_name == "character_pick":
+        character_id_tag = next(
+            (
+                field_tag
+                for field_tag, field in request_schema.items()
+                if field["name"] == "id" and field["type"] == "integer"
+            ),
+            None,
+        )
+        if character_id_tag is None:
+            return {}
+        character_id = request_fields.get(character_id_tag)
+        character_ids = game_state.get("character", {}).get("ids", set())
+        if character_id not in character_ids:
+            return {}
+        errno_tag = next(
+            (
+                field_tag
+                for field_tag, field in response_schema.items()
+                if field["name"] == "errno" and field["type"] == "integer"
+            ),
+            None,
+        )
+        if errno_tag is None:
+            return {}
+        game_state["character"]["selected_id"] = character_id
+        game_state["flow_stage"] = "character_selected"
+        return {errno_tag: 0}
+    return authoritative_responses.get(tag, {})
+
+
+def find_protocol_tag(catalog, protocol_name):
+    return next(
+        (
+            tag
+            for tag, spec in catalog.items()
+            if spec["name"] == protocol_name
+        ),
+        None,
+    )
 
 
 def resolve_database_response(tag, response_schema, request_schema, request_fields, game_state):
@@ -528,13 +574,111 @@ def resolve_database_response(tag, response_schema, request_schema, request_fiel
             tag, request_fields, game_state or {}
         )
         if result is not None:
+            validate_response_candidate(result, response_schema, "DATABASE")
+            if game_state is not None:
+                remember_character_catalog(tag, result, response_schema, game_state)
             return result
     if game_state is None:
         return {}
-    return game_state.get("database_responses", {}).get(tag, {})
+    result = game_state.get("database_responses", {}).get(tag, {})
+    remember_character_catalog(tag, result, response_schema, game_state)
+    return result
+
+
+def remember_character_catalog(tag, response_fields, response_schema, game_state):
+    if RESPONSE_CATALOG.get(tag, {}).get("name") != "character_list":
+        return
+    character_tag = next(
+        (
+            field_tag
+            for field_tag, field in response_schema.items()
+            if field["name"] == "character" and field["type"] == "map"
+        ),
+        None,
+    )
+    if character_tag is None or character_tag not in response_fields:
+        return
+    catalog = response_fields[character_tag]
+    game_state.setdefault("character", {}).update(
+        catalog=copy.deepcopy(catalog),
+        ids=set(catalog),
+    )
+
+
+def advance_game_flow_on_response(tag, game_state):
+    if game_state is None:
+        return
+    protocol_name = RESPONSE_CATALOG.get(tag, {}).get("name")
+    stages = {
+        "login": "authenticated",
+        "character_list": "character_list_ready",
+        "character_create": "character_created",
+        "character_pick": "character_selected",
+    }
+    if protocol_name in stages:
+        game_state["flow_stage"] = stages[protocol_name]
+
+
+def dispatch_configured_game_flow(connection, state, protocol_name):
+    flow_groups = {
+        "enter_map": ("main_player_create", "aoi_add"),
+        "map_ready": (
+            "sync_common_data",
+            "sync_item_pack",
+            "sync_skill_info",
+            "sync_mission",
+        ),
+    }
+    message_names = flow_groups.get(protocol_name)
+    if message_names is None:
+        return None
+    game_state = state.game_state
+    if game_state.get("character", {}).get("selected_id") is None:
+        return f"{protocol_name} flow paused: no selected character in authoritative state"
+
+    messages = game_state.get("server_messages", {})
+    resolved = []
+    missing = []
+    for message_name in message_names:
+        tag = find_protocol_tag(REQUEST_CATALOG, message_name)
+        if tag is None:
+            missing.append(f"{message_name} has no APK request schema")
+        elif tag not in messages:
+            missing.append(f"{message_name} has no configured state payload")
+        else:
+            resolved.append((tag, messages[tag]))
+    if missing:
+        return f"{protocol_name} flow paused: " + "; ".join(missing)
+
+    for tag, message in resolved:
+        if tag in RESPONSE_CATALOG:
+            session = send_server_rpc(
+                connection,
+                state,
+                tag,
+                message["body"],
+            )
+            sent_as = f"RPC session={session}"
+        else:
+            send_server_push(connection, state, tag, message["body"])
+            sent_as = "push"
+        print(
+            f"[FLOW] Sent {REQUEST_CATALOG[tag]['name']} tag={tag} "
+            f"as {sent_as}; source={message['source']}"
+        )
+    game_state["flow_stage"] = (
+        "map_entities_sent" if protocol_name == "enter_map" else "initial_state_sent"
+    )
+    return f"{protocol_name} flow sent {len(resolved)} configured messages"
 
 
 def resolve_request_derived_response(tag, response_schema, request_schema, request_fields, game_state):
+    if RESPONSE_CATALOG.get(tag, {}).get("name") in {
+        "character_list",
+        "character_create",
+        "character_pick",
+    }:
+        return {}
     response, _missing = generate_request_derived_response(
         response_schema,
         request_schema,
@@ -546,6 +690,12 @@ def resolve_request_derived_response(tag, response_schema, request_schema, reque
 
 
 def resolve_safe_response_defaults(tag, response_schema, request_schema, request_fields, game_state):
+    if RESPONSE_CATALOG.get(tag, {}).get("name") in {
+        "character_list",
+        "character_create",
+        "character_pick",
+    }:
+        return {}
     required_fields = get_required_response_fields(tag)
     return {
         field_tag: value
@@ -862,6 +1012,9 @@ class ClientConnectionState:
                 if isinstance(identity, str):
                     self.game_state["identity"] = identity
                     self.game_state["account_player"]["account_id"] = identity
+                    self.game_state["account_player"]["source"] = (
+                        "client_request_observation_not_authoritative"
+                    )
                 self.game_state["flow_stage"] = "login_requested"
             elif protocol_name == "character_list":
                 self.game_state["flow_stage"] = "character_list_requested"
@@ -882,6 +1035,18 @@ class ClientConnectionState:
                     )
             elif protocol_name == "character_pick":
                 self.game_state["flow_stage"] = "character_pick_requested"
+                character_id_tag = next(
+                    (
+                        field_tag
+                        for field_tag, field in request_schema.items()
+                        if field["name"] == "id" and field["type"] == "integer"
+                    ),
+                    None,
+                )
+                if character_id_tag in request_fields:
+                    self.game_state["character"]["requested_id"] = request_fields[
+                        character_id_tag
+                    ]
             elif protocol_name in ("enter_map", "map_ready"):
                 self.game_state["flow_stage"] = "map_entry_requested"
             elif protocol_name in ("sync_item_pack", "inventory"):
@@ -908,6 +1073,87 @@ class ClientConnectionState:
             self.game_state["authoritative_responses"][tag] = copy.deepcopy(
                 response_fields
             )
+            if spec["name"] == "character_list":
+                character_field = next(
+                    (
+                        field_tag
+                        for field_tag, field in spec["fields"].items()
+                        if field["name"] == "character" and field["type"] == "map"
+                    ),
+                    None,
+                )
+                if character_field is not None:
+                    catalog = response_fields.get(character_field, {})
+                    self.game_state["character"]["catalog"] = copy.deepcopy(catalog)
+                    self.game_state["character"]["ids"] = set(catalog)
+                    self.game_state["flow_stage"] = "character_list_ready"
+                else:
+                    self.game_state["character"]["catalog"] = {}
+                    self.game_state["character"]["ids"] = set()
+            elif spec["name"] == "character_create":
+                errno_tag = next(
+                    (
+                        field_tag
+                        for field_tag, field in spec["fields"].items()
+                        if field["name"] == "errno"
+                    ),
+                    None,
+                )
+                if errno_tag is not None and response_fields.get(errno_tag) == 0:
+                    self.game_state["flow_stage"] = "character_created"
+
+    def set_character_catalog(self, character_map, source="database"):
+        tag = find_protocol_tag(RESPONSE_CATALOG, "character_list")
+        if tag is None:
+            raise KeyError("APK has no character_list response schema")
+        response_schema = RESPONSE_CATALOG[tag]["fields"]
+        character_tag = next(
+            (
+                field_tag
+                for field_tag, field in response_schema.items()
+                if field["name"] == "character" and field["type"] == "map"
+            ),
+            None,
+        )
+        if character_tag is None:
+            raise ValueError("character_list response has no character map field")
+        character_schema = response_schema[character_tag].get("object_schema", {})
+        id_tag = next(
+            (
+                field_tag
+                for field_tag, field in character_schema.items()
+                if field["name"] == "id" and field["type"] == "integer"
+            ),
+            None,
+        )
+        if id_tag is None:
+            raise ValueError("character overview schema has no integer id field")
+        for character_id, overview in character_map.items():
+            if not isinstance(overview, dict) or overview.get(id_tag) != character_id:
+                raise ValueError(
+                    "character catalog keys must match each overview's schema id"
+                )
+        response_fields = {character_tag: copy.deepcopy(character_map)}
+        validate_response_candidate(response_fields, response_schema, "character catalog")
+        with self.lock:
+            self.game_state["authoritative_responses"][tag] = response_fields
+            self.game_state["character"]["catalog"] = copy.deepcopy(character_map)
+            self.game_state["character"]["ids"] = set(character_map)
+            self.game_state["character"]["source"] = source
+            self.game_state["flow_stage"] = "character_list_ready"
+
+    def set_server_message(self, tag, body_fields, source="database"):
+        spec = REQUEST_CATALOG.get(tag)
+        if spec is None:
+            raise KeyError(f"No APK request/push schema registered for tag {tag}")
+        if not isinstance(body_fields, dict):
+            raise TypeError("Server message body must be a field-tag dictionary")
+        validate_response_candidate(body_fields, spec["fields"], "server message")
+        with self.lock:
+            self.game_state.setdefault("server_messages", {})[tag] = {
+                "body": copy.deepcopy(body_fields),
+                "source": source,
+            }
 
     def set_database_response(self, tag, response_fields):
         spec = RESPONSE_CATALOG.get(tag)
@@ -920,6 +1166,20 @@ class ClientConnectionState:
             self.game_state["database_responses"][tag] = copy.deepcopy(
             response_fields
             )
+            if spec["name"] == "character_list":
+                character_field = next(
+                    (
+                        field_tag
+                        for field_tag, field in spec["fields"].items()
+                        if field["name"] == "character" and field["type"] == "map"
+                    ),
+                    None,
+                )
+                if character_field is not None:
+                    catalog = response_fields.get(character_field, {})
+                    self.game_state["character"]["catalog"] = copy.deepcopy(catalog)
+                    self.game_state["character"]["ids"] = set(catalog)
+                    self.game_state["flow_stage"] = "character_list_ready"
 
     def clear(self):
         with self.lock:
@@ -940,9 +1200,15 @@ class ClientConnectionState:
                 "npc_aoi",
             ):
                 self.game_state[category].clear()
+            self.game_state["character"].update(
+                catalog={},
+                ids=set(),
+                selected_id=None,
+            )
             self.game_state["server_time"].clear()
             self.game_state["authoritative_responses"].clear()
             self.game_state["database_responses"].clear()
+            self.game_state.pop("server_messages", None)
 
 
 def extract_braced_block(source, opening_brace):
@@ -1400,7 +1666,11 @@ def build_auto_game_state():
         "flow_stage": "connected",
         "observed_requests": {},
         "account_player": {},
-        "character": {},
+        "character": {
+            "catalog": {},
+            "ids": set(),
+            "selected_id": None,
+        },
         "map": {},
         "inventory": {},
         "skills": {},
@@ -1414,6 +1684,7 @@ def build_auto_game_state():
         },
         "authoritative_responses": {},
         "database_responses": {},
+        "server_messages": {},
         "state_source": "client_observations_and_configured_providers",
     }
 
@@ -1798,6 +2069,15 @@ def handle_client(connection, address, state=None):
                 spec["fields"],
             )
             state.record_request(rpc_tag, request_body, spec["fields"])
+            protocol_name = spec["name"]
+            if protocol_name in ("enter_map", "map_ready"):
+                flow_result = dispatch_configured_game_flow(
+                    connection,
+                    state,
+                    protocol_name,
+                )
+                if flow_result:
+                    print(f"[FLOW] {flow_result}")
             named_request_body = {
                 spec["fields"].get(tag, {}).get("name", str(tag)): value
                 for tag, value in request_body.items()
@@ -1850,6 +2130,7 @@ def handle_client(connection, address, state=None):
                     send_rpc_response(
                         connection, state, rpc_tag, session, generated_fields
                     )
+                    advance_game_flow_on_response(rpc_tag, state.game_state)
                     generated_names = {
                         response_spec["fields"][field_tag]["name"]: value
                         for field_tag, value in generated_fields.items()
