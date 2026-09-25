@@ -1124,6 +1124,11 @@ def ItemContainerTool_Name(slot):
     names = {0: "HEAD", 1: "BODY", 2: "BELT", 3: "LEG", 4: "NECKLACE", 5: "WEAPON"}
     return names.get(slot, f"SLOT_{slot}")
 
+def get_fashion_slot_index(subtype):
+    """Map fashion item subtype to the four FASHION_EQUIPPACK slots used by the APK."""
+    return {0: 2, 1: 0, 2: 1, 3: 3}.get(int(subtype), 0)
+
+
 def get_equip_slot_index(subtype):
     """Map ItemData.SubType (0=WEAPON, 1=HEAD, 2=BODY, 3=LEG, 4=BELT, 5=NECKLACE) to container slot index."""
     m = {0: 5, 1: 0, 2: 1, 3: 3, 4: 2, 5: 4}
@@ -2515,7 +2520,7 @@ def normalize_backpack_state(c):
     for item in c['fashion_backpack'].values():
         if isinstance(item, dict):
             cfg = ITEM_CONFIG.get(str(item.get('itemId', '')), {})
-            item.setdefault('slot', int(cfg.get('subtype', 0) or 0))
+            item.setdefault('slot', get_fashion_slot_index(int(cfg.get('subtype', 0) or 0)))
 
     # Migrate the old list-based inventory exactly once into ItemContainer state.
     legacy = c.get('inventory', [])
@@ -3692,11 +3697,14 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 129: # sell_item
+                # sell_item.request schema is indexId(0), itemCount(1), type(2).
                 index_id = get_val_int(body, 0, -1)
-                item_count = max(1, get_val_int(body, 1, 1))
+                item_count = min(20, max(1, get_val_int(body, 1, 1)))
+                container_type = get_val_int(body, 2, -1)
                 if picked_char:
                     normalize_backpack_state(picked_char)
-                    container, key, item, ctype = find_gameitem(picked_char, index_id, [0, 2, 3, 5])
+                    allowed = [container_type] if container_type in (0, 2, 3, 5) else [0, 2, 3, 5]
+                    container, key, item, ctype = find_gameitem(picked_char, index_id, allowed)
                     if item:
                         sold_cnt = min(item_count, max(1, int(item.get('stack', 1))))
                         item_id = str(item.get('itemId', ''))
@@ -3710,23 +3718,35 @@ def client_handler(conn, addr):
                         save_chars(all_accounts_chars)
                         sync_char_attrs_rpc(conn, picked_char)
                         sync_all_bag_containers(picked_char, send_rpc_push)
-                        print(f"[BAG SELL] item={item_id} index={index_id} count={sold_cnt} cash=+{sold_cnt*100}")
+                        print(f"[BAG SELL] item={item_id} index={index_id} type={ctype} count={sold_cnt}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 224: # open_item_package
                 index_id = get_val_int(body, 0, -1)
-                count = max(1, get_val_int(body, 2, 1))
+                index_id2 = get_val_int(body, 1, -1)
+                count = min(99, max(1, get_val_int(body, 2, 1)))
                 if picked_char:
                     normalize_backpack_state(picked_char)
                     container, key, item, ctype = find_gameitem(picked_char, index_id, [2])
                     if item:
                         box_id = str(item.get('itemId', ''))
+                        # indexId2 is an optional required/consumed companion item for combo boxes.
+                        companion = None
+                        c2 = None
+                        if index_id2 >= 0:
+                            c2, k2, companion, _ = find_gameitem(picked_char, index_id2, [2])
+                            if c2 is not None and companion is None:
+                                print(f"[BAG OPEN PACKAGE] companion index missing={index_id2}")
                         count = min(count, max(1, int(item.get('stack', 1))))
                         item['stack'] = int(item.get('stack', 1)) - count
                         if item['stack'] <= 0:
                             container.pop(key, None)
+                        if companion is not None:
+                            companion['stack'] = int(companion.get('stack', 1)) - count
+                            if companion['stack'] <= 0:
+                                c2.pop(index_id2 if index_id2 in c2 else str(index_id2), None)
                         reward_cash = 20000 * count
                         reward_exp = 5000 * count
                         grant_item_rewards(picked_char, [("1001", 0, reward_cash), ("2001", 0, reward_exp)], conn, send_rpc_push)
@@ -3840,15 +3860,16 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 240: # change_item_state
-                container_type = get_val_int(body, 0, -1)
-                index_id = get_val_int(body, 1, -1)
-                state = get_val_int(body, 2, 0)
+                # change_item_state.request schema is indexId(0), type(1).
+                index_id = get_val_int(body, 0, -1)
+                container_type = get_val_int(body, 1, -1)
                 if picked_char and container_type in range(7):
                     container, key, item, ctype = find_gameitem(picked_char, index_id, [container_type])
                     if item:
                         parm = [int(x) for x in item.get('parm', [0] * 8)]
                         parm = (parm + [0] * 8)[:8]
-                        parm[5] = state
+                        # ItemContainer tip logic uses Parm[5] == 0 for unseen items.
+                        parm[5] = 1
                         item['parm'] = parm
                         save_chars(all_accounts_chars)
                         send_update_item_push(send_rpc_push, ctype, int(key), item)
@@ -4248,7 +4269,7 @@ def client_handler(conn, addr):
                     if item:
                         item = fbp.pop(key)
                         cfg = ITEM_CONFIG.get(str(item.get('itemId', '')), {})
-                        slot = requested_slot if requested_slot >= 0 else int(item.get('slot', cfg.get('subtype', 0) or 0))
+                        slot = requested_slot if requested_slot >= 0 else int(item.get('slot', get_fashion_slot_index(int(cfg.get('subtype', 0) or 0))))
                         old_item = fpack.get(slot)
                         if old_item:
                             old_idx = _next_item_index(fbp)
