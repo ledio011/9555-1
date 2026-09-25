@@ -12,6 +12,7 @@ NPC_INST_MAP = {} # inst_id -> nid (to resolve rewards)
 NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 DEAD_NPC_SET = set() # duplicate death/reward prevention set
+ONLINE_CHAR_MAP = {} # char_id -> send_rpc_push
 
 # Load Mission Data
 missions_data = {}
@@ -375,7 +376,8 @@ try:
                 if len(parts) > 11 and parts[0] == '*' and parts[1]:
                     ITEM_CONFIG[parts[1]] = {
                         'type': int(parts[7]) if parts[7].isdigit() else 0,
-                        'function': int(parts[11]) if parts[11].isdigit() else 0
+                        'subtype': int(parts[9]) if len(parts) > 9 and parts[9].isdigit() else 0,
+                        'function': int(parts[13]) if len(parts) > 13 and parts[13].isdigit() else 0
                     }
         print(f"[ITEM CONFIG LOADED] items={len(ITEM_CONFIG)}")
 except: traceback.print_exc()
@@ -606,23 +608,20 @@ def decode_sproto_list(data):
         ptr += 4 + l
     return res
 
-def get_visual(name, prof, mount_id='', mount_color='', mount_state=0):
+def get_visual(name, prof, mount_id='', mount_color='', mount_state=0, is_show_fashion=False):
     m = {0:{"m":"100","h":"XD_A_T","b":"XD_A_S","l":"XD_A_X","w":"XD_A_WQ"},
          1:{"m":"104","h":"QJ_A_T","b":"QJ_A_S","l":"QJ_A_X","w":"QJ_A_WQ"},
          2:{"m":"105","h":"NQS_A_T","b":"NQS_A_S","l":"NQS_A_X","w":"NQS_A_WQ"}}
     v = m.get(prof, m[1])
+    show_type = 1 if is_show_fashion else 0
     fields = [(0, name), (1, v["m"]), (2, v["h"]), (3, v["b"]),
-              (4, v["l"]), (5, v["w"]), (10, 0)]
-    # characterVisual uses protocol tags 12-14 for the selected vehicle.
-    # MountId is required by the Street Race UI even while the player is not
-    # currently driving in the city (mount_state == 0).
+              (4, v["l"]), (5, v["w"]), (10, show_type)]
     if mount_id:
         fields.extend([(12, str(mount_id)), (13, int(mount_state)),
                        (14, str(mount_color or ''))])
     return encode_sproto(fields)
 
 def get_equipped_mount(c):
-    """Return the APK garage vehicle currently equipped by this character."""
     mounts = c.get('mounts', {})
     preferred = str(c.get('equipped_mount_id', ''))
     if preferred and int(mounts.get(preferred, {}).get('state', 0)) == 2:
@@ -640,7 +639,8 @@ def get_equipped_mount(c):
 def build_main_player_visual(c):
     mount_id, mount_color, mount_state = get_equipped_mount(c)
     return get_visual(c.get('name', 'Hero'), c.get('prof', 0),
-                      mount_id, mount_color, mount_state)
+                      mount_id, mount_color, mount_state,
+                      c.get('is_show_fashion', False))
 
 def sync_main_player_visual(picked_char, send_rpc_push):
     """Push the normal APK AOI visual update after a garage change."""
@@ -846,47 +846,85 @@ def get_char_ov(c, sort_index=None):
     ])
 
 def get_full_char(c):
+    char_id = int(c.get('id', 0))
     gen = get_general(c)
     stats = get_character_stats(c)
 
-    hp_cur = c.get('hp', stats['hp_max'])
+    hp_cur = int(c.get('hp', stats['hp_max']))
 
     attr_oth = encode_sproto([
         (0, hp_cur),
-        (1, stats['exp']),
-        (2, stats['lv']),
-        (3, stats['power']),
+        (1, int(stats['exp'])),
+        (2, int(stats['lv'])),
+        (3, int(stats['power'])),
         (15, 1)
     ])
 
-    prop = encode_sproto([(13, c.get('cash', 1000)), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
-    pos = c.get('pos', [29860, 100, -17005, 0])
-    mv = get_movement(pos[0], pos[1], pos[2], pos[3])
+    prop = encode_sproto([
+        (13, int(c.get('cash', 1000))),
+        (14, int(c.get('gold', 100))),
+        (15, int(c.get('diamonds', 10))),
+        (16, int(c.get('guild_contrib', 0))),
+        (17, int(c.get('honor', 0))),
+        (18, int(c.get('tokens', 0)))
+    ])
+    pos = c.get('pos', [7007, 100, 5033, 0])
+    if len(pos) >= 3 and pos[1] <= 0:
+        pos[1] = 100
+    mv = get_movement(int(pos[0]), int(pos[1]), int(pos[2]), int(pos[3]) if len(pos) > 3 else 0)
 
-    attr_run = encode_sproto([(0, stats['hp_max']), (2, stats['atk']), (3, stats['def'])])
-    # attr_all tags (attribute.cs): 0:max_hp, 2:atk, 3:def, 4:hit, 5:eva, 6:cri, 7:res, 8:exd, 9:exr, 10:crd, 11:crr, 12:defa, 13:mov, 17:dgea, 18:resa, 19:hita, 20:cria
+    attr_run = encode_sproto([(0, int(stats['hp_max'])), (2, int(stats['atk'])), (3, int(stats['def']))])
     attr_all_data = [
-        (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
-        (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
-        (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
-        (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
+        (0, int(stats['hp_max'])), (2, int(stats['atk'])), (3, int(stats['def'])),
+        (4, int(stats['hit'])), (5, int(stats['eva'])), (6, int(stats['cri'])), (7, int(stats['res'])),
+        (8, int(stats['exd'])), (9, int(stats['exr'])), (10, int(stats['crd'])), (11, int(stats['crr'])),
+        (12, int(stats['defa'])), (13, 500), (17, int(stats['dgea'])), (18, int(stats['resa'])), (19, int(stats['hita'])), (20, int(stats['cria']))
     ]
     attr_all = encode_sproto(attr_all_data)
     run = encode_sproto([(6, attr_run), (7, attr_all)])
 
-    char_level = stats['lv']
+    char_level = int(stats['lv'])
     skill_levels = c.get('skill_levels', {})
     skills_map = build_skills_map(c.get('prof', 0), char_level, skill_levels)
-    wid = "10001" if c.get('prof', 0) == 0 else "20001" if c.get('prof', 0) == 1 else "30001"
-    w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
-    equip_map = {5: w1}
 
-    # character.download: the APK treats 2 as completed.  Sending 1 again on
-    # reconnect would reopen the optional download/reward UI forever, even
-    # though MSG 270 was already persisted for this character.
+    # Tag 9: equip (Dictionary<long, gameitem>)
+    equip_map = {}
+    epack = c.get('equip_pack', {})
+    if epack:
+        for slot, item in epack.items():
+            if item and isinstance(item, dict):
+                encoded = encode_gameitem_sproto(item)
+                if encoded:
+                    equip_map[int(item.get('indexId', slot))] = encoded
+    if not equip_map:
+        wid = "10001" if c.get('prof', 0) == 0 else "20001" if c.get('prof', 0) == 1 else "30001"
+        w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (4, 0), (5, 1), (6, 1), (7, [0]*8), (8, 1)])
+        equip_map = {5: w1}
+
+    # Tag 10: badge_equip (Dictionary<long, gameitem>)
+    badge_equip_map = {}
+    bpack = c.get('badge_equip_pack', {})
+    if bpack:
+        for pos_idx, item in bpack.items():
+            if item and isinstance(item, dict):
+                encoded = encode_gameitem_sproto(item)
+                if encoded:
+                    badge_equip_map[int(item.get('indexId', pos_idx))] = encoded
+
+    # Tag 11: fashion_equip (Dictionary<long, gameitem>)
+    fashion_equip_map = {}
+    fpack = c.get('fashion_equip_pack', {})
+    if fpack:
+        for slot, item in fpack.items():
+            if item and isinstance(item, dict):
+                encoded = encode_gameitem_sproto(item)
+                if encoded:
+                    fashion_equip_map[int(item.get('indexId', slot))] = encoded
+
     download_state = 2 if c.get('download_complete') else 1
+    potion_idx = int(c.get('potion_index', 0))
     return encode_sproto([
-        (0, c['id']),
+        (0, char_id),
         (1, gen),
         (2, attr_oth),
         (5, prop),
@@ -894,19 +932,285 @@ def get_full_char(c):
         (7, mv),
         (8, skills_map),
         (9, equip_map),
-        (12, 0),
+        (10, badge_equip_map),
+        (11, fashion_equip_map),
+        (12, potion_idx),
         (13, run),
         (15, download_state)
     ])
+
+def sync_common_data_rpc(picked_char):
+    """Build Sproto Tag 592 (sync_common_data) with tutorial function state dic."""
+    func_info_map = {}
+    if picked_char and picked_char.get('tutorial', 0) == 1:
+        for fid in range(1, 100):
+            func_info_map[str(fid)] = encode_sproto([(0, str(fid)), (1, 1)])
+    elif picked_char:
+        saved_func = picked_char.get('func_info', {})
+        for fid, fstate in saved_func.items():
+            func_info_map[str(fid)] = encode_sproto([(0, str(fid)), (1, int(fstate))])
+
+    sync_fields = [
+        (0, int(time.time())),
+        (1, 0),
+        (2, int(time.time()) + 86400),
+        (3, 10000),
+        (4, 0),
+        (5, 0),
+        (6, 0),
+        (7, 0),
+        (8, func_info_map),
+        (9, 0)
+    ]
+    return encode_sproto(sync_fields)
+
+def ItemContainerTool_Name(slot):
+    names = {0: "HEAD", 1: "BODY", 2: "BELT", 3: "LEG", 4: "NECKLACE", 5: "WEAPON"}
+    return names.get(slot, f"SLOT_{slot}")
+
+def get_equip_slot_index(subtype):
+    """Map ItemData.SubType (0=WEAPON, 1=HEAD, 2=BODY, 3=LEG, 4=BELT, 5=NECKLACE) to container slot index."""
+    m = {0: 5, 1: 0, 2: 1, 3: 3, 4: 2, 5: 4}
+    return m.get(int(subtype), 5)
+
+def encode_gameitem_sproto(item):
+    """Encode gameitem object for Sproto serialization matching C# schema."""
+    if not item or not isinstance(item, dict): return None
+    index_id = int(item.get('indexId', 0))
+    item_id = str(item.get('itemId', '10001'))
+    bind_flag = bool(item.get('bindflag', True))
+    lvl = int(item.get('level', 1))
+    flg = int(item.get('flags', 0))
+    stk = int(item.get('stack', 1))
+    qual = max(0, min(5, int(item.get('quality', 0))))
+    parm_list = [int(x) for x in item.get('parm', [0]*8)]
+    appr = int(item.get('appraise', 1))
+
+    fields = [
+        (0, index_id),
+        (1, item_id),
+        (2, bind_flag),
+        (3, lvl),
+        (4, flg),
+        (5, stk),
+        (6, qual),
+        (7, parm_list),
+        (8, appr)
+    ]
+    return encode_sproto(fields)
+
+def sync_backpack_item_rpc(picked_char):
+    """Build Sproto Tag 592 (sync_backpack_item) for Equipment Backpack."""
+    items = {}
+    bp = picked_char.get('equip_backpack', {})
+    for index_id, item in bp.items():
+        encoded = encode_gameitem_sproto(item)
+        if encoded:
+            items[int(index_id)] = encoded
+    return encode_sproto([(0, items)])
+
+def sync_badgepack_item_rpc(picked_char):
+    """Build Sproto Tag 604 (sync_badgepack_item) for Badge Backpack."""
+    items = {}
+    bp = picked_char.get('badge_backpack', {})
+    for index_id, item in bp.items():
+        encoded = encode_gameitem_sproto(item)
+        if encoded:
+            items[int(index_id)] = encoded
+    return encode_sproto([(0, items)])
+
+def sync_fashion_backpack_item_rpc(picked_char):
+    """Build Sproto Tag 616 (sync_fashion_backpack_item) for Fashion Backpack."""
+    items = {}
+    bp = picked_char.get('fashion_backpack', {})
+    for index_id, item in bp.items():
+        encoded = encode_gameitem_sproto(item)
+        if encoded:
+            items[int(index_id)] = encoded
+    return encode_sproto([(0, items)])
+
+def sync_item_pack_rpc(picked_char):
+    """Build Sproto Tag 611 (sync_item_pack) for Item Backpack."""
+    items = {}
+    ibp = picked_char.get('item_backpack', {})
+    if ibp:
+        for index_id, item in ibp.items():
+            encoded = encode_gameitem_sproto(item)
+            if encoded:
+                items[int(index_id)] = encoded
+    else:
+        inv = picked_char.get('inventory', [])
+        for i in range(len(inv)):
+            item = inv[i]
+            guid = i + 10000
+            items[guid] = encode_sproto([
+                (0, guid),
+                (1, str(item['id'])),
+                (2, True),
+                (5, int(item['amount']))
+            ])
+    return encode_sproto([(0, items)])
+
+def send_update_item_push(send_rpc_push, container_type, index_id, item_dict=None):
+    """Send Sproto Tag 525 (update_item) to client."""
+    fields = [
+        (0, int(container_type)),
+        (1, int(index_id))
+    ]
+    if item_dict:
+        fields.append((2, encode_gameitem_sproto(item_dict)))
+    send_rpc_push(525, encode_sproto(fields))
+
+def sync_dance_state_rpc(picked_char=None):
+    """Build Sproto Tag 686 (sync_dance_state_info) for Single Dance & Guild Dance."""
+    now = int(time.time())
+    dance_info_obj = encode_sproto([
+        (0, 101),                   # uuid = 101
+        (1, "101"),                 # ID = "101" (matches CityDanceData.csv ID 101)
+        (2, now),                    # start_time
+        (3, now + 1800),             # end_time
+        (4, 1),                      # state = 1 (open/active)
+        (5, 0),                      # parm
+        (6, 1800),                   # duration = 1800s (30 minutes)
+        (7, now + 86400)             # reset_time
+    ])
+    dance_map = {101: dance_info_obj}
+    return encode_sproto([
+        (0, 1),        # state = 1
+        (1, 1),        # open = 1
+        (2, dance_map) # dance_state_info map
+    ])
+
+def calculate_dance_reward(char_level, dance_id="10001"):
+    """Calculates verified per-second EXP reward from BaseLvData with ±5% variance."""
+    try:
+        char_level = max(1, min(int(char_level), 80))
+    except (TypeError, ValueError):
+        char_level = 1
+
+    req_data = LEVEL_DATA.get(char_level, LEVEL_DATA.get(1, {'exp': 400}))
+    req_exp = req_data.get('exp', 400)
+
+    # Base EXP per 10s tick = 0.5% of req_exp; per second = (0.5% * req_exp) / 10
+    base_exp = max(1, int((req_exp * 0.005) / 10.0))
+    multiplier = 2.0 if str(dance_id) == "10002" else 1.0
+    variance = random.randint(95, 105) / 100.0
+
+    return max(1, int(base_exp * multiplier * variance))
+
+def build_friend_info_obj(c, ftype=0, main_char_id=0):
+    stats = get_character_stats(c)
+    cid = main_char_id if main_char_id else c['id']
+    fid = c['id']
+    time_info = c['id'] if ftype == 6 else int(time.time())
+
+    return encode_sproto([
+        (0, cid),                          # characterId (tag 0)
+        (1, fid),                          # friendId (tag 1)
+        (2, c.get('name', 'Hero')),        # name (tag 2)
+        (3, stats['lv']),                  # level (tag 3)
+        (4, c.get('prof', 0)),             # profession (tag 4)
+        (5, stats['power']),               # combValue (tag 5)
+        (6, 1),                            # state (tag 6: 1=online)
+        (7, time_info),                    # timeInfo (tag 7)
+        (8, ftype),                        # friendType (tag 8: 0=friend, 2=apply, 6=enemy)
+        (9, 0),                            # guildId (tag 9)
+        (10, ""),                          # guildName (tag 10)
+        (11, 100)                          # friendScore (tag 11)
+    ])
+
+def send_social_update_rpc(send_rpc_push, picked_char):
+    """Push Tag 534 (ret_request_update_friend_useinfo) for Friends (ftype=0) and Requests (ftype=2)."""
+    friends_map = {}
+    for fid, f_data in picked_char.get('friends', {}).items():
+        friends_map[int(fid)] = build_friend_info_obj(f_data, ftype=0)
+    for fid, f_data in picked_char.get('friend_applys', {}).items():
+        friends_map[int(fid)] = build_friend_info_obj(f_data, ftype=2)
+    send_rpc_push(534, encode_sproto([(0, friends_map), (1, 0)]))
+
+def send_enemy_update_rpc(send_rpc_push, picked_char):
+    """Push Tag 534 (ret_request_update_friend_useinfo) for Enemies (ftype=6)."""
+    enemys_map = {}
+    for fid, f_data in picked_char.get('enemies', {}).items():
+        enemys_map[int(fid)] = build_friend_info_obj(f_data, ftype=6, main_char_id=picked_char['id'])
+    send_rpc_push(534, encode_sproto([(0, enemys_map), (1, 1)]))
+
+def build_mail_update_obj(mail_data):
+    """Build Sproto mail_update schema object for Sproto Tag 603."""
+    items_map = {}
+    for i_id, i_info in mail_data.get('items', {}).items():
+        if isinstance(i_info, dict):
+            i_cnt = int(i_info.get('count', 1))
+        else:
+            i_cnt = int(i_info)
+        items_map[str(i_id)] = encode_sproto([(0, str(i_id)), (1, i_cnt)])
+
+    return encode_sproto([
+        (0, int(mail_data['id'])),                             # mailId (tag 0)
+        (1, int(mail_data.get('sendertype', 0))),              # sendertype (tag 1)
+        (3, str(mail_data.get('title', 'System Mail'))),       # title (tag 3)
+        (4, int(mail_data.get('senderTime', int(time.time())))),# senderTime (tag 4)
+        (5, int(mail_data.get('receiveId', 0))),               # receiveId (tag 5)
+        (6, int(mail_data.get('readTime', 0))),                # readTime (tag 6)
+        (7, str(mail_data.get('context', ''))),                # context (tag 7)
+        (8, int(mail_data.get('mailState', 0))),               # mailState (tag 8)
+        (9, int(mail_data.get('sortTime', int(time.time())))), # sortTime (tag 9)
+        (10, items_map),                                       # items (tag 10)
+        (11, int(mail_data.get('expireday', 30)))              # expireday (tag 11)
+    ])
+
+def start_dance_session(conn, send_rpc_push, picked_char, dance_id="10001"):
+    """Starts continuous 1.0-second periodic dance EXP reward ticks and 30-minute auto-stop."""
+    if not picked_char:
+        return
+
+    picked_char['is_dancing'] = True
+    picked_char['dance_id'] = str(dance_id)
+    picked_char['dance_start_time'] = int(time.time())
+
+    def run_dance_ticks():
+        if not picked_char or not picked_char.get('is_dancing'):
+            return
+
+        # Check 30-minute duration limit (1800 seconds)
+        elapsed = int(time.time()) - picked_char.get('dance_start_time', int(time.time()))
+        if elapsed >= 1800:
+            picked_char['is_dancing'] = False
+            social_dance = encode_sproto([(0, picked_char['id']), (1, "")])
+            send_rpc_push(657, encode_sproto([(0, social_dance)]))
+            sync_char_attrs_rpc(conn, picked_char)
+            print(f"[DANCE] Character {picked_char['id']} 30-minute dance session completed!")
+            return
+
+        char_lv = picked_char.get('level', 1)
+        cur_did = picked_char.get('dance_id', '10001')
+        exp_reward = calculate_dance_reward(char_lv, cur_did)
+
+        grant_item_rewards(picked_char, [("2001", 0, exp_reward)], conn, send_rpc_push)
+        send_rpc_push(638, encode_sproto([(0, [encode_sproto([(0, "2001"), (1, exp_reward), (3, 0)])])]))
+        print(f"[DANCE TICK] Granted +{exp_reward} EXP to character {picked_char['id']} (did={cur_did})")
+
+        if picked_char.get('is_dancing'):
+            timer = threading.Timer(1.0, run_dance_ticks)
+            timer.daemon = True
+            timer.start()
+
+    timer = threading.Timer(1.0, run_dance_ticks)
+    timer.daemon = True
+    timer.start()
 
 def sync_char_attrs_rpc(conn, picked_char):
     """Sends TAG 510 (aoi_update_attribute) to sync all stats."""
     stats = get_character_stats(picked_char)
     hp_cur = picked_char.get('hp', stats['hp_max'])
 
+    dance_state = 1 if picked_char.get('is_dancing') else 0
+    dance_id = str(picked_char.get('dance_id', '10001')) if picked_char.get('is_dancing') else ''
+
     # attribute_other (Tag 1 in character_aoi_attribute)
     attr_oth = encode_sproto([
-        (0, hp_cur), (1, stats['exp']), (2, stats['lv']), (3, stats['power']), (15, 1)
+        (0, hp_cur), (1, stats['exp']), (2, stats['lv']), (3, stats['power']), (15, 1),
+        (17, dance_state), (18, dance_id)
     ])
 
     # attribute (Tag 2 in character_aoi_attribute)
@@ -1505,12 +1809,49 @@ def sync_inventory_data(picked_char):
     return encode_sproto([(0, items)])
 
 def add_to_inventory(picked_char, item_id, amount):
+    item_id = str(item_id)
     if 'inventory' not in picked_char: picked_char['inventory'] = []
+    found = False
     for item in picked_char['inventory']:
-        if item['id'] == item_id:
+        if str(item['id']) == item_id:
             item['amount'] += amount
-            return
-    picked_char['inventory'].append({'id': item_id, 'amount': amount})
+            found = True
+            break
+    if not found:
+        picked_char['inventory'].append({'id': item_id, 'amount': amount})
+
+    cfg = ITEM_CONFIG.get(item_id, {})
+    itype = cfg.get('type', 0)
+
+    if itype == 2 or itype == 3 or itype == 4:
+        ckey = 'equip_backpack'
+    elif itype in (15, 16):
+        ckey = 'fashion_backpack'
+    elif itype in (13, 22):
+        ckey = 'badge_backpack'
+    else:
+        ckey = 'item_backpack'
+
+    container = picked_char.setdefault(ckey, {})
+    if ckey == 'item_backpack':
+        existing = False
+        for idx, item in container.items():
+            if str(item.get('itemId')) == item_id:
+                item['stack'] = item.get('stack', 1) + amount
+                existing = True
+                break
+        if not existing:
+            idx = int(time.time() * 1000) % 10000000 + len(container)
+            container[idx] = {
+                'indexId': idx, 'itemId': item_id, 'bindflag': True,
+                'quality': 1, 'level': 1, 'stack': amount, 'parm': [0]*8, 'appraise': 1
+            }
+    else:
+        idx = int(time.time() * 1000) % 10000000 + len(container)
+        container[idx] = {
+            'indexId': idx, 'itemId': item_id, 'bindflag': True,
+            'quality': 1, 'level': 1, 'stack': amount, 'parm': [0]*8, 'appraise': 1
+        }
 
 def build_mount_info(picked_char):
     """Build the exact mount map consumed by the APK garage handlers.
@@ -1595,7 +1936,7 @@ def copy_attempts_remaining(picked_char, copy_id, cfg):
     state = ensure_daily_copy_state(picked_char)
     remaining = state.setdefault('remaining', {})
     if copy_id not in remaining:
-        remaining[copy_id] = int(cfg['max_plays'])
+        remaining[copy_id] = int(cfg.get('max_plays', 3))
     return max(0, int(remaining[copy_id]))
 
 def street_race_rewards(level):
@@ -1695,7 +2036,10 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None)
         sync_char_attrs_rpc(conn, picked_char)
 
     if inv_changed and send_rpc_push:
-        send_rpc_push(611, sync_inventory_data(picked_char))
+        send_rpc_push(611, sync_item_pack_rpc(picked_char))
+        send_rpc_push(592, sync_backpack_item_rpc(picked_char))
+        send_rpc_push(604, sync_badgepack_item_rpc(picked_char))
+        send_rpc_push(616, sync_fashion_backpack_item_rpc(picked_char))
 
 def give_mission_rewards(picked_char, mid):
     """Resolves rewards by profession and calculates level ups using BaseLvData."""
@@ -1845,6 +2189,8 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             matched = not target_id or str(cfg.get('logic_id')) == str(target_id) or event in ['exp_copy', 'enter_copy', 'dungeon']
         elif logic_type == 114 and event == 'world_boss':
             matched = True
+        elif logic_type == 132 and event == 'dance':
+            matched = True
         elif logic_type == 7 and event == 'map':
             matched = target == str(map_id)
 
@@ -1879,7 +2225,11 @@ def init_character_fields(c):
         'completed_side_missions': [],
         'last_main_mission_id': "-1",
         'inventory': [],
-        'pos': [29860, 100, -17005, 0],
+        'friends': {},
+        'friend_applys': {},
+        'enemies': {},
+        'mails': {},
+        'pos': [7007, 100, 5033, 0],
         'map_id': "11",
         'tutorial': 0,
         'download_complete': False,
@@ -1895,6 +2245,46 @@ def init_character_fields(c):
     }
     for k, v in fields.items():
         if k not in c: c[k] = v
+
+    epack = c.setdefault('equip_pack', {})
+    prof_str = str(c.get('prof', 0))
+    starter_set = {
+        0: {"0": "10002", "1": "20002", "2": "30002"}.get(prof_str, "10002"),
+        1: {"0": "10003", "1": "20003", "2": "30003"}.get(prof_str, "10003"),
+        2: {"0": "10005", "1": "20005", "2": "30005"}.get(prof_str, "10005"),
+        3: {"0": "10004", "1": "20004", "2": "30004"}.get(prof_str, "10004"),
+        4: {"0": "10006", "1": "20006", "2": "30006"}.get(prof_str, "10006"),
+        5: {"0": "10001", "1": "20001", "2": "30001"}.get(prof_str, "10001"),
+    }
+    for s_idx, s_item_id in starter_set.items():
+        if s_idx not in epack or not epack[s_idx]:
+            epack[s_idx] = {
+                'indexId': s_idx,
+                'itemId': s_item_id,
+                'bindflag': True,
+                'quality': 1,
+                'level': 1,
+                'stack': 1,
+                'parm': [0]*8,
+                'appraise': 1
+            }
+
+    # Add System Welcome Mail for new characters
+    if not c.get('mails'):
+        now = int(time.time())
+        c['mails']["1001"] = {
+            'id': 1001,
+            'sendertype': 0,
+            'title': "Welcome to Liberty City!",
+            'senderTime': now,
+            'receiveId': c.get('id', 0),
+            'readTime': 0,
+            'context': "Welcome to Vice City! Enjoy your adventure in Liberty City.#rClaim your starter rewards below!",
+            'mailState': 0,
+            'sortTime': now,
+            'items': {'1001': {'id': "1001", 'count': 50000}, '2001': {'id': "2001", 'count': 10000}},
+            'expireday': 30
+        }
 
     # Initialize or restore HP if not set or if dead
     stats = get_character_stats(c)
@@ -1946,6 +2336,8 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
                 print(f"[TELEPORT] Spawn fix map={target_map_id} pos={landing_pos}")
 
     if landing_pos:
+        if landing_pos[1] <= 0:
+            landing_pos[1] = 100
         picked_char['pos'] = landing_pos
     else:
         print(f"[MAP CONFIG MISSING] map_id={target_map_id}")
@@ -1970,9 +2362,6 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         ]))
         print(f"[MAIN PLAYER CREATE SEND] map_id={target_map_id}")
 
-        # TAG 505: aoi_add (NPCs)
-        spawn_map_npcs(conn, target_map_id, picked_char)
-
         # BOSS SPAWN for Dominance Map 502
         if target_map_id == "502":
             did = picked_char.get('active_domin_id', '1')
@@ -1985,8 +2374,6 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
             boss_stats = get_npc_attr("1105")
             NPC_HP_MAP[boss_inst_id] = boss_stats['hp_max']
             NPC_INST_MAP[boss_inst_id] = "BOSS_" + did
-            # The APK cannot create the zombie player (or the VS panel) until
-            # map_ready.  Remember it here; MSG 100 sends the actual tag 544.
             picked_char['boss_waiting_for_map_ready'] = True
             print(f"[M1003 DEBUG] Prepared Boss did={did} inst={boss_inst_id} max_hp={boss_stats['hp_max']} (awaiting map_ready)")
 
@@ -2035,10 +2422,10 @@ def serve_resource_http(conn, initial_data):
             return
         size = os.path.getsize(local_path)
         headers = (
-            b"HTTP/1.1 200 OK\r\n"
-            + b"Content-Length: " + str(size).encode("ascii") + b"\r\n"
-            + b"Content-Type: application/octet-stream\r\n"
-            + b"Connection: close\r\n\r\n"
+                b"HTTP/1.1 200 OK\r\n"
+                + b"Content-Length: " + str(size).encode("ascii") + b"\r\n"
+                + b"Content-Type: application/octet-stream\r\n"
+                + b"Connection: close\r\n\r\n"
         )
         conn.sendall(headers)
         if parts[0] == "GET":
@@ -2171,7 +2558,8 @@ def client_handler(conn, addr):
 
             raw = sproto_unpack(data); pkg = decode_sproto(raw, 0)
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
-            print(f"[RX] MSG={msg} SESSION={session}")
+            if msg in (100, 105, 115, 116, 117, 121, 122, 129, 167, 168, 170, 171, 172, 199, 223, 224, 303) or (picked_char and picked_char.get('map_ready_done')):
+                print(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
 
             if msg == 4: # login
@@ -2188,11 +2576,9 @@ def client_handler(conn, addr):
 
             elif msg == 103: # character_list
                 chars = get_account_chars(all_accounts_chars, cur_areaId, acc_id)
-                # Sort by last_played descending (internal)
-                chars.sort(key=lambda x: x.get('last_played', 0), reverse=True)
+                # Sort in creation order (1st created to 4th created)
+                chars.sort(key=lambda x: x.get('createtime', x.get('id', 0)))
 
-                # The client sorts character_overview.createtime ASCENDING.
-                # To make the last played (newest) show first, we give it the smallest createtime.
                 ov_list = []
                 for i, c in enumerate(chars):
                     ov_list.append(get_char_ov(c, i))
@@ -2218,10 +2604,11 @@ def client_handler(conn, addr):
             elif msg == 105: # character_pick
                 char_id = get_val_int(body, 0)
                 picked_char = next((c for c in get_account_chars(all_accounts_chars, cur_areaId, acc_id) if c['id'] == char_id), None)
-                resp = encode_sproto([(0, 1 if picked_char else 0)])
+                resp = encode_sproto([]) if picked_char else encode_sproto([(0, 1)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
+                    ONLINE_CHAR_MAP[picked_char['id']] = send_rpc_push
                     picked_char['last_played'] = int(time.time())
                     print(f"[CHARACTER PICK] id={picked_char['id']} level={picked_char.get('level')}")
                     init_character_fields(picked_char)
@@ -2241,20 +2628,25 @@ def client_handler(conn, addr):
                     # Correct Sequence: 614 -> 611 -> 540 -> 519 -> 503
 
                     # 614: sync_common_data
-                    fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
-                    funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
+                    fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3016", "3030", "4014", "4026", "4061", "4062", "4063", "4064", "4081", "4084"]
+                    if picked_char.get('tutorial', 0) == 1:
+                        fids += [str(i) for i in range(1, 100)]
+                    funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in set(fids)}
                     send_rpc_push(614, encode_sproto([
                         (0, int(time.time())), (2, 0), (4, 10000), (9, funcs), (12, random.randint(1, 10000)), (13, 1), (14, int(time.time()))
                     ]))
 
-                    # 611: inventory_sync
-                    send_rpc_push(611, sync_inventory_data(picked_char))
+                    # 611: sync_item_pack (Item Backpack)
+                    send_rpc_push(611, sync_item_pack_rpc(picked_char))
 
-                    # 592: backpack_sync
-                    send_rpc_push(592, encode_sproto([(0, {})]))
+                    # 592: sync_backpack_item (Equipment Backpack)
+                    send_rpc_push(592, sync_backpack_item_rpc(picked_char))
 
-                    # 616: fashion_sync
-                    send_rpc_push(616, encode_sproto([(0, {})]))
+                    # 604: sync_badgepack_item (Badge Backpack)
+                    send_rpc_push(604, sync_badgepack_item_rpc(picked_char))
+
+                    # 616: sync_fashion_backpack_item (Fashion Backpack)
+                    send_rpc_push(616, sync_fashion_backpack_item_rpc(picked_char))
 
                     # 510: initial stats sync
                     sync_char_attrs_rpc(conn, picked_char)
@@ -2266,8 +2658,18 @@ def client_handler(conn, addr):
                     # 519: mission_sync
                     send_rpc_push(519, sync_mission_data(picked_char))
 
-                    # TAG 503: enter_map
+                    # 534: friend_sync (Tag 534 delivers friends & pending requests)
+                    send_social_update_rpc(send_rpc_push, picked_char)
+
+                    # 603: mail_sync
+                    for m_id, m_data in picked_char.get('mails', {}).items():
+                        send_rpc_push(603, build_mail_update_obj(m_data))
+
+                    # Correct spawn pos for map 11
                     mid = str(picked_char.get('map_id', '11'))
+                    if mid == "11" and (not picked_char.get('pos') or picked_char['pos'] == [29860, 100, -17005, 0] or picked_char['pos'] == [18250, 100, -4016, -6458] or picked_char['pos'][1] <= 0):
+                        picked_char['pos'] = [7007, 100, 5033, 0]
+
                     scene_name = "Unknown"
                     if mid in MAP_CONFIG:
                         scene_name = MAP_CONFIG[mid]['scene']
@@ -2291,9 +2693,6 @@ def client_handler(conn, addr):
                         ]))
                         print(f"[MAIN PLAYER CREATE SEND] map_id={mid}")
 
-                        # TAG 505: aoi_add (NPCs)
-                        spawn_map_npcs(conn, mid, picked_char)
-
                     except Exception:
                         print("[!] FAILED TO SEND INITIAL MAP ENTER")
                         traceback.print_exc()
@@ -2301,8 +2700,18 @@ def client_handler(conn, addr):
 
             elif msg == 100: # map_ready
                 if picked_char:
-                    mid = picked_char.get('map_id', '11')
-                    print(f"[MAP READY RECEIVED] map_id={mid}")
+                    picked_char['map_ready_done'] = True
+                    mid = str(picked_char.get('map_id', '11'))
+                    print(f"==================================================")
+                    print(f"[MAP READY RECEIVED] Character is fully in map_id={mid}!")
+                    print(f"==================================================")
+
+                    # 1. TAG 654: start_enter_game (Close loading box & enable HUD controls)
+                    send_rpc_push(654, encode_sproto([(0, 1)]))
+
+                    # 2. TAG 505 / AOI: spawn map NPCs
+                    spawn_map_npcs(conn, mid, picked_char)
+
                     if mid in ["223", "224", "225", "226", "227", "228", "229"]:
                         exp_state = picked_char.get('exp_stage_state')
                         if exp_state:
@@ -2317,20 +2726,15 @@ def client_handler(conn, addr):
                             ]))
                             print(f"[EXP STAGE] map_ready sent 629 & 683 updates for copy={mid}")
                     if mid == "502":
-                        # Map 502 exposes its match timer only through this APK tag.
                         send_rpc_push(629, encode_sproto([(0, int(time.time()) + 60), (1, 0)]))
                         boss_id = picked_char.get('boss_inst_id')
                         if boss_id and picked_char.pop('boss_waiting_for_map_ready', False):
                             did = picked_char.get('active_domin_id', '1')
                             boss_stats = get_npc_attr("1105")
-                            # Tag 544 creates ObjZombiePlayer and opens the VS UI.
                             send_rpc_push(544, encode_sproto([(0, get_boss_char(boss_id, did))]))
                             sync_npc_attrs_rpc(conn, boss_id, boss_stats, NPC_HP_MAP.get(boss_id, boss_stats['hp_max']))
                             print(f"[M1003 DEBUG] Spawned Boss did={did} inst={boss_id} after map_ready")
 
-                            # Tag 547 closes the VS UI and activates the APK's
-                            # built-in zombie auto-fight.  Sending it immediately
-                            # makes the VS UI invisible, so keep it on screen first.
                             def start_domin_battle(expected_boss_id=boss_id):
                                 if (picked_char.get('map_id') == '502'
                                         and picked_char.get('boss_inst_id') == expected_boss_id
@@ -2340,6 +2744,7 @@ def client_handler(conn, addr):
                             arena_timer = threading.Timer(2.5, start_domin_battle)
                             arena_timer.daemon = True
                             arena_timer.start()
+
                     send_rpc_push(519, sync_mission_data(picked_char))
 
             elif msg == 101: # move
@@ -2580,7 +2985,7 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 115: # use_item, including vehicle exchange vouchers
+            elif msg == 115: # use_item, including vehicle exchange vouchers, tickets & consumables
                 index_id = get_val_int(body, 0, -1)
                 success = 0
                 if picked_char:
@@ -2602,25 +3007,715 @@ def client_handler(conn, addr):
                             send_rpc_push(611, sync_inventory_data(picked_char))
                             send_rpc_push(630, encode_sproto([(0, build_mount_info(picked_char))]))
                             print(f"[MOUNT] voucher redeemed item={item.get('id')} vehicle={mount_id}")
-                        elif item.get('id') in ITEM_CONFIG:
+                        elif item.get('id') in ITEM_CONFIG and ITEM_CONFIG[item['id']]['type'] == 18:
                             cfg = ITEM_CONFIG[item['id']]
-                            if cfg['type'] == 18: # REMAIN ticket
-                                subtype = cfg['function']
-                                state = ensure_daily_copy_state(picked_char)
-                                # Find all copy IDs for this subtype and reset their remaining counts.
-                                # The client uses Item 9205 (SubType 7) for Street Race.
-                                for copy_id, sc_cfg in COPY_SCENE_CONFIG.items():
-                                    if sc_cfg['subtype'] == subtype:
-                                        state['remaining'][copy_id] = sc_cfg['max_plays']
-                                item['amount'] -= 1
-                                if item['amount'] < 1:
-                                    inventory.pop(item_index)
-                                success = 1
-                                save_chars(all_accounts_chars)
-                                send_rpc_push(611, sync_inventory_data(picked_char))
-                                send_rpc_push(555, sync_copy_scenes(picked_char))
-                                print(f"[TICKET] used item={item['id']} for subtype={subtype}")
+                            subtype = cfg['function']
+                            state = ensure_daily_copy_state(picked_char)
+                            for copy_id, sc_cfg in COPY_SCENE_CONFIG.items():
+                                if sc_cfg['subtype'] == subtype:
+                                    state['remaining'][copy_id] = sc_cfg['max_plays']
+                            item['amount'] -= 1
+                            if item['amount'] < 1:
+                                inventory.pop(item_index)
+                            success = 1
+                            save_chars(all_accounts_chars)
+                            send_rpc_push(611, sync_inventory_data(picked_char))
+                            send_rpc_push(555, sync_copy_scenes(picked_char))
+                            print(f"[TICKET] used item={item['id']} for subtype={subtype}")
+                        else:
+                            # General Consumable / Potion / Healing Item
+                            item_id = str(item.get('id', ''))
+                            if item_id == "2001":
+                                add_exp = 1000
+                                grant_item_rewards(picked_char, [("2001", 0, add_exp)], conn, send_rpc_push)
+                            elif item_id == "1001":
+                                add_cash = 10000
+                                picked_char['cash'] = picked_char.get('cash', 0) + add_cash
+                                sync_char_attrs_rpc(conn, picked_char)
+                            else:
+                                stats = get_character_stats(picked_char)
+                                picked_char['hp'] = stats['hp_max']
+                                sync_char_attrs_rpc(conn, picked_char)
+
+                            item['amount'] -= 1
+                            if item['amount'] < 1:
+                                inventory.pop(item_index)
+                            success = 1
+                            save_chars(all_accounts_chars)
+                            send_rpc_push(611, sync_inventory_data(picked_char))
+                            print(f"[BAG USE ITEM] Used consumable item={item_id} from bag")
                 send_rpc_push(526, encode_sproto([(0, success), (1, index_id)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 116: # equip_item
+                index_id = get_val_int(body, 0)
+                if picked_char:
+                    ebp = picked_char.setdefault('equip_backpack', {})
+                    epack = picked_char.setdefault('equip_pack', {})
+                    item = None
+                    if index_id in ebp:
+                        item = ebp.pop(index_id)
+                    else:
+                        inventory = picked_char.get('inventory', [])
+                        item_index = index_id - 10000
+                        if 0 <= item_index < len(inventory):
+                            raw = inventory.pop(item_index)
+                            item = {
+                                'indexId': index_id, 'itemId': str(raw['id']),
+                                'bindflag': True, 'quality': 1, 'level': 1, 'stack': 1, 'parm': [0]*8, 'appraise': 1
+                            }
+                    if item:
+                        item_id = str(item['itemId'])
+                        item_cfg = ITEM_CONFIG.get(item_id, {})
+                        subtype = item_cfg.get('subtype', 0)
+                        slot = get_equip_slot_index(subtype)
+                        old_item = epack.get(slot)
+                        item['indexId'] = slot
+                        epack[slot] = item
+                        if old_item:
+                            old_idx = int(time.time() * 1000) % 10000000 + len(ebp)
+                            old_item['indexId'] = old_idx
+                            ebp[old_idx] = old_item
+                            send_update_item_push(send_rpc_push, 0, old_idx, old_item)
+                        else:
+                            send_update_item_push(send_rpc_push, 0, index_id, None)
+                        send_update_item_push(send_rpc_push, 1, slot, item)
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(592, sync_backpack_item_rpc(picked_char))
+                        send_rpc_push(611, sync_item_pack_rpc(picked_char))
+                        sync_char_attrs_rpc(conn, picked_char)
+                        sync_main_player_visual(picked_char, send_rpc_push)
+                        old_name = old_item.get('itemId') if old_item else 'None'
+                        print(f"==================================================")
+                        print(f"[BAG UI ACTION] EQUIP ITEM")
+                        print(f"  • Equipping Item ID  : {item_id}")
+                        print(f"  • Equipment Slot    : Slot {slot} ({ItemContainerTool_Name(slot)})")
+                        print(f"  • Swapped Old Item  : {old_name}")
+                        print(f"  • Equipment Bag     : Synced (Tag 592, Code 0)")
+                        print(f"  • Equipped Pack     : Synced (Tag 525, Code 1)")
+                        print(f"  • Character Stats   : Updated & Synced (Tag 510)")
+                        print(f"==================================================")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 117: # unequip_item
+                index_id = get_val_int(body, 0)
+                if picked_char:
+                    ebp = picked_char.setdefault('equip_backpack', {})
+                    epack = picked_char.setdefault('equip_pack', {})
+                    if index_id in epack:
+                        un_item = epack.pop(index_id)
+                        new_idx = int(time.time() * 1000) % 10000000 + len(ebp)
+                        un_item['indexId'] = new_idx
+                        ebp[new_idx] = un_item
+                        send_update_item_push(send_rpc_push, 1, index_id, None)
+                        send_update_item_push(send_rpc_push, 0, new_idx, un_item)
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(592, sync_backpack_item_rpc(picked_char))
+                        sync_char_attrs_rpc(conn, picked_char)
+                        sync_main_player_visual(picked_char, send_rpc_push)
+                        print(f"==================================================")
+                        print(f"[BAG UI ACTION] UNEQUIP ITEM")
+                        print(f"  • Unequipping Item  : {un_item.get('itemId')}")
+                        print(f"  • From Slot         : Slot {index_id} ({ItemContainerTool_Name(index_id)})")
+                        print(f"  • Moved To Bag Index: {new_idx}")
+                        print(f"  • Equipped Pack     : Cleared Slot {index_id} (Tag 525, Code 1)")
+                        print(f"  • Equipment Bag     : Updated Index {new_idx} (Tag 525, Code 0)")
+                        print(f"==================================================")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 129: # sell_item
+                index_id = get_val_int(body, 0)
+                item_count = get_val_int(body, 1, 1)
+                item_type = get_val_int(body, 2, 0)
+                if picked_char:
+                    target_container = None
+                    target_key = None
+                    item_found = None
+                    ctype = 2 # ITEM_BACKPACK = 2
+                    for ckey, container_code in [('item_backpack', 2), ('equip_backpack', 0), ('fashion_backpack', 5), ('badge_backpack', 3)]:
+                        c_dict = picked_char.get(ckey, {})
+                        if index_id in c_dict or str(index_id) in c_dict:
+                            target_container = c_dict
+                            target_key = index_id if index_id in c_dict else str(index_id)
+                            item_found = c_dict[target_key]
+                            ctype = container_code
+                            break
+
+                    if not item_found:
+                        inventory = picked_char.get('inventory', [])
+                        item_index = index_id - 10000
+                        if 0 <= item_index < len(inventory):
+                            raw = inventory[item_index]
+                            item_found = {'itemId': str(raw['id']), 'stack': raw['amount']}
+
+                    if item_found:
+                        item_id = str(item_found.get('itemId', ''))
+                        item_cfg = ITEM_CONFIG.get(item_id, {})
+                        sold_cnt = min(item_count, item_found.get('stack', 1))
+                        earned_cash = sold_cnt * 100
+                        if target_container and target_key:
+                            item_found['stack'] = item_found.get('stack', 1) - sold_cnt
+                            if item_found['stack'] <= 0:
+                                target_container.pop(target_key, None)
+                                send_update_item_push(send_rpc_push, ctype, index_id, None)
+                            else:
+                                send_update_item_push(send_rpc_push, ctype, index_id, item_found)
+
+                        inv = picked_char.get('inventory', [])
+                        for inv_item in list(inv):
+                            if str(inv_item.get('id')) == item_id:
+                                inv_item['amount'] -= sold_cnt
+                                if inv_item['amount'] <= 0:
+                                    inv.remove(inv_item)
+                                break
+
+                        picked_char['cash'] = picked_char.get('cash', 0) + earned_cash
+                        save_chars(all_accounts_chars)
+                        sync_char_attrs_rpc(conn, picked_char)
+                        send_rpc_push(611, sync_item_pack_rpc(picked_char))
+                        send_rpc_push(592, sync_backpack_item_rpc(picked_char))
+                        print(f"==================================================")
+                        print(f"[BAG UI ACTION] SELL ITEM (MSG 129)")
+                        print(f"  • Sold Item ID      : {item_id}")
+                        print(f"  • Sold Count        : {sold_cnt}")
+                        print(f"  • Cash Earned       : +{earned_cash} Cash")
+                        print(f"  • Total Cash Now    : {picked_char.get('cash', 0)}")
+                        print(f"  • Container Code    : Code {ctype}")
+                        print(f"==================================================")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 224: # open_item_package
+                index_id = get_val_int(body, 0)
+                count = get_val_int(body, 2, 1)
+                if picked_char:
+                    item_found = None
+                    target_container = None
+                    target_key = None
+                    ctype = 2 # ITEM_BACKPACK = 2
+                    for ckey, container_code in [('item_backpack', 2), ('equip_backpack', 0)]:
+                        c_dict = picked_char.get(ckey, {})
+                        if index_id in c_dict or str(index_id) in c_dict:
+                            target_container = c_dict
+                            target_key = index_id if index_id in c_dict else str(index_id)
+                            item_found = c_dict[target_key]
+                            ctype = container_code
+                            break
+
+                    if not item_found:
+                        inventory = picked_char.get('inventory', [])
+                        item_index = index_id - 10000
+                        if 0 <= item_index < len(inventory):
+                            raw = inventory[item_index]
+                            item_found = {'itemId': str(raw['id']), 'stack': raw['amount']}
+
+                    if item_found:
+                        box_id = str(item_found.get('itemId', ''))
+                        count = min(count, item_found.get('stack', 1))
+                        if target_container and target_key:
+                            item_found['stack'] = item_found.get('stack', 1) - count
+                            if item_found['stack'] <= 0:
+                                target_container.pop(target_key, None)
+                                send_update_item_push(send_rpc_push, ctype, index_id, None)
+                            else:
+                                send_update_item_push(send_rpc_push, ctype, index_id, item_found)
+
+                        reward_cash = 20000 * count
+                        reward_exp = 5000 * count
+                        grant_item_rewards(picked_char, [("1001", 0, reward_cash), ("2001", 0, reward_exp)], conn, send_rpc_push)
+
+                        reward_items = [
+                            encode_sproto([(0, "1001"), (1, reward_cash)]),
+                            encode_sproto([(0, "2001"), (1, reward_exp)])
+                        ]
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(617, encode_sproto([(0, reward_items)]))
+                        print(f"[BAG OPEN BOX] Opened box {box_id} index={index_id} count={count} cash={reward_cash} exp={reward_exp}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 122: # sort_item
+                if picked_char:
+                    send_rpc_push(611, sync_item_pack_rpc(picked_char))
+                    send_rpc_push(592, sync_backpack_item_rpc(picked_char))
+                    send_rpc_push(604, sync_badgepack_item_rpc(picked_char))
+                    send_rpc_push(616, sync_fashion_backpack_item_rpc(picked_char))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 303: # equip_appraise
+                index_id = get_val_int(body, 0)
+                if picked_char:
+                    ebp = picked_char.setdefault('equip_backpack', {})
+                    if index_id in ebp:
+                        item_dict = ebp[index_id]
+                        item_dict['appraise'] = 1
+                        item_dict['quality'] = random.randint(1, 5)
+                        save_chars(all_accounts_chars)
+                        send_update_item_push(send_rpc_push, 0, index_id, item_dict) # 0 = EQUIP_BACKPACK
+                        score = item_dict['quality'] * 100
+                        send_rpc_push(681, encode_sproto([
+                            (0, encode_gameitem_sproto(item_dict)),
+                            (1, score)
+                        ]))
+                        print(f"[EQUIP APPRAISE] Appraised item {index_id} quality={item_dict['quality']} score={score}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 168: # equip_inlay
+                eq_idx = get_val_int(body, 0)
+                gem_idx = get_val_int(body, 1)
+                socket_idx = get_val_int(body, 2)
+                if picked_char:
+                    ebp = picked_char.setdefault('equip_backpack', {})
+                    epack = picked_char.setdefault('equip_pack', {})
+                    item_dict = ebp.get(eq_idx) or epack.get(eq_idx)
+                    gem_item = ebp.get(gem_idx)
+                    if item_dict and gem_item:
+                        inlay_map = item_dict.setdefault('inlay', {})
+                        inlay_map[socket_idx] = {'index': socket_idx, 'itemId': str(gem_item.get('itemId', ''))}
+                        ebp.pop(gem_idx, None)
+                        save_chars(all_accounts_chars)
+                        ctype = 0 if eq_idx in ebp else 1
+                        send_update_item_push(send_rpc_push, ctype, eq_idx, item_dict)
+                        send_update_item_push(send_rpc_push, 0, gem_idx, None)
+                        sync_char_attrs_rpc(conn, picked_char)
+                        print(f"[INLAY GEM] Item={eq_idx} Socket={socket_idx} Gem={gem_item.get('itemId')}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 170: # equip_star_refine
+                eq_idx = get_val_int(body, 0)
+                if picked_char:
+                    ebp = picked_char.setdefault('equip_backpack', {})
+                    epack = picked_char.setdefault('equip_pack', {})
+                    item_dict = ebp.get(eq_idx) or epack.get(eq_idx)
+                    if item_dict:
+                        parm = item_dict.setdefault('parm', [0]*8)
+                        parm[1] = min(10, parm[1] + 1)
+                        save_chars(all_accounts_chars)
+                        ctype = 0 if eq_idx in ebp else 1
+                        send_update_item_push(send_rpc_push, ctype, eq_idx, item_dict)
+                        sync_char_attrs_rpc(conn, picked_char)
+                        print(f"[STAR REFINE] Item={eq_idx} NewStarLevel={parm[1]}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 171: # equip_inherit
+                src_idx = get_val_int(body, 0)
+                dst_idx = get_val_int(body, 1)
+                if picked_char:
+                    ebp = picked_char.setdefault('equip_backpack', {})
+                    epack = picked_char.setdefault('equip_pack', {})
+                    src_item = ebp.get(src_idx) or epack.get(src_idx)
+                    dst_item = ebp.get(dst_idx) or epack.get(dst_idx)
+                    if src_item and dst_item:
+                        dst_item['level'] = src_item.get('level', 1)
+                        dst_parm = dst_item.setdefault('parm', [0]*8)
+                        src_parm = src_item.setdefault('parm', [0]*8)
+                        dst_parm[1] = src_parm[1]
+                        src_item['level'] = 1
+                        src_parm[1] = 0
+                        save_chars(all_accounts_chars)
+                        c_src = 0 if src_idx in ebp else 1
+                        c_dst = 0 if dst_idx in ebp else 1
+                        send_update_item_push(send_rpc_push, c_src, src_idx, src_item)
+                        send_update_item_push(send_rpc_push, c_dst, dst_idx, dst_item)
+                        sync_char_attrs_rpc(conn, picked_char)
+                        print(f"[EQUIP INHERIT] Inherited stats from {src_idx} to {dst_idx}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 172: # decomp_item
+                eq_idx = get_val_int(body, 0)
+                if picked_char:
+                    ebp = picked_char.setdefault('equip_backpack', {})
+                    if eq_idx in ebp:
+                        item_dict = ebp.pop(eq_idx)
+                        mats_granted = (item_dict.get('level', 1) + item_dict.get('quality', 1)) * 5
+                        add_to_inventory(picked_char, "3001", mats_granted)
+                        save_chars(all_accounts_chars)
+                        send_update_item_push(send_rpc_push, 0, eq_idx, None) # 0 = EQUIP_BACKPACK
+                        send_rpc_push(611, sync_item_pack_rpc(picked_char))
+                        print(f"[EQUIP DECOMP] Disassembled item={item_dict.get('itemId')} granted mats={mats_granted}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 172: # decomp_item
+                eq_idx = get_val_int(body, 0)
+                if picked_char:
+                    ebp = picked_char.setdefault('equip_backpack', {})
+                    if eq_idx in ebp:
+                        item_dict = ebp.pop(eq_idx)
+                        mats_granted = (item_dict.get('level', 1) + item_dict.get('quality', 1)) * 5
+                        add_to_inventory(picked_char, "3001", mats_granted)
+                        save_chars(all_accounts_chars)
+                        send_update_item_push(send_rpc_push, 1, eq_idx, None)
+                        send_rpc_push(611, sync_item_pack_rpc(picked_char))
+                        print(f"[EQUIP DECOMP] Disassembled item={item_dict.get('itemId')} granted mats={mats_granted}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 185: # change_potion
+                p_idx = get_val_int(body, 0)
+                if picked_char:
+                    picked_char['potion_index'] = p_idx
+                    save_chars(all_accounts_chars)
+                    print(f"==================================================")
+                    print(f"[POTION SELECT] Selected potion index={p_idx}")
+                    print(f"==================================================")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 240: # change_item_state
+                index_id = get_val_int(body, 0)
+                state_type = get_val_int(body, 1)
+                print(f"==================================================")
+                print(f"[BAG UI ACTION] CHANGE ITEM STATE (MSG 240)")
+                print(f"  • Item Index        : {index_id}")
+                print(f"  • New State Type    : {state_type}")
+                print(f"==================================================")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 223: # change_show_type
+                if picked_char:
+                    picked_char['is_show_fashion'] = not picked_char.get('is_show_fashion', False)
+                    save_chars(all_accounts_chars)
+                    sync_main_player_visual(picked_char, send_rpc_push)
+                    print(f"[FASHION TOGGLE] is_show_fashion={picked_char['is_show_fashion']}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 204: # mail_operation
+                m_id = str(get_val_int(body, 0))
+                op_type = get_val_int(body, 1)
+                if picked_char:
+                    mails = picked_char.setdefault('mails', {})
+                    if m_id in mails:
+                        m_data = mails[m_id]
+                        if op_type == 2 and m_data.get('items'):
+                            rewards = [(str(k), 0, int(v.get('count', 1))) for k, v in m_data['items'].items()]
+                            grant_item_rewards(picked_char, rewards, conn, send_rpc_push)
+                            m_data['mailState'] = 1
+                            save_chars(all_accounts_chars)
+                            send_rpc_push(603, build_mail_update_obj(m_data))
+                            print(f"[MAIL CLAIM] Claimed attachments for mail {m_id}")
+                        elif op_type == 3:
+                            mails.pop(m_id, None)
+                            save_chars(all_accounts_chars)
+                            print(f"[MAIL DELETE] Deleted mail {m_id}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg in (123, 124, 125): # apply_friend(123), accept_friend(124), del_friend(125)
+                f_id = get_val_int(body, 0)
+                if picked_char:
+                    friends = picked_char.setdefault('friends', {})
+                    applys = picked_char.setdefault('friend_applys', {})
+                    if msg == 123:
+                        applys[f_id] = {'id': f_id, 'time': int(time.time())}
+                    elif msg == 124:
+                        friends[f_id] = {'id': f_id, 'level': 1}
+                        applys.pop(f_id, None)
+                    elif msg == 125:
+                        friends.pop(f_id, None)
+                    save_chars(all_accounts_chars)
+                    send_social_update_rpc(send_rpc_push, picked_char)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 167: # equip_enhance
+                index_id = get_val_int(body, 0)
+                if picked_char:
+                    ebp = picked_char.setdefault('equip_backpack', {})
+                    epack = picked_char.setdefault('equip_pack', {})
+                    target_item = ebp.get(index_id) or epack.get(index_id)
+                    if target_item:
+                        cost = (target_item.get('level', 1) + 1) * 2000
+                        if picked_char.get('cash', 0) >= cost:
+                            picked_char['cash'] -= cost
+                            target_item['level'] = target_item.get('level', 1) + 1
+                            save_chars(all_accounts_chars)
+                            ctype = 1 if index_id in ebp else 2
+                            send_update_item_push(send_rpc_push, ctype, index_id, target_item)
+                            sync_char_attrs_rpc(conn, picked_char)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 199: # badge_merge
+                if picked_char:
+                    send_rpc_push(604, sync_badgepack_item_rpc(picked_char))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 268: # unlock_function_complete
+                fid = field_text(body, 0)
+                fstate = get_val_int(body, 1, 1)
+                if picked_char:
+                    func_info = picked_char.setdefault('func_info', {})
+                    func_info[str(fid)] = fstate
+                    save_chars(all_accounts_chars)
+                    print(f"[FUNC UNLOCK] Completed function unlock fid={fid} state={fstate}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 234: # leave_game
+                print(f"[LEAVE GAME] Client requested leave_game")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 225: # request_daily_active
+                send_rpc_push(619, encode_sproto([(0, 0), (1, 0), (2, {})]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 319: # request_daily_mission
+                send_rpc_push(688, encode_sproto([(0, {})]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 295: # request_sign_30_day_info
+                send_rpc_push(668, encode_sproto([(0, 1), (1, 0)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 288: # request_sign_week_info
+                send_rpc_push(661, encode_sproto([(0, 1), (1, 0)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 210: # request_first_buy
+                send_rpc_push(582, encode_sproto([(0, 0)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 202: # request_daily_buy
+                send_rpc_push(575, encode_sproto([(0, {})]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 200: # request_tower_copy_info
+                send_rpc_push(573, encode_sproto([(0, 1), (1, 1)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 195: # request_slot_info
+                s_info = encode_sproto([(1, 0), (2, 10)])
+                send_rpc_push(568, encode_sproto([(0, s_info), (1, {}), (2, {})]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 242: # request_activity_info
+                send_rpc_push(633, encode_sproto([(0, {})]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 252: # request_rank_pvp_data
+                send_rpc_push(643, encode_sproto([(0, 0), (1, 0)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 257: # request_retrieve_info
+                send_rpc_push(648, encode_sproto([(0, {})]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 261: # request_wild_boss_info
+                send_rpc_push(652, encode_sproto([(0, {})]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 296: # request_30_day_info
+                send_rpc_push(669, encode_sproto([(0, {})]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 278: # request_invest_pack
+                send_rpc_push(662, encode_sproto([(0, 0)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 258: # request_level_pack
+                send_rpc_push(649, encode_sproto([(0, {})]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 253: # request_big_pack
+                send_rpc_push(644, encode_sproto([(0, {})]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 299: # request_special_big_pack
+                send_rpc_push(671, encode_sproto([(0, {})]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 221: # equip_fashion_item
+                index_id = get_val_int(body, 0)
+                if picked_char:
+                    fbp = picked_char.setdefault('fashion_backpack', {})
+                    fpack = picked_char.setdefault('fashion_equip_pack', {})
+                    if index_id in fbp:
+                        item = fbp.pop(index_id)
+                        slot = item.get('slot', 0)
+                        old_item = fpack.get(slot)
+                        fpack[slot] = item
+                        if old_item:
+                            fbp[old_item['indexId']] = old_item
+                            send_update_item_push(send_rpc_push, 6, old_item['indexId'], old_item)
+                        else:
+                            send_update_item_push(send_rpc_push, 6, index_id, None)
+                        send_update_item_push(send_rpc_push, 7, slot, item)
+                        save_chars(all_accounts_chars)
+                        sync_main_player_visual(picked_char, send_rpc_push)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 222: # unequip_fashion_item
+                index_id = get_val_int(body, 0)
+                if picked_char:
+                    fbp = picked_char.setdefault('fashion_backpack', {})
+                    fpack = picked_char.setdefault('fashion_equip_pack', {})
+                    slot_found = None
+                    for slot, item in list(fpack.items()):
+                        if item and int(item.get('indexId', -1)) == index_id:
+                            slot_found = slot
+                            break
+                    if slot_found is not None:
+                        item = fpack.pop(slot_found)
+                        fbp[item['indexId']] = item
+                        send_update_item_push(send_rpc_push, 7, slot_found, None)
+                        send_update_item_push(send_rpc_push, 6, item['indexId'], item)
+                        save_chars(all_accounts_chars)
+                        sync_main_player_visual(picked_char, send_rpc_push)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 197: # equip_badge
+                index_id = get_val_int(body, 0)
+                target_pos = get_val_int(body, 1)
+                if picked_char:
+                    bbp = picked_char.setdefault('badge_backpack', {})
+                    bpack = picked_char.setdefault('badge_equip_pack', {})
+                    if index_id in bbp:
+                        item = bbp.pop(index_id)
+                        old_item = bpack.get(target_pos)
+                        bpack[target_pos] = item
+                        if old_item:
+                            bbp[old_item['indexId']] = old_item
+                            send_update_item_push(send_rpc_push, 4, old_item['indexId'], old_item)
+                        else:
+                            send_update_item_push(send_rpc_push, 4, index_id, None)
+                        send_update_item_push(send_rpc_push, 5, target_pos, item)
+                        save_chars(all_accounts_chars)
+                        sync_char_attrs_rpc(conn, picked_char)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 198: # unequip_badge
+                index_id = get_val_int(body, 0)
+                if picked_char:
+                    bbp = picked_char.setdefault('badge_backpack', {})
+                    bpack = picked_char.setdefault('badge_equip_pack', {})
+                    slot_found = None
+                    for slot, item in list(bpack.items()):
+                        if item and int(item.get('indexId', -1)) == index_id:
+                            slot_found = slot
+                            break
+                    if slot_found is not None:
+                        item = bpack.pop(slot_found)
+                        bbp[item['indexId']] = item
+                        send_update_item_push(send_rpc_push, 5, slot_found, None)
+                        send_update_item_push(send_rpc_push, 4, item['indexId'], item)
+                        save_chars(all_accounts_chars)
+                        sync_char_attrs_rpc(conn, picked_char)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 121: # sell_item
+                index_id = get_val_int(body, 0)
+                item_count = get_val_int(body, 1, 1)
+                container_type = get_val_int(body, 2, 1)
+                if picked_char:
+                    container_key = {
+                        1: 'equip_backpack',
+                        3: 'item_backpack',
+                        4: 'badge_backpack',
+                        6: 'fashion_backpack'
+                    }.get(container_type, 'equip_backpack')
+
+                    c_map = picked_char.setdefault(container_key, {})
+                    if index_id in c_map:
+                        item = c_map[index_id]
+                        sold_count = min(item_count, item.get('stack', 1))
+                        cash_earned = sold_count * 100
+                        item['stack'] = item.get('stack', 1) - sold_count
+                        if item['stack'] <= 0:
+                            del c_map[index_id]
+                            send_update_item_push(send_rpc_push, container_type, index_id, None)
+                        else:
+                            send_update_item_push(send_rpc_push, container_type, index_id, item)
+                        picked_char['cash'] = picked_char.get('cash', 0) + cash_earned
+                        save_chars(all_accounts_chars)
+                        sync_char_attrs_rpc(conn, picked_char)
+                        print(f"[SELL ITEM] Sold item index={index_id} count={sold_count} earned={cash_earned}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 223: # change_show_type
+                show_type = get_val_int(body, 0, 1)
+                if picked_char:
+                    picked_char['is_show_fashion'] = (show_type == 1)
+                    save_chars(all_accounts_chars)
+                    sync_main_player_visual(picked_char, send_rpc_push)
+                    print(f"[FASHION SHOW TYPE] Updated is_show_fashion={picked_char['is_show_fashion']}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3012,6 +4107,86 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif msg == 313: # request_dance_state_info
+                send_rpc_push(686, sync_dance_state_rpc(picked_char))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 227: # request_dance_info
+                # Return map of unlocked dance moves (matches DanceData.csv IDs 10001 & 10002)
+                now = int(time.time())
+                d1 = encode_sproto([(0, "10001"), (1, True), (2, 0), (3, now + 86400)])
+                is_m_unlocked = picked_char.get('unlocked_dances', {}).get('10002', False) if picked_char else False
+                d2 = encode_sproto([(0, "10002"), (1, is_m_unlocked), (2, 0), (3, now + 86400 if is_m_unlocked else 0)])
+                dance_map = {
+                    "10001": d1,
+                    "10002": d2
+                }
+                # ret_request_dance_info (TAG 623): curUse(0), dance_info(1), type(2)
+                send_rpc_push(623, encode_sproto([(0, "10001"), (1, dance_map), (2, 0)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 229: # use_dance (Start dancing)
+                did = field_text(body, 0, "10001")
+                if not did or did == "None":
+                    did = "10001"
+
+                now = int(time.time())
+                if picked_char and did == "10002":
+                    unlocked_map = picked_char.setdefault('unlocked_dances', {})
+                    if not unlocked_map.get('10002'):
+                        cost = 500
+                        p_gold = picked_char.get('gold', 0)
+                        p_cash = picked_char.get('cash', 0)
+                        if p_gold >= cost:
+                            picked_char['gold'] -= cost
+                            unlocked_map['10002'] = True
+                            save_chars(all_accounts_chars)
+                            print(f"[DANCE BUY] Player {picked_char['id']} purchased Moonwalk with 500 Gold!")
+                        elif p_cash >= cost:
+                            picked_char['cash'] -= cost
+                            unlocked_map['10002'] = True
+                            save_chars(all_accounts_chars)
+                            print(f"[DANCE BUY] Player {picked_char['id']} purchased Moonwalk with 500 Cash!")
+
+                d1 = encode_sproto([(0, "10001"), (1, True), (2, 0), (3, now + 86400)])
+                is_m_unlocked = picked_char.get('unlocked_dances', {}).get('10002', False) if picked_char else False
+                d2 = encode_sproto([(0, "10002"), (1, is_m_unlocked), (2, 0), (3, now + 86400 if is_m_unlocked else 0)])
+                dance_map = {
+                    "10001": d1,
+                    "10002": d2
+                }
+
+                # start_participate_dance (TAG 624): curUse(0), dance_info(1)
+                send_rpc_push(624, encode_sproto([(0, did), (1, dance_map)]))
+                if picked_char:
+                    advance_missions(picked_char, send_rpc_push, 'dance')
+                    advance_missions(picked_char, send_rpc_push, 'interact', target_id='1009')
+                    advance_missions(picked_char, send_rpc_push, 'interact', target_id='132')
+
+                    # Sync AOI so others see us dancing
+                    social_dance = encode_sproto([(0, picked_char['id']), (1, str(did))])
+                    send_rpc_push(657, encode_sproto([(0, social_dance)]))
+
+                    # Start continuous 1.0-second periodic dance EXP reward ticks
+                    start_dance_session(conn, send_rpc_push, picked_char, did)
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 228: # pause_participate_dance (Stop dancing)
+                if picked_char:
+                    picked_char['is_dancing'] = False
+                    social_dance = encode_sproto([(0, picked_char['id']), (1, "")])
+                    send_rpc_push(657, encode_sproto([(0, social_dance)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
             elif msg in [106, 246, 273, 207, 201, 322]:
                 # Scene/Dungeon Entry
                 mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
@@ -3038,6 +4213,334 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif msg == 123: # mail_operation
+                mail_id = get_val_int(body, 0)
+                operation = get_val_int(body, 1) # 0=Read, 1=Delete, 2=Claim Item, 3=Claim All, 4=Delete All Read
+                if picked_char:
+                    mails = picked_char.setdefault('mails', {})
+                    s_mid = str(mail_id)
+
+                    if operation == 0: # Read Mail
+                        if s_mid in mails:
+                            mails[s_mid]['readTime'] = int(time.time())
+                            if mails[s_mid].get('mailState', 0) == 0:
+                                mails[s_mid]['mailState'] = 1
+                            save_chars(all_accounts_chars)
+                            send_rpc_push(531, build_mail_update_obj(mails[s_mid]))
+                            print(f"[MAIL] Read mail id={mail_id}")
+
+                    elif operation == 1: # Delete Single Mail
+                        if s_mid in mails:
+                            del mails[s_mid]
+                            save_chars(all_accounts_chars)
+                            send_rpc_push(532, encode_sproto([(0, mail_id)])) # mail_delete Tag 532
+                            print(f"[MAIL] Deleted mail id={mail_id}")
+
+                    elif operation == 2: # Claim Mail Attachment
+                        if s_mid in mails and mails[s_mid].get('mailState', 0) != 3:
+                            m_obj = mails[s_mid]
+                            rewards_to_grant = []
+                            for item_id, item_info in m_obj.get('items', {}).items():
+                                amt = item_info.get('count', 1) if isinstance(item_info, dict) else int(item_info)
+                                rewards_to_grant.append((str(item_id), 0, amt))
+
+                            if rewards_to_grant:
+                                grant_item_rewards(picked_char, rewards_to_grant, conn, send_rpc_push)
+                                send_rpc_push(638, encode_sproto([(0, [encode_sproto([(0, r[0]), (1, r[2]), (3, 0)]) for r in rewards_to_grant])]))
+
+                            m_obj['mailState'] = 3 # 3 = GETITEM (Claimed)
+                            m_obj['readTime'] = int(time.time())
+                            save_chars(all_accounts_chars)
+                            send_rpc_push(531, build_mail_update_obj(m_obj))
+                            print(f"[MAIL] Claimed rewards for mail id={mail_id}")
+
+                    elif operation == 3: # Claim All Mail Attachments
+                        claimed_any = False
+                        all_rewards = []
+                        for m_obj in list(mails.values()):
+                            if m_obj.get('mailState', 0) != 3 and m_obj.get('items'):
+                                for item_id, item_info in m_obj.get('items', {}).items():
+                                    amt = item_info.get('count', 1) if isinstance(item_info, dict) else int(item_info)
+                                    all_rewards.append((str(item_id), 0, amt))
+                                m_obj['mailState'] = 3 # 3 = GETITEM (Claimed)
+                                m_obj['readTime'] = int(time.time())
+                                claimed_any = True
+                                send_rpc_push(531, build_mail_update_obj(m_obj))
+
+                        if claimed_any:
+                            grant_item_rewards(picked_char, all_rewards, conn, send_rpc_push)
+                            send_rpc_push(638, encode_sproto([(0, [encode_sproto([(0, r[0]), (1, r[2]), (3, 0)]) for r in all_rewards])]))
+                            save_chars(all_accounts_chars)
+                            print(f"[MAIL] Claimed ALL mail rewards for player {picked_char['id']}")
+
+                    elif operation == 4: # Delete All Read Mails
+                        to_del = [m_id for m_id, m_obj in mails.items() if m_obj.get('mailState', 0) in (1, 3)]
+                        for m_id in to_del:
+                            del mails[m_id]
+                            send_rpc_push(532, encode_sproto([(0, int(m_id))]))
+                        save_chars(all_accounts_chars)
+                        print(f"[MAIL] Deleted all read mails count={len(to_del)}")
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 120: # chat
+                tell_id = get_val_int(body, 0)
+                tell_name = field_text(body, 1)
+                chat_info = field_text(body, 2)
+                chattype = get_val_int(body, 3, 0)
+                linktype = get_val_int(body, 4, 0)
+                intdata = body.get(5, [])
+                stringdata = body.get(6, [])
+
+                if picked_char:
+                    stats = get_character_stats(picked_char)
+                    chat_item_fields = [
+                        (0, picked_char['id']),
+                        (1, picked_char.get('name', 'Hero')),
+                        (2, tell_id),
+                        (3, tell_name),
+                        (4, chat_info),
+                        (5, chattype),
+                        (6, linktype),
+                        (9, picked_char.get('prof', 0)),
+                        (10, picked_char.get('level', 1)),
+                        (11, stats['power'])
+                    ]
+                    if intdata: chat_item_fields.append((7, intdata))
+                    if stringdata: chat_item_fields.append((8, stringdata))
+
+                    chat_item_obj = encode_sproto(chat_item_fields)
+                    send_rpc_push(528, encode_sproto([(0, [chat_item_obj])]))
+                    print(f"[CHAT] char={picked_char['id']} type={chattype} info={chat_info}")
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 124: # add_friend
+                target_id = get_val_int(body, 0)
+                ftype = get_val_int(body, 1) # 0 = Friend, 1 = Enemy
+                if picked_char:
+                    target_char = None
+                    for area_dict in all_accounts_chars.values():
+                        if isinstance(area_dict, dict):
+                            for char_list in area_dict.values():
+                                if isinstance(char_list, list):
+                                    for c in char_list:
+                                        if isinstance(c, dict) and c.get('id') == target_id:
+                                            target_char = c
+                                            break
+
+                    if target_char and target_char.get('id') != picked_char['id']:
+                        summary_sender = {
+                            'id': picked_char['id'],
+                            'name': picked_char.get('name', 'Hero'),
+                            'prof': picked_char.get('prof', 0),
+                            'level': picked_char.get('level', 1)
+                        }
+                        summary_target = {
+                            'id': target_char['id'],
+                            'name': target_char.get('name', 'Hero'),
+                            'prof': target_char.get('prof', 0),
+                            'level': target_char.get('level', 1)
+                        }
+                        if ftype == 1: # Enemy
+                            picked_char.setdefault('enemies', {})[str(target_id)] = summary_target
+                            save_chars(all_accounts_chars)
+                            send_enemy_update_rpc(send_rpc_push, picked_char)
+                            print(f"[SOCIAL] Added enemy {target_id} for player {picked_char['id']}")
+                        else: # Friend Request
+                            target_char.setdefault('friend_applys', {})[str(picked_char['id'])] = summary_sender
+                            save_chars(all_accounts_chars)
+                            print(f"[SOCIAL] Sent friend request from {picked_char['id']} to target {target_id}")
+                            if target_id in ONLINE_CHAR_MAP:
+                                target_push = ONLINE_CHAR_MAP[target_id]
+                                target_push(536, encode_sproto([(0, build_friend_info_obj(summary_sender, ftype=2))]))
+                                print(f"[SOCIAL] Pushed Tag 536 real-time notification to target {target_id}")
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 125: # del_friend
+                target_id = get_val_int(body, 0)
+                ftype = get_val_int(body, 1) # 0 = Friend, 1 = Enemy
+                if picked_char:
+                    s_tid = str(target_id)
+                    if ftype == 1:
+                        picked_char.get('enemies', {}).pop(s_tid, None)
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(535, encode_sproto([(0, target_id)]))
+                        send_enemy_update_rpc(send_rpc_push, picked_char)
+                    else:
+                        picked_char.get('friends', {}).pop(s_tid, None)
+                        target_char = None
+                        for area_dict in all_accounts_chars.values():
+                            if isinstance(area_dict, dict):
+                                for char_list in area_dict.values():
+                                    if isinstance(char_list, list):
+                                        for c in char_list:
+                                            if isinstance(c, dict) and c.get('id') == target_id:
+                                                target_char = c
+                                                break
+                        if target_char:
+                            target_char.get('friends', {}).pop(str(picked_char['id']), None)
+                        if target_id in ONLINE_CHAR_MAP:
+                            target_push = ONLINE_CHAR_MAP[target_id]
+                            target_push(537, encode_sproto([(0, picked_char['id'])])) # Tag 537 be_deleted_friend
+                            if target_char:
+                                send_social_update_rpc(target_push, target_char)
+
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(535, encode_sproto([(0, target_id)]))
+                        send_social_update_rpc(send_rpc_push, picked_char)
+                    print(f"[SOCIAL] Deleted enemy/friend {target_id}")
+
+            elif msg == 126: # request_update_friend_useinfo (The Foe / Friends Tab Update)
+                req_type = get_val_int(body, 1, 0)
+                if picked_char:
+                    if req_type == 1: # The Foe / Enemies
+                        enemys_map = {}
+                        for fid, f_data in picked_char.get('enemies', {}).items():
+                            enemys_map[int(fid)] = build_friend_info_obj(f_data, ftype=6, main_char_id=picked_char['id'])
+                        send_rpc_push(534, encode_sproto([(0, enemys_map), (1, 1)])) # Tag 534 ret_request_update_friend_useinfo
+                        print(f"[SOCIAL] Responded Tag 534 for Foe list count={len(enemys_map)}")
+                    else: # Friends and Friend Requests
+                        friends_map = {}
+                        for fid, f_data in picked_char.get('friends', {}).items():
+                            friends_map[int(fid)] = build_friend_info_obj(f_data, ftype=0)
+                        for fid, f_data in picked_char.get('friend_applys', {}).items():
+                            friends_map[int(fid)] = build_friend_info_obj(f_data, ftype=2)
+                        send_rpc_push(534, encode_sproto([(0, friends_map), (1, 0)])) # Tag 534 ret_request_update_friend_useinfo
+                        print(f"[SOCIAL] Responded Tag 534 for Friends/Requests list count={len(friends_map)} (friends={len(picked_char.get('friends', {}))}, applys={len(picked_char.get('friend_applys', {}))})")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 158: # approve_resverve_friend (Accept/Refuse Friend Request)
+                target_id = get_val_int(body, 0)
+                is_agree = get_val_int(body, 1) # 1 = Agree, 0 = Refuse
+                if picked_char:
+                    s_tid = str(target_id)
+                    apply_dict = picked_char.get('friend_applys', {})
+                    if s_tid in apply_dict:
+                        applicant_data = apply_dict.pop(s_tid)
+                        target_char = None
+                        for area_dict in all_accounts_chars.values():
+                            if isinstance(area_dict, dict):
+                                for char_list in area_dict.values():
+                                    if isinstance(char_list, list):
+                                        for c in char_list:
+                                            if isinstance(c, dict) and c.get('id') == target_id:
+                                                target_char = c
+                                                break
+                        if is_agree == 1:
+                            summary_picked = {
+                                'id': picked_char['id'],
+                                'name': picked_char.get('name', 'Hero'),
+                                'prof': picked_char.get('prof', 0),
+                                'level': picked_char.get('level', 1)
+                            }
+                            summary_target = {
+                                'id': target_id,
+                                'name': applicant_data.get('name', 'Hero'),
+                                'prof': applicant_data.get('prof', 0),
+                                'level': applicant_data.get('level', 1)
+                            }
+                            picked_char.setdefault('friends', {})[s_tid] = summary_target
+                            if target_char:
+                                target_char.setdefault('friends', {})[str(picked_char['id'])] = summary_picked
+
+                        save_chars(all_accounts_chars)
+                        send_social_update_rpc(send_rpc_push, picked_char)
+                        if target_id in ONLINE_CHAR_MAP and target_char:
+                            send_social_update_rpc(ONLINE_CHAR_MAP[target_id], target_char)
+
+                        print(f"[SOCIAL] Friend request from {target_id} {'accepted' if is_agree == 1 else 'refused'}")
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 159: # req_random_online_character_list
+                if picked_char:
+                    rec_list = []
+                    for area_dict in all_accounts_chars.values():
+                        if isinstance(area_dict, dict):
+                            for char_list in area_dict.values():
+                                if isinstance(char_list, list):
+                                    for c in char_list:
+                                        if isinstance(c, dict) and c.get('id') != picked_char['id']:
+                                            rec_list.append(build_friend_info_obj(c, ftype=0))
+                                            if len(rec_list) >= 5: break
+                    send_rpc_push(570, encode_sproto([(0, rec_list)])) # Tag 570 ret_random_online_character_list
+
+            elif msg == 160: # search_online_character_by_name
+                search_name = field_text(body, 0)
+                if picked_char and search_name:
+                    res_list = []
+                    for area_dict in all_accounts_chars.values():
+                        if isinstance(area_dict, dict):
+                            for char_list in area_dict.values():
+                                if isinstance(char_list, list):
+                                    for c in char_list:
+                                        if isinstance(c, dict) and search_name.lower() in c.get('name', '').lower():
+                                            res_list.append(build_friend_info_obj(c, ftype=0))
+                    send_rpc_push(571, encode_sproto([(0, res_list)])) # Tag 571 ret_search_online_character_by_name
+
+            elif msg == 324: # update_player_map_info (Revenge Enemy Location Tracker)
+                target_id = get_val_int(body, 0)
+                target_char = None
+                for area_dict in all_accounts_chars.values():
+                    if isinstance(area_dict, dict):
+                        for char_list in area_dict.values():
+                            if isinstance(char_list, list):
+                                for c in char_list:
+                                    if isinstance(c, dict) and c.get('id') == target_id:
+                                        target_char = c
+                                        break
+                if target_char:
+                    m_id = str(target_char.get('map_id', '11'))
+                    m_pos = target_char.get('pos', [29860, 100, -17005, 0])
+                    pos_obj = encode_sproto([
+                        (0, int(m_pos[0])), (1, int(m_pos[1])), (2, int(m_pos[2]))
+                    ])
+                    resp = encode_sproto([
+                        (0, 1),        # state = 1 (online)
+                        (1, m_id),     # mapid
+                        (2, pos_obj)   # pos
+                    ])
+                    print(f"[SOCIAL] Responded MSG 324 for Enemy Revenge target={target_id} map={m_id}")
+                else:
+                    resp = encode_sproto([(0, 0)])
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 321: # gather_other_player (Revenge Enemy Teleport / Warp)
+                target_id = get_val_int(body, 0)
+                if picked_char:
+                    target_char = None
+                    for area_dict in all_accounts_chars.values():
+                        if isinstance(area_dict, dict):
+                            for char_list in area_dict.values():
+                                if isinstance(char_list, list):
+                                    for c in char_list:
+                                        if isinstance(c, dict) and c.get('id') == target_id:
+                                            target_char = c
+                                            break
+                    if target_char:
+                        e_map = str(target_char.get('map_id', '11'))
+                        e_pos = list(target_char.get('pos', [29860, 100, -17005, 0]))
+                        start_map_transition(conn, picked_char, e_map, send_rpc_push, override_pos=e_pos)
+                        print(f"[REVENGE WARP] Player {picked_char['id']} teleported to enemy {target_id} on map {e_map}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
             elif msg == 270: # download_finish
                 if picked_char and not picked_char.get('download_complete'):
                     picked_char['download_complete'] = True
@@ -3063,20 +4566,25 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 306: # tutorial_finish
-                # The APK sends this before scheduling its optional-download tip.
-                # It is an RPC request, so it must receive an empty success reply.
                 if picked_char:
                     picked_char['tutorial'] = 1
                     save_chars(all_accounts_chars)
-                print("[TUTORIAL] tutorial_finish acknowledged")
+                    send_rpc_push(592, sync_common_data_rpc(picked_char))
+                print("[TUTORIAL] tutorial_finish acknowledged and persisted")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg in [118, 218, 145, 225, 258, 261, 278, 296, 299, 313, 319]:
+            elif msg == 218: # heart_beat
+                client_time = get_val_int(body, 0, 0)
+                if session is not None:
+                    resp_data = encode_sproto([(0, client_time), (1, int(time.time()))])
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp_data)
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg in [118, 145, 225, 258, 261, 278, 296, 299, 319]:
                 resp_data = encode_sproto([])
                 if msg == 118: resp_data = encode_sproto([(0, f"User_{random.randint(100,999)}")])
-                elif msg == 218: resp_data = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp_data)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if msg == 145 and picked_char:
@@ -3180,6 +4688,8 @@ def client_handler(conn, addr):
         traceback.print_exc()
     finally:
         try:
+            if picked_char and ONLINE_CHAR_MAP.get(picked_char['id']) == send_rpc_push:
+                del ONLINE_CHAR_MAP[picked_char['id']]
             conn_id = id(conn)
             if conn_id in NPC_SPAWNED_MAPS:
                 del NPC_SPAWNED_MAPS[conn_id]
