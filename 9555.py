@@ -1008,13 +1008,21 @@ def get_full_char(c):
 
     hp_cur = int(c.get('hp', stats['hp_max']))
 
-    attr_oth = encode_sproto([
+    attr_pairs = [
         (0, hp_cur),
         (1, int(stats['exp'])),
         (2, int(stats['lv'])),
         (3, int(stats['power'])),
         (15, 1)
-    ])
+    ]
+    guild_id = int(c.get('guild_id', 0) or 0)
+    if guild_id:
+        attr_pairs.extend([
+            (6, guild_id),
+            (7, c.get('guild_name', '')),
+            (8, int(c.get('guild_job', 0) or 0))
+        ])
+    attr_oth = encode_sproto(attr_pairs)
 
     prop = encode_sproto([
         (13, int(c.get('cash', 1000))),
@@ -2566,6 +2574,10 @@ def normalize_backpack_state(c):
 def init_character_fields(c):
     fields = {
         'level': 1, 'exp': 0, 'cash': 1000,
+        'gold': 100, 'diamonds': 10, 'guild_contrib': 0,
+        'honor': 0, 'tokens': 0,
+        'line_index': 1, 'line_count': 3, 'line_states': {},
+        'pk': 0, 'guild_id': 0, 'guild_name': '', 'guild_job': 0,
         'skill_levels': {},
         'active_missions': {},
         'completed_side_missions': [],
@@ -2578,7 +2590,9 @@ def init_character_fields(c):
         'pos': [7007, 100, 5033, 0],
         'map_id': "11",
         'tutorial': 0,
-        'download_complete': False,
+        # This revival keeps the required AssetBundles local, so a new character
+        # must not be redirected into the remote download gate.
+        'download_complete': True,
         'mounts': {},
         'equipped_mount_id': '',
         'mount_riding': False,
@@ -2954,7 +2968,7 @@ def client_handler(conn, addr):
                 sid = get_val_int(body, 5, 1); cur_areaId = str(get_area_id(sid))
                 # login.response (max_field_count=4): type(0), versionCode(1), dataVersionCode(2), serverLevel(3)
                 resp = encode_sproto([
-                    (0, 2), (1, "1.012.017"), (2, "205"), (3, 1)
+                    (0, 2), (1, "1.012.017"), (2, "200"), (3, 1)
                 ])
                 print(f"[LOGIN] Login request for acc_id={acc_id} area={cur_areaId}")
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
