@@ -32,6 +32,7 @@ SCHEMA_CATALOG = {}
 CLIENT_REQUEST_HANDLERS = {}
 RESPONSE_FIELD_USAGE = {}
 RESPONSE_PRODUCERS = {}
+RESPONSE_EVIDENCE_GRAPH = {}
 REAL_RESPONSE_PRODUCERS = {}
 DATABASE_RESPONSE_PROVIDER = None
 SAFE_RESPONSE_DEFAULTS = {}
@@ -40,6 +41,9 @@ GAME_STATE_LOCK = threading.Lock()
 AUTO_GAME_STATE = {}
 UNKNOWN_REQUEST_LOG_LOCK = threading.Lock()
 GAME_METADATA = {}
+CHARACTER_STORE = {}
+CLIENT_STATE_SOURCES = {}
+DATABASE_SOURCES = {}
 
 
 def sproto_pack(data):
@@ -407,7 +411,10 @@ def send_server_rpc(connection, state, tag, body_fields):
     return session
 
 
-def generate_schema_default(descriptor):
+def generate_schema_default(descriptor, depth=0):
+    if depth > 24:
+        return None
+
     field_type = descriptor.get("type")
     if field_type == "integer":
         return 0
@@ -420,7 +427,7 @@ def generate_schema_default(descriptor):
     if field_type == "object":
         result = {}
         for tag, child in descriptor.get("object_schema", {}).items():
-            value = generate_schema_default(child)
+            value = generate_schema_default(child, depth + 1)
             if value is not None:
                 result[tag] = value
         return result
@@ -436,6 +443,164 @@ def generate_schema_default(descriptor):
     return None
 
 
+def find_game_state_value(
+    game_state,
+    field_name,
+    descriptor,
+    source_kinds=None,
+):
+    if not isinstance(game_state, dict) or not field_name:
+        return None
+    normalized_name = re.sub(r"[^a-z0-9]", "", field_name.casefold())
+    categories = {
+        "CLIENT_STATE": (
+            "account_player", "character", "map", "inventory", "skills",
+            "missions", "position", "stats", "npc_aoi", "server_time",
+        ),
+        "PLAYER_STATE": (
+            "account_player", "character", "position", "stats",
+        ),
+        "GAME_STATE": (
+            "map", "inventory", "skills", "missions", "npc_aoi",
+            "server_time",
+        ),
+        "DATABASE": ("database_responses",),
+        "COLLECTION": (
+            "character", "inventory", "skills", "missions", "npc_aoi",
+        ),
+    }
+    allowed_categories = {
+        category
+        for source_kind in source_kinds or categories
+        for category in categories.get(source_kind, ())
+    }
+    candidates = [game_state]
+    for category in allowed_categories:
+        value = game_state.get(category)
+        if isinstance(value, dict):
+            candidates.append(value)
+    for candidate in candidates:
+        for key, value in candidate.items():
+            if re.sub(r"[^a-z0-9]", "", str(key).casefold()) == normalized_name:
+                if isinstance(value, dict) and descriptor.get("type") == "map":
+                    for collection_key in ("catalog", "records", "values", "data"):
+                        if collection_key in value:
+                            value = value[collection_key]
+                            break
+                if (
+                    descriptor.get("type") == "map"
+                    and isinstance(value, dict)
+                    and all(isinstance(key, int) for key in value)
+                ):
+                    try:
+                        encode_sproto_object({0: value}, {0: descriptor})
+                    except (TypeError, ValueError, OverflowError, KeyError):
+                        pass
+                    else:
+                        return copy.deepcopy(value)
+                return convert_named_data_to_schema(value, descriptor)
+    return None
+
+
+def convert_named_data_to_schema(value, descriptor, depth=0):
+    if depth > 24:
+        raise ValueError("state data exceeds maximum schema depth")
+    field_type = descriptor.get("type")
+    if field_type in ("integer", "boolean", "string", "bytes"):
+        if field_type == "integer" and isinstance(value, int) and not isinstance(value, bool):
+            return value
+        if field_type == "boolean" and isinstance(value, bool):
+            return value
+        if field_type == "string" and isinstance(value, str):
+            return value
+        if field_type == "bytes" and isinstance(value, (bytes, bytearray)):
+            return bytes(value)
+        return None
+    if field_type == "object":
+        return convert_named_object_to_schema(
+            value, descriptor.get("object_schema", {}), depth + 1
+        )
+    if field_type == "map":
+        object_schema = descriptor.get("object_schema", {})
+        if not isinstance(value, (dict, list)):
+            return None
+        if isinstance(value, dict):
+            items = value.items()
+        else:
+            key_tag = descriptor.get("key_tag")
+            items = []
+            for item in value:
+                if not isinstance(item, dict) or key_tag is None:
+                    return None
+                key_name = object_schema.get(key_tag, {}).get("name")
+                if key_name not in item:
+                    return None
+                items.append((item[key_name], item))
+        result = {}
+        for key, item in items:
+            try:
+                map_key = int(key)
+            except (TypeError, ValueError):
+                return None
+            converted = convert_named_object_to_schema(item, object_schema, depth + 1)
+            if not converted:
+                return None
+            key_tag = descriptor.get("key_tag")
+            if key_tag is not None and converted.get(key_tag, map_key) != map_key:
+                return None
+            result[map_key] = converted
+        return result
+    if field_type in ("integer_list", "boolean_list", "string_list"):
+        if not isinstance(value, list):
+            return None
+        item_type = {
+            "integer_list": int,
+            "boolean_list": bool,
+            "string_list": str,
+        }[field_type]
+        if any(
+            not isinstance(item, item_type)
+            or (field_type == "integer_list" and isinstance(item, bool))
+            for item in value
+        ):
+            return None
+        return copy.deepcopy(value)
+    if field_type == "object_list":
+        if not isinstance(value, list):
+            return None
+        converted = [
+            convert_named_object_to_schema(
+                item, descriptor.get("object_schema", {}), depth + 1
+            )
+            for item in value
+        ]
+        return None if any(item is None for item in converted) else converted
+    return None
+
+
+def convert_named_object_to_schema(value, schema, depth=0):
+    if depth > 24 or not isinstance(value, dict):
+        return None
+    by_name = {
+        re.sub(r"[^a-z0-9]", "", field["name"].casefold()): (tag, field)
+        for tag, field in schema.items()
+    }
+    result = {}
+    for name, child_value in value.items():
+        entry = by_name.get(re.sub(r"[^a-z0-9]", "", str(name).casefold()))
+        if entry is None:
+            continue
+        field_tag, child_descriptor = entry
+        converted = convert_named_data_to_schema(
+            child_value,
+            child_descriptor,
+            depth + 1,
+        )
+        if converted is not None:
+            result[field_tag] = converted
+    return result
+
+
 def resolve_universal_schema_defaults(
     tag,
     response_schema,
@@ -443,11 +608,17 @@ def resolve_universal_schema_defaults(
     request_fields,
     game_state,
 ):
-    protocol_name = RESPONSE_CATALOG.get(tag, {}).get("name")
-    if protocol_name in {"character_list", "character_create", "character_pick"}:
-        return {}
     generated = {}
+    unsafe_collection_types = {
+        "map",
+        "object_list",
+        "integer_list",
+        "boolean_list",
+        "string_list",
+    }
     for field_tag, descriptor in response_schema.items():
+        if descriptor.get("type") in unsafe_collection_types:
+            continue
         value = generate_schema_default(descriptor)
         if value is not None:
             generated[field_tag] = value
@@ -523,9 +694,38 @@ def resolve_game_state_response(tag, response_schema, request_schema, request_fi
     if game_state is None:
         return {}
     authoritative_responses = game_state.get("authoritative_responses", {})
+    result = copy.deepcopy(authoritative_responses.get(tag, {}))
+    evidence = RESPONSE_EVIDENCE_GRAPH.get(tag, {}).get("fields", {})
+    for field_tag, descriptor in response_schema.items():
+        if field_tag in result:
+            continue
+        field_evidence = evidence.get(field_tag, {})
+        source_kinds = {
+            source.get("source_kind")
+            for source in field_evidence.get("sources", ())
+        }
+        if not source_kinds.intersection(
+            {
+                "CLIENT_STATE",
+                "PLAYER_STATE",
+                "GAME_STATE",
+                "DATABASE",
+                "COLLECTION",
+            }
+        ):
+            continue
+        value = find_game_state_value(
+            game_state,
+            descriptor.get("name", ""),
+            descriptor,
+            source_kinds=source_kinds,
+        )
+        if value is not None:
+            result[field_tag] = value
+
     protocol_name = RESPONSE_CATALOG.get(tag, {}).get("name")
     if protocol_name == "character_list":
-        return authoritative_responses.get(tag, {})
+        return result
     if protocol_name == "character_pick":
         character_id_tag = next(
             (
@@ -540,7 +740,7 @@ def resolve_game_state_response(tag, response_schema, request_schema, request_fi
         character_id = request_fields.get(character_id_tag)
         character_ids = game_state.get("character", {}).get("ids", set())
         if character_id not in character_ids:
-            return {}
+            return result
         errno_tag = next(
             (
                 field_tag
@@ -550,11 +750,11 @@ def resolve_game_state_response(tag, response_schema, request_schema, request_fi
             None,
         )
         if errno_tag is None:
-            return {}
+            return result
         game_state["character"]["selected_id"] = character_id
         game_state["flow_stage"] = "character_selected"
-        return {errno_tag: 0}
-    return authoritative_responses.get(tag, {})
+        result[errno_tag] = 0
+    return result
 
 
 def find_protocol_tag(catalog, protocol_name):
@@ -581,8 +781,78 @@ def resolve_database_response(tag, response_schema, request_schema, request_fiel
     if game_state is None:
         return {}
     result = game_state.get("database_responses", {}).get(tag, {})
+    protocol_name = RESPONSE_CATALOG.get(tag, {}).get("name")
+    if not result and protocol_name == "character_list":
+        result = load_character_store_response(game_state, response_schema)
+        account_id = game_state.get("identity")
+        if isinstance(account_id, str):
+            account = CHARACTER_STORE.get(account_id)
+            if isinstance(account, dict):
+                characters = account.get("characters")
+                if characters is not None:
+                    try:
+                        count = len(characters)
+                    except TypeError:
+                        count = 0
+                    print(
+                        f"[DB] character_list account={account_id} "
+                        f"characters={count}"
+                    )
+                else:
+                    print(
+                        f"[DB] character_list account={account_id} "
+                        "has no 'characters' field"
+                    )
+            else:
+                print(
+                    f"[DB] character_list account={account_id} "
+                    "not found in characters.json"
+                )
+        else:
+            print("[DB] character_list requested before login identity")
     remember_character_catalog(tag, result, response_schema, game_state)
     return result
+
+
+def load_character_store_response(game_state, response_schema):
+    account_id = game_state.get("identity")
+    if not isinstance(account_id, str):
+        return {}
+    account = CHARACTER_STORE.get(account_id)
+    if not isinstance(account, dict):
+        return {}
+    characters = account.get("characters")
+    if characters is None:
+        return {}
+    for field_tag, descriptor in response_schema.items():
+        if descriptor.get("name") != "character" or descriptor.get("type") != "map":
+            continue
+        converted = convert_named_data_to_schema(characters, descriptor)
+        if converted is not None:
+            return {field_tag: converted}
+    return {}
+
+
+def load_character_store():
+    path = os.environ.get(
+        "CHARACTERS_FILE",
+        os.path.join(SCRIPT_DIR, "characters.json"),
+    )
+    if not os.path.isfile(path):
+        return {}
+    with open(path, "r", encoding="utf-8") as character_file:
+        data = json.load(character_file)
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} must contain a JSON object keyed by account ID")
+    accounts = data.get("accounts", data)
+    if not isinstance(accounts, dict):
+        raise ValueError(f"{path} 'accounts' must be a JSON object")
+    normalized = {}
+    for account_id, account in accounts.items():
+        if not isinstance(account, dict):
+            raise ValueError(f"{path} account {account_id!r} must be a JSON object")
+        normalized[str(account_id)] = account
+    return normalized
 
 
 def remember_character_catalog(tag, response_fields, response_schema, game_state):
@@ -1890,10 +2160,125 @@ def scan_response_field_usage(assets, responses):
     return usages
 
 
+def scan_client_state_sources(assets):
+    return scan_source_evidence(
+        assets,
+        re.compile(
+            r"\b(?:Player|Character|Game|Scene|Map|Inventory|"
+            r"Skill|Mission|Role|Actor)[A-Za-z0-9_]*\s*"
+            r"(?:\.Instance|\.instance|\.Current|\.current|\.Instance\.)"
+            r"|(?:this\.)?_[A-Za-z0-9]*(?:player|character|state|data|manager)",
+            re.IGNORECASE,
+        ),
+        "CLIENT_STATE",
+    )
+
+
+def scan_database_sources(assets):
+    return scan_source_evidence(
+        assets,
+        re.compile(
+            r"\b(?:DB|Db|Database|DataBase|DAO|Dao|Repository|"
+            r"PlayerPrefs|SQLite|Sqlite|Table|Query|Select|LoadFromDB)"
+            r"[A-Za-z0-9_]*\b",
+            re.IGNORECASE,
+        ),
+        "DATABASE",
+    )
+
+
+def scan_source_evidence(assets, pattern, source_kind):
+    evidence = []
+    for path, contents in assets.items():
+        normalized_path = path.replace("\\", "/")
+        if not normalized_path.lower().endswith(".cs"):
+            continue
+        source = contents.decode("utf-8-sig", errors="replace")
+        for match in pattern.finditer(source):
+            evidence.append(
+                {
+                    "source_kind": source_kind,
+                    "file": normalized_path,
+                    "line": source.count("\n", 0, match.start()) + 1,
+                    "symbol": match.group(0),
+                }
+            )
+    return evidence
+
+
+def build_response_evidence_graph(
+    responses,
+    client_handlers,
+    field_usage,
+    producers,
+    client_state_sources,
+    database_sources,
+):
+    source_evidence = client_state_sources + database_sources
+    graph = {}
+    for tag, response in responses.items():
+        fields = {}
+        for field_tag, descriptor in response["fields"].items():
+            usages = copy.deepcopy(field_usage.get(tag, {}).get(field_tag, []))
+            producer_assignments = []
+            for producer in producers.get(tag, ()):
+                for assignment in producer.get("fields", {}).get(field_tag, ()):
+                    producer_assignments.append(
+                        {
+                            "handler": producer["handler"],
+                            "file": producer["file"],
+                            "direction": producer["direction"],
+                            **copy.deepcopy(assignment),
+                        }
+                    )
+
+            anchors = [
+                (item["file"], item["line"])
+                for item in usages + producer_assignments
+            ]
+            related_sources = []
+            for source in source_evidence:
+                if any(
+                    source["file"] == path and abs(source["line"] - line) <= 80
+                    for path, line in anchors
+                ):
+                    related_sources.append(copy.deepcopy(source))
+
+            source_kinds = {
+                assignment["source_kind"]
+                for assignment in producer_assignments
+            }
+            source_kinds.update(source["source_kind"] for source in related_sources)
+            fields[field_tag] = {
+                "name": descriptor["name"],
+                "type": descriptor["type"],
+                "client_handler": client_handlers.get(tag),
+                "client_usage": usages,
+                "producer_assignments": producer_assignments,
+                "sources": related_sources
+                + [
+                    {
+                        "source_kind": kind,
+                        "origin": "producer_expression",
+                    }
+                    for kind in sorted(source_kinds)
+                    if kind
+                    not in {source["source_kind"] for source in related_sources}
+                ],
+            }
+        graph[tag] = {
+            "protocol": response["name"],
+            "fields": fields,
+        }
+    return graph
+
+
 def read_game_assets(client_address):
     global ASSET_CACHE, ASSET_CACHE_LOADED, RESPONSE_CATALOG
     global REQUEST_CATALOG, SCHEMA_CATALOG, CLIENT_REQUEST_HANDLERS
     global RESPONSE_FIELD_USAGE, RESPONSE_PRODUCERS, GAME_METADATA
+    global CHARACTER_STORE, CLIENT_STATE_SOURCES, DATABASE_SOURCES
+    global RESPONSE_EVIDENCE_GRAPH
 
     if ASSET_CACHE_LOADED:
         return
@@ -1976,6 +2361,17 @@ def read_game_assets(client_address):
             CLIENT_REQUEST_HANDLERS,
         )
         GAME_METADATA = extract_game_metadata(assets)
+        CHARACTER_STORE = load_character_store()
+        CLIENT_STATE_SOURCES = scan_client_state_sources(assets)
+        DATABASE_SOURCES = scan_database_sources(assets)
+        RESPONSE_EVIDENCE_GRAPH = build_response_evidence_graph(
+            RESPONSE_CATALOG,
+            CLIENT_REQUEST_HANDLERS,
+            RESPONSE_FIELD_USAGE,
+            RESPONSE_PRODUCERS,
+            CLIENT_STATE_SOURCES,
+            DATABASE_SOURCES,
+        )
         ASSET_CACHE_LOADED = True
         producer_source_counts = {}
         for producers in RESPONSE_PRODUCERS.values():
@@ -1986,6 +2382,9 @@ def read_game_assets(client_address):
                         producer_source_counts[source_kind] = (
                             producer_source_counts.get(source_kind, 0) + 1
                         )
+        evidence_field_count = sum(
+            len(entry["fields"]) for entry in RESPONSE_EVIDENCE_GRAPH.values()
+        )
         print("\rPlease wait reading game assets 100/100%")
         print(
             f"[ASSETS] Cached {len(assets)} files ({bytes_read:,} bytes) in RAM; "
@@ -1993,6 +2392,9 @@ def read_game_assets(client_address):
             f"responses, {len(SCHEMA_CATALOG)} Sproto structs, and "
             f"{sum(len(fields) for fields in RESPONSE_FIELD_USAGE.values())} "
             "response fields with client-side usage; "
+            f"indexed {len(CLIENT_STATE_SOURCES)} client-state and "
+            f"{len(DATABASE_SOURCES)} database-source references; "
+            f"linked evidence for {evidence_field_count} response fields; "
             f"{sum(len(producers) for producers in RESPONSE_PRODUCERS.values())} "
             "response producer sites indexed "
             f"(sources: {producer_source_counts}); "
