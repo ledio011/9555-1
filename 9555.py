@@ -1122,17 +1122,20 @@ def sync_common_data_rpc(picked_char):
         for fid, fstate in saved_func.items():
             func_info_map[str(fid)] = encode_sproto([(0, str(fid)), (1, int(fstate))])
 
+    # Proven sync_common_data layout from the APK:
+    # 0 serverTime, 2 time_offset, 4 pvp_scale, 6 big_pack,
+    # 9 func_info, 11 guildId, 12 seed, 13 serverLevel, 14 start_time.
+    now = int(time.time())
     sync_fields = [
-        (0, int(time.time())),
-        (1, 0),
-        (2, int(time.time()) + 86400),
-        (3, 10000),
-        (4, 0),
-        (5, 0),
-        (6, 0),
-        (7, 0),
-        (8, func_info_map),
-        (9, 0)
+        (0, now),
+        (2, 0),
+        (4, 10000),
+        (6, int(picked_char.get('big_pack', 0) or 0) if picked_char else 0),
+        (9, func_info_map),
+        (11, int(picked_char.get('guild_id', 0) or 0) if picked_char else 0),
+        (12, random.randint(1, 10000)),
+        (13, int(picked_char.get('server_level', 1) or 1) if picked_char else 1),
+        (14, now)
     ]
     return encode_sproto(sync_fields)
 
@@ -2766,8 +2769,15 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
     picked_char['map_ready_map_id'] = ""
     picked_char['main_player_created_sent'] = False
     picked_char['map_ready_sent_at'] = 0
-    picked_char['line_index'] = max(1, int(picked_char.get('line_index', 1)))
-    picked_char['line_count'] = max(picked_char['line_index'], int(picked_char.get('line_count', 3)))
+    # PlayerData.CurLineIndex is zero-based; map 11 has one default line.
+    raw_line_count = int(picked_char.get('line_count', 1) or 1)
+    line_count = max(1, raw_line_count)
+    raw_line_index = int(picked_char.get('line_index', 0) or 0)
+    picked_char['line_count'] = line_count
+    picked_char['line_index'] = max(0, min(raw_line_index, line_count - 1))
+    if str(picked_char.get('map_id', '11')) == '11':
+        picked_char['line_count'] = 1
+        picked_char['line_index'] = 0
     save_chars(all_accounts_chars)
 
     # TAG 503: enter_map
@@ -3108,8 +3118,15 @@ def client_handler(conn, addr):
                     save_chars(all_accounts_chars)
 
                     # Correct Sequence: 614 -> 611 -> 540 -> 534/531 -> 503 -> map_ready(100)
-                    picked_char['line_index'] = max(1, int(picked_char.get('line_index', 1)))
-                    picked_char['line_count'] = max(picked_char['line_index'], int(picked_char.get('line_count', 3)))
+                    # PlayerData.CurLineIndex is zero-based.
+                    raw_line_count = int(picked_char.get('line_count', 1) or 1)
+                    line_count = max(1, raw_line_count)
+                    raw_line_index = int(picked_char.get('line_index', 0) or 0)
+                    picked_char['line_count'] = line_count
+                    picked_char['line_index'] = max(0, min(raw_line_index, line_count - 1))
+                    if str(picked_char.get('map_id', '11')) == '11':
+                        picked_char['line_count'] = 1
+                        picked_char['line_index'] = 0
 
                     # 614: sync_common_data
                     fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3016", "3030", "4014", "4026", "4061", "4062", "4063", "4064", "4081", "4084"]
@@ -5082,9 +5099,12 @@ def client_handler(conn, addr):
                     # change_scene_line is a one-way request (no RPC session).
                     # The client expects the resulting line state through push 568.
                     if picked_char:
-                        line_index = max(1, get_val_int(body, 0, picked_char.get('line_index', 1)))
+                        requested_line = get_val_int(body, 0, picked_char.get('line_index', 0))
+                        line_count = max(1, int(picked_char.get('line_count', 1) or 1))
+                        if str(picked_char.get('map_id', '11')) == '11':
+                            line_count = 1
+                        line_index = max(0, min(requested_line, line_count - 1))
                         picked_char['line_index'] = line_index
-                        line_count = max(line_index, int(picked_char.get('line_count', 3)))
                         picked_char['line_count'] = line_count
                         save_chars(all_accounts_chars)
                         line_states = normalize_line_states(picked_char)
@@ -5132,8 +5152,13 @@ def client_handler(conn, addr):
                     send_rpc_push(607, encode_sproto([]))
                 elif msg == 219: # request_line_state
                     mid = str(picked_char.get('map_id', '11')) if picked_char else '11'
-                    line_count = max(1, int(picked_char.get('line_count', 3))) if picked_char else 3
-                    line_index = max(1, int(picked_char.get('line_index', 1))) if picked_char else 1
+                    line_count = max(1, int(picked_char.get('line_count', 1) or 1)) if picked_char else 1
+                    if picked_char and str(picked_char.get('map_id', '11')) == '11':
+                        line_count = 1
+                    line_index = max(0, min(
+                        int(picked_char.get('line_index', 0) or 0),
+                        line_count - 1
+                    )) if picked_char else 0
                     line_states = normalize_line_states(picked_char) if picked_char else [0] * line_count
                     # update_line_state: mapInfoId(0), line_count(1), line_states(2).
                     send_rpc_push(568, encode_sproto([
