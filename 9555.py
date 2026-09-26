@@ -32,6 +32,13 @@ COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
 SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
 STREET_RACE_REWARD_BY_LEVEL = {} # level -> AdaptData _drop_bc ShowRewardData id
 ITEM_CONFIG = {} # itemId -> {type, function}
+FUNCTION_DATA = {} # funcId -> {class, condition, is_download, first_open, unlock_type, side_mission}
+EQUIP_CONFIG = {} # equipId -> {name, lv, class, job, position, base_stat, base_val, model, ...}
+DOWNLOAD_REWARD_DATA = [] # list of (itemId, count, quality) tuples
+SKILL_UPGRADE_DATA = {} # level -> {price_type, price_value}
+RELIFE_DATA = [] # list of {min_count, max_count, use_count}
+SERVER_DATA_LIST = [] # list of server dicts from ServerData
+GAME_CONFIG = {} # key -> value (from ConfigData)
 
 try:
     script_dir = os.path.dirname(__file__)
@@ -380,6 +387,141 @@ try:
                         'function': int(parts[11]) if parts[11].isdigit() else 0
                     }
         print(f"[ITEM CONFIG LOADED] items={len(ITEM_CONFIG)}")
+
+    # Load FunctionData (feature unlock gates by level)
+    func_path = os.path.join(text_asset_root, "FunctionData")
+    if os.path.exists(func_path):
+        with open(func_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 8 and parts[0] == "*" and parts[1] and parts[1] not in ("ID",):
+                    fid = parts[1]
+                    FUNCTION_DATA[fid] = {
+                        'class': int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0,
+                        'condition': int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else 0,
+                        'is_download': int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else 0,
+                        'first_open': int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else 0,
+                        'unlock_type': int(parts[10]) if len(parts) > 10 and parts[10].isdigit() else 0,
+                        'side_mission': parts[13] if len(parts) > 13 else ''
+                    }
+        print(f"[FUNCTION DATA LOADED] count={len(FUNCTION_DATA)}")
+
+    # Load EquipData (equipment definitions)
+    equip_path = os.path.join(text_asset_root, "EquipData")
+    if os.path.exists(equip_path):
+        with open(equip_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 16 and parts[0] == "*" and parts[1] and parts[1] not in ("ID",):
+                    eid = parts[1]
+                    EQUIP_CONFIG[eid] = {
+                        'name': parts[2],
+                        'lv': int(parts[3]) if parts[3].isdigit() else 0,
+                        'class': int(parts[4]) if parts[4].isdigit() else 1,
+                        'job': int(parts[6]) if parts[6].lstrip('-').isdigit() else -1,
+                        'position': int(parts[7]) if parts[7].isdigit() else 0,
+                        'base_stat': int(parts[8]) if parts[8].isdigit() else 0,
+                        'base_val': int(parts[9]) if parts[9].isdigit() else 0,
+                        'stat1': int(parts[10]) if len(parts) > 10 and parts[10].isdigit() else 0,
+                        'stat1_val': int(parts[11]) if len(parts) > 11 and parts[11].isdigit() else 0,
+                        'stat2': int(parts[12]) if len(parts) > 12 and parts[12].isdigit() else 0,
+                        'stat2_val': int(parts[13]) if len(parts) > 13 and parts[13].isdigit() else 0,
+                        'model': parts[16] if len(parts) > 16 else '',
+                        'base_skills': parts[23].split('#') if len(parts) > 23 and parts[23] else [],
+                        'weapon_type': int(parts[24]) if len(parts) > 24 and parts[24].isdigit() else 0
+                    }
+        print(f"[EQUIP CONFIG LOADED] count={len(EQUIP_CONFIG)}")
+
+    # Load DownloadRewardData (expansion download rewards)
+    dl_path = os.path.join(text_asset_root, "DownloadRewardData")
+    if os.path.exists(dl_path):
+        with open(dl_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 4 and parts[0] == "*" and parts[1] and parts[1] not in ("ID",):
+                    # Parse triplets: ItemID, ItemCount, Quality
+                    for i in range(2, len(parts) - 2, 3):
+                        item_id = parts[i].strip()
+                        count = int(parts[i+1]) if i+1 < len(parts) and parts[i+1].strip().isdigit() else 0
+                        quality = int(parts[i+2]) if i+2 < len(parts) and parts[i+2].strip().isdigit() else 0
+                        if item_id and count > 0:
+                            DOWNLOAD_REWARD_DATA.append((item_id, count, quality))
+        print(f"[DOWNLOAD REWARD LOADED] items={len(DOWNLOAD_REWARD_DATA)}")
+
+    # Load SkillupgradeData (skill upgrade costs by level)
+    sku_path = os.path.join(text_asset_root, "SkillupgradeData")
+    if os.path.exists(sku_path):
+        with open(sku_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 3 and parts[0] == "*" and parts[1].isdigit():
+                    lv = int(parts[1])
+                    SKILL_UPGRADE_DATA[lv] = {
+                        'price_type': int(parts[2]) if parts[2].isdigit() else 0,
+                        'price_value': int(parts[3]) if parts[3].isdigit() else 0
+                    }
+        print(f"[SKILL UPGRADE DATA LOADED] levels={len(SKILL_UPGRADE_DATA)}")
+
+    # Load RelifeData (respawn tier config)
+    relife_path = os.path.join(text_asset_root, "RelifeData")
+    if os.path.exists(relife_path):
+        with open(relife_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 4 and parts[0] == "*" and parts[1].isdigit():
+                    RELIFE_DATA.append({
+                        'id': int(parts[1]),
+                        'min_count': int(parts[2]) if parts[2].isdigit() else 0,
+                        'max_count': int(parts[3]) if parts[3].isdigit() else 999999,
+                        'use_count': int(parts[4]) if parts[4].isdigit() else 1
+                    })
+        RELIFE_DATA.sort(key=lambda x: x['min_count'])
+        print(f"[RELIFE DATA LOADED] tiers={len(RELIFE_DATA)}")
+
+    # Load ServerData (server list definitions)
+    srv_path = os.path.join(text_asset_root, "ServerData")
+    if os.path.exists(srv_path):
+        with open(srv_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 15 and parts[0] == "*" and parts[1].isdigit():
+                    SERVER_DATA_LIST.append({
+                        'id': int(parts[1]),
+                        'name': parts[2],
+                        'state': int(parts[3]) if parts[3].isdigit() else 0,
+                        'area': int(parts[4]) if parts[4].isdigit() else 0,
+                        'timezone': int(parts[5]) if parts[5].lstrip('-').isdigit() else 0,
+                        'db_local': int(parts[6]) if parts[6].isdigit() else 0,
+                        'new_char': int(parts[7]) if parts[7].isdigit() else 0,
+                        'server_list': parts[8],
+                        'display_name': parts[9],
+                        'ip': parts[10],
+                        'port': int(parts[11]) if parts[11].isdigit() else 9555,
+                        'rank': int(parts[12]) if parts[12].isdigit() else 0,
+                        'weight': int(parts[13]) if parts[13].isdigit() else 1,
+                        'new_server': int(parts[14]) if parts[14].isdigit() else 0,
+                        'player_state': int(parts[15]) if parts[15].lstrip('-').isdigit() else -4,
+                    })
+        print(f"[SERVER DATA LOADED] servers={len(SERVER_DATA_LIST)}")
+
+    # Load ConfigData (global game configuration)
+    cfg_path = os.path.join(text_asset_root, "ConfigData")
+    if os.path.exists(cfg_path):
+        with open(cfg_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 4 and parts[0] == "*" and parts[1] and parts[1] not in ("Key",):
+                    key = parts[1]
+                    val_type = int(parts[3]) if parts[3].isdigit() else 0
+                    raw_val = parts[4]
+                    if val_type == 0:  # float
+                        try: GAME_CONFIG[key] = float(raw_val)
+                        except: GAME_CONFIG[key] = raw_val
+                    else:  # int
+                        try: GAME_CONFIG[key] = int(raw_val)
+                        except: GAME_CONFIG[key] = raw_val
+        print(f"[GAME CONFIG LOADED] keys={len(GAME_CONFIG)}")
+
 except: traceback.print_exc()
 
 BAK_DB = CHAR_DB + ".bak"
@@ -724,6 +866,17 @@ SKILL_UNLOCK_LVS = [1, 5, 10, 15, 20, 25]
 
 def get_skill_upgrade_cost(lv):
     if lv < 0: return 0
+    # Data-driven: read from SkillupgradeData TextAsset
+    if SKILL_UPGRADE_DATA:
+        entry = SKILL_UPGRADE_DATA.get(lv)
+        if entry:
+            return entry['price_value']
+        # Level beyond data table
+        max_lv = max(SKILL_UPGRADE_DATA.keys())
+        if lv > max_lv:
+            return SKILL_UPGRADE_DATA[max_lv]['price_value']
+        return 0
+    # Fallback: original hardcoded formula
     if lv < 15: return (lv + 1) * 10000
     if lv < 24: return (lv - 13) * 100000 + 100000
     if lv == 24: return 3000000
@@ -790,6 +943,14 @@ def get_level_data(level):
         raise RuntimeError("BaseLvData has no valid level rows")
     return LEVEL_DATA[min(valid_levels, key=lambda key: abs(key - level))]
 
+def get_relife_config(death_count):
+    if RELIFE_DATA:
+        for cfg in RELIFE_DATA:
+            if cfg['min_count'] <= death_count <= cfg['max_count']:
+                return cfg
+        return RELIFE_DATA[-1]
+    return {'id': 1, 'min_count': 1, 'max_count': 999999, 'use_count': 1}
+
 def get_character_stats(c):
     """Calculates all character attributes and Power based on profession and level."""
     lv = c.get('level', 1)
@@ -805,8 +966,12 @@ def get_character_stats(c):
     cri = ld['cri'][prof]
     res = ld['res'][prof]
 
-    # Add Weapon ATK (Level 1 weapon 10001/20001/30001 gives 180 ATK)
-    atk += 180
+    # Add Weapon ATK from EquipData (starter weapon per profession)
+    starter_wids = {0: "10001", 1: "20001", 2: "30001"}
+    wid = starter_wids.get(prof, "10001")
+    equip = EQUIP_CONFIG.get(wid)
+    weapon_atk = equip['base_val'] if equip and equip.get('base_stat') == 1001 else 180
+    atk += weapon_atk
 
     # Profession-specific coefficients from GameDefine.cs
     # XD (0), QJ (1), NQS (2)
@@ -879,8 +1044,11 @@ def get_full_char(c):
     char_level = stats['lv']
     skill_levels = c.get('skill_levels', {})
     skills_map = build_skills_map(c.get('prof', 0), char_level, skill_levels)
-    wid = "10001" if c.get('prof', 0) == 0 else "20001" if c.get('prof', 0) == 1 else "30001"
-    w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, 1), (5, 1), (6, 1), (7, [0]*8)])
+    starter_wids = {0: "10001", 1: "20001", 2: "30001"}
+    wid = starter_wids.get(c.get('prof', 0), "10001")
+    equip = EQUIP_CONFIG.get(wid)
+    equip_class = equip['class'] if equip else 1
+    w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, equip_class), (5, 1), (6, 1), (7, [0]*8)])
     equip_map = {5: w1}
 
     # character.download: the APK treats 2 as completed.  Sending 1 again on
@@ -1174,12 +1342,16 @@ def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
             timer.start()
         else:
             # Tag 618: notice_relife_player triggers RebirthUIRoot Respawn UI
+            death_count = picked_char.get('death_count', 0) + 1
+            picked_char['death_count'] = death_count
+            relife_cfg = get_relife_config(death_count)
             relife_req = encode_sproto([
-                (0, 1),
+                (0, relife_cfg['id']),
                 (1, 0),
-                (2, ""),
+                (2, "9202"), # typically 9202 is the rebirth item
                 (3, picked_char['id']),
-                (4, picked_char['name'])
+                (4, picked_char['name']),
+                (5, relife_cfg['use_count'])
             ])
             send_rpc_push(618, relife_req)
 
@@ -2242,8 +2414,22 @@ def client_handler(conn, addr):
 
                     # Correct Sequence: 614 -> 611 -> 540 -> 519 -> 503
 
-                    # 614: sync_common_data
-                    fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
+                    # 614: sync_common_data (data-driven from FunctionData)
+                    char_level = picked_char.get('level', 1)
+                    if FUNCTION_DATA:
+                        fids = []
+                        for fid, finfo in FUNCTION_DATA.items():
+                            fc = finfo['class']
+                            # class 0: default open, class 4: tutorial record -> always unlock
+                            if fc == 0 or fc == 4:
+                                fids.append(fid)
+                            elif fc == 1:
+                                # class 1: level-gated -> unlock when level >= condition
+                                if char_level >= finfo['condition']:
+                                    fids.append(fid)
+                    else:
+                        # Fallback: original hardcoded list
+                        fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     send_rpc_push(614, encode_sproto([
                         (0, int(time.time())), (2, 0), (4, 10000), (9, funcs), (12, random.randint(1, 10000)), (13, 1), (14, int(time.time()))
@@ -2679,8 +2865,13 @@ def client_handler(conn, addr):
                                     print('[M1003 DEBUG] Player died in arena; scheduling loss return')
                                     schedule_domin_return(restore_hp=True)
                                 else:
+                                    death_count = picked_char.get('death_count', 0) + 1
+                                    picked_char['death_count'] = death_count
+                                    relife_cfg = get_relife_config(death_count)
                                     relife_req = encode_sproto([
-                                        (0, 1), (1, 0), (2, "9202"), (3, picked_char['id']), (4, picked_char['name'])
+                                        (0, relife_cfg['id']), (1, 0), (2, "9202"), 
+                                        (3, picked_char['id']), (4, picked_char['name']),
+                                        (5, relife_cfg['use_count'])
                                     ])
                                     send_rpc_push(618, relife_req)
                         elif target_id in NPC_HP_MAP:
@@ -3030,24 +3221,41 @@ def client_handler(conn, addr):
 
             elif msg == 7: # update_game_server
                 # Tag 2 in response is the game_server list.
-                # Tag 5 in game_server is serverPlayerState (-4=Normal).
-                # Tag 10 in game_server is newServer (0=Old).
-                server = encode_sproto([
-                    (0, 302), (1, "EU-001"), (2, "s16.serv00.com"), (3, 15678),
-                    (4, 1), (5, -4), (6, 1), (7, 1), (8, 1), (9, 1), (10, 0)
-                ])
-                resp = encode_sproto([(2, [server])])
+                servers = []
+                if SERVER_DATA_LIST:
+                    for s in SERVER_DATA_LIST:
+                        # Pack each server definition
+                        s_data = encode_sproto([
+                            (0, s['id']), (1, s['name']), (2, s['ip']), (3, s['port']),
+                            (4, s['state']), (5, s['player_state']), (6, s['area']), 
+                            (7, s['db_local']), (8, s['timezone']), (9, s['new_char']), 
+                            (10, s['new_server'])
+                        ])
+                        servers.append(s_data)
+                else:
+                    # Fallback
+                    server = encode_sproto([
+                        (0, 302), (1, "EU-001"), (2, "s16.serv00.com"), (3, 15678),
+                        (4, 1), (5, -4), (6, 1), (7, 1), (8, 1), (9, 1), (10, 0)
+                    ])
+                    servers.append(server)
+                resp = encode_sproto([(2, servers)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 270: # download_finish
                 if picked_char and not picked_char.get('download_complete'):
                     picked_char['download_complete'] = True
-                    # Expansion Rewards: Mount 9301 (Chevrolet voucher), 9011 (10), 9001 (20), 5026 (5)
-                    add_to_inventory(picked_char, "9301", 1)
-                    add_to_inventory(picked_char, "9011", 10)
-                    add_to_inventory(picked_char, "9001", 20)
-                    add_to_inventory(picked_char, "5026", 5)
+                    # Expansion Rewards from DownloadRewardData
+                    if DOWNLOAD_REWARD_DATA:
+                        for item_id, count, quality in DOWNLOAD_REWARD_DATA:
+                            add_to_inventory(picked_char, item_id, count)
+                    else:
+                        # Fallback
+                        add_to_inventory(picked_char, "9301", 1)
+                        add_to_inventory(picked_char, "9011", 10)
+                        add_to_inventory(picked_char, "9001", 20)
+                        add_to_inventory(picked_char, "5026", 5)
                     save_chars(all_accounts_chars)
 
                     # Sync items and finalize client state
