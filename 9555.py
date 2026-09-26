@@ -1504,6 +1504,7 @@ def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid):
         ])]))
 
         advance_missions(picked_char, send_rpc_push, 'kill', target_id=npcid)
+        advance_missions(picked_char, send_rpc_push, 'level')
 
 def spawn_map_npcs(conn, map_id, picked_char=None):
     """Spawns all NPCs, Monsters, and Traffic defined in data for the map."""
@@ -1683,15 +1684,17 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
     # 2. Spawn Mission targets defined by the APK data.
-    # Map 11 (TUTORIAL_CAR) spawns targets LOCALLY. Server spawning causes duplicates/crashes.
-    if picked_char and map_str != "11":
+    # We no longer spawn target cars here, so we don't need to skip Map 11.
+    if picked_char:
         for mid, mdata in picked_char.get('active_missions', {}).items():
             if mdata['state'] == 1:
                 cfg = missions_data.get(mid)
                 if cfg:
                     logic_id = str(cfg.get('logic_id', ''))
-                    if logic_id in KILL_TARGET_SPAWNS:
-                        for s in KILL_TARGET_SPAWNS[logic_id]:
+                    # The client looks up KillTargetMissionData by MissionID (e.g. 1001) first, then falls back to LogicID.
+                    spawn_key = str(mid) if str(mid) in KILL_TARGET_SPAWNS else logic_id
+                    if spawn_key in KILL_TARGET_SPAWNS:
+                        for s in KILL_TARGET_SPAWNS[spawn_key]:
                             if str(s['map']) == map_str:
                                 for _ in range(s['num']): send_npc_create(s['nid'], f"Quest_{s['nid']}", s['x'], s['z'], 0)
 
@@ -2055,9 +2058,10 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             else:
                 # Match target NPC from MissionData or spawned NPCs from KillTargetMissionData
                 logic_id = str(cfg.get('logic_id', ''))
+                spawn_key = str(mid) if str(mid) in KILL_TARGET_SPAWNS else logic_id
                 spawn_nids = set()
-                if logic_id in KILL_TARGET_SPAWNS:
-                    for s in KILL_TARGET_SPAWNS[logic_id]:
+                if spawn_key in KILL_TARGET_SPAWNS:
+                    for s in KILL_TARGET_SPAWNS[spawn_key]:
                         spawn_nids.add(str(s['nid']))
                 matched = target == target_value or target_value in spawn_nids
         elif logic_type == 19 and event == 'car':
@@ -2082,9 +2086,10 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
         elif logic_type == 25 and event in ['capture', 'kill']:
             # LogicType 25 (Capture/Boss Kill) - match target NPC or KillTargetMissionData spawns
             logic_id = str(cfg.get('logic_id', ''))
+            spawn_key = str(mid) if str(mid) in KILL_TARGET_SPAWNS else logic_id
             spawn_nids = set()
-            if logic_id in KILL_TARGET_SPAWNS:
-                for s in KILL_TARGET_SPAWNS[logic_id]:
+            if spawn_key in KILL_TARGET_SPAWNS:
+                for s in KILL_TARGET_SPAWNS[spawn_key]:
                     spawn_nids.add(str(s['nid']))
             matched = not target or target == target_value or str(cfg.get('logic_id', '')) == target_value or target_value in spawn_nids
         elif logic_type in [102, 103, 105, 106, 107, 108, 110, 113, 114, 117, 119, 120, 132] and event == 'dungeon':
@@ -2101,9 +2106,12 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
         required = int(cfg.get('count') or cfg.get('require_num') or 1)
         logic_id = str(cfg.get('logic_id', ''))
         
-        if logic_type in [1, 4, 11, 17, 23, 25]: # Kill / Capture
-            if logic_id in KILL_TARGET_SPAWNS:
-                required = KILL_TARGET_SPAWNS[logic_id][0].get('require', 1)
+        if logic_type in [1, 4, 11, 17, 23]: # Kill
+            spawn_key = str(mid) if str(mid) in KILL_TARGET_SPAWNS else logic_id
+            if spawn_key in KILL_TARGET_SPAWNS:
+                required = KILL_TARGET_SPAWNS[spawn_key][0].get('require', 1)
+        elif logic_type == 25: # Capture / Boss
+            required = 1
         elif logic_type == 24: # Target Car
             if logic_id in TARGET_CAR_SPAWNS:
                 required = TARGET_CAR_SPAWNS[logic_id][0].get('require', 1)
@@ -2595,6 +2603,16 @@ def client_handler(conn, addr):
                     if mid == "502":
                         # Map 502 exposes its match timer only through this APK tag.
                         send_rpc_push(629, encode_sproto([(0, int(time.time()) + 60), (1, 0)]))
+                        
+                        def arena_timeout():
+                            if picked_char and picked_char.get('map_id') == '502':
+                                print('[M1003 DEBUG] Arena 60s timeout reached; returning')
+                                schedule_domin_return(restore_hp=True)
+                        
+                        t = threading.Timer(60.0, arena_timeout)
+                        t.daemon = True
+                        t.start()
+                        
                         boss_id = picked_char.get('boss_inst_id')
                         if boss_id and picked_char.pop('boss_waiting_for_map_ready', False):
                             did = picked_char.get('active_domin_id', '1')
@@ -3214,8 +3232,6 @@ def client_handler(conn, addr):
                         (4, elapsed), (5, 1 if new_record else 0), (6, active_copy_id)
                     ]))
                     if won:
-                        # Mission 1004 is LogicType 102 / LogicID 102.
-                        advance_missions(picked_char, send_rpc_push, 'dungeon', target_id='102')
                         advance_missions(picked_char, send_rpc_push, 'level')
                     send_rpc_push(555, sync_copy_scenes(picked_char))
                     schedule_street_race_return()
