@@ -42,6 +42,15 @@ GAME_CONFIG = {} # key -> value (from ConfigData)
 
 try:
     script_dir = os.path.dirname(__file__)
+
+    # Accept both the original folder name and the plural name used by the
+    # deployed resource tree.
+    text_asset_root = os.path.join(script_dir, "assets", "Bundle", "TextAsset")
+    if not os.path.isdir(text_asset_root):
+        text_asset_root = os.path.join(script_dir, "assets", "Bundle", "TextAssets")
+    if not os.path.isdir(text_asset_root):
+        text_asset_root = os.path.join(script_dir, "Decompiled", "assets", "Bundle", "TextAsset")
+
     md_path = os.path.join(text_asset_root, "MissionData")
     if os.path.exists(md_path):
         with open(md_path, "r", encoding='utf-8') as f:
@@ -85,14 +94,6 @@ try:
         print(f"[REWARDS DATA LOADED] count={len(rewards_data)}")
 
     def is_data(line): return line.startswith("*,") or ("," in line and line.split(",")[1].isdigit())
-
-    # Accept both the original folder name and the plural name used by the
-    # deployed resource tree.
-    text_asset_root = os.path.join(script_dir, "assets", "Bundle", "TextAsset")
-    if not os.path.isdir(text_asset_root):
-        text_asset_root = os.path.join(script_dir, "assets", "Bundle", "TextAssets")
-    if not os.path.isdir(text_asset_root):
-        text_asset_root = os.path.join(script_dir, "Decompiled", "assets", "Bundle", "TextAsset")
 
     # Load EffInfoData
     eff_path = os.path.join(text_asset_root, "EffInfoData")
