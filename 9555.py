@@ -305,26 +305,28 @@ try:
         print(f"[DAILY EXP CONFIG LOADED] count={len(DAILY_EXP_CONFIG)}")
 
     # Load KillTargetMissionData (Mission Spawns)
+    # KillTargetMissionData rows are keyed by their own ID column.
+    # Missions reference them via logic_id (MissionData column 9).
+    # Header: *,ID,SceneID,PosX,PosZ,Range,NpcID,FlashNum,RequireNum
     kt_path = os.path.join(text_asset_root, "KillTargetMissionData")
     if os.path.exists(kt_path):
         with open(kt_path, "r", encoding='utf-8') as f:
             for line in f:
                 parts = line.strip().split(",")
-                if len(parts) > 7 and parts[0] == "*" and parts[1].isdigit():
-                    mid = parts[1]
-                    if mid not in KILL_TARGET_SPAWNS: KILL_TARGET_SPAWNS[mid] = []
-                    num = int(parts[7]) if parts[7].isdigit() else 1
-                    KILL_TARGET_SPAWNS[mid].append({
+                if len(parts) > 7 and parts[1].isdigit():
+                    row_id = parts[1]
+                    if row_id not in KILL_TARGET_SPAWNS: KILL_TARGET_SPAWNS[row_id] = []
+                    flash_num = int(parts[7]) if parts[7].isdigit() else 1
+                    require_num = int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else flash_num
+                    KILL_TARGET_SPAWNS[row_id].append({
                         'map': parts[2],
                         'x': int(parts[3]),
                         'z': int(parts[4]),
                         'o': int(parts[5]) if parts[5] else 0,
                         'nid': parts[6],
-                        'num': num
+                        'num': flash_num,
+                        'require': require_num
                     })
-                    # Update mission data requirement count if present
-                    if mid in missions_data:
-                        missions_data[mid]['count'] = num
         print(f"[KILL TARGET DATA LOADED] count={len(KILL_TARGET_SPAWNS)}")
 
     # Load TargetCarMissionData
@@ -334,13 +336,15 @@ try:
             for line in f:
                 parts = line.strip().split(",")
                 if len(parts) > 6 and parts[1].isdigit():
-                    mid = parts[1]
-                    if mid not in TARGET_CAR_SPAWNS: TARGET_CAR_SPAWNS[mid] = []
-                    TARGET_CAR_SPAWNS[mid].append({
+                    row_id = parts[1]
+                    if row_id not in TARGET_CAR_SPAWNS: TARGET_CAR_SPAWNS[row_id] = []
+                    require_num = int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else 1
+                    TARGET_CAR_SPAWNS[row_id].append({
                         'map': parts[2],
                         'x': int(float(parts[3])),
                         'z': int(float(parts[4])),
-                        'car_id': parts[6] # e.g. "Chevrolet"
+                        'car_id': parts[6], # e.g. "Chevrolet"
+                        'require': require_num
                     })
         print(f"[TARGET CAR DATA LOADED] count={len(TARGET_CAR_SPAWNS)}")
 
@@ -353,10 +357,9 @@ try:
                 if len(parts) > 5 and parts[0] == "*" and parts[1].isdigit():
                     req_id = parts[1]
                     num = int(parts[5]) if parts[5].isdigit() else 1
-                    # Associate with mission using this logic_id
-                    for m in missions_data.values():
-                        if m.get('logic_id') == req_id:
-                            m['count'] = num
+                    # Associate with mission using mission ID
+                    if req_id in missions_data:
+                        missions_data[req_id]['count'] = num
         print("[MISSION REQUIRE DATA LOADED]")
 
     # Load the actual garage vehicle definitions.  Only rows marked NeedShow
@@ -1214,6 +1217,10 @@ def get_npc_attr(nid, player_level=1):
     if cfg.get('atk_abs', 0) > atk: atk = cfg['atk_abs']
     if cfg.get('def_abs', 0) > df: df = cfg['def_abs']
 
+    if cfg.get('level', 1) == 9999:
+        hp = hp * 5
+        atk = int(atk * 1.5)
+
     prof_coeffs = {"atk": 16, "hp": 1, "def": 11}
     raw_power = (atk * prof_coeffs['atk'] + hp * prof_coeffs['hp'] + df * prof_coeffs['def'])
     power = int(raw_power * 3.0)
@@ -1681,15 +1688,12 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         for mid, mdata in picked_char.get('active_missions', {}).items():
             if mdata['state'] == 1:
                 cfg = missions_data.get(mid)
-                if mid in KILL_TARGET_SPAWNS:
-                    for s in KILL_TARGET_SPAWNS[mid]:
-                        if str(s['map']) == map_str:
-                            for _ in range(s['num']): send_npc_create(s['nid'], f"Quest_{s['nid']}", s['x'], s['z'], 0)
-                logic_id = str(missions_data[mid].get('logic_id', ''))
-                if logic_id in TARGET_CAR_SPAWNS:
-                    for s in TARGET_CAR_SPAWNS[logic_id]:
-                        if str(s['map']) == map_str:
-                            send_npc_create(s['car_id'], f"QuestCar_{s['car_id']}", s['x'], s['z'], 0)
+                if cfg:
+                    logic_id = str(cfg.get('logic_id', ''))
+                    if logic_id in KILL_TARGET_SPAWNS:
+                        for s in KILL_TARGET_SPAWNS[logic_id]:
+                            if str(s['map']) == map_str:
+                                for _ in range(s['num']): send_npc_create(s['nid'], f"Quest_{s['nid']}", s['x'], s['z'], 0)
 
 def sync_mission_data(picked_char):
     own_missions_list = []
@@ -2050,9 +2054,10 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                 matched = True
             else:
                 # Match target NPC from MissionData or spawned NPCs from KillTargetMissionData
+                logic_id = str(cfg.get('logic_id', ''))
                 spawn_nids = set()
-                if mid in KILL_TARGET_SPAWNS:
-                    for s in KILL_TARGET_SPAWNS[mid]:
+                if logic_id in KILL_TARGET_SPAWNS:
+                    for s in KILL_TARGET_SPAWNS[logic_id]:
                         spawn_nids.add(str(s['nid']))
                 matched = target == target_value or target_value in spawn_nids
         elif logic_type == 19 and event == 'car':
@@ -2076,9 +2081,10 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             matched = str(cfg.get('logic_id')) == target_value
         elif logic_type == 25 and event in ['capture', 'kill']:
             # LogicType 25 (Capture/Boss Kill) - match target NPC or KillTargetMissionData spawns
+            logic_id = str(cfg.get('logic_id', ''))
             spawn_nids = set()
-            if mid in KILL_TARGET_SPAWNS:
-                for s in KILL_TARGET_SPAWNS[mid]:
+            if logic_id in KILL_TARGET_SPAWNS:
+                for s in KILL_TARGET_SPAWNS[logic_id]:
                     spawn_nids.add(str(s['nid']))
             matched = not target or target == target_value or str(cfg.get('logic_id', '')) == target_value or target_value in spawn_nids
         elif logic_type in [102, 103, 105, 106, 107, 108, 110, 113, 114, 117, 119, 120, 132] and event == 'dungeon':
@@ -2093,6 +2099,15 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             continue
 
         required = int(cfg.get('count') or cfg.get('require_num') or 1)
+        logic_id = str(cfg.get('logic_id', ''))
+        
+        if logic_type in [1, 4, 11, 17, 23, 25]: # Kill / Capture
+            if logic_id in KILL_TARGET_SPAWNS:
+                required = KILL_TARGET_SPAWNS[logic_id][0].get('require', 1)
+        elif logic_type == 24: # Target Car
+            if logic_id in TARGET_CAR_SPAWNS:
+                required = TARGET_CAR_SPAWNS[logic_id][0].get('require', 1)
+        
         if logic_type in [2, 6, 102, 103, 105, 106, 107, 108, 110, 113, 114, 117, 119, 120, 132]:
             required = 1
         if logic_type == 7:
@@ -2489,12 +2504,16 @@ def client_handler(conn, addr):
                         fids = []
                         for fid, finfo in FUNCTION_DATA.items():
                             fc = finfo['class']
-                            # class 0: default open, class 4: tutorial record -> always unlock
-                            if fc == 0 or fc == 4:
+                            # class 0: default open
+                            if fc == 0:
                                 fids.append(fid)
                             elif fc == 1:
                                 # class 1: level-gated -> unlock when level >= condition
                                 if char_level >= finfo['condition']:
+                                    fids.append(fid)
+                            elif fc == 4:
+                                # class 4: tutorial record -> only unlock if completed
+                                if fid in picked_char.get('completed_tutorials', []):
                                     fids.append(fid)
                     else:
                         # Fallback: original hardcoded list
@@ -2983,7 +3002,14 @@ def client_handler(conn, addr):
 
                                     did = picked_char.get('active_domin_id', '1')
                                     print(f"[M1003 DEBUG] Boss {target_id} killed by client dmg. Winning did={did}")
-                                    advance_missions(picked_char, send_rpc_push, 'capture', target_id=did)
+                                    # Find the active capture mission and use its target_id
+                                    cap_target = did
+                                    for act_m, act_mdata in list(picked_char.get('active_missions', {}).items()):
+                                        cap_cfg = missions_data.get(act_m, {})
+                                        if cap_cfg.get('logic_type') == 25:
+                                            cap_target = str(cap_cfg.get('target_id', did))
+                                            break
+                                    advance_missions(picked_char, send_rpc_push, 'capture', target_id=cap_target)
                                     picked_char['boss_inst_id'] = None
                                 else:
                                     on_npc_killed(conn, send_rpc_push, picked_char, target_id, target_nid)
@@ -3065,7 +3091,13 @@ def client_handler(conn, addr):
                         did = picked_char.get('active_domin_id', '1')
                         print(f"[M1003 DEBUG] RX 137 zombie died; winning did={did}")
                         # Capture wins update mission progress, not copy_scene_result (552).
-                        advance_missions(picked_char, send_rpc_push, 'capture', target_id=did)
+                        cap_target = did
+                        for act_m, act_mdata in list(picked_char.get('active_missions', {}).items()):
+                            cap_cfg = missions_data.get(act_m, {})
+                            if cap_cfg.get('logic_type') == 25:
+                                cap_target = str(cap_cfg.get('target_id', did))
+                                break
+                        advance_missions(picked_char, send_rpc_push, 'capture', target_id=cap_target)
                         picked_char['boss_inst_id'] = None
                         DEAD_NPC_SET.add(boss_id)
                     else:
@@ -3124,6 +3156,7 @@ def client_handler(conn, addr):
                         picked_char['active_copy_id'] = copy_id
                         save_chars(all_accounts_chars)
                         send_rpc_push(555, sync_copy_scenes(picked_char))
+                        advance_missions(picked_char, send_rpc_push, 'dungeon', target_id=copy_id)
                         start_map_transition(conn, picked_char, copy_id, send_rpc_push)
                         print(f"[EXP STAGE] entered id={copy_id} remaining={remaining - 1}")
                     else:
@@ -3140,10 +3173,12 @@ def client_handler(conn, addr):
                         save_chars(all_accounts_chars)
                         start_map_transition(conn, picked_char, cfg['map_id'], send_rpc_push)
                         send_rpc_push(555, sync_copy_scenes(picked_char))
+                        advance_missions(picked_char, send_rpc_push, 'dungeon', target_id=copy_id)
                         print(f"[STREET RACE] entered id={copy_id} remaining={remaining - 1}/{cfg['max_plays']}")
                     else:
                         print(f"[STREET RACE] denied id={copy_id}; daily attempts exhausted")
                 elif picked_char:
+                    advance_missions(picked_char, send_rpc_push, 'dungeon', target_id=copy_id)
                     start_map_transition(conn, picked_char, copy_id, send_rpc_push)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
