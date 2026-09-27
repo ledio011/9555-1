@@ -1,0 +1,4 @@
+,任务编号,对应的Map,任务类型,解锁等级,名字,描述,规则,副本背景图片,副本UI图片,奖励显示,货币类型0钞票1金币2钻石,费用起始,费用递增,费用最大,男NPCID,女NPCID
+,STRING,STRING,INT,INT,STRING,STRING,STRING,STRING,STRING,STRING,INT,INT,INT,INT,STRING,STRING
+*,ID,MapId,Type,UnlockLevel,Name,Description,Rule,Background,Icon,ShowRewardID,CostType,CostStart,CostAdd,CostMax,ManNpcId,WomenNpcId
+*,1301,101,8,10,#{101629},#{101630},#{101631},Sex_PVE,CZ_seQing_PVE,39000,0,0,1000,10000,1079,1080

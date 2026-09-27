@@ -1,0 +1,32 @@
+﻿using System;
+
+// Token: 0x020001FC RID: 508
+public enum ATTRIBUTE_TYPE
+{
+	// Token: 0x040016B4 RID: 5812
+	INVALID = -1,
+	// Token: 0x040016B5 RID: 5813
+	ATK = 1001,
+	// Token: 0x040016B6 RID: 5814
+	HP,
+	// Token: 0x040016B7 RID: 5815
+	DEF,
+	// Token: 0x040016B8 RID: 5816
+	HIT,
+	// Token: 0x040016B9 RID: 5817
+	DGE,
+	// Token: 0x040016BA RID: 5818
+	CRI,
+	// Token: 0x040016BB RID: 5819
+	RES,
+	// Token: 0x040016BC RID: 5820
+	EXD,
+	// Token: 0x040016BD RID: 5821
+	EXR,
+	// Token: 0x040016BE RID: 5822
+	REC,
+	// Token: 0x040016BF RID: 5823
+	MOV,
+	// Token: 0x040016C0 RID: 5824
+	CRD
+}

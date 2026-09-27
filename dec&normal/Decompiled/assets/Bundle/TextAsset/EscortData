@@ -1,0 +1,13 @@
+,任务编号,对应MissionID,对应的Map,任务类型,对应的奖励,显示奖励,双倍开启时间,双倍持续时间,单倍奖励怪物,双倍奖励,双倍系数,失败系数,每日次数,解锁等级,,,名字,描述,规则,副本背景图片,副本UI图片,对应地图点ID
+,STRING,STRING,STRING,INT,STRING,STRING,INT,INT,INT,INT,INT,INT,INT,INT,INT,,STRING,STRING,STRING,STRING,STRING,STRING
+*,ID,MissionId,MapId,Type,RewardId,ShowRewardId,StartTime,DurationTime,NormalMonsterGroup,SpecialMonsterGroup,SpecialScale,FailureScale,MaxPlayNum,UnlockLevel,RandomIndex,MinLevel,Name,Description,Rule,Background,Icon,ActivityMapId
+*,30001,30001,109,1,_show_hs,_drop_hs,73800,3540,10001,10001,200,50,2,26,0,26,#{101513},#{101607},#{101608},huSong_PVP,CZ_huSong_PVP,84
+*,30002,30002,109,2,_show_hs,_drop_hs,73800,3540,,,200,50,1,28,0,28,#{101514},#{101609},#{101610},qiangJie_PVP,CZ_qiangJie_PVP,85
+*,30003,30003,109,1,_show_hs,_drop_hs,73800,3540,10002,10002,200,50,2,26,1,26,#{101513},#{101607},#{101608},huSong_PVP,CZ_huSong_PVP,131
+*,30004,30004,109,1,_show_hs,_drop_hs,73800,3540,10003,10003,200,50,2,26,2,26,#{101513},#{101607},#{101608},huSong_PVP,CZ_huSong_PVP,132
+*,30005,30005,110,1,_show_hs,_drop_hs,73800,3540,10004,10004,200,50,2,30,3,30,#{101513},#{101607},#{101608},huSong_PVP,CZ_huSong_PVP,133
+*,30006,30006,110,1,_show_hs,_drop_hs,73800,3540,10005,10005,200,50,2,30,4,30,#{101513},#{101607},#{101608},huSong_PVP,CZ_huSong_PVP,134
+*,30007,30007,111,1,_show_hs,_drop_hs,73800,3540,10006,10006,200,50,2,60,5,60,#{101513},#{101607},#{101608},huSong_PVP,CZ_huSong_PVP,136
+*,30008,30008,111,1,_show_hs,_drop_hs,73800,3540,10007,10007,200,50,2,60,6,60,#{101513},#{101607},#{101608},huSong_PVP,CZ_huSong_PVP,137
+*,30009,30009,110,2,_show_hs,_drop_hs,73800,3540,,,200,50,1,40,1,40,#{101514},#{101609},#{101610},qiangJie_PVP,CZ_qiangJie_PVP,135
+*,30010,30010,111,2,_show_hs,_drop_hs,73800,3540,,,200,50,1,65,2,65,#{101514},#{101609},#{101610},qiangJie_PVP,CZ_qiangJie_PVP,138

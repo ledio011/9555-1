@@ -1,0 +1,7 @@
+,任务编号,对应的Map,任务类型,对应的奖励,显示奖励,奖励周期,解锁等级,名字,描述,规则,副本背景图片,副本UI图片,任务UI图片,音响模型,CD时间,持续时间,开启时间
+,STRING,STRING,INT,STRING,STRING,INT,INT,STRING,STRING,STRING,STRING,STRING,STRING,,,INT,INT
+*,ID,MapId,Type,DropId,ShowRewardId,RewardDuration,UnlockLevel,Name,Description,Rule,Background,Icon,MissionIcon,NpcID,CDTime,DurationTime,StartTime
+*,101,101,0,_drop_jh,30301,1,8,#{101515},#{101611},#{101612},FuBenTuBiao_DANCE,CZ_fuBenTuBiao_DANCE,CZ_gaWu_geRen,,,1800,
+*,102,101,1,_drop_jhdj,30301,1,8,#{405025},#{101611},#{101612},FuBenTuBiao_DANCE,CZ_fuBenTuBiao_DANCE,CZ_gaWu_geRenDaoJu,80001,,1800,
+*,103,101,2,_drop_gjh,30301,1,8,#{105100},#{101639},#{101640},FuBenTuBiao_DANCE,CZ_fuBenTuBiao_DANCE,CZ_gaWu_gongHui,,604800,1800,39600#43200#45000#46800#68400#72000#73800#75600
+*,104,101,3,_drop_gjhdj,30301,1,8,#{405026},#{101639},#{101640},FuBenTuBiao_DANCE,CZ_fuBenTuBiao_DANCE,CZ_gaWu_gongHuiDaoJu,80002,,1800,

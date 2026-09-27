@@ -1,0 +1,4 @@
+,副本ID,MapID,活动类型,副本子类型,开启时间,持续时间,等待开启时间,副本存活时间,参数1,参数2,参数3,最大贡献奖励,显示奖励,最大人数,每日次数,解锁等级,名字,描述,规则,副本背景图片,副本UI图片
+,STRING,STRING,INT,INT,INT,INT,INT,INT,INT,INT,INT,STRING,STRING,INT,INT,INT,STRING,STRING,STRING,STRING,STRING
+*,ID,MapID,Type,SubType,StartTime,DurationTime,WaitTime,ExistTime,WaveCount,Parm2,Parm3,MaxDropID,RewardID,MaxPlayer,MaxPlayNum,UnlockLevel,Name,Description,Rule,Background,Icon
+*,601,601,4,10,45000,3600,300,900,5,,,_dps_jzjb,_show_jzjb,6,10,22,#{101516},#{101613},#{101614},jingYanFuBen_PVE,CZ_suiJiZuDui_PVE

@@ -1,0 +1,19 @@
+,STRING,STRING,STRING,STRING,STRING,INT,INT,STRING,STRING,INT,STRING,STRING,INT,STRING,STRING,INT,STRING
+,ID,任务链名称,任务链简介,任务链简述,包含任务(用#分割),限制时间（秒）,限制次数,一星奖励ID,一星奖励ID,一星奖励时间,二星奖励ID,二星奖励ID,二星奖励时间,三星奖励ID,三星奖励ID,三星奖励时间,ShowReward
+*,ID,Name,Desc,Tip,ContainsMission,LimitTime,LimitNum,Reward1,ShowReward1,Reward1Time,Reward2,ShowReward2,Reward2Time,Reward3,ShowReward3,Reward3Time,ShowRewardId
+,10000,Boy's Adventure,Complete all Mission in sequence.,Complete Line Mission,52001#52002#52003#52004,600,1,47101,47101,0,47201,47201,150,47301,47301,300,70001
+,10001,Code R.A.R,Complete all Mission in sequence.,Complete Line Mission,52005#52006#52007#52008,600,1,47102,47102,0,47202,47202,150,47302,47302,300,70001
+,10002,Courier,Complete all Mission in sequence.,Complete Line Mission,52009#52010#52011#52012,600,1,47103,47103,0,47203,47203,150,47303,47303,300,70001
+,10003,Corner Battle,Complete all Mission in sequence.,Complete Line Mission,52013#52014#52015#52016,600,1,47104,47104,0,47204,47204,150,47304,47304,300,70001
+*,101,Start in Return,Complete all Mission in sequence.,Complete Line Mission,46001#46002#46003#46004#46005,300,1,47101,47101,0,47201,47201,150,47301,47301,200,70001
+*,102,Break out,Complete all Mission in sequence.,Complete Line Mission,46006#46007#46008#46009#46010,300,1,47102,47102,0,47202,47202,150,47302,47302,200,70001
+*,103,Important File,Complete all Mission in sequence.,Complete Line Mission,46011#46012#46013#46014#46015,300,1,47103,47103,0,47203,47203,150,47303,47303,200,70001
+*,104,Fight Start,Complete all Mission in sequence.,Complete Line Mission,46016#46017#46018#46019#46020,300,1,47104,47104,0,47204,47204,150,47304,47304,200,70001
+*,105,Secret Night,Complete all Mission in sequence.,Complete Line Mission,46021#46022#46023#46024#46025,300,1,47101,47101,0,47201,47201,150,47301,47301,200,70001
+*,106,Illegal Trade,Complete all Mission in sequence.,Complete Line Mission,46026#46027#46028#46029#46030,300,1,47102,47102,0,47202,47202,150,47302,47302,200,70001
+*,107,Encrypted Data,Complete all Mission in sequence.,Complete Line Mission,46031#46032#46033#46034#46035,300,1,47103,47103,0,47203,47203,150,47303,47303,200,70001
+*,108,Golden Age,Complete all Mission in sequence.,Complete Line Mission,46036#46037#46038#46039#46040,300,1,47104,47104,0,47204,47204,150,47304,47304,200,70001
+*,109,Drive in Fight,Complete all Mission in sequence.,Complete Line Mission,46041#46042#46043#46044#46045,300,1,47101,47101,0,47201,47201,150,47301,47301,200,70001
+*,110,Rabbit Car,Complete all Mission in sequence.,Complete Line Mission,46046#46047#46048#46049#46050,300,1,47102,47102,0,47202,47202,150,47302,47302,200,70001
+*,111,Bomb and Boom,Complete all Mission in sequence.,Complete Line Mission,46051#46052#46053#46054#46055,300,1,47103,47103,0,47203,47203,150,47303,47303,200,70001
+*,112,Final Exile,Complete all Mission in sequence.,Complete Line Mission,46056#46057#46058#46059#46060,300,1,47104,47104,0,47204,47204,150,47304,47304,200,70001

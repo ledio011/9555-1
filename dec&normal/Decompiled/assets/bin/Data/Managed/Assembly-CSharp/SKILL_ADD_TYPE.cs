@@ -1,0 +1,20 @@
+﻿using System;
+
+// Token: 0x020001FD RID: 509
+public enum SKILL_ADD_TYPE
+{
+	// Token: 0x040016C2 RID: 5826
+	SHIT = 3001,
+	// Token: 0x040016C3 RID: 5827
+	SCRI,
+	// Token: 0x040016C4 RID: 5828
+	SEXD,
+	// Token: 0x040016C5 RID: 5829
+	SATE,
+	// Token: 0x040016C6 RID: 5830
+	SATM,
+	// Token: 0x040016C7 RID: 5831
+	SATC,
+	// Token: 0x040016C8 RID: 5832
+	SATP
+}

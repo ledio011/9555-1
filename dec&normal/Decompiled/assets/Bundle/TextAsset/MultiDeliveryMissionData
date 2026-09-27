@@ -1,0 +1,6 @@
+,ID,NPC顺序,目标NPCID,任务目标MapID,对话框内容
+,STRING,INT,STRING,STRING,STRING
+*,ID,Index,TargetNpcId,TargetMapId,Dialog
+*,1,0,1001,101,Find 2
+*,1,1,1002,102,Find 3
+*,1,2,1006,101,Finish

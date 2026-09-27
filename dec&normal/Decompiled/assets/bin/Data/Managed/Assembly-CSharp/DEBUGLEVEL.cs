@@ -1,0 +1,16 @@
+﻿using System;
+
+// Token: 0x02000A6E RID: 2670
+public enum DEBUGLEVEL
+{
+	// Token: 0x04003C7A RID: 15482
+	DEBUG,
+	// Token: 0x04003C7B RID: 15483
+	INFO,
+	// Token: 0x04003C7C RID: 15484
+	WARING,
+	// Token: 0x04003C7D RID: 15485
+	ERRO,
+	// Token: 0x04003C7E RID: 15486
+	NOLOG
+}

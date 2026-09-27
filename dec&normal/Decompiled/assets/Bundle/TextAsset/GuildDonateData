@@ -1,0 +1,6 @@
+,捐献ID,材料ID,材料数量,捐献帮贡获得,帮派经验,捐献次数
+,STRING,STRING,INT,INT,INT,INT
+*,ID,ItemID,ItemCount,Contribute,GuildExp,DonateCount
+*,1,1001,200000,60,600,10
+*,2,1002,200,200,1000,10
+*,3,1003,50,500,2000,10

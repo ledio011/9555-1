@@ -1,0 +1,14 @@
+﻿using System;
+
+// Token: 0x0200015F RID: 351
+public enum COPY_SCENE_TYPE
+{
+	// Token: 0x04000DAD RID: 3501
+	NORMAL,
+	// Token: 0x04000DAE RID: 3502
+	DAILY,
+	// Token: 0x04000DAF RID: 3503
+	SPECIAL,
+	// Token: 0x04000DB0 RID: 3504
+	MULTI
+}

@@ -1,0 +1,4 @@
+,copyScene相对应的ID,MapID,MapID,最大人数,等级区间
+,STRING,STRING,STRING,INT,INT
+*,ID,MapID,MapID2,MaxPlayer,UnlockLevel
+*,1201,1201,1202,50,19

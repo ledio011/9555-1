@@ -1,0 +1,12 @@
+﻿using System;
+
+// Token: 0x02000972 RID: 2418
+public enum EQUIP_PACK_TYPE
+{
+	// Token: 0x040030E3 RID: 12515
+	BACKPACK,
+	// Token: 0x040030E4 RID: 12516
+	FASHION,
+	// Token: 0x040030E5 RID: 12517
+	BADGE
+}

@@ -1,0 +1,7 @@
+,ID,次数,免费次数,付费价格,,,
+,STRING,INT,INT,INT,INT,,
+*,ID,RollNum,MaxPlayNum,PriceType,PriceCost,,
+*,1,1,1,2,100,,
+*,2,5,0,2,469,,
+*,3,10,0,2,899,,
+*,4,20,0,2,1699,,

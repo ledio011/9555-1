@@ -1,0 +1,95 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{36DE3202-9626-46C4-8CE1-208C23762A57}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <RootNamespace>Assembly-UnityScript-firstpass</RootNamespace>
+    <AssemblyName>Assembly-UnityScript-firstpass</AssemblyName>
+    <TargetFrameworkVersion>v2.0</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Boo.Lang">
+      <HintPath>..\..\atg\auto-theft-gangsters-1-19\assets\bin\Data\Managed\Boo.Lang.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine">
+      <HintPath>..\..\atg\auto-theft-gangsters-1-19\assets\bin\Data\Managed\UnityEngine.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <AppDesigner Include="Properties\" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="AAMode.cs" />
+    <Compile Include="AntialiasingAsPostEffect.cs" />
+    <Compile Include="BloomAndLensFlares.cs" />
+    <Compile Include="BloomScreenBlendMode.cs" />
+    <Compile Include="BokehDestination.cs" />
+    <Compile Include="CameraInfo.cs" />
+    <Compile Include="CharacterMotor.cs" />
+    <Compile Include="CharacterMotorJumping.cs" />
+    <Compile Include="CharacterMotorMovement.cs" />
+    <Compile Include="CharacterMotorMovingPlatform.cs" />
+    <Compile Include="CharacterMotorSliding.cs" />
+    <Compile Include="CharacterState.cs" />
+    <Compile Include="ColorCorrectionCurves.cs" />
+    <Compile Include="ColorCorrectionMode.cs" />
+    <Compile Include="ContrastEnhance.cs" />
+    <Compile Include="Crease.cs" />
+    <Compile Include="DepthOfField34.cs" />
+    <Compile Include="DepthOfFieldScatter.cs" />
+    <Compile Include="Dof34QualitySetting.cs" />
+    <Compile Include="DofBlurriness.cs" />
+    <Compile Include="DofResolution.cs" />
+    <Compile Include="EdgeDetectEffectNormals.cs" />
+    <Compile Include="EdgeDetectMode.cs" />
+    <Compile Include="Fisheye.cs" />
+    <Compile Include="FPSInputController.cs" />
+    <Compile Include="GlobalFog.cs" />
+    <Compile Include="HDRBloomMode.cs" />
+    <Compile Include="LensflareStyle34.cs" />
+    <Compile Include="MovementTransferOnJump.cs" />
+    <Compile Include="NoiseAndGrain.cs" />
+    <Compile Include="PlatformInputController.cs" />
+    <Compile Include="PostEffectsBase.cs" />
+    <Compile Include="PostEffectsHelper.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="Quads.cs" />
+    <Compile Include="ScreenOverlay.cs" />
+    <Compile Include="ShaftsScreenBlendMode.cs" />
+    <Compile Include="SmoothFollow.cs" />
+    <Compile Include="SmoothLookAt.cs" />
+    <Compile Include="SunShafts.cs" />
+    <Compile Include="SunShaftsResolution.cs" />
+    <Compile Include="ThirdPersonCamera.cs" />
+    <Compile Include="ThirdPersonController.cs" />
+    <Compile Include="TiltShift.cs" />
+    <Compile Include="Tonemapping.cs" />
+    <Compile Include="Triangles.cs" />
+    <Compile Include="TweakMode34.cs" />
+    <Compile Include="Vignetting.cs" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>

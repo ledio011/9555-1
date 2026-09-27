@@ -1,0 +1,9 @@
+,ID,解锁等级,解锁区域名称,解锁地图alph值,小锁UI地图位置X,小锁UI地图位置Z
+,INT,INT,STRING,FLOAT,INT,INT
+*,ID,UnlockLevel,AreaName,UnlockAlph,UIPosX,UIPosZ
+*,0,5,FB_saiDao_jingJieXian_1,0.1,-6600,5000
+*,1,10,FB_saiDao_jingJieXian_2,0.3,18552,-5800
+*,2,15,FB_saiDao_jingJieXian_3,0.5,21872,-22383
+*,3,10000,FB_saiDao_jingJieXian_5,0.9,-800,-12000
+*,4,23,FB_saiDao_jingJieXian_6,0.7,6000,-24600
+*,5,10000,FB_saiDao_jingJieXian_7,0.9,14000,9000

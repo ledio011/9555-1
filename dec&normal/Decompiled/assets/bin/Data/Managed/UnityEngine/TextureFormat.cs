@@ -1,0 +1,99 @@
+﻿using System;
+
+namespace UnityEngine
+{
+	// Token: 0x0200011E RID: 286
+	public enum TextureFormat
+	{
+		// Token: 0x0400047E RID: 1150
+		Alpha8 = 1,
+		// Token: 0x0400047F RID: 1151
+		ARGB4444,
+		// Token: 0x04000480 RID: 1152
+		RGB24,
+		// Token: 0x04000481 RID: 1153
+		RGBA32,
+		// Token: 0x04000482 RID: 1154
+		ARGB32,
+		// Token: 0x04000483 RID: 1155
+		RGB565 = 7,
+		// Token: 0x04000484 RID: 1156
+		DXT1 = 10,
+		// Token: 0x04000485 RID: 1157
+		DXT5 = 12,
+		// Token: 0x04000486 RID: 1158
+		RGBA4444,
+		// Token: 0x04000487 RID: 1159
+		BGRA32,
+		// Token: 0x04000488 RID: 1160
+		PVRTC_RGB2 = 30,
+		// Token: 0x04000489 RID: 1161
+		PVRTC_RGBA2,
+		// Token: 0x0400048A RID: 1162
+		PVRTC_RGB4,
+		// Token: 0x0400048B RID: 1163
+		PVRTC_RGBA4,
+		// Token: 0x0400048C RID: 1164
+		ETC_RGB4,
+		// Token: 0x0400048D RID: 1165
+		ATC_RGB4,
+		// Token: 0x0400048E RID: 1166
+		ATC_RGBA8,
+		// Token: 0x0400048F RID: 1167
+		ATF_RGB_DXT1 = 38,
+		// Token: 0x04000490 RID: 1168
+		ATF_RGBA_JPG,
+		// Token: 0x04000491 RID: 1169
+		ATF_RGB_JPG,
+		// Token: 0x04000492 RID: 1170
+		EAC_R,
+		// Token: 0x04000493 RID: 1171
+		EAC_R_SIGNED,
+		// Token: 0x04000494 RID: 1172
+		EAC_RG,
+		// Token: 0x04000495 RID: 1173
+		EAC_RG_SIGNED,
+		// Token: 0x04000496 RID: 1174
+		ETC2_RGB,
+		// Token: 0x04000497 RID: 1175
+		ETC2_RGBA1,
+		// Token: 0x04000498 RID: 1176
+		ETC2_RGBA8,
+		// Token: 0x04000499 RID: 1177
+		ASTC_RGB_4x4,
+		// Token: 0x0400049A RID: 1178
+		ASTC_RGB_5x5,
+		// Token: 0x0400049B RID: 1179
+		ASTC_RGB_6x6,
+		// Token: 0x0400049C RID: 1180
+		ASTC_RGB_8x8,
+		// Token: 0x0400049D RID: 1181
+		ASTC_RGB_10x10,
+		// Token: 0x0400049E RID: 1182
+		ASTC_RGB_12x12,
+		// Token: 0x0400049F RID: 1183
+		ASTC_RGBA_4x4,
+		// Token: 0x040004A0 RID: 1184
+		ASTC_RGBA_5x5,
+		// Token: 0x040004A1 RID: 1185
+		ASTC_RGBA_6x6,
+		// Token: 0x040004A2 RID: 1186
+		ASTC_RGBA_8x8,
+		// Token: 0x040004A3 RID: 1187
+		ASTC_RGBA_10x10,
+		// Token: 0x040004A4 RID: 1188
+		ASTC_RGBA_12x12,
+		// Token: 0x040004A5 RID: 1189
+		[Obsolete("Use PVRTC_RGB2")]
+		PVRTC_2BPP_RGB = 30,
+		// Token: 0x040004A6 RID: 1190
+		[Obsolete("Use PVRTC_RGBA2")]
+		PVRTC_2BPP_RGBA,
+		// Token: 0x040004A7 RID: 1191
+		[Obsolete("Use PVRTC_RGB4")]
+		PVRTC_4BPP_RGB,
+		// Token: 0x040004A8 RID: 1192
+		[Obsolete("Use PVRTC_RGBA4")]
+		PVRTC_4BPP_RGBA
+	}
+}

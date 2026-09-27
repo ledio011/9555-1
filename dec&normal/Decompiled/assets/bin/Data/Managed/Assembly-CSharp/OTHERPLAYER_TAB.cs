@@ -1,0 +1,18 @@
+﻿using System;
+
+// Token: 0x02000964 RID: 2404
+public enum OTHERPLAYER_TAB
+{
+	// Token: 0x0400302A RID: 12330
+	INVILAD = -1,
+	// Token: 0x0400302B RID: 12331
+	PLAYERINFO_TAP,
+	// Token: 0x0400302C RID: 12332
+	TAB_1,
+	// Token: 0x0400302D RID: 12333
+	TAB_2,
+	// Token: 0x0400302E RID: 12334
+	TAB_3,
+	// Token: 0x0400302F RID: 12335
+	TAB_4
+}

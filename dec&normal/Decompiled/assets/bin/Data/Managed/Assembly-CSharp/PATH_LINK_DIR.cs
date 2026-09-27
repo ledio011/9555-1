@@ -1,0 +1,14 @@
+﻿using System;
+
+// Token: 0x020001C8 RID: 456
+public enum PATH_LINK_DIR
+{
+	// Token: 0x040013DE RID: 5086
+	FORWARD,
+	// Token: 0x040013DF RID: 5087
+	BACKWARD,
+	// Token: 0x040013E0 RID: 5088
+	LEFT,
+	// Token: 0x040013E1 RID: 5089
+	RIGHT
+}

@@ -1,0 +1,3 @@
+,ID,路径点内序号,坐标X（单位厘米）,Z（单位厘米）
+,STRING,INT,INT,INT
+*,ID,PointIndex,PosX,PosZ

@@ -1,0 +1,10 @@
+﻿using System;
+
+// Token: 0x02000983 RID: 2435
+public enum REBIRTH_TYPE
+{
+	// Token: 0x040031A9 RID: 12713
+	MAIN_CITY_REBIRTH,
+	// Token: 0x040031AA RID: 12714
+	CURRENT_MAP_REBIRTH
+}

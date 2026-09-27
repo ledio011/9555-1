@@ -1,0 +1,16 @@
+,配置对应的Key,名称备注(不导出),数值类型,内容
+,STRING,,INT,STRING
+*,Key,UnExport,Type,ContentValue
+*,badge_parm_1,徽章套装效果,0,0.02
+*,badge_parm_2,徽章套装效果,0,0.02
+*,badge_parm_3,徽章套装效果,0,0.02
+*,badge_attribute_1,徽章套装效果,1,1012
+*,badge_attribute_2,徽章套装效果,1,1013
+*,badge_attribute_3,徽章套装效果,1,1009
+*,MissionPosLevel,[废弃]任务界面按钮位置,0,40
+*,LocalDropMaxMoeny,单机场景掉钱上限,1,1050000
+*,badgeLv1_gold,徽章自动合成消耗(未开发),1,80
+*,badgeLv1_diamond,徽章自动合成消耗(未开发),1,8
+*,pkModeCDTime,战斗模式切换CD,0,120
+*,HangupMissionCost,刷新挂机任务消耗金条,1,20
+*,LocalDropMaxExp,单机场景掉经验上限,1,100000

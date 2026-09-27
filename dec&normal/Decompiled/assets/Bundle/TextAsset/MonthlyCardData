@@ -1,0 +1,4 @@
+,ID,奖励ID,最多展示4个掉落物品,,,,,,,,,,,,,,,,,,
+,STRING,STRING,INT,STRING,INT,INT,STRING,STRING,INT,STRING,STRING,INT,STRING,STRING,INT,STRING,STRING,STRING,STRING,STRING,STRING
+*,ID,ItemID1,ItemCount1,Quality1,ItemID2,ItemCount2,Quality2,ItemID3,ItemCount3,Quality3,ItemID4,ItemCount4,Quality4,ItemID5,ItemCount5,Quality5,ProductId,Dollor,BGName,FlagName,PricePicName
+*,1,1003,50,3,3001,10,3,4001,6,3,9603,3,3,,,,vip_01_499,4.99,FuBenTuBiao_DANCE,CZ_yueKaTu,CZ_$4.99

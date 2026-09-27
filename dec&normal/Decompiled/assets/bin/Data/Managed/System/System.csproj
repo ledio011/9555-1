@@ -1,0 +1,186 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{E77B21DF-9336-4E66-B20B-96AD7530AFEE}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <RootNamespace>System</RootNamespace>
+    <AssemblyName>System</AssemblyName>
+    <TargetFrameworkVersion>v2.0</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup />
+  <ItemGroup>
+    <AppDesigner Include="Properties\" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Collections\Generic\Stack.cs" />
+    <Compile Include="Collections\Specialized\ProcessStringDictionary.cs" />
+    <Compile Include="Collections\Specialized\StringDictionary.cs" />
+    <Compile Include="ComponentModel\AsyncCompletedEventArgs.cs" />
+    <Compile Include="ComponentModel\AsyncOperation.cs" />
+    <Compile Include="ComponentModel\BackgroundWorker.cs" />
+    <Compile Include="ComponentModel\BrowsableAttribute.cs" />
+    <Compile Include="ComponentModel\Component.cs" />
+    <Compile Include="ComponentModel\DefaultEventAttribute.cs" />
+    <Compile Include="ComponentModel\DefaultPropertyAttribute.cs" />
+    <Compile Include="ComponentModel\DefaultValueAttribute.cs" />
+    <Compile Include="ComponentModel\DescriptionAttribute.cs" />
+    <Compile Include="ComponentModel\DesignerAttribute.cs" />
+    <Compile Include="ComponentModel\DesignerCategoryAttribute.cs" />
+    <Compile Include="ComponentModel\DesignerSerializationVisibility.cs" />
+    <Compile Include="ComponentModel\DesignerSerializationVisibilityAttribute.cs" />
+    <Compile Include="ComponentModel\Design\IDesigner.cs" />
+    <Compile Include="ComponentModel\DoWorkEventArgs.cs" />
+    <Compile Include="ComponentModel\DoWorkEventHandler.cs" />
+    <Compile Include="ComponentModel\EditorAttribute.cs" />
+    <Compile Include="ComponentModel\EditorBrowsableAttribute.cs" />
+    <Compile Include="ComponentModel\EditorBrowsableState.cs" />
+    <Compile Include="ComponentModel\EventHandlerList.cs" />
+    <Compile Include="ComponentModel\ExpandableObjectConverter.cs" />
+    <Compile Include="ComponentModel\IComponent.cs" />
+    <Compile Include="ComponentModel\IContainer.cs" />
+    <Compile Include="ComponentModel\ISite.cs" />
+    <Compile Include="ComponentModel\ISynchronizeInvoke.cs" />
+    <Compile Include="ComponentModel\ListEntry.cs" />
+    <Compile Include="ComponentModel\NotifyParentPropertyAttribute.cs" />
+    <Compile Include="ComponentModel\ProgressChangedEventArgs.cs" />
+    <Compile Include="ComponentModel\ProgressChangedEventHandler.cs" />
+    <Compile Include="ComponentModel\RecommendedAsConfigurableAttribute.cs" />
+    <Compile Include="ComponentModel\RunWorkerCompletedEventArgs.cs" />
+    <Compile Include="ComponentModel\RunWorkerCompletedEventHandler.cs" />
+    <Compile Include="ComponentModel\TypeConverter.cs" />
+    <Compile Include="ComponentModel\TypeConverterAttribute.cs" />
+    <Compile Include="ComponentModel\Win32Exception.cs" />
+    <Compile Include="DefaultUriParser.cs" />
+    <Compile Include="Diagnostics\DataReceivedEventArgs.cs" />
+    <Compile Include="Diagnostics\DataReceivedEventHandler.cs" />
+    <Compile Include="Diagnostics\FileVersionInfo.cs" />
+    <Compile Include="Diagnostics\MonitoringDescriptionAttribute.cs" />
+    <Compile Include="Diagnostics\Process.cs" />
+    <Compile Include="Diagnostics\ProcessModule.cs" />
+    <Compile Include="Diagnostics\ProcessModuleCollection.cs" />
+    <Compile Include="Diagnostics\ProcessModuleCollectionBase.cs" />
+    <Compile Include="Diagnostics\ProcessStartInfo.cs" />
+    <Compile Include="Diagnostics\ProcessWindowStyle.cs" />
+    <Compile Include="GenericUriParser.cs" />
+    <Compile Include="IO\MonoIO.cs" />
+    <Compile Include="IO\MonoIOError.cs" />
+    <Compile Include="IO\MonoSyncFileStream.cs" />
+    <Compile Include="Locale.cs" />
+    <Compile Include="MonoTODOAttribute.cs" />
+    <Compile Include="Net\Dns.cs" />
+    <Compile Include="Net\EndPoint.cs" />
+    <Compile Include="Net\IPAddress.cs" />
+    <Compile Include="Net\IPEndPoint.cs" />
+    <Compile Include="Net\IPHostEntry.cs" />
+    <Compile Include="Net\IPv6Address.cs" />
+    <Compile Include="Net\NetworkInformation\IPStatus.cs" />
+    <Compile Include="Net\NetworkInformation\Ping.cs" />
+    <Compile Include="Net\NetworkInformation\PingCompletedEventArgs.cs" />
+    <Compile Include="Net\NetworkInformation\PingCompletedEventHandler.cs" />
+    <Compile Include="Net\NetworkInformation\PingOptions.cs" />
+    <Compile Include="Net\NetworkInformation\PingReply.cs" />
+    <Compile Include="Net\SocketAddress.cs" />
+    <Compile Include="Net\Sockets\AddressFamily.cs" />
+    <Compile Include="Net\Sockets\LingerOption.cs" />
+    <Compile Include="Net\Sockets\MulticastOption.cs" />
+    <Compile Include="Net\Sockets\ProtocolType.cs" />
+    <Compile Include="Net\Sockets\SelectMode.cs" />
+    <Compile Include="Net\Sockets\Socket.cs" />
+    <Compile Include="Net\Sockets\SocketError.cs" />
+    <Compile Include="Net\Sockets\SocketException.cs" />
+    <Compile Include="Net\Sockets\SocketFlags.cs" />
+    <Compile Include="Net\Sockets\SocketOptionLevel.cs" />
+    <Compile Include="Net\Sockets\SocketOptionName.cs" />
+    <Compile Include="Net\Sockets\SocketShutdown.cs" />
+    <Compile Include="Net\Sockets\SocketType.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="Text\RegularExpressions\BaseMachine.cs" />
+    <Compile Include="Text\RegularExpressions\Capture.cs" />
+    <Compile Include="Text\RegularExpressions\CaptureCollection.cs" />
+    <Compile Include="Text\RegularExpressions\Category.cs" />
+    <Compile Include="Text\RegularExpressions\CategoryUtils.cs" />
+    <Compile Include="Text\RegularExpressions\FactoryCache.cs" />
+    <Compile Include="Text\RegularExpressions\Group.cs" />
+    <Compile Include="Text\RegularExpressions\GroupCollection.cs" />
+    <Compile Include="Text\RegularExpressions\ICompiler.cs" />
+    <Compile Include="Text\RegularExpressions\IMachine.cs" />
+    <Compile Include="Text\RegularExpressions\IMachineFactory.cs" />
+    <Compile Include="Text\RegularExpressions\Interpreter.cs" />
+    <Compile Include="Text\RegularExpressions\InterpreterFactory.cs" />
+    <Compile Include="Text\RegularExpressions\Interval.cs" />
+    <Compile Include="Text\RegularExpressions\IntervalCollection.cs" />
+    <Compile Include="Text\RegularExpressions\LinkRef.cs" />
+    <Compile Include="Text\RegularExpressions\LinkStack.cs" />
+    <Compile Include="Text\RegularExpressions\Mark.cs" />
+    <Compile Include="Text\RegularExpressions\Match.cs" />
+    <Compile Include="Text\RegularExpressions\MatchEvaluator.cs" />
+    <Compile Include="Text\RegularExpressions\MRUList.cs" />
+    <Compile Include="Text\RegularExpressions\OpCode.cs" />
+    <Compile Include="Text\RegularExpressions\OpFlags.cs" />
+    <Compile Include="Text\RegularExpressions\PatternCompiler.cs" />
+    <Compile Include="Text\RegularExpressions\Position.cs" />
+    <Compile Include="Text\RegularExpressions\QuickSearch.cs" />
+    <Compile Include="Text\RegularExpressions\Regex.cs" />
+    <Compile Include="Text\RegularExpressions\RegexOptions.cs" />
+    <Compile Include="Text\RegularExpressions\ReplacementEvaluator.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\Alternation.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\AnchorInfo.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\Assertion.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\BackslashNumber.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\BalancingGroup.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\CaptureAssertion.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\CapturingGroup.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\CharacterClass.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\CompositeExpression.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\Expression.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\ExpressionAssertion.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\ExpressionCollection.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\Group.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\Literal.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\NonBacktrackingGroup.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\Parser.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\PositionAssertion.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\Reference.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\RegularExpression.cs" />
+    <Compile Include="Text\RegularExpressions\Syntax\Repetition.cs" />
+    <Compile Include="Uri.cs" />
+    <Compile Include="UriFormatException.cs" />
+    <Compile Include="UriHostNameType.cs" />
+    <Compile Include="UriKind.cs" />
+    <Compile Include="UriParser.cs" />
+    <Compile Include="UriPartial.cs" />
+    <Compile Include="UriTypeConverter.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="System.csproj">
+      <Project>{E77B21DF-9336-4E66-B20B-96AD7530AFEE}</Project>
+      <Name>System</Name>
+    </ProjectReference>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>

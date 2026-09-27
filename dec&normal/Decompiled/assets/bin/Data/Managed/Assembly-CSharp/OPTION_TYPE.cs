@@ -1,0 +1,18 @@
+﻿using System;
+
+// Token: 0x0200019A RID: 410
+public enum OPTION_TYPE
+{
+	// Token: 0x04001191 RID: 4497
+	STORAGE = 1,
+	// Token: 0x04001192 RID: 4498
+	WEAPONSHOP,
+	// Token: 0x04001193 RID: 4499
+	ENTERCOPY,
+	// Token: 0x04001194 RID: 4500
+	SEX_NPC_MAN,
+	// Token: 0x04001195 RID: 4501
+	SEX_NPC_WOMEN,
+	// Token: 0x04001196 RID: 4502
+	OPEN_SHOP
+}

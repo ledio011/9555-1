@@ -1,0 +1,20 @@
+﻿using System;
+
+// Token: 0x02000109 RID: 265
+public enum EQUIP_BACKPACK_TYPE
+{
+	// Token: 0x04000883 RID: 2179
+	WEAPON,
+	// Token: 0x04000884 RID: 2180
+	HEAD,
+	// Token: 0x04000885 RID: 2181
+	BODY,
+	// Token: 0x04000886 RID: 2182
+	LEG,
+	// Token: 0x04000887 RID: 2183
+	BELT,
+	// Token: 0x04000888 RID: 2184
+	NECKLACE,
+	// Token: 0x04000889 RID: 2185
+	COUNT
+}

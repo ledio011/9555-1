@@ -1,0 +1,345 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{E3B8A850-0A49-4648-B453-1B9EB511FF6D}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <RootNamespace>UnityEngine</RootNamespace>
+    <AssemblyName>UnityEngine</AssemblyName>
+    <TargetFrameworkVersion>v2.0</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System">
+      <HintPath>..\..\atg\auto-theft-gangsters-1-19\assets\bin\Data\Managed\System.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <AppDesigner Include="Properties\" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="AddComponentMenu.cs" />
+    <Compile Include="AndroidJavaClass.cs" />
+    <Compile Include="AndroidJavaException.cs" />
+    <Compile Include="AndroidJavaObject.cs" />
+    <Compile Include="AndroidJavaProxy.cs" />
+    <Compile Include="AndroidJavaRunnable.cs" />
+    <Compile Include="AndroidJavaRunnableProxy.cs" />
+    <Compile Include="AndroidJNI.cs" />
+    <Compile Include="AndroidJNIHelper.cs" />
+    <Compile Include="AndroidJNISafe.cs" />
+    <Compile Include="AndroidReflection.cs" />
+    <Compile Include="Animation.cs" />
+    <Compile Include="AnimationClip.cs" />
+    <Compile Include="AnimationCullingType.cs" />
+    <Compile Include="AnimationCurve.cs" />
+    <Compile Include="AnimationEvent.cs" />
+    <Compile Include="AnimationPlayMode.cs" />
+    <Compile Include="AnimationState.cs" />
+    <Compile Include="Animator.cs" />
+    <Compile Include="AnimatorStateInfo.cs" />
+    <Compile Include="AnimatorTransitionInfo.cs" />
+    <Compile Include="Application.cs" />
+    <Compile Include="AssemblyIsEditorAssembly.cs" />
+    <Compile Include="AssetBundle.cs" />
+    <Compile Include="AssetBundleCreateRequest.cs" />
+    <Compile Include="AssetBundleRequest.cs" />
+    <Compile Include="AsyncOperation.cs" />
+    <Compile Include="AttributeHelperEngine.cs" />
+    <Compile Include="AudioClip.cs" />
+    <Compile Include="AudioListener.cs" />
+    <Compile Include="AudioSource.cs" />
+    <Compile Include="Behaviour.cs" />
+    <Compile Include="BoneWeight.cs" />
+    <Compile Include="Bounds.cs" />
+    <Compile Include="BoxCollider.cs" />
+    <Compile Include="CacheIndex.cs" />
+    <Compile Include="Camera.cs" />
+    <Compile Include="CameraClearFlags.cs" />
+    <Compile Include="CanConvertToFlashAttribute.cs" />
+    <Compile Include="Canvas.cs" />
+    <Compile Include="CanvasGroup.cs" />
+    <Compile Include="CanvasRenderer.cs" />
+    <Compile Include="CapsuleCollider.cs" />
+    <Compile Include="CharacterController.cs" />
+    <Compile Include="CharacterInfo.cs" />
+    <Compile Include="CharacterJoint.cs" />
+    <Compile Include="ClassLibraryInitializer.cs" />
+    <Compile Include="Collider.cs" />
+    <Compile Include="Collider2D.cs" />
+    <Compile Include="Collision.cs" />
+    <Compile Include="CollisionFlags.cs" />
+    <Compile Include="Color.cs" />
+    <Compile Include="Color32.cs" />
+    <Compile Include="ColorSpace.cs" />
+    <Compile Include="CombineInstance.cs" />
+    <Compile Include="Compass.cs" />
+    <Compile Include="Component.cs" />
+    <Compile Include="ConstantForce.cs" />
+    <Compile Include="ContactPoint.cs" />
+    <Compile Include="ContextMenu.cs" />
+    <Compile Include="ControllerColliderHit.cs" />
+    <Compile Include="Coroutine.cs" />
+    <Compile Include="Cubemap.cs" />
+    <Compile Include="Debug.cs" />
+    <Compile Include="DepthTextureMode.cs" />
+    <Compile Include="DisallowMultipleComponent.cs" />
+    <Compile Include="Display.cs" />
+    <Compile Include="DrivenRectTransformTracker.cs" />
+    <Compile Include="DrivenTransformProperties.cs" />
+    <Compile Include="Event.cs" />
+    <Compile Include="EventModifiers.cs" />
+    <Compile Include="Events\ArgumentCache.cs" />
+    <Compile Include="Events\BaseInvokableCall.cs" />
+    <Compile Include="Events\CachedInvokableCall.cs" />
+    <Compile Include="Events\InvokableCall.2.cs" />
+    <Compile Include="Events\InvokableCall.cs" />
+    <Compile Include="Events\InvokableCallList.cs" />
+    <Compile Include="Events\PersistentCall.cs" />
+    <Compile Include="Events\PersistentCallGroup.cs" />
+    <Compile Include="Events\PersistentListenerMode.cs" />
+    <Compile Include="Events\UnityAction.2.cs" />
+    <Compile Include="Events\UnityAction.cs" />
+    <Compile Include="Events\UnityEvent.2.cs" />
+    <Compile Include="Events\UnityEvent.cs" />
+    <Compile Include="Events\UnityEventBase.cs" />
+    <Compile Include="Events\UnityEventCallState.cs" />
+    <Compile Include="EventType.cs" />
+    <Compile Include="ExecuteInEditMode.cs" />
+    <Compile Include="ExitGUIException.cs" />
+    <Compile Include="FilterMode.cs" />
+    <Compile Include="Flare.cs" />
+    <Compile Include="FocusType.cs" />
+    <Compile Include="Font.cs" />
+    <Compile Include="FontStyle.cs" />
+    <Compile Include="ForceMode.cs" />
+    <Compile Include="GameObject.cs" />
+    <Compile Include="Gizmos.cs" />
+    <Compile Include="GL.cs" />
+    <Compile Include="Gradient.cs" />
+    <Compile Include="GradientAlphaKey.cs" />
+    <Compile Include="GradientColorKey.cs" />
+    <Compile Include="Graphics.cs" />
+    <Compile Include="GUI.cs" />
+    <Compile Include="GUIClip.cs" />
+    <Compile Include="GUIContent.cs" />
+    <Compile Include="GUIElement.cs" />
+    <Compile Include="GUILayer.cs" />
+    <Compile Include="GUILayout.cs" />
+    <Compile Include="GUILayoutEntry.cs" />
+    <Compile Include="GUILayoutGroup.cs" />
+    <Compile Include="GUILayoutOption.cs" />
+    <Compile Include="GUILayoutUtility.cs" />
+    <Compile Include="GUIScrollGroup.cs" />
+    <Compile Include="GUISettings.cs" />
+    <Compile Include="GUISkin.cs" />
+    <Compile Include="GUIStateObjects.cs" />
+    <Compile Include="GUIStyle.cs" />
+    <Compile Include="GUIStyleState.cs" />
+    <Compile Include="GUIText.cs" />
+    <Compile Include="GUITexture.cs" />
+    <Compile Include="GUIUtility.cs" />
+    <Compile Include="GUIWordWrapSizer.cs" />
+    <Compile Include="Gyroscope.cs" />
+    <Compile Include="HideFlags.cs" />
+    <Compile Include="HideInInspector.cs" />
+    <Compile Include="HingeJoint.cs" />
+    <Compile Include="HorizontalWrapMode.cs" />
+    <Compile Include="HumanBone.cs" />
+    <Compile Include="HumanLimit.cs" />
+    <Compile Include="ICanvasRaycastFilter.cs" />
+    <Compile Include="ImageEffectOpaque.cs" />
+    <Compile Include="ImageEffectTransformsToLDR.cs" />
+    <Compile Include="ImagePosition.cs" />
+    <Compile Include="IMECompositionMode.cs" />
+    <Compile Include="Input.cs" />
+    <Compile Include="InternalDrawTextureArguments.cs" />
+    <Compile Include="InternalStaticBatchingUtility.cs" />
+    <Compile Include="Internal\DefaultValueAttribute.cs" />
+    <Compile Include="Internal\ExcludeFromDocsAttribute.cs" />
+    <Compile Include="Internal_DrawArguments.cs" />
+    <Compile Include="Internal_DrawWithTextSelectionArguments.cs" />
+    <Compile Include="ISerializationCallbackReceiver.cs" />
+    <Compile Include="Joint.cs" />
+    <Compile Include="jvalue.cs" />
+    <Compile Include="KeyCode.cs" />
+    <Compile Include="Keyframe.cs" />
+    <Compile Include="LayerMask.cs" />
+    <Compile Include="LensFlare.cs" />
+    <Compile Include="Light.cs" />
+    <Compile Include="LightmapData.cs" />
+    <Compile Include="LightmapSettings.cs" />
+    <Compile Include="LightProbeGroup.cs" />
+    <Compile Include="LightProbes.cs" />
+    <Compile Include="LightRenderMode.cs" />
+    <Compile Include="LightType.cs" />
+    <Compile Include="LineRenderer.cs" />
+    <Compile Include="LocationService.cs" />
+    <Compile Include="LODGroup.cs" />
+    <Compile Include="LogType.cs" />
+    <Compile Include="Material.cs" />
+    <Compile Include="Mathf.cs" />
+    <Compile Include="Matrix4x4.cs" />
+    <Compile Include="Mesh.cs" />
+    <Compile Include="MeshCollider.cs" />
+    <Compile Include="MeshFilter.cs" />
+    <Compile Include="MeshRenderer.cs" />
+    <Compile Include="MeshSubsetCombineUtility.cs" />
+    <Compile Include="MeshTopology.cs" />
+    <Compile Include="MonoBehaviour.cs" />
+    <Compile Include="Motion.cs" />
+    <Compile Include="MultilineAttribute.cs" />
+    <Compile Include="NavMesh.cs" />
+    <Compile Include="NavMeshAgent.cs" />
+    <Compile Include="NavMeshHit.cs" />
+    <Compile Include="NavMeshPath.cs" />
+    <Compile Include="NetworkReachability.cs" />
+    <Compile Include="NetworkView.cs" />
+    <Compile Include="NotConvertedAttribute.cs" />
+    <Compile Include="NotRenamedAttribute.cs" />
+    <Compile Include="Object.cs" />
+    <Compile Include="ObstacleAvoidanceType.cs" />
+    <Compile Include="OcclusionArea.cs" />
+    <Compile Include="Particle.cs" />
+    <Compile Include="ParticleEmitter.cs" />
+    <Compile Include="ParticleSystem.cs" />
+    <Compile Include="ParticleSystemRenderer.cs" />
+    <Compile Include="PhysicMaterial.cs" />
+    <Compile Include="Physics.cs" />
+    <Compile Include="Physics2D.cs" />
+    <Compile Include="Plane.cs" />
+    <Compile Include="PlayerPrefs.cs" />
+    <Compile Include="PlayerPrefsException.cs" />
+    <Compile Include="PlayMode.cs" />
+    <Compile Include="PrimitiveType.cs" />
+    <Compile Include="Projector.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="PropertyAttribute.cs" />
+    <Compile Include="QualitySettings.cs" />
+    <Compile Include="Quaternion.cs" />
+    <Compile Include="QueueMode.cs" />
+    <Compile Include="Random.cs" />
+    <Compile Include="RangeAttribute.cs" />
+    <Compile Include="Ray.cs" />
+    <Compile Include="RaycastHit.cs" />
+    <Compile Include="RaycastHit2D.cs" />
+    <Compile Include="Rect.cs" />
+    <Compile Include="RectOffset.cs" />
+    <Compile Include="RectTransform.cs" />
+    <Compile Include="RectTransformUtility.cs" />
+    <Compile Include="ReferenceData.cs" />
+    <Compile Include="RenderBuffer.cs" />
+    <Compile Include="Renderer.cs" />
+    <Compile Include="RenderingPath.cs" />
+    <Compile Include="RenderMode.cs" />
+    <Compile Include="RenderSettings.cs" />
+    <Compile Include="RenderTexture.cs" />
+    <Compile Include="RenderTextureFormat.cs" />
+    <Compile Include="RenderTextureReadWrite.cs" />
+    <Compile Include="RequireComponent.cs" />
+    <Compile Include="Resolution.cs" />
+    <Compile Include="Resources.cs" />
+    <Compile Include="Rigidbody.cs" />
+    <Compile Include="Rigidbody2D.cs" />
+    <Compile Include="RuntimeAnimatorController.cs" />
+    <Compile Include="RuntimePlatform.cs" />
+    <Compile Include="ScaleMode.cs" />
+    <Compile Include="Screen.cs" />
+    <Compile Include="ScriptableObject.cs" />
+    <Compile Include="SelectionBaseAttribute.cs" />
+    <Compile Include="SendMessageOptions.cs" />
+    <Compile Include="SendMouseEvents.cs" />
+    <Compile Include="Serialization\FormerlySerializedAsAttribute.cs" />
+    <Compile Include="SerializeField.cs" />
+    <Compile Include="SerializePrivateVariables.cs" />
+    <Compile Include="SetupCoroutine.cs" />
+    <Compile Include="Shader.cs" />
+    <Compile Include="SkeletonBone.cs" />
+    <Compile Include="SkinnedMeshRenderer.cs" />
+    <Compile Include="SkinQuality.cs" />
+    <Compile Include="Skybox.cs" />
+    <Compile Include="SliderHandler.cs" />
+    <Compile Include="SliderState.cs" />
+    <Compile Include="SoftJointLimit.cs" />
+    <Compile Include="Space.cs" />
+    <Compile Include="SpaceAttribute.cs" />
+    <Compile Include="SphereCollider.cs" />
+    <Compile Include="Sprite.cs" />
+    <Compile Include="SpriteRenderer.cs" />
+    <Compile Include="Sprites\DataUtility.cs" />
+    <Compile Include="StackTraceUtility.cs" />
+    <Compile Include="StaticBatchingUtility.cs" />
+    <Compile Include="SystemClock.cs" />
+    <Compile Include="SystemInfo.cs" />
+    <Compile Include="SystemLanguage.cs" />
+    <Compile Include="TextAnchor.cs" />
+    <Compile Include="TextAreaAttribute.cs" />
+    <Compile Include="TextAsset.cs" />
+    <Compile Include="TextEditor.cs" />
+    <Compile Include="TextGenerationSettings.cs" />
+    <Compile Include="TextGenerator.cs" />
+    <Compile Include="Texture.cs" />
+    <Compile Include="Texture2D.cs" />
+    <Compile Include="TextureFormat.cs" />
+    <Compile Include="TextureWrapMode.cs" />
+    <Compile Include="ThreadPriority.cs" />
+    <Compile Include="Time.cs" />
+    <Compile Include="TooltipAttribute.cs" />
+    <Compile Include="Touch.cs" />
+    <Compile Include="TouchPhase.cs" />
+    <Compile Include="TouchScreenKeyboard.cs" />
+    <Compile Include="TouchScreenKeyboardType.cs" />
+    <Compile Include="TouchScreenKeyboard_InternalConstructorHelperArguments.cs" />
+    <Compile Include="TrackedReference.cs" />
+    <Compile Include="TrailRenderer.cs" />
+    <Compile Include="Transform.cs" />
+    <Compile Include="TransparencySortMode.cs" />
+    <Compile Include="UICharInfo.cs" />
+    <Compile Include="UILineInfo.cs" />
+    <Compile Include="UIVertex.cs" />
+    <Compile Include="UnityEngineInternal\GenericStack.cs" />
+    <Compile Include="UnityEngineInternal\TypeInferenceRuleAttribute.cs" />
+    <Compile Include="UnityEngineInternal\TypeInferenceRules.cs" />
+    <Compile Include="UnityException.cs" />
+    <Compile Include="UnityLogWriter.cs" />
+    <Compile Include="UnityString.cs" />
+    <Compile Include="UserAuthorization.cs" />
+    <Compile Include="Vector2.cs" />
+    <Compile Include="Vector3.cs" />
+    <Compile Include="Vector4.cs" />
+    <Compile Include="VerticalWrapMode.cs" />
+    <Compile Include="WaitForEndOfFrame.cs" />
+    <Compile Include="WaitForFixedUpdate.cs" />
+    <Compile Include="WaitForSeconds.cs" />
+    <Compile Include="WrapMode.cs" />
+    <Compile Include="WrapperlessIcall.cs" />
+    <Compile Include="WritableAttribute.cs" />
+    <Compile Include="WWW.cs" />
+    <Compile Include="WWWForm.cs" />
+    <Compile Include="WWWTranscoder.cs" />
+    <Compile Include="YieldInstruction.cs" />
+    <Compile Include="_AndroidJNIHelper.cs" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>

@@ -1,0 +1,12 @@
+,ID,,Name1,Name2,显示开始等级,显示结束等级,
+,STRING,STRING,STRING,STRING,INT,INT,
+*,ID,ICON,Name1,Name2,StartLevel,EndLevel,Type
+*,1,CZ_zhuJieMianAnNiu_JiNeng,#{605001},#{605501},2,5,0
+*,2,CZ_paTa_PVE,#{605002},#{605502},5,7,1
+*,3,CZ_jingYanFuBen_PVE,#{605003},#{605503},7,11,1
+*,4,CZ_shengCun_PVP,#{605008},#{605504},11,13,1
+*,5,cz_baoLiJieQu_PVP,#{605005},#{605505},13,16,1
+*,6,CZ_gongHuiBOSS_PVE,#{605009},#{605511},16,18,1
+*,7,CZ_left_PVP,#{605004},#{605512},18,19,1
+*,8,CZ_zhuangBeiFuBen_PVE,#{605006},#{605513},19,21,1
+*,9,CZ_zhuJieMianAnNiu_QiangHua,#{605007},#{605514},21,24,0

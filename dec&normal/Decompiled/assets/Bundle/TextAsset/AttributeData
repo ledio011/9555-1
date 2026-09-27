@@ -1,0 +1,4 @@
+,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT,INT
+,等级,生命值,攻击力,命中,暴击,防御力,闪避,固定增伤,固定减伤,移动速度,生命值恢复速度,暴击增伤
+*,level,HP,ATK,HIT,CRI,DEF,EVA,EXD,EXR,MOV,REC,EXC
+,1,500,100,100,0,50,0,0,0,3,0,0

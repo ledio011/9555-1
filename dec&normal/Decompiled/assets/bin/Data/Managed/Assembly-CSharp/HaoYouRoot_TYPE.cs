@@ -1,0 +1,14 @@
+﻿using System;
+
+// Token: 0x020001E1 RID: 481
+public enum HaoYouRoot_TYPE
+{
+	// Token: 0x040014C0 RID: 5312
+	FRIEND_LIST,
+	// Token: 0x040014C1 RID: 5313
+	ENEMY_LIST,
+	// Token: 0x040014C2 RID: 5314
+	APPLY_FRIEND,
+	// Token: 0x040014C3 RID: 5315
+	MAIL_LIST
+}

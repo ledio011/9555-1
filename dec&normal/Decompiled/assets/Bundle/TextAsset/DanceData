@@ -1,0 +1,5 @@
+,任务编号,舞蹈价格,价格类型,使用类型,奖励倍数,动作名称
+,STRING,INT,INT,INT,INT,STRING
+*,ID,Price,PriceType,UseType,RewardScale,ActionName
+*,10001,0,0,0,100,tiaoWu_mianFei
+*,10002,500,1,0,200,tiaoWu_fuFei
