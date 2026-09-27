@@ -32,8 +32,27 @@ COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
 SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
 STREET_RACE_REWARD_BY_LEVEL = {} # level -> AdaptData _drop_bc ShowRewardData id
 ITEM_CONFIG = {} # itemId -> {type, function}
+SHOP_CONFIG = {} # shopId -> {shop_type, item_id, price_type, price, min_level, max_level}
+DAILY_ACTIVE_CONFIG = {} # actId -> {type, score, count}
+DAILY_ACTIVE_REWARDS = [] # list of {id, min_lv, max_lv, score, item_id, count}
+DAILY_MISSION_CONFIG = {} # mid -> {min_level, max_level}
+ONLINE_MISSION_CONFIG = {} # id -> {mid, min_level, max_level, star}
+BUFF_CONFIG = {} # buffId -> {name, type, attr_id, attr_val, attr_type}
+REFINE_CONFIG = {} # refineId -> {job, part, lv, cost_id, cost_num, money_type, money_cost, chance}
+LEVEL_REWARD_CONFIG = {} # id -> {target_lv, item_id, count}
+SIGNIN_WEEK_CONFIG = {} # day -> {job1: (item, count), job2: (item, count), job3: (item, count)}
+SIGNIN_MONTH_CONFIG = {} # day -> {item, count, price_type, price_cost}
+NPC_DIALOG_CONFIG = {} # dialogId -> {option_id, missions}
+NPC_OPTION_DIALOG_CONFIG = {} # optionId -> {option_type, option_param}
+CONSIGN_TAB_CONFIG = [] # list of {top_tab, item_type, sub_type}
+FIRST_BUY_CONFIG = {} # id -> {job1: (item, count), job2: (item, count), job3: (item, count), cash: count}
+GUILD_LEVEL_CONFIG = {} # lv -> {exp, max_player, donate_count}
+GUILD_SKILL_CONFIG = {} # skillId -> {skill_type, lv_limit, cost, attr_id, attr_val}
+ATTRIBUTE_CONFIG = {} # level -> {hp, atk, hit, cri, def_val, eva, exd, exr}
+EQUIP_DROP_CONFIG = {} # dropId -> {drop_num, stats: [(att_id, quality, value, weight)]}
 FUNCTION_DATA = {} # funcId -> {class, condition, is_download, first_open, unlock_type, side_mission}
 EQUIP_CONFIG = {} # equipId -> {name, lv, class, job, position, base_stat, base_val, model, ...}
+EQUIP_UPGRADE_CONFIG = {} # (part, lv) -> {cost_num, cost_cash}
 DOWNLOAD_REWARD_DATA = [] # list of (itemId, count, quality) tuples
 SKILL_UPGRADE_DATA = {} # level -> {price_type, price_value}
 RELIFE_DATA = [] # list of {min_count, max_count, use_count}
@@ -445,6 +464,323 @@ try:
                         'function': int(parts[11]) if parts[11].isdigit() else 0
                     }
         print(f"[ITEM CONFIG LOADED] items={len(ITEM_CONFIG)}")
+
+    # Load ShopData
+    shop_path = os.path.join(text_asset_root, "ShopData")
+    if os.path.exists(shop_path):
+        with open(shop_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 7 and parts[0] == "*" and parts[1].isdigit():
+                    sid = parts[1]
+                    SHOP_CONFIG[sid] = {
+                        'shop_type': int(parts[2]) if parts[2].isdigit() else 0,
+                        'item_id': parts[3],
+                        'price_type': int(parts[6]) if parts[6].isdigit() else 0,
+                        'price': int(parts[7]) if parts[7].isdigit() else 0,
+                        'min_level': int(parts[15]) if len(parts) > 15 and parts[15].isdigit() else 1,
+                        'max_level': int(parts[16]) if len(parts) > 16 and parts[16].isdigit() else 99
+                    }
+        print(f"[SHOP CONFIG LOADED] count={len(SHOP_CONFIG)}")
+
+    # Load DailyActiveData
+    dac_path = os.path.join(text_asset_root, "DailyActiveData")
+    if os.path.exists(dac_path):
+        with open(dac_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 7 and parts[0] == "*" and parts[1].isdigit():
+                    aid = parts[1]
+                    DAILY_ACTIVE_CONFIG[aid] = {
+                        'type': int(parts[2]) if parts[2].isdigit() else 0,
+                        'score': int(parts[6]) if parts[6].isdigit() else 0,
+                        'count': int(parts[7]) if parts[7].isdigit() else 0
+                    }
+        print(f"[DAILY ACTIVE CONFIG LOADED] count={len(DAILY_ACTIVE_CONFIG)}")
+
+    # Load DailyActiveRewardData
+    dar_path = os.path.join(text_asset_root, "DailyActiveRewardData")
+    if os.path.exists(dar_path):
+        with open(dar_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 6 and parts[0] == "*" and parts[1].isdigit():
+                    DAILY_ACTIVE_REWARDS.append({
+                        'id': int(parts[1]),
+                        'min_lv': int(parts[2]) if parts[2].isdigit() else 1,
+                        'max_lv': int(parts[3]) if parts[3].isdigit() else 99,
+                        'score': int(parts[4]) if parts[4].isdigit() else 0,
+                        'item_id': parts[5],
+                        'count': int(parts[6]) if parts[6].isdigit() else 1
+                    })
+        print(f"[DAILY ACTIVE REWARDS LOADED] count={len(DAILY_ACTIVE_REWARDS)}")
+
+    # Load DailyMissionData
+    dm_path = os.path.join(text_asset_root, "DailyMissionData")
+    if os.path.exists(dm_path):
+        with open(dm_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 3 and parts[0] == "*" and parts[1].isdigit():
+                    mid = parts[1]
+                    max_lv = int(parts[2]) if parts[2].isdigit() else 99
+                    min_lv = int(parts[3]) if parts[3].isdigit() else 0
+                    DAILY_MISSION_CONFIG[mid] = {'min_level': min_lv, 'max_level': max_lv}
+        print(f"[DAILY MISSION CONFIG LOADED] count={len(DAILY_MISSION_CONFIG)}")
+
+    # Load OnlineMissionData
+    om_path = os.path.join(text_asset_root, "OnlineMissionData")
+    if os.path.exists(om_path):
+        with open(om_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 5 and parts[0] == "*" and parts[1].isdigit():
+                    oid = parts[1]
+                    mid = parts[2]
+                    min_lv = int(parts[3]) if parts[3].isdigit() else 0
+                    max_lv = int(parts[4]) if parts[4].isdigit() else 99
+                    star = int(parts[5]) if parts[5].isdigit() else 1
+                    ONLINE_MISSION_CONFIG[oid] = {
+                        'mid': mid,
+                        'min_level': min_lv,
+                        'max_level': max_lv,
+                        'star': star
+                    }
+        print(f"[ONLINE MISSION CONFIG LOADED] count={len(ONLINE_MISSION_CONFIG)}")
+
+    # Load BuffInfoData
+    buff_path = os.path.join(text_asset_root, "BuffInfoData")
+    if os.path.exists(buff_path):
+        with open(buff_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 11 and parts[0] == "*" and parts[1].isdigit():
+                    bid = parts[1]
+                    BUFF_CONFIG[bid] = {
+                        'name': parts[2],
+                        'type': int(parts[8]) if parts[8].isdigit() else 0,
+                        'attr_id': int(parts[9]) if parts[9].isdigit() else 0,
+                        'attr_val': int(parts[10]) if parts[10].isdigit() else 0,
+                        'attr_type': int(parts[11]) if parts[11].isdigit() else 0
+                    }
+        print(f"[BUFF CONFIG LOADED] count={len(BUFF_CONFIG)}")
+
+    # Load RefineData
+    refine_path = os.path.join(text_asset_root, "RefineData")
+    if os.path.exists(refine_path):
+        with open(refine_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 21 and parts[0] == "*" and parts[1].isdigit():
+                    rid = parts[1]
+                    REFINE_CONFIG[rid] = {
+                        'job': int(parts[2]) if parts[2].isdigit() else 0,
+                        'part': int(parts[3]) if parts[3].isdigit() else 0,
+                        'lv': int(parts[4]) if parts[4].isdigit() else 0,
+                        'cost_id': parts[13],
+                        'cost_num': int(parts[14]) if parts[14].isdigit() else 0,
+                        'money_type': int(parts[17]) if parts[17].isdigit() else 0,
+                        'money_cost': int(parts[18]) if parts[18].isdigit() else 0,
+                        'chance': int(parts[21]) if parts[21].isdigit() else 100
+                    }
+        print(f"[REFINE CONFIG LOADED] count={len(REFINE_CONFIG)}")
+
+    # Load LevelRewardData
+    lrd_path = os.path.join(text_asset_root, "LevelRewardData")
+    if os.path.exists(lrd_path):
+        with open(lrd_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 4 and parts[0] == "*" and parts[1].isdigit():
+                    lrid = parts[1]
+                    LEVEL_REWARD_CONFIG[lrid] = {
+                        'target_lv': int(parts[2]) if parts[2].isdigit() else 1,
+                        'item_id': parts[3],
+                        'count': int(parts[4]) if parts[4].isdigit() else 1
+                    }
+        print(f"[LEVEL REWARD CONFIG LOADED] count={len(LEVEL_REWARD_CONFIG)}")
+
+    # Load SignInWeekData
+    siw_path = os.path.join(text_asset_root, "SignInWeekData")
+    if os.path.exists(siw_path):
+        with open(siw_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 11 and parts[0] == "*" and parts[1].isdigit():
+                    day = int(parts[1])
+                    SIGNIN_WEEK_CONFIG[day] = {
+                        1: (parts[2], int(parts[3]) if parts[3].isdigit() else 1),
+                        2: (parts[6], int(parts[7]) if parts[7].isdigit() else 1),
+                        3: (parts[10], int(parts[11]) if parts[11].isdigit() else 1)
+                    }
+        print(f"[SIGNIN WEEK CONFIG LOADED] days={len(SIGNIN_WEEK_CONFIG)}")
+
+    # Load SignInMonthData
+    sim_path = os.path.join(text_asset_root, "SignInMonthData")
+    if os.path.exists(sim_path):
+        with open(sim_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 5 and parts[0] == "*" and parts[1].isdigit():
+                    day = int(parts[1])
+                    SIGNIN_MONTH_CONFIG[day] = {
+                        'item': parts[2],
+                        'count': int(parts[3]) if parts[3].isdigit() else 1,
+                        'price_type': int(parts[4]) if parts[4].isdigit() else 1,
+                        'price_cost': int(parts[5]) if parts[5].isdigit() else 0
+                    }
+        print(f"[SIGNIN MONTH CONFIG LOADED] days={len(SIGNIN_MONTH_CONFIG)}")
+
+    # Load EquipmentUpgradeData
+    equ_path = os.path.join(text_asset_root, "EquipmentUpgradeData")
+    if os.path.exists(equ_path):
+        with open(equ_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 18 and parts[0] == "*" and parts[1].isdigit():
+                    part_id = int(parts[1])
+                    lv = int(parts[2]) if parts[2].isdigit() else 1
+                    cost_num = int(parts[16]) if parts[16].isdigit() else 0
+                    cost_cash = int(parts[18]) if parts[18].isdigit() else 0
+                    EQUIP_UPGRADE_CONFIG[(part_id, lv)] = {
+                        'cost_num': cost_num,
+                        'cost_cash': cost_cash
+                    }
+        print(f"[EQUIP UPGRADE CONFIG LOADED] count={len(EQUIP_UPGRADE_CONFIG)}")
+
+    # Load NPCDialogData
+    npcd_path = os.path.join(text_asset_root, "NPCDialogData")
+    if os.path.exists(npcd_path):
+        with open(npcd_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 6 and parts[0] == "*" and parts[1].isdigit():
+                    did = parts[1]
+                    option_id = parts[4]
+                    missions = [m.strip() for m in parts[6].split(";") if m.strip()]
+                    NPC_DIALOG_CONFIG[did] = {
+                        'option_id': option_id,
+                        'missions': missions
+                    }
+        print(f"[NPC DIALOG CONFIG LOADED] count={len(NPC_DIALOG_CONFIG)}")
+
+    # Load NPCOptionDialogData
+    npco_path = os.path.join(text_asset_root, "NPCOptionDialogData")
+    if os.path.exists(npco_path):
+        with open(npco_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 7 and parts[0] == "*" and parts[1].isdigit():
+                    opid = parts[1]
+                    optype = int(parts[6]) if parts[6].lstrip('-').isdigit() else -1
+                    opparam = parts[7]
+                    NPC_OPTION_DIALOG_CONFIG[opid] = {
+                        'option_type': optype,
+                        'option_param': opparam
+                    }
+        print(f"[NPC OPTION DIALOG CONFIG LOADED] count={len(NPC_OPTION_DIALOG_CONFIG)}")
+
+    # Load ConsignBuyTabData
+    cbt_path = os.path.join(text_asset_root, "ConsignBuyTabData")
+    if os.path.exists(cbt_path):
+        with open(cbt_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 4 and parts[0] == "*" and parts[1].isdigit():
+                    CONSIGN_TAB_CONFIG.append({
+                        'top_tab': int(parts[1]),
+                        'item_type': int(parts[3]) if parts[3].isdigit() else 0,
+                        'sub_type': int(parts[4]) if parts[4].isdigit() else 0
+                    })
+        print(f"[CONSIGN TAB CONFIG LOADED] count={len(CONSIGN_TAB_CONFIG)}")
+
+    # Load FirstBuyData
+    fb_path = os.path.join(text_asset_root, "FirstBuyData")
+    if os.path.exists(fb_path):
+        with open(fb_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 15 and parts[0] == "*" and parts[1].isdigit():
+                    fbid = parts[1]
+                    FIRST_BUY_CONFIG[fbid] = {
+                        1: (parts[2], int(parts[3]) if parts[3].isdigit() else 1),
+                        2: (parts[6], int(parts[7]) if parts[7].isdigit() else 1),
+                        3: (parts[10], int(parts[11]) if parts[11].isdigit() else 1),
+                        'cash': int(parts[15]) if parts[15].isdigit() else 0
+                    }
+        print(f"[FIRST BUY CONFIG LOADED] count={len(FIRST_BUY_CONFIG)}")
+
+    # Load GuildLevelData
+    glv_path = os.path.join(text_asset_root, "GuildLevelData")
+    if os.path.exists(glv_path):
+        with open(glv_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 3 and parts[0] == "*" and parts[1].isdigit():
+                    lv = int(parts[1])
+                    GUILD_LEVEL_CONFIG[lv] = {
+                        'exp': int(parts[2]) if parts[2].isdigit() else 0,
+                        'max_player': int(parts[3]) if parts[3].isdigit() else 30,
+                        'donate_count': int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 10
+                    }
+        print(f"[GUILD LEVEL CONFIG LOADED] levels={len(GUILD_LEVEL_CONFIG)}")
+
+    # Load GuildSkillData
+    gsk_path = os.path.join(text_asset_root, "GuildSkillData")
+    if os.path.exists(gsk_path):
+        with open(gsk_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 8 and parts[0] == "*" and parts[3].isdigit():
+                    skid = parts[3]
+                    GUILD_SKILL_CONFIG[skid] = {
+                        'skill_type': int(parts[1]) if parts[1].isdigit() else 0,
+                        'lv_limit': int(parts[2]) if parts[2].isdigit() else 1,
+                        'cost': int(parts[6]) if parts[6].isdigit() else 0,
+                        'attr_id': int(parts[7]) if parts[7].isdigit() else 0,
+                        'attr_val': int(parts[8]) if parts[8].isdigit() else 0
+                    }
+        print(f"[GUILD SKILL CONFIG LOADED] skills={len(GUILD_SKILL_CONFIG)}")
+
+    # Load AttributeData
+    attr_path = os.path.join(text_asset_root, "AttributeData")
+    if os.path.exists(attr_path):
+        with open(attr_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 9 and parts[1].isdigit():
+                    lv = int(parts[1])
+                    ATTRIBUTE_CONFIG[lv] = {
+                        'hp': int(parts[2]) if parts[2].isdigit() else 0,
+                        'atk': int(parts[3]) if parts[3].isdigit() else 0,
+                        'hit': int(parts[4]) if parts[4].isdigit() else 0,
+                        'cri': int(parts[5]) if parts[5].isdigit() else 0,
+                        'def_val': int(parts[6]) if parts[6].isdigit() else 0,
+                        'eva': int(parts[7]) if parts[7].isdigit() else 0,
+                        'exd': int(parts[8]) if parts[8].isdigit() else 0,
+                        'exr': int(parts[9]) if parts[9].isdigit() else 0
+                    }
+        print(f"[ATTRIBUTE CONFIG LOADED] levels={len(ATTRIBUTE_CONFIG)}")
+
+    # Load EquipDrop
+    eqd_path = os.path.join(text_asset_root, "EquipDrop")
+    if os.path.exists(eqd_path):
+        with open(eqd_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 19 and parts[0] == "*" and parts[1].isdigit():
+                    dpid = parts[1]
+                    drop_num = int(parts[3]) if parts[3].isdigit() else 1
+                    stats = []
+                    for idx in range(16, len(parts) - 3, 4):
+                        att_id = parts[idx].strip()
+                        if att_id:
+                            q = int(parts[idx+1]) if parts[idx+1].isdigit() else 0
+                            v = int(parts[idx+2]) if parts[idx+2].isdigit() else 0
+                            w = int(parts[idx+3]) if parts[idx+3].isdigit() else 0
+                            stats.append((att_id, q, v, w))
+                    EQUIP_DROP_CONFIG[dpid] = {'drop_num': drop_num, 'stats': stats}
+        print(f"[EQUIP DROP CONFIG LOADED] count={len(EQUIP_DROP_CONFIG)}")
 
     # Load FunctionData (feature unlock gates by level)
     func_path = os.path.join(text_asset_root, "FunctionData")
