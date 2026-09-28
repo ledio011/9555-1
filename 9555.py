@@ -378,13 +378,16 @@ try:
                     if row_id not in KILL_TARGET_SPAWNS: KILL_TARGET_SPAWNS[row_id] = []
                     flash_num = int(parts[7]) if parts[7].isdigit() else 1
                     require_num = int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else flash_num
+                    nid = parts[6]
+                    if nid == "9901":
+                        nid = "90009" # Ensure client local spawn on Map 11 uses explicit Level 1 Hulk (1000 HP, 40 ATK, 100 DEF)
                     KILL_TARGET_SPAWNS[row_id].append({
                         'map': parts[2],
                         'x': int(parts[3]),
                         'z': int(parts[4]),
                         'range': int(parts[5]) if len(parts) > 5 and parts[5].lstrip('-').isdigit() else 500,
                         'o': 0,
-                        'nid': parts[6],
+                        'nid': nid,
                         'num': flash_num,
                         'require': require_num
                     })
@@ -1704,6 +1707,19 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         hp_max = npc_stats['hp_max']
         atk = npc_stats['atk']
         df = npc_stats['def']
+        hit = npc_stats.get('hit', 2844)
+        eva = npc_stats.get('eva', 100)
+        cri = npc_stats.get('cri', 351)
+        exd = npc_stats.get('exd', 0)
+        exr = npc_stats.get('exr', 0)
+        res = npc_stats.get('res', 0)
+        crd = npc_stats.get('crd', 15000)
+        crr = npc_stats.get('crr', 0)
+        defa = npc_stats.get('defa', 3158)
+        dgea = npc_stats.get('dgea', 6317)
+        resa = npc_stats.get('resa', 3158)
+        hita = npc_stats.get('hita', 316)
+        cria = npc_stats.get('cria', 3158)
         lvl = npc_stats['lv']
 
         GLOBAL_INST_COUNTER += 1
@@ -1720,10 +1736,14 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             elif "QJ_A" in final_nid: final_nid = "104"
             elif "NQS_A" in final_nid: final_nid = "105"
 
-        # npc_attribute schema: id(0), npcdataid(1), hp(2), max_hp(3), atk(4), def(5), x(15), z(16), o(17), level(18), player_name(21)
+        # npc_attribute schema:
+        # id(0), npcdataid(1), hp(2), max_hp(3), atk(4), def(5), hit(6), eva(7), cri(8), exd(9), exr(10), res(11), crd(12), crr(13), defa(14),
+        # x(15), z(16), o(17), level(18), player_name(21), dgea(24), resa(25), hita(26), cria(27)
         attr = encode_sproto([
             (0, inst_id), (1, final_nid), (2, hp_cur), (3, hp_max), (4, atk), (5, df),
-            (15, x), (16, z), (17, o), (18, lvl), (21, name)
+            (6, hit), (7, eva), (8, cri), (9, exd), (10, exr), (11, res), (12, crd), (13, crr), (14, defa),
+            (15, x), (16, z), (17, o), (18, lvl), (21, name),
+            (24, dgea), (25, resa), (26, hita), (27, cria)
         ])
         ph = encode_sproto([(0, 509)]); pf = sproto_pack(ph + encode_sproto([(0, attr)]))
         try: conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -1866,7 +1886,8 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
     # 2. Spawn Mission targets defined by the APK data.
-    if picked_char:
+    # Map 11 (TUTORIAL_CAR) handles spawning KillTargetMissionData locally on client (SceneManager.cs line 929).
+    if picked_char and map_str != "11":
         for mid, mdata in picked_char.get('active_missions', {}).items():
             if mdata['state'] == 1:
                 cfg = missions_data.get(mid)
