@@ -1713,7 +1713,9 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
 
         # Handle composite models like "PartA;PartB;PartC" to prevent client crashes
         final_nid = str(nid)
-        if ";" in final_nid:
+        if final_nid == "9901":
+            final_nid = "90009"
+        elif ";" in final_nid:
             if "XD_A" in final_nid: final_nid = "100"
             elif "QJ_A" in final_nid: final_nid = "104"
             elif "NQS_A" in final_nid: final_nid = "105"
@@ -1864,8 +1866,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
     # 2. Spawn Mission targets defined by the APK data.
-    # Map 11 (TUTORIAL_CAR) handles spawning KillTargetMissionData locally on client (SceneManager.cs line 929).
-    if picked_char and map_str != "11":
+    if picked_char:
         for mid, mdata in picked_char.get('active_missions', {}).items():
             if mdata['state'] == 1:
                 cfg = missions_data.get(mid)
