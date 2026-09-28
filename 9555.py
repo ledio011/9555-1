@@ -2570,6 +2570,17 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         ]))
         print(f"[MAIN PLAYER CREATE SEND] map_id={target_map_id}")
 
+        # TAG 512: aoi_relife_player - force client ObjMainPlayer.OnRelife() to close RebirthUIRoot/CopyFailShowRoot and clear local DiedFlag
+        p_stats = get_character_stats(picked_char)
+        relife_char = encode_sproto([
+            (0, picked_char['id']),
+            (1, p_stats['hp_max']),
+            (2, int(picked_char['pos'][0])),
+            (3, int(picked_char['pos'][1])),
+            (4, int(picked_char['pos'][2]))
+        ])
+        send_rpc_push(512, encode_sproto([(0, relife_char)]))
+
         # TAG 505: aoi_add (NPCs)
         spawn_map_npcs(conn, target_map_id, picked_char)
 
