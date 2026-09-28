@@ -2039,28 +2039,22 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                                 for _ in range(s['num']): send_npc_create(s['nid'], f"Quest_{s['nid']}", s['x'], s['z'], 0)
 
 def sync_mission_data(picked_char):
-    own_missions_list = []
+    own_missions_map = {}
     for mid, mdata in picked_char.get('active_missions', {}).items():
-        # Ensure parm has 8 elements and is long list
         parm = mdata.get('parm', [0]*8)
         if len(parm) < 8: parm += [0]*(8-len(parm))
-        # ownmission schema: missionId(0), missionstate(1), missionquality(2), parm(3)
-        # FIX: APK logic for SyncMissionList requires int.Parse(mid) for main missions check
-        m_bytes = encode_sproto([
+        own_missions_map[str(mid)] = encode_sproto([
             (0, str(mid)),
             (1, int(mdata['state'])),
             (2, 0), # missionquality
             (3, [int(x) for x in parm])
         ])
-        own_missions_list.append(m_bytes)
 
     last_main = picked_char.get('last_main_mission_id', "-1")
-    if last_main == "" or last_main == "None": last_main = "-1"
+    if last_main in [None, "", "None"]: last_main = "-1"
 
-    # sync_mission.request schema: missions(0), last_missionId(1), sidedone_mission(2)
-    # FIX: missions must be encoded as a Sproto array of objects (concatenated length-prefixed chunks)
     data_list = [
-        (0, own_missions_list),
+        (0, own_missions_map),
         (1, str(last_main)),
         (2, [int(x) for x in picked_char.get('completed_side_missions', []) if x])
     ]
