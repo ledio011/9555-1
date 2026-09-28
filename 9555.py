@@ -379,6 +379,8 @@ try:
                     flash_num = int(parts[7]) if parts[7].isdigit() else 1
                     require_num = int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else flash_num
                     nid = parts[6]
+                    if nid == "9901":
+                        nid = "90009" # Map scaling 9901 template to absolute Level 1 Hulk in NpcData (1000 HP, 40 ATK, 100 DEF)
                     KILL_TARGET_SPAWNS[row_id].append({
                         'map': parts[2],
                         'x': int(parts[3]),
@@ -3828,12 +3830,7 @@ def start_server():
             server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         except Exception:
             pass
-    try:
-        server.bind(("0.0.0.0", PORT))
-    except OSError as e:
-        print(f"\n[!] BIND ERROR: Port {PORT} is already in use by another running instance of 9555.py!")
-        print(f"[!] Please stop the old server process with:  killall -9 python3   or   pkill -9 -f 9555.py\n")
-        raise e
+    server.bind(("0.0.0.0", PORT))
     server.listen(20)
     print(f"GAME SERVER 9555 READY ON PORT {PORT}")
     while True:
