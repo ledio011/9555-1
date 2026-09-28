@@ -2499,12 +2499,20 @@ def init_character_fields(c):
     for k, v in fields.items():
         if k not in c: c[k] = v
 
+    # Clean up dungeon states when initializing character fields in main city
+    c.pop('exp_stage_state', None)
+
     # Initialize or restore HP if not set or if dead
     stats = get_character_stats(c)
     if 'hp' not in c or c.get('hp', 0) <= 0:
         c['hp'] = stats['hp_max']
 
 def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, override_pos=None):
+    if target_map_id == "11" and picked_char:
+        picked_char.pop('exp_stage_state', None)
+        picked_char['active_copy_id'] = None
+        picked_char['pre_copy_pos'] = None
+
     if picked_char and picked_char.get('hp', 0) <= 0:
         stats = get_character_stats(picked_char)
         picked_char['hp'] = stats['hp_max']
