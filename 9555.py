@@ -2868,7 +2868,7 @@ def client_handler(conn, addr):
                         fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     send_rpc_push(614, encode_sproto([
-                        (0, int(time.time())), (2, 0), (4, 10000), (9, funcs), (12, random.randint(1, 10000)), (13, 1), (14, int(time.time()))
+                        (0, int(time.time())), (2, 0), (4, 0), (8, funcs), (12, random.randint(1, 10000)), (13, 1), (14, int(time.time()))
                     ]))
 
                     # 611: inventory_sync
@@ -4739,7 +4739,7 @@ def client_handler(conn, addr):
                     fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
                     funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
                     send_rpc_push(614, encode_sproto([
-                        (0, int(time.time())), (2, 0), (4, 10000), (9, funcs), (12, random.randint(1, 10000)), (13, 1), (14, int(time.time()))
+                        (0, int(time.time())), (2, 0), (4, 0), (8, funcs), (12, random.randint(1, 10000)), (13, 1), (14, int(time.time()))
                     ]))
                 print(f"[TUTORIAL] tutorial_finish acknowledged for char_id={picked_char['id'] if picked_char else 0}")
                 if session is not None:
