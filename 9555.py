@@ -3213,26 +3213,27 @@ def client_handler(conn, addr):
                                         (5, relife_cfg['use_count'])
                                     ])
                                     send_rpc_push(618, relife_req)
-                        elif target_id in NPC_HP_MAP:
-                            # Damage to NPC/Monster/Boss
+                        elif target_id in NPC_HP_MAP or (picked_char and target_id != picked_char['id']):
+                            # Damage to NPC/Monster/Boss (including local client NPCs)
+                            target_nid = NPC_INST_MAP.get(target_id, "9901")
+                            NPC_INST_MAP[target_id] = target_nid
+
+                            nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
+                            defender_stats = get_npc_attr(nid_str, picked_char.get('level', 1))
+
+                            if target_id not in NPC_HP_MAP:
+                                NPC_HP_MAP[target_id] = defender_stats['hp_max']
+
                             NPC_HP_MAP[target_id] -= dmg
 
-                            # Synchronization of target HP to ensure bar update
-                            target_nid = NPC_INST_MAP.get(target_id)
-                            defender_stats = None
-                            if target_nid:
-                                # Resolve stats for syncing (Boss uses "1105", NPCs use nid)
-                                nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
-                                defender_stats = get_npc_attr(nid_str)
-
-                                # Send attribute update (Tag 510)
-                                a_oth_fields = [(0, max(0, NPC_HP_MAP[target_id])), (2, defender_stats['lv'])]
-                                if NPC_INST_MAP.get(target_id, '').startswith('BOSS_'):
-                                    a_oth_fields.extend([(4, 1), (15, 2)])
-                                a_oth = encode_sproto(a_oth_fields)
-                                a_base = encode_sproto([(0, defender_stats['hp_max'])])
-                                aoi_attr = encode_sproto([(0, target_id), (1, a_oth), (2, a_base)])
-                                send_rpc_push(510, encode_sproto([(0, aoi_attr)]))
+                            # Synchronization of target HP to ensure bar update (Tag 510)
+                            a_oth_fields = [(0, max(0, NPC_HP_MAP[target_id])), (2, defender_stats['lv'])]
+                            if NPC_INST_MAP.get(target_id, '').startswith('BOSS_'):
+                                a_oth_fields.extend([(4, 1), (15, 2)])
+                            a_oth = encode_sproto(a_oth_fields)
+                            a_base = encode_sproto([(0, defender_stats['hp_max'])])
+                            aoi_attr = encode_sproto([(0, target_id), (1, a_oth), (2, a_base)])
+                            send_rpc_push(510, encode_sproto([(0, aoi_attr)]))
 
                             if NPC_HP_MAP[target_id] <= 0:
                                 # Ensure death is processed exactly once
