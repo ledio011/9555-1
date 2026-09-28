@@ -1745,19 +1745,8 @@ def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
             timer.daemon = True
             timer.start()
         else:
-            # Tag 618: notice_relife_player triggers RebirthUIRoot Respawn UI
             death_count = picked_char.get('death_count', 0) + 1
             picked_char['death_count'] = death_count
-            relife_cfg = get_relife_config(death_count)
-            relife_req = encode_sproto([
-                (0, relife_cfg['id']),
-                (1, 0),
-                (2, "9202"), # typically 9202 is the rebirth item
-                (3, picked_char['id']),
-                (4, picked_char['name']),
-                (5, relife_cfg['use_count'])
-            ])
-            send_rpc_push(618, relife_req)
 
         picked_char.pop('exp_stage_state', None)
 
@@ -2569,17 +2558,6 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
             (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
         ]))
         print(f"[MAIN PLAYER CREATE SEND] map_id={target_map_id}")
-
-        # TAG 512: aoi_relife_player - force client ObjMainPlayer.OnRelife() to close RebirthUIRoot/CopyFailShowRoot and clear local DiedFlag
-        p_stats = get_character_stats(picked_char)
-        relife_char = encode_sproto([
-            (0, picked_char['id']),
-            (1, p_stats['hp_max']),
-            (2, int(picked_char['pos'][0])),
-            (3, int(picked_char['pos'][1])),
-            (4, int(picked_char['pos'][2]))
-        ])
-        send_rpc_push(512, encode_sproto([(0, relife_char)]))
 
         # TAG 505: aoi_add (NPCs)
         spawn_map_npcs(conn, target_map_id, picked_char)
@@ -4322,13 +4300,6 @@ def client_handler(conn, addr):
                                 else:
                                     death_count = picked_char.get('death_count', 0) + 1
                                     picked_char['death_count'] = death_count
-                                    relife_cfg = get_relife_config(death_count)
-                                    relife_req = encode_sproto([
-                                        (0, relife_cfg['id']), (1, 0), (2, "9202"), 
-                                        (3, picked_char['id']), (4, picked_char['name']),
-                                        (5, relife_cfg['use_count'])
-                                    ])
-                                    send_rpc_push(618, relife_req)
                         elif target_id in NPC_HP_MAP:
                             # Damage to NPC/Monster/Boss
                             NPC_HP_MAP[target_id] -= dmg
