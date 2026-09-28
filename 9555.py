@@ -3889,9 +3889,6 @@ def client_handler(conn, addr):
             elif msg == 246: # enter_survive_batttle
                 if picked_char:
                     start_map_transition(conn, picked_char, "505", send_rpc_push)
-                    send_rpc_push(665, encode_sproto([
-                        (0, 1), (1, 100000), (2, 500)
-                    ]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4671,7 +4668,6 @@ def client_handler(conn, addr):
                     start_map_transition(conn, picked_char, mid, send_rpc_push)
                     if msg == 201: # world_boss
                         advance_missions(picked_char, send_rpc_push, 'world_boss')
-                        send_rpc_push(552, encode_sproto([(0, 1), (1, mid), (2, True)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
