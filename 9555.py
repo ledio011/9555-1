@@ -4927,7 +4927,7 @@ def client_handler(conn, addr):
 
                 di_p = encode_sproto([
                     (0, "1"),
-                    (8, 0),
+                    (8, 1),
                     (9, 0)
                 ])
 
@@ -4936,7 +4936,7 @@ def client_handler(conn, addr):
                     (1, [cl_p])
                 ])
 
-                print("[M1003 DEBUG] TX 684 ret_domin_info domin_id=1 state=0")
+                print("[M1003 DEBUG] TX 684 ret_domin_info domin_id=1 state=1")
                 send_rpc_push(684, resp_p)
 
             elif msg == 178: # update_misison_parm
@@ -4967,10 +4967,11 @@ def client_handler(conn, addr):
                         picked_char['pre_copy_pos'] = None
                         picked_char['active_copy_id'] = None
                         picked_char['street_race_return_scheduled'] = False
-                    else:
+                        start_map_transition(conn, picked_char, "11", send_rpc_push, override_pos=saved_pos)
+                    elif picked_char.get('pre_arena_pos'):
                         saved_pos = picked_char.get('pre_arena_pos')
                         picked_char['pre_arena_pos'] = None
-                    start_map_transition(conn, picked_char, "11", send_rpc_push, override_pos=saved_pos)
+                        start_map_transition(conn, picked_char, "11", send_rpc_push, override_pos=saved_pos)
                     save_chars(all_accounts_chars)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
