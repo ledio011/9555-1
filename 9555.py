@@ -1557,8 +1557,9 @@ def get_npc_attr(nid, player_level=1):
     if cfg.get('def_abs', 0) > df: df = cfg['def_abs']
 
     if cfg.get('level', 1) == 9999:
-        hp = hp * 5
-        atk = int(atk * 1.5)
+        # Mobs scale with player level: Level 1 Hulk HP = 2400 (3000 * 0.8), ATK = 95 (Crit ~190)
+        hp = max(2400, (ld['hp'][0] * cfg.get('hp_coe', 10000) * 8) // 100000)
+        atk = max(95, (ld['atk'][0] * cfg.get('atk_coe', 10000)) // 30000)
 
     prof_coeffs = {"atk": 16, "hp": 1, "def": 11}
     raw_power = (atk * prof_coeffs['atk'] + hp * prof_coeffs['hp'] + df * prof_coeffs['def'])
@@ -2030,8 +2031,8 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 cfg = missions_data.get(mid)
                 if cfg:
                     logic_id = str(cfg.get('logic_id', ''))
-                    # The client looks up KillTargetMissionData by MissionID (e.g. 1001) first, then falls back to LogicID.
-                    spawn_key = str(mid) if str(mid) in KILL_TARGET_SPAWNS else logic_id
+                    # Prioritize LogicID (e.g. LogicID=1 for Mission 1001) in KillTargetMissionData
+                    spawn_key = logic_id if logic_id in KILL_TARGET_SPAWNS else str(mid)
                     if spawn_key in KILL_TARGET_SPAWNS:
                         for s in KILL_TARGET_SPAWNS[spawn_key]:
                             if str(s['map']) == map_str:
@@ -2397,12 +2398,12 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             else:
                 # Match target NPC from MissionData or spawned NPCs from KillTargetMissionData
                 logic_id = str(cfg.get('logic_id', ''))
-                spawn_key = str(mid) if str(mid) in KILL_TARGET_SPAWNS else logic_id
+                spawn_key = logic_id if logic_id in KILL_TARGET_SPAWNS else str(mid)
                 spawn_nids = set()
                 if spawn_key in KILL_TARGET_SPAWNS:
                     for s in KILL_TARGET_SPAWNS[spawn_key]:
                         spawn_nids.add(str(s['nid']))
-                matched = target == target_value or target_value in spawn_nids
+                matched = target == target_value or target_value in spawn_nids or target_value == str(cfg.get('target_id'))
         elif logic_type == 19 and event == 'car':
             # The client sends type 2 for a normal car robbery without an
             # NPC/car id, so its event type is the authoritative discriminator.
@@ -2446,9 +2447,9 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
         logic_id = str(cfg.get('logic_id', ''))
         
         if logic_type in [1, 4, 11, 17, 23]: # Kill
-            spawn_key = str(mid) if str(mid) in KILL_TARGET_SPAWNS else logic_id
+            spawn_key = logic_id if logic_id in KILL_TARGET_SPAWNS else str(mid)
             if spawn_key in KILL_TARGET_SPAWNS:
-                required = KILL_TARGET_SPAWNS[spawn_key][0].get('require', 1)
+                required = KILL_TARGET_SPAWNS[spawn_key][0].get('require', 2)
         elif logic_type == 25: # Capture / Boss
             required = 1
         elif logic_type == 24: # Target Car
@@ -3378,6 +3379,28 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif msg == 149: # guild_kick
+                target_id = get_val_int(body, 0)
+                if picked_char and picked_char.get('guild_id') and picked_char.get('guild_job') == 1:
+                    gid = picked_char['guild_id']
+                    if gid in GUILDS and target_id in GUILDS[gid]['members']:
+                        GUILDS[gid]['members'].remove(target_id)
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(632, encode_sproto([(0, True), (1, target_id)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 150: # guild_job_change
+                target_id = get_val_int(body, 0)
+                job = get_val_int(body, 1)
+                if picked_char and picked_char.get('guild_id') and picked_char.get('guild_job') == 1:
+                    save_chars(all_accounts_chars)
+                    send_rpc_push(633, encode_sproto([(0, True), (1, target_id), (2, job)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
             elif msg == 152: # guild_req_list
                 glist = []
                 for gid, ginfo in GUILDS.items():
@@ -3442,7 +3465,7 @@ def client_handler(conn, addr):
                         (0, chattype), (1, picked_char['id']), (2, picked_char['name']),
                         (3, content), (4, int(time.time())), (5, 0)
                     ])
-                    send_rpc_push(617, encode_sproto([(0, [citem])]))
+                    send_rpc_push(528, encode_sproto([(0, [citem])]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3457,7 +3480,7 @@ def client_handler(conn, addr):
                     f_info = encode_sproto([
                         (0, friend_id), (1, f"Friend_{friend_id}"), (2, 1), (3, 1)
                     ])
-                    send_rpc_push(618, encode_sproto([(0, f_info)]))
+                    send_rpc_push(533, encode_sproto([(0, f_info)]))
                     my_f_info = encode_sproto([
                         (0, picked_char['id']), (1, picked_char['name']), (2, picked_char.get('level', 1)), (3, 1)
                     ])
@@ -3474,7 +3497,7 @@ def client_handler(conn, addr):
                         friends.remove(friend_id)
                         picked_char['friends'] = list(friends)
                         save_chars(all_accounts_chars)
-                    send_rpc_push(619, encode_sproto([(0, friend_id)]))
+                    send_rpc_push(535, encode_sproto([(0, friend_id)]))
                     send_rpc_push(537, encode_sproto([(0, picked_char['id'])]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
