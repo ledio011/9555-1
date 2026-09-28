@@ -1886,7 +1886,8 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
     # 2. Spawn Mission targets defined by the APK data.
-    if picked_char:
+    # Map 11 (TUTORIAL_CAR) handles spawning KillTargetMissionData locally on client (SceneManager.cs line 929).
+    if picked_char and map_str != "11":
         for mid, mdata in picked_char.get('active_missions', {}).items():
             if mdata['state'] == 1:
                 cfg = missions_data.get(mid)
@@ -3226,13 +3227,7 @@ def client_handler(conn, addr):
                             NPC_HP_MAP[target_id] -= dmg
 
                             # Synchronization of target HP to ensure bar update (Tag 510)
-                            a_oth_fields = [(0, max(0, NPC_HP_MAP[target_id])), (2, defender_stats['lv'])]
-                            if NPC_INST_MAP.get(target_id, '').startswith('BOSS_'):
-                                a_oth_fields.extend([(4, 1), (15, 2)])
-                            a_oth = encode_sproto(a_oth_fields)
-                            a_base = encode_sproto([(0, defender_stats['hp_max'])])
-                            aoi_attr = encode_sproto([(0, target_id), (1, a_oth), (2, a_base)])
-                            send_rpc_push(510, encode_sproto([(0, aoi_attr)]))
+                            sync_npc_attrs_rpc(conn, target_id, defender_stats, max(0, NPC_HP_MAP[target_id]))
 
                             if NPC_HP_MAP[target_id] <= 0:
                                 # Ensure death is processed exactly once
