@@ -379,8 +379,6 @@ try:
                     flash_num = int(parts[7]) if parts[7].isdigit() else 1
                     require_num = int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else flash_num
                     nid = parts[6]
-                    if nid == "9901":
-                        nid = "90009" # Ensure client local spawn on Map 11 uses explicit Level 1 Hulk (1000 HP, 40 ATK, 100 DEF)
                     KILL_TARGET_SPAWNS[row_id].append({
                         'map': parts[2],
                         'x': int(parts[3]),
@@ -2265,7 +2263,10 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                 if spawn_key in KILL_TARGET_SPAWNS:
                     for s in KILL_TARGET_SPAWNS[spawn_key]:
                         spawn_nids.add(str(s['nid']))
-                matched = target == target_value or target_value in spawn_nids
+                if target in ("9901", "90009", "1001") or target_value in ("9901", "90009", "1001"):
+                    matched = target_value in ("9901", "90009", "1001")
+                else:
+                    matched = target == target_value or target_value in spawn_nids
         elif logic_type == 19 and event == 'car':
             # The client sends type 2 for a normal car robbery without an
             # NPC/car id, so its event type is the authoritative discriminator.
