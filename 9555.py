@@ -3040,6 +3040,8 @@ def client_handler(conn, addr):
                                 next_cfg = missions_data[str(next_mid)]
                                 if next_cfg.get('logic_type') == 7:
                                     advance_missions(picked_char, send_rpc_push, 'level')
+                            if mid == '1001':
+                                picked_char['tutorial'] = 1
                             save_chars(all_accounts_chars)
                             print(f"[MISSION COMPLETE] mission_id={mid} chained={is_chained}")
 
@@ -3456,6 +3458,10 @@ def client_handler(conn, addr):
                         (0, friend_id), (1, f"Friend_{friend_id}"), (2, 1), (3, 1)
                     ])
                     send_rpc_push(618, encode_sproto([(0, f_info)]))
+                    my_f_info = encode_sproto([
+                        (0, picked_char['id']), (1, picked_char['name']), (2, picked_char.get('level', 1)), (3, 1)
+                    ])
+                    send_rpc_push(536, encode_sproto([(0, my_f_info)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3469,6 +3475,7 @@ def client_handler(conn, addr):
                         picked_char['friends'] = list(friends)
                         save_chars(all_accounts_chars)
                     send_rpc_push(619, encode_sproto([(0, friend_id)]))
+                    send_rpc_push(537, encode_sproto([(0, picked_char['id'])]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3482,6 +3489,23 @@ def client_handler(conn, addr):
                     sync_main_player_visual(picked_char, send_rpc_push)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 142: # ask_character_info
+                target_id = get_val_int(body, 0)
+                target_c = None
+                for area_dict in all_accounts_chars.values():
+                    if isinstance(area_dict, dict):
+                        for char_list in area_dict.values():
+                            if isinstance(char_list, list):
+                                for c in char_list:
+                                    if isinstance(c, dict) and c.get('id') == target_id:
+                                        target_c = c
+                                        break
+                resp_c = get_full_char(target_c) if target_c else (get_full_char(picked_char) if picked_char else encode_sproto([]))
+                if session is not None:
+                    resp_data = encode_sproto([(0, resp_c)])
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp_data)
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 202: # request_tower_copy_info
@@ -3878,6 +3902,86 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif msg == 195: # request_guild_boss
+                if picked_char:
+                    gboss_list = [
+                        encode_sproto([(0, "1"), (1, 100), (2, 1)]),
+                        encode_sproto([(0, "2"), (1, 100), (2, 0)])
+                    ]
+                    send_rpc_push(637, encode_sproto([(0, gboss_list)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 233: # open_guild_boss
+                boss_id = field_text(body, 0)
+                if picked_char and picked_char.get('guild_job') == 1:
+                    gboss = encode_sproto([(0, boss_id), (1, 100), (2, 1)])
+                    send_rpc_push(636, encode_sproto([(0, True), (1, gboss)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 194: # enter_guild_boss_scene
+                if picked_char:
+                    start_map_transition(conn, picked_char, "507", send_rpc_push)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 322: # enter_guild_city_scene
+                if picked_char:
+                    start_map_transition(conn, picked_char, "508", send_rpc_push)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 309: # refresh_online_misison
+                if picked_char:
+                    p_lv = picked_char.get('level', 1)
+                    active_m = picked_char.get('active_missions', {})
+                    for oid, ocfg in ONLINE_MISSION_CONFIG.items():
+                        if ocfg['min_level'] <= p_lv <= ocfg['max_level']:
+                            mid = ocfg['mid']
+                            if mid in missions_data and mid not in active_m:
+                                active_m[mid] = {'state': 1, 'parm': [0]*8}
+                                break
+                    save_chars(all_accounts_chars)
+                    send_rpc_push(519, sync_mission_data(picked_char))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 281: # refresh_online_state
+                if picked_char:
+                    grant_item_rewards(picked_char, [("1001", 0, 20000)], conn, send_rpc_push)
+                    save_chars(all_accounts_chars)
+                    send_rpc_push(611, sync_inventory_data(picked_char))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 214: # random_select_team
+                target_id = get_val_int(body, 0)
+                op_type = get_val_int(body, 1, 1)
+                if picked_char:
+                    match_state = 1 if op_type == 1 else 0
+                    send_rpc_push(571, encode_sproto([
+                        (0, match_state), (1, target_id)
+                    ]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 177: # gather_team
+                if picked_char and picked_char.get('team_id'):
+                    send_rpc_push(682, encode_sproto([
+                        (0, picked_char['id']), (1, picked_char['name'])
+                    ]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
             elif msg == 303: # equip_appraise
                 index_id = get_val_int(body, 0)
                 if picked_char:
@@ -3907,6 +4011,22 @@ def client_handler(conn, addr):
                         save_chars(all_accounts_chars)
                         send_rpc_push(611, sync_inventory_data(picked_char))
                         sync_char_attrs_rpc(conn, picked_char)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 197: # equip_badge
+                index_id = get_val_int(body, 0)
+                badge_slot = get_val_int(body, 1)
+                if picked_char:
+                    badges = picked_char.setdefault('equipped_badges', {})
+                    badges[badge_slot] = index_id
+                    save_chars(all_accounts_chars)
+                    b_items = {}
+                    for slot_idx, b_idx in badges.items():
+                        b_items[slot_idx] = encode_sproto([(0, str(b_idx)), (1, 1), (2, slot_idx)])
+                    send_rpc_push(593, encode_sproto([(0, b_items)]))
+                    sync_char_attrs_rpc(conn, picked_char)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4593,12 +4713,16 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 306: # tutorial_finish
-                # The APK sends this before scheduling its optional-download tip.
-                # It is an RPC request, so it must receive an empty success reply.
                 if picked_char:
                     picked_char['tutorial'] = 1
                     save_chars(all_accounts_chars)
-                print("[TUTORIAL] tutorial_finish acknowledged")
+                    char_level = picked_char.get('level', 1)
+                    fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
+                    funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
+                    send_rpc_push(614, encode_sproto([
+                        (0, int(time.time())), (2, 0), (4, 10000), (9, funcs), (12, random.randint(1, 10000)), (13, 1), (14, int(time.time()))
+                    ]))
+                print(f"[TUTORIAL] tutorial_finish acknowledged for char_id={picked_char['id'] if picked_char else 0}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
