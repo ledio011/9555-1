@@ -372,6 +372,9 @@ try:
                 parts = line.strip().split(",")
                 if len(parts) > 7 and parts[1].isdigit():
                     row_id = parts[1]
+                    # Skip duplicate 4-digit MissionID override rows (e.g., 1001 with FlashNum=4) in favor of 1-digit LogicIDs (e.g., 1 with FlashNum=2)
+                    if int(row_id) >= 1000 and str(int(row_id) - 1000) in KILL_TARGET_SPAWNS:
+                        continue
                     if row_id not in KILL_TARGET_SPAWNS: KILL_TARGET_SPAWNS[row_id] = []
                     flash_num = int(parts[7]) if parts[7].isdigit() else 1
                     require_num = int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else flash_num
@@ -1861,8 +1864,8 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
     # 2. Spawn Mission targets defined by the APK data.
-    # We no longer spawn target cars here, so we don't need to skip Map 11.
-    if picked_char:
+    # Map 11 (TUTORIAL_CAR) handles spawning KillTargetMissionData locally on client (SceneManager.cs line 929).
+    if picked_char and map_str != "11":
         for mid, mdata in picked_char.get('active_missions', {}).items():
             if mdata['state'] == 1:
                 cfg = missions_data.get(mid)
@@ -3684,7 +3687,7 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
                 v_p = encode_sproto([
-                    (0, "Q7MZK4RP"),
+                    (0, "Ash Viper"),
                     (1, "100"),
                     (2, "XD_A_T"),
                     (3, "XD_A_S"),
