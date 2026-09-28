@@ -340,6 +340,9 @@ try:
                     if row_id not in KILL_TARGET_SPAWNS: KILL_TARGET_SPAWNS[row_id] = []
                     flash_num = int(parts[7]) if parts[7].isdigit() else 1
                     require_num = int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else flash_num
+                    if row_id in ("1", "1001"):
+                        flash_num = 2
+                        require_num = 2
                     KILL_TARGET_SPAWNS[row_id].append({
                         'map': parts[2],
                         'x': int(parts[3]),
@@ -1745,8 +1748,19 @@ def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
             timer.daemon = True
             timer.start()
         else:
+            # Tag 618: notice_relife_player triggers RebirthUIRoot Respawn UI
             death_count = picked_char.get('death_count', 0) + 1
             picked_char['death_count'] = death_count
+            relife_cfg = get_relife_config(death_count)
+            relife_req = encode_sproto([
+                (0, relife_cfg['id']),
+                (1, 0),
+                (2, "9202"), # typically 9202 is the rebirth item
+                (3, picked_char['id']),
+                (4, picked_char['name']),
+                (5, relife_cfg['use_count'])
+            ])
+            send_rpc_push(618, relife_req)
 
         picked_char.pop('exp_stage_state', None)
 
@@ -2812,8 +2826,11 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
                     picked_char['last_played'] = int(time.time())
-                    print(f"[CHARACTER PICK] id={picked_char['id']} level={picked_char.get('level')}")
                     init_character_fields(picked_char)
+                    picked_char['hp'] = get_character_stats(picked_char)['hp_max']
+                    picked_char['death_count'] = 0
+                    picked_char.pop('exp_stage_state', None)
+                    print(f"[CHARACTER PICK] id={picked_char['id']} level={picked_char.get('level')} HP restored to {picked_char['hp']}")
                     # Initial Mission Assignment for new characters
                     has_active_main = False
                     for active_id in picked_char['active_missions']:
@@ -4300,6 +4317,13 @@ def client_handler(conn, addr):
                                 else:
                                     death_count = picked_char.get('death_count', 0) + 1
                                     picked_char['death_count'] = death_count
+                                    relife_cfg = get_relife_config(death_count)
+                                    relife_req = encode_sproto([
+                                        (0, relife_cfg['id']), (1, 0), (2, "9202"), 
+                                        (3, picked_char['id']), (4, picked_char['name']),
+                                        (5, relife_cfg['use_count'])
+                                    ])
+                                    send_rpc_push(618, relife_req)
                         elif target_id in NPC_HP_MAP:
                             # Damage to NPC/Monster/Boss
                             NPC_HP_MAP[target_id] -= dmg
