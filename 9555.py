@@ -3828,7 +3828,12 @@ def start_server():
             server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         except Exception:
             pass
-    server.bind(("0.0.0.0", PORT))
+    try:
+        server.bind(("0.0.0.0", PORT))
+    except OSError as e:
+        print(f"\n[!] BIND ERROR: Port {PORT} is already in use by another running instance of 9555.py!")
+        print(f"[!] Please stop the old server process with:  killall -9 python3   or   pkill -9 -f 9555.py\n")
+        raise e
     server.listen(20)
     print(f"GAME SERVER 9555 READY ON PORT {PORT}")
     while True:
