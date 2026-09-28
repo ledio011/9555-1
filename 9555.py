@@ -3536,9 +3536,10 @@ def client_handler(conn, addr):
                     cur_fl = picked_char.get('tower_cur_floor', 1)
                     max_fl = picked_char.get('tower_max_floor', 1)
                     resets = picked_char.get('tower_resets', 1)
-                    send_rpc_push(653, encode_sproto([
+                    t_info = encode_sproto([
                         (0, cur_fl), (1, max_fl), (2, resets), (3, 0)
-                    ]))
+                    ])
+                    send_rpc_push(606, encode_sproto([(0, t_info)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3809,7 +3810,7 @@ def client_handler(conn, addr):
                                                 (4, c_data.get('power', 1000))
                                             ]))
                                             if len(opponents) >= num: break
-                    send_rpc_push(640, encode_sproto([
+                    send_rpc_push(542, encode_sproto([
                         (0, len(opponents)), (1, opponents)
                     ]))
                 if session is not None:
@@ -3829,9 +3830,9 @@ def client_handler(conn, addr):
             elif msg == 242: # request_slot_info
                 if picked_char:
                     spin_count = picked_char.get('slot_spin_count', 0)
-                    sum_rewards = [int(x) for x in picked_char.get('slot_claimed_rewards', [])]
+                    s_info = encode_sproto([(1, spin_count), (2, 10)])
                     send_rpc_push(633, encode_sproto([
-                        (0, spin_count), (1, sum_rewards)
+                        (0, s_info)
                     ]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -4749,9 +4750,8 @@ def client_handler(conn, addr):
             elif msg == 261: # request_daily_active
                 if picked_char:
                     score = picked_char.get('daily_active_score', 0)
-                    claimed = [int(x) for x in picked_char.get('daily_active_claimed', [])]
                     send_rpc_push(649, encode_sproto([
-                        (0, score), (1, claimed)
+                        (0, {}), (1, {}), (2, score)
                     ]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -4772,8 +4772,7 @@ def client_handler(conn, addr):
                                     save_chars(all_accounts_chars)
                                     send_rpc_push(611, sync_inventory_data(picked_char))
                                     send_rpc_push(649, encode_sproto([
-                                        (0, picked_char.get('daily_active_score', 0)),
-                                        (1, list(claimed))
+                                        (0, {}), (1, {}), (2, picked_char.get('daily_active_score', 0))
                                     ]))
                                     break
                 if session is not None:
@@ -4805,8 +4804,9 @@ def client_handler(conn, addr):
                 if picked_char:
                     cur_day = ((int(time.time()) // 86400) % 7) + 1
                     claimed = [int(x) for x in picked_char.get('claimed_week_days', [])]
+                    is_signed = cur_day in claimed
                     send_rpc_push(641, encode_sproto([
-                        (0, cur_day), (1, claimed)
+                        (0, cur_day), (1, is_signed), (2, False), (4, claimed)
                     ]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -4837,7 +4837,7 @@ def client_handler(conn, addr):
                     cur_day = min(31, max(1, (int(time.time()) // 86400) % 31 + 1))
                     claimed = [int(x) for x in picked_char.get('claimed_month_days', [])]
                     send_rpc_push(642, encode_sproto([
-                        (0, cur_day), (1, claimed)
+                        (0, cur_day), (1, 0), (2, cur_day), (4, claimed)
                     ]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
