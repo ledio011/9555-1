@@ -3251,23 +3251,12 @@ def client_handler(conn, addr):
 
                             nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
 
-                            # Mission 1001 / KillTargetMissionData logic 1 on map 11
-                            # uses the fixed Hulk values from concrete NpcData 90009.
-                            is_m1001_hulk = (
-                                str(picked_char.get('map_id', '')) == '11' and
-                                str(nid_str) == '9901' and
-                                any(
-                                    str(mid) == '1001' and
-                                    mdata.get('state') == 1 and
-                                    str(missions_data.get(str(mid), {}).get('logic_id', '')) == '1'
-                                    for mid, mdata in picked_char.get('active_missions', {}).items()
-                                )
-                            )
-
-                            if is_m1001_hulk:
-                                defender_stats = get_tutorial_m1001_hulk_attr()
-                            else:
-                                defender_stats = get_npc_attr(nid_str, picked_char.get('level', 1))
+                            # Mission 1001 targets NPC 9901.
+                            # Original client logic treats 9901 as a percentage-template NPC:
+                            # its 10000 coefficients are applied to AdaptData for the
+                            # player's current level. Do NOT replace it with the fixed
+                            # level-1 stats of concrete NPC 90009.
+                            defender_stats = get_npc_attr(nid_str, picked_char.get('level', 1))
 
                             if target_id not in NPC_HP_MAP:
                                 NPC_HP_MAP[target_id] = defender_stats['hp_max']
