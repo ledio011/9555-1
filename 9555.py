@@ -3259,9 +3259,19 @@ def client_handler(conn, addr):
                                     ])
                                     send_rpc_push(618, relife_req)
                         elif target_id in NPC_HP_MAP or (picked_char and target_id != picked_char['id']):
-                            # Damage to NPC/Monster/Boss (including local client NPCs)
-                            target_nid = NPC_INST_MAP.get(target_id, "9901")
-                            NPC_INST_MAP[target_id] = target_nid
+                            # Tutorial map 11 creates the Hulk locally, so the client
+                            # sends its local AOI instance id (for example 197/198),
+                            # not NPCDataID 9901. Resolve those local ids explicitly
+                            # to the real Mission 1001 target instead of relying on the
+                            # generic fallback below.
+                            target_nid = NPC_INST_MAP.get(target_id)
+                            if not target_nid and picked_char.get('map_id') == '11':
+                                target_nid = "9901"
+                                NPC_INST_MAP[target_id] = target_nid
+                                print(f"[M1001 ID FIX] local_inst={target_id} -> npc_id=9901")
+                            if not target_nid:
+                                target_nid = "9901"
+                                NPC_INST_MAP[target_id] = target_nid
 
                             nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
 
@@ -3273,11 +3283,23 @@ def client_handler(conn, addr):
                             defender_stats = get_npc_attr(nid_str, picked_char.get('level', 1))
 
                             if target_id not in NPC_HP_MAP:
+                                # The tutorial Hulk is client-local: before the first
+                                # hit the server has never seen its instance id. Seed
+                                # the authoritative HP from NPC 9901/AdaptData and
+                                # send the full attributes using the SAME local id.
                                 NPC_HP_MAP[target_id] = defender_stats['hp_max']
+                                print(
+                                    f"[M1001 HULK ID INIT] inst={target_id} npc_id=9901 "
+                                    f"lv={defender_stats['lv']} "
+                                    f"HP={defender_stats['hp_max']} ATK={defender_stats['atk']} "
+                                    f"DEF={defender_stats['def']} HIT={defender_stats['hit']} "
+                                    f"EVA={defender_stats['eva']} CRI={defender_stats['cri']}"
+                                )
+                                sync_npc_attrs_rpc(conn, target_id, defender_stats, NPC_HP_MAP[target_id])
 
                             NPC_HP_MAP[target_id] -= dmg
 
-                            # Synchronization of target HP to ensure bar update (Tag 510)
+                            # Synchronize the post-hit HP using the local instance id.
                             sync_npc_attrs_rpc(conn, target_id, defender_stats, max(0, NPC_HP_MAP[target_id]))
 
                             if NPC_HP_MAP[target_id] <= 0:
