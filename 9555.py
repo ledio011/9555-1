@@ -1899,14 +1899,13 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                     if spawn_key in KILL_TARGET_SPAWNS:
                         for s in KILL_TARGET_SPAWNS[spawn_key]:
                             if str(s['map']) == map_str:
-                                        for _ in range(s['num']):
+                                for _ in range(s['num']):
                                     # Match the client KillTargetMissionData behavior:
                                     # randomize each target within Range and give it a random orientation.
                                     sx = s['x'] + random.randint(-s['range'], s['range'])
                                     sz = s['z'] + random.randint(-s['range'], s['range'])
                                     so = random.randint(0, 36000)
                                     send_npc_create(s['nid'], f"Quest_{s['nid']}", sx, sz, so)
-
 def sync_mission_data(picked_char):
     own_missions_list = []
     for mid, mdata in picked_char.get('active_missions', {}).items():
