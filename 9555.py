@@ -1891,28 +1891,10 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
                 send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
-    # 2. Spawn mission targets defined by the APK data.
-    # Map 11 mission-1001 targets are created by the client-side
-    # KillTargetMissionData path. Keep this server-authoritative for Map 11
-    # only after the client patch disables its duplicate local spawn.
-    if picked_char:
-        for mid, mdata in picked_char.get('active_missions', {}).items():
-            if mdata['state'] == 1:
-                cfg = missions_data.get(mid)
-                if cfg:
-                    logic_id = str(cfg.get('logic_id', ''))
-                    # The client looks up KillTargetMissionData by LogicID (matching DataManager.GetKillTargetMissionDataById).
-                    spawn_key = logic_id if logic_id in KILL_TARGET_SPAWNS else str(mid)
-                    if spawn_key in KILL_TARGET_SPAWNS:
-                        for s in KILL_TARGET_SPAWNS[spawn_key]:
-                            if str(s['map']) == map_str:
-                                for _ in range(s['num']):
-                                    # Match the client KillTargetMissionData behavior:
-                                    # randomize each target within Range and give it a random orientation.
-                                    sx = s['x'] + random.randint(-s['range'], s['range'])
-                                    sz = s['z'] + random.randint(-s['range'], s['range'])
-                                    so = random.randint(0, 36000)
-                                    send_npc_create(s['nid'], f"Quest_{s['nid']}", sx, sz, so)
+    # 2. Tutorial KillTarget NPCs are client-local.
+    # SceneManager.CheckKillTargetMission() creates these through
+    # CitySimController.GetNpc() and reports their death with local_npc_die.
+    # Do not spawn a second server-side copy here.
 def sync_mission_data(picked_char):
     own_missions_list = []
     for mid, mdata in picked_char.get('active_missions', {}).items():
