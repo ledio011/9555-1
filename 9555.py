@@ -1705,10 +1705,10 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         return
     spawned_maps.add(map_str)
 
-    def send_npc_create(nid, name, x, z, o):
+    def send_npc_create(nid, name, x, z, o, override_stats=None):
         global GLOBAL_INST_COUNTER
         player_lvl = picked_char.get('level', 1) if picked_char else 1
-        npc_stats = get_npc_attr(nid, player_lvl)
+        npc_stats = override_stats if override_stats is not None else get_npc_attr(nid, player_lvl)
         hp_cur = npc_stats['hp_max']
         hp_max = npc_stats['hp_max']
         atk = npc_stats['atk']
@@ -1906,10 +1906,64 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
                 send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
-    # 2. Tutorial KillTarget NPCs are client-local.
-    # SceneManager.CheckKillTargetMission() creates these through
-    # CitySimController.GetNpc() and reports their death with local_npc_die.
-    # Do not spawn a second server-side copy here.
+    # 2. Spawn Mission targets defined by the APK data.
+    if picked_char:
+        for mid, mdata in picked_char.get('active_missions', {}).items():
+            if mdata.get('state') != 1:
+                continue
+
+            cfg = missions_data.get(mid)
+            if not cfg:
+                continue
+
+            logic_id = str(cfg.get('logic_id', ''))
+            spawn_key = logic_id if logic_id in KILL_TARGET_SPAWNS else str(mid)
+            if spawn_key not in KILL_TARGET_SPAWNS:
+                continue
+
+            for spawn in KILL_TARGET_SPAWNS[spawn_key]:
+                if str(spawn.get('map')) != map_str:
+                    continue
+
+                for _ in range(int(spawn.get('num', 1))):
+                    nid = str(spawn.get('nid', ''))
+                    stats_override = None
+
+                    if str(mid) == "1001" and nid == "9901":
+                        stats_override = get_npc_attr(nid, picked_char.get('level', 1))
+                        defaults = {
+                            'hp_max': 2200,
+                            'atk': 80,
+                            'def': 140,
+                            'hit': 3411,
+                            'eva': 155,
+                            'cri': 421,
+                            'res': 0,
+                            'exd': 0,
+                            'exr': 0,
+                            'crd': 15000,
+                            'crr': 0,
+                            'defa': 3792,
+                            'dgea': 7583,
+                            'resa': 3792,
+                            'hita': 379,
+                            'cria': 3792,
+                            'lv': 5
+                        }
+                        for key, value in defaults.items():
+                            current = stats_override.get(key)
+                            if current is None:
+                                stats_override[key] = value
+
+                    send_npc_create(
+                        nid,
+                        f"Quest_{nid}",
+                        int(spawn.get('x', 0)),
+                        int(spawn.get('z', 0)),
+                        0,
+                        stats_override
+                    )
+
 def sync_mission_data(picked_char):
     own_missions_list = []
     for mid, mdata in picked_char.get('active_missions', {}).items():
