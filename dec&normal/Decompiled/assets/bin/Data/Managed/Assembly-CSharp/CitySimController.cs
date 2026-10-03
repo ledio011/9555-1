@@ -679,24 +679,52 @@ public class CitySimController : SingletonUnity<CitySimController>
 		objInitNpcData.mDir = (position - objInitNpcData.mPos).normalized;
 		objInitNpcData.npcInfoData = npcDataByID;
 		objInitNpcData.mCharacterModelId = npcDataByID.Model;
-		objInitNpcData.MaxHP = objInitNpcData.npcInfoData.Hp;
-		objInitNpcData.HP = objInitNpcData.npcInfoData.Hp;
-		objInitNpcData.ATK = objInitNpcData.npcInfoData.Atk;
-		objInitNpcData.DEF = objInitNpcData.npcInfoData.Def;
-		objInitNpcData.HIT = objInitNpcData.npcInfoData.HIT;
-		objInitNpcData.EVA = objInitNpcData.npcInfoData.DGE;
-		objInitNpcData.CRI = objInitNpcData.npcInfoData.CRI;
-		objInitNpcData.EXD = objInitNpcData.npcInfoData.EXD;
-		objInitNpcData.EXR = objInitNpcData.npcInfoData.EXR;
-		objInitNpcData.RES = objInitNpcData.npcInfoData.RES;
-		objInitNpcData.CRD = objInitNpcData.npcInfoData.CRD;
-		objInitNpcData.CRR = objInitNpcData.npcInfoData.CRR;
-		objInitNpcData.DEFA = objInitNpcData.npcInfoData.DEFA;
-		objInitNpcData.DGEA = objInitNpcData.npcInfoData.DGEA;
-		objInitNpcData.HITA = objInitNpcData.npcInfoData.HITA;
-		objInitNpcData.RESA = objInitNpcData.npcInfoData.RESA;
-		objInitNpcData.CRIA = objInitNpcData.npcInfoData.CRIA;
-		objInitNpcData.Level = objInitNpcData.npcInfoData.Lv;
+		if (objInitNpcData.npcInfoData.ID == "9901")
+		{
+			// 9901 is a percentage-template Hulk: its absolute NpcData
+			// combat fields are empty, so calculate them from AdaptData.
+			int level = SingletonDontDestoryUnity<GameManager>.Instance.PlayerData.Level;
+			AdaptData adaptDataByID = DataManager.GetAdaptDataByID(level);
+			objInitNpcData.MaxHP = (long)(objInitNpcData.npcInfoData.HpCoe * adaptDataByID.HpStd / 10000);
+			objInitNpcData.HP = objInitNpcData.MaxHP;
+			objInitNpcData.ATK = objInitNpcData.npcInfoData.AtkCoe * adaptDataByID.AtkStd / 10000;
+			objInitNpcData.DEF = objInitNpcData.npcInfoData.DefCoe * adaptDataByID.DefStd / 10000;
+			objInitNpcData.HIT = objInitNpcData.npcInfoData.HITCoe * adaptDataByID.HITStd / 10000;
+			objInitNpcData.EVA = objInitNpcData.npcInfoData.DGECoe * adaptDataByID.DGEStd / 10000;
+			objInitNpcData.CRI = objInitNpcData.npcInfoData.CRICoe * adaptDataByID.CRIStd / 10000;
+			objInitNpcData.EXD = objInitNpcData.npcInfoData.EXDCoe * adaptDataByID.EXDStd / 10000;
+			objInitNpcData.EXR = objInitNpcData.npcInfoData.EXRCoe * adaptDataByID.EXRStd / 10000;
+			objInitNpcData.RES = objInitNpcData.npcInfoData.RESCoe * adaptDataByID.RESStd / 10000;
+			objInitNpcData.CRD = objInitNpcData.npcInfoData.CRDCoe * adaptDataByID.CRDStd / 10000;
+			objInitNpcData.CRR = objInitNpcData.npcInfoData.CRRCoe * adaptDataByID.CRRStd / 10000;
+			objInitNpcData.DEFA = objInitNpcData.npcInfoData.DEFACoe * adaptDataByID.DEFAStd / 10000;
+			objInitNpcData.DGEA = objInitNpcData.npcInfoData.DGEACoe * adaptDataByID.DGEAStd / 10000;
+			objInitNpcData.HITA = objInitNpcData.npcInfoData.HITACoe * adaptDataByID.HITAStd / 10000;
+			objInitNpcData.RESA = objInitNpcData.npcInfoData.RESACoe * adaptDataByID.RESAStd / 10000;
+			objInitNpcData.CRIA = objInitNpcData.npcInfoData.CRIACoe * adaptDataByID.CRIAStd / 10000;
+			objInitNpcData.Level = level;
+		}
+		else
+		{
+			objInitNpcData.MaxHP = objInitNpcData.npcInfoData.Hp;
+			objInitNpcData.HP = objInitNpcData.npcInfoData.Hp;
+			objInitNpcData.ATK = objInitNpcData.npcInfoData.Atk;
+			objInitNpcData.DEF = objInitNpcData.npcInfoData.Def;
+			objInitNpcData.HIT = objInitNpcData.npcInfoData.HIT;
+			objInitNpcData.EVA = objInitNpcData.npcInfoData.DGE;
+			objInitNpcData.CRI = objInitNpcData.npcInfoData.CRI;
+			objInitNpcData.EXD = objInitNpcData.npcInfoData.EXD;
+			objInitNpcData.EXR = objInitNpcData.npcInfoData.EXR;
+			objInitNpcData.RES = objInitNpcData.npcInfoData.RES;
+			objInitNpcData.CRD = objInitNpcData.npcInfoData.CRD;
+			objInitNpcData.CRR = objInitNpcData.npcInfoData.CRR;
+			objInitNpcData.DEFA = objInitNpcData.npcInfoData.DEFA;
+			objInitNpcData.DGEA = objInitNpcData.npcInfoData.DGEA;
+			objInitNpcData.HITA = objInitNpcData.npcInfoData.HITA;
+			objInitNpcData.RESA = objInitNpcData.npcInfoData.RESA;
+			objInitNpcData.CRIA = objInitNpcData.npcInfoData.CRIA;
+			objInitNpcData.Level = objInitNpcData.npcInfoData.Lv;
+		}
 		objInitNpcData.AntiStun = objInitNpcData.npcInfoData.AntiStun;
 		objInitNpcData.AntiKnockDown = objInitNpcData.npcInfoData.AntiKnockDown;
 		Singleton<ObjManager>.Instance.GetRagdollNPC(objInitNpcData, null);
