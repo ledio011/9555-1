@@ -1752,6 +1752,20 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         cria = npc_stats.get('cria', 3158)
         lvl = npc_stats['lv']
 
+        # Debug Mission 1001 Hulk (NPC 9901) stats before encoding the
+        # npc_attribute packet. This lets us verify the server-side values
+        # independently from how the APK renders them.
+        if str(nid) == "9901":
+            print(
+                "[M1001 HULK STATS] "
+                f"orig_nid=9901 client_nid=90009 "
+                f"lv={lvl} HP={hp_cur}/{hp_max} ATK={atk} DEF={df} "
+                f"HIT={hit} EVA={eva} CRI={cri} RES={res} "
+                f"EXD={exd} EXR={exr} CRD={crd} CRR={crr} "
+                f"DEFA={defa} DGEA={dgea} RESA={resa} "
+                f"HITA={hita} CRIA={cria} POWER={npc_stats.get('power', 0)}"
+            )
+
         GLOBAL_INST_COUNTER += 1
         inst_id = GLOBAL_INST_COUNTER
         NPC_HP_MAP[inst_id] = hp_max
