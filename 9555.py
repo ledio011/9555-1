@@ -1422,6 +1422,30 @@ def get_npc_attr(nid, player_level=1):
         'power': power
     }
 
+TUTORIAL_M1001_HULK_STATS = {
+    'hp_max': 1000,
+    'atk': 40,
+    'def': 100,
+    'hit': 2844,
+    'eva': 129,
+    'cri': 351,
+    'res': 0,
+    'exd': 0,
+    'exr': 0,
+    'crd': 15000,
+    'crr': 0,
+    'defa': 3158,
+    'dgea': 6317,
+    'resa': 3158,
+    'hita': 316,
+    'cria': 3158,
+    'lv': 1,
+    'power': 15060
+}
+
+def get_tutorial_m1001_hulk_attr():
+    return dict(TUTORIAL_M1001_HULK_STATS)
+
 def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
     """Sends TAG 510 to sync NPC stats."""
     # The dominance zombie is initially added to camp 2 by tag 544.  Omitting
@@ -3226,7 +3250,24 @@ def client_handler(conn, addr):
                             NPC_INST_MAP[target_id] = target_nid
 
                             nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
-                            defender_stats = get_npc_attr(nid_str, picked_char.get('level', 1))
+
+                            # Mission 1001 / KillTargetMissionData logic 1 on map 11
+                            # uses the fixed Hulk values from concrete NpcData 90009.
+                            is_m1001_hulk = (
+                                str(picked_char.get('map_id', '')) == '11' and
+                                str(nid_str) == '9901' and
+                                any(
+                                    str(mid) == '1001' and
+                                    mdata.get('state') == 1 and
+                                    str(missions_data.get(str(mid), {}).get('logic_id', '')) == '1'
+                                    for mid, mdata in picked_char.get('active_missions', {}).items()
+                                )
+                            )
+
+                            if is_m1001_hulk:
+                                defender_stats = get_tutorial_m1001_hulk_attr()
+                            else:
+                                defender_stats = get_npc_attr(nid_str, picked_char.get('level', 1))
 
                             if target_id not in NPC_HP_MAP:
                                 NPC_HP_MAP[target_id] = defender_stats['hp_max']
