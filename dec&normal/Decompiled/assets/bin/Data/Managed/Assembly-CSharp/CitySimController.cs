@@ -2080,26 +2080,57 @@ public class CitySimController : SingletonUnity<CitySimController>
 		objInitNpcData.mDir = MathUtil.HeadingToVector3(curData.Data.PositionO);
 		objInitNpcData.npcInfoData = DataManager.GetNpcDataByID(curData.Data.NpcID);
 		objInitNpcData.mCharacterModelId = objInitNpcData.npcInfoData.Model;
-		objInitNpcData.MaxHP = objInitNpcData.npcInfoData.Hp;
-		objInitNpcData.HP = objInitNpcData.npcInfoData.Hp;
-		objInitNpcData.ATK = objInitNpcData.npcInfoData.Atk;
-		objInitNpcData.DEF = objInitNpcData.npcInfoData.Def;
-		objInitNpcData.HIT = objInitNpcData.npcInfoData.HIT;
-		objInitNpcData.EVA = objInitNpcData.npcInfoData.DGE;
-		objInitNpcData.CRI = objInitNpcData.npcInfoData.CRI;
-		objInitNpcData.EXD = objInitNpcData.npcInfoData.EXD;
-		objInitNpcData.EXR = objInitNpcData.npcInfoData.EXR;
-		objInitNpcData.RES = objInitNpcData.npcInfoData.RES;
-		objInitNpcData.CRD = objInitNpcData.npcInfoData.CRD;
-		objInitNpcData.CRR = objInitNpcData.npcInfoData.CRR;
-		objInitNpcData.DEFA = objInitNpcData.npcInfoData.DEFA;
-		objInitNpcData.DGEA = objInitNpcData.npcInfoData.DGEA;
-		objInitNpcData.HITA = objInitNpcData.npcInfoData.HITA;
-		objInitNpcData.RESA = objInitNpcData.npcInfoData.RESA;
-		objInitNpcData.CRIA = objInitNpcData.npcInfoData.CRIA;
-		objInitNpcData.Level = objInitNpcData.npcInfoData.Lv;
-		objInitNpcData.AntiStun = objInitNpcData.npcInfoData.AntiStun;
-		objInitNpcData.AntiKnockDown = objInitNpcData.npcInfoData.AntiKnockDown;
+		// Mission 1001 -> KillTargetMissionData logic 1 -> NpcID 9901.
+		// 9901 is a percentage template with empty absolute combat fields.
+		// The concrete tutorial Hulk values are the fixed values stored by
+		// NpcData 90009. Use them for this local mission NPC instead of any
+		// player-level-dependent calculation.
+		if (curData.Data.MapID == "11" && curData.Data.NpcID == "9901")
+		{
+			objInitNpcData.MaxHP = 1000L;
+			objInitNpcData.HP = 1000L;
+			objInitNpcData.ATK = 40;
+			objInitNpcData.DEF = 100;
+			objInitNpcData.HIT = 2844;
+			objInitNpcData.EVA = 129;
+			objInitNpcData.CRI = 351;
+			objInitNpcData.EXD = 0;
+			objInitNpcData.EXR = 0;
+			objInitNpcData.RES = 0;
+			objInitNpcData.CRD = 15000;
+			objInitNpcData.CRR = 0;
+			objInitNpcData.DEFA = 3158;
+			objInitNpcData.DGEA = 6317;
+			objInitNpcData.HITA = 316;
+			objInitNpcData.RESA = 3158;
+			objInitNpcData.CRIA = 3158;
+			objInitNpcData.Level = 1;
+			objInitNpcData.AntiStun = 0;
+			objInitNpcData.AntiKnockDown = 0;
+		}
+		else
+		{
+			objInitNpcData.MaxHP = objInitNpcData.npcInfoData.Hp;
+			objInitNpcData.HP = objInitNpcData.npcInfoData.Hp;
+			objInitNpcData.ATK = objInitNpcData.npcInfoData.Atk;
+			objInitNpcData.DEF = objInitNpcData.npcInfoData.Def;
+			objInitNpcData.HIT = objInitNpcData.npcInfoData.HIT;
+			objInitNpcData.EVA = objInitNpcData.npcInfoData.DGE;
+			objInitNpcData.CRI = objInitNpcData.npcInfoData.CRI;
+			objInitNpcData.EXD = objInitNpcData.npcInfoData.EXD;
+			objInitNpcData.EXR = objInitNpcData.npcInfoData.EXR;
+			objInitNpcData.RES = objInitNpcData.npcInfoData.RES;
+			objInitNpcData.CRD = objInitNpcData.npcInfoData.CRD;
+			objInitNpcData.CRR = objInitNpcData.npcInfoData.CRR;
+			objInitNpcData.DEFA = objInitNpcData.npcInfoData.DEFA;
+			objInitNpcData.DGEA = objInitNpcData.npcInfoData.DGEA;
+			objInitNpcData.HITA = objInitNpcData.npcInfoData.HITA;
+			objInitNpcData.RESA = objInitNpcData.npcInfoData.RESA;
+			objInitNpcData.CRIA = objInitNpcData.npcInfoData.CRIA;
+			objInitNpcData.Level = objInitNpcData.npcInfoData.Lv;
+			objInitNpcData.AntiStun = objInitNpcData.npcInfoData.AntiStun;
+			objInitNpcData.AntiKnockDown = objInitNpcData.npcInfoData.AntiKnockDown;
+		}
 		objInitNpcData.PathID = curData.Data.PathId;
 		return Singleton<ObjManager>.Instance.GetRagdollNPC(objInitNpcData, null);
 	}
