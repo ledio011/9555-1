@@ -12,6 +12,8 @@ NPC_INST_MAP = {} # inst_id -> nid (to resolve rewards)
 NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 DEAD_NPC_SET = set() # duplicate death/reward prevention set
+M1001_LOCAL_HULK_IDS = {} # connection identity -> local Hulk instance IDs
+M1001_HULK_STATS_SENT = set() # (connection identity, instance id) configured via npc_create
 M1001_SERVER_NPCS = {} # connection identity -> server-side Mission 1001 Hulk instance IDs
 
 # Load Mission Data
@@ -1422,6 +1424,67 @@ def get_npc_attr(nid, player_level=1):
         'exd': exd, 'exr': exr, 'crd': crd, 'crr': crr,
         'power': power
     }
+
+def send_m1001_hulk_stats(conn, inst_id, x=6287, z=3512, o=0):
+    stats = {
+        'hp_max': 2200,
+        'atk': 80,
+        'def': 140,
+        'hit': 3411,
+        'eva': 155,
+        'cri': 421,
+        'res': 0,
+        'exd': 0,
+        'exr': 0,
+        'crd': 15000,
+        'crr': 0,
+        'defa': 3792,
+        'dgea': 7583,
+        'resa': 3792,
+        'hita': 379,
+        'cria': 3792,
+        'lv': 5
+    }
+    attr = encode_sproto([
+        (0, int(inst_id)),
+        (1, "9901"),
+        (2, stats['hp_max']),
+        (3, stats['hp_max']),
+        (4, stats['atk']),
+        (5, stats['def']),
+        (6, stats['hit']),
+        (7, stats['eva']),
+        (8, stats['cri']),
+        (9, stats['exd']),
+        (10, stats['exr']),
+        (11, stats['res']),
+        (12, stats['crd']),
+        (13, stats['crr']),
+        (14, stats['defa']),
+        (15, int(x)),
+        (16, int(z)),
+        (17, int(o)),
+        (18, stats['lv']),
+        (19, 0),
+        (20, 0),
+        (24, stats['dgea']),
+        (25, stats['resa']),
+        (26, stats['hita']),
+        (27, stats['cria'])
+    ])
+    ph = encode_sproto([(0, 509)])
+    pf = sproto_pack(ph + encode_sproto([(0, attr)]))
+    try:
+        conn.sendall(struct.pack(">H", len(pf)) + pf)
+        print(
+            f"[M1001 HULK VALUES] inst={inst_id} npc=9901 "
+            f"LV={stats['lv']} HP={stats['hp_max']} ATK={stats['atk']} "
+            f"DEF={stats['def']} HIT={stats['hit']} EVA={stats['eva']} CRI={stats['cri']}"
+        )
+        return stats
+    except Exception as e:
+        print(f"[M1001 HULK VALUES ERROR] inst={inst_id}: {e}")
+        return None
 
 def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
     """Sends TAG 510 to sync NPC stats."""
@@ -3271,21 +3334,32 @@ def client_handler(conn, addr):
                                     ])
                                     send_rpc_push(618, relife_req)
                         elif target_id in NPC_HP_MAP or (picked_char and target_id != picked_char['id']):
-                            # Tutorial map 11 creates the Hulk locally, so the client
-                            # sends its local AOI instance id (for example 197/198),
-                            # not NPCDataID 9901. Resolve those local ids explicitly
-                            # to the real Mission 1001 target instead of relying on the
-                            # generic fallback below.
                             target_nid = NPC_INST_MAP.get(target_id)
-                            if not target_nid and picked_char.get('map_id') == '11':
-                                target_nid = "9901"
-                                NPC_INST_MAP[target_id] = target_nid
-                                print(f"[M1001 ID FIX] local_inst={target_id} -> npc_id=9901")
+
+                            if picked_char.get('map_id') == '11' and target_nid is None:
+                                active_1001 = picked_char.get('active_missions', {}).get('1001', {})
+                                hulk_ids = M1001_LOCAL_HULK_IDS.setdefault(id(conn), set())
+                                if active_1001.get('state') == 1 and len(hulk_ids) < 2:
+                                    target_nid = "9901"
+                                    NPC_INST_MAP[target_id] = target_nid
+                                    hulk_ids.add(target_id)
+                                    print(f"[M1001 ID FIX] local_inst={target_id} -> npc_id=9901")
+
                             if not target_nid:
                                 target_nid = "9901"
                                 NPC_INST_MAP[target_id] = target_nid
 
                             nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
+
+                            if picked_char.get('map_id') == '11' and nid_str == '9901':
+                                hulk_ids = M1001_LOCAL_HULK_IDS.setdefault(id(conn), set())
+                                hulk_ids.add(target_id)
+                                hulk_key = (id(conn), target_id)
+                                if hulk_key not in M1001_HULK_STATS_SENT:
+                                    hulk_stats = send_m1001_hulk_stats(conn, target_id)
+                                    if hulk_stats is not None:
+                                        M1001_HULK_STATS_SENT.add(hulk_key)
+                                        NPC_HP_MAP[target_id] = hulk_stats['hp_max']
 
                             # Mission 1001 targets NPC 9901.
                             # Original client logic treats 9901 as a percentage-template NPC:
@@ -3295,13 +3369,9 @@ def client_handler(conn, addr):
                             defender_stats = get_npc_attr(nid_str, picked_char.get('level', 1))
 
                             if target_id not in NPC_HP_MAP:
-                                # The tutorial Hulk is client-local: before the first
-                                # hit the server has never seen its instance id. Seed
-                                # the authoritative HP from NPC 9901/AdaptData and
-                                # send the full attributes using the SAME local id.
                                 NPC_HP_MAP[target_id] = defender_stats['hp_max']
                                 print(
-                                    f"[M1001 HULK ID INIT] inst={target_id} npc_id=9901 "
+                                    f"[NPC ID INIT] inst={target_id} npc_id={nid_str} "
                                     f"lv={defender_stats['lv']} "
                                     f"HP={defender_stats['hp_max']} ATK={defender_stats['atk']} "
                                     f"DEF={defender_stats['def']} HIT={defender_stats['hit']} "
