@@ -18,13 +18,54 @@ public class aoi_update_attribute_handler
 			{
 				if (objCharacter.ObjType == GameDefine.OBJ_TYPE.OBJ_NPC)
 				{
+					// NPCs created locally by SceneManager (for example Mission 1001 Hulk)
+					// must keep the existing object.  Apply TAG 510 values directly;
+					// do NOT route them through npc_create (509), which recycles/recreates.
+					CharacterAttributeData npcAttr = objCharacter.AttributeData;
+
 					if (request.character.HasAttribute)
 					{
-						objCharacter.AttributeData.MaxHP = request.character.attribute.max_hp;
+						attribute attr = request.character.attribute;
+						if (attr.HasMax_hp) npcAttr.MaxHP = attr.max_hp;
+						if (attr.HasAtk) npcAttr.ATK = (int)attr.atk;
+						if (attr.HasDef) npcAttr.DEF = (int)attr.def;
+						if (attr.HasHit) npcAttr.HIT = (int)attr.hit;
+						if (attr.HasEva) npcAttr.DGE = (int)attr.eva;
+						if (attr.HasCri) npcAttr.CRI = (int)attr.cri;
+						if (attr.HasRes) npcAttr.RES = (float)attr.res;
+						if (attr.HasExd) npcAttr.EXD = (float)attr.exd / 10000f;
+						if (attr.HasExr) npcAttr.EXR = (float)attr.exr / 10000f;
+						if (attr.HasCrd) npcAttr.CRD = (float)attr.crd / 10000f;
+						if (attr.HasCrr) npcAttr.CRR = (float)attr.crr / 10000f;
+						if (attr.HasDefa) npcAttr.DEFA = (int)attr.defa;
+						if (attr.HasDgea) npcAttr.DGEA = (int)attr.dgea;
+						if (attr.HasResa) npcAttr.RESA = (int)attr.resa;
+						if (attr.HasHita) npcAttr.HITA = (int)attr.hita;
+						if (attr.HasCria) npcAttr.CRIA = (int)attr.cria;
+					}
+					if (request.character.HasAttribute_all)
+					{
+						attribute all = request.character.attribute_all;
+						if (all.HasAtk) npcAttr.CurATK = (float)all.atk;
+						if (all.HasDef) npcAttr.CurDEF = (float)all.def;
+						if (all.HasHit) npcAttr.CurHIT = (float)all.hit;
+						if (all.HasEva) npcAttr.CurDGE = (float)all.eva;
+						if (all.HasCri) npcAttr.CurCRI = (float)all.cri;
+						if (all.HasRes) npcAttr.CurRES = (float)all.res;
+						if (all.HasExd) npcAttr.CurEXD = (float)all.exd / 10000f;
+						if (all.HasExr) npcAttr.CurEXR = (float)all.exr / 10000f;
+						if (all.HasCrd) npcAttr.CurCRD = (float)all.crd / 10000f;
+						if (all.HasCrr) npcAttr.CurCRR = (float)all.crr / 10000f;
+						if (all.HasDefa) npcAttr.CurDEFA = (int)all.defa;
+						if (all.HasDgea) npcAttr.CurDGEA = (int)all.dgea;
+						if (all.HasResa) npcAttr.CurRESA = (int)all.resa;
+						if (all.HasHita) npcAttr.CurHITA = (int)all.hita;
+						if (all.HasCria) npcAttr.CurCRIA = (int)all.cria;
 					}
 					if (request.character.HasAttribute_other)
 					{
 						long hp = request.character.attribute_other.hp;
+						npcAttr.Level = (int)request.character.attribute_other.level;
 						objCharacter.ChangeHPVal(hp);
 						long guildId = (!request.character.attribute_other.HasGuildId) ? -1L : request.character.attribute_other.guildId;
 						long teamId = (!request.character.attribute_other.HasGuildJob) ? -1L : request.character.attribute_other.guildJob;
