@@ -926,7 +926,7 @@ public class SceneManager
 		}
 		for (int i = 0; i < this.mKillTargetMissionData.Count; i++)
 		{
-			if (!this.mKillTargetNpcDic.ContainsKey(this.mKillTargetMissionList[i].MissionId) && Vector3.Distance(mainPlayer.Position, this.mKillTargetMissionData[i].Pos) < this.mFlashKillTargetNpcDis && this.CurrentMapInofData.MapType == MAPTYPE.TUTORIAL_CAR && SingletonUnity<CitySimController>.Exists)
+			if (!this.mKillTargetNpcDic.ContainsKey(this.mKillTargetMissionList[i].MissionId) && Vector3.Distance(mainPlayer.Position, this.mKillTargetMissionData[i].Pos) < this.mFlashKillTargetNpcDis && this.CurrentMapInofData.MapType == MAPTYPE.TUTORIAL_CAR && this.CurrentMapInofData.ID != "11" && SingletonUnity<CitySimController>.Exists)
 			{
 				this.mKillTargetNpcDic.Add(this.mKillTargetMissionList[i].MissionId, new List<long>());
 				for (int j = 0; j < this.mKillTargetMissionData[i].FlashNum; j++)
