@@ -378,9 +378,10 @@ try:
                     if row_id not in KILL_TARGET_SPAWNS: KILL_TARGET_SPAWNS[row_id] = []
                     flash_num = int(parts[7]) if parts[7].isdigit() else 1
                     require_num = int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else flash_num
-                    nid = parts[6]
+                    source_nid = parts[6]
+                    nid = source_nid
                     if nid == "9901":
-                        nid = "90009" # Map scaling 9901 template to absolute Level 1 Hulk in NpcData (1000 HP, 40 ATK, 100 DEF)
+                        nid = "90009" # Mission 1001 source template -> concrete Level 1 Hulk in NpcData
                     KILL_TARGET_SPAWNS[row_id].append({
                         'map': parts[2],
                         'x': int(parts[3]),
@@ -388,6 +389,7 @@ try:
                         'range': int(parts[5]) if len(parts) > 5 and parts[5].lstrip('-').isdigit() else 500,
                         'o': 0,
                         'nid': nid,
+                        'source_nid': source_nid,
                         'num': flash_num,
                         'require': require_num
                     })
@@ -1897,7 +1899,13 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                     if spawn_key in KILL_TARGET_SPAWNS:
                         for s in KILL_TARGET_SPAWNS[spawn_key]:
                             if str(s['map']) == map_str:
-                                for _ in range(s['num']): send_npc_create(s['nid'], f"Quest_{s['nid']}", s['x'], s['z'], 0)
+                                for _ in range(s['num']):
+                            # Match the client KillTargetMissionData behavior:
+                            # randomize each target within Range and give it a random orientation.
+                            sx = s['x'] + random.randint(-s['range'], s['range'])
+                            sz = s['z'] + random.randint(-s['range'], s['range'])
+                            so = random.randint(0, 36000)
+                            send_npc_create(s['nid'], f"Quest_{s['nid']}", sx, sz, so)
 
 def sync_mission_data(picked_char):
     own_missions_list = []
@@ -2261,13 +2269,25 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                 logic_id = str(cfg.get('logic_id', ''))
                 spawn_key = logic_id if logic_id in KILL_TARGET_SPAWNS else str(mid)
                 spawn_nids = set()
+                spawn_maps = set()
                 if spawn_key in KILL_TARGET_SPAWNS:
                     for s in KILL_TARGET_SPAWNS[spawn_key]:
                         spawn_nids.add(str(s['nid']))
-                if target in ("9901", "90009", "1001") or target_value in ("9901", "90009", "1001"):
-                    matched = target_value in ("9901", "90009", "1001")
-                else:
-                    matched = target == target_value or target_value in spawn_nids
+                        if s.get('source_nid'):
+                            spawn_nids.add(str(s['source_nid']))
+                        if s.get('map') is not None:
+                            spawn_maps.add(str(s['map']))
+
+                # KillTargetMissionData defines the scene as part of the target.
+                # Only count the target when the player is on that scene, and accept
+                # both the original NpcID (e.g. 9901) and the concrete server NPC
+                # (e.g. 90009) used to represent it.
+                on_target_map = not spawn_maps or str(picked_char.get('map_id', '')) in spawn_maps
+                target_ids = set(spawn_nids)
+                if target:
+                    target_ids.add(target)
+                if on_target_map:
+                    matched = target_value in target_ids
         elif logic_type == 19 and event == 'car':
             # The client sends type 2 for a normal car robbery without an
             # NPC/car id, so its event type is the authoritative discriminator.
