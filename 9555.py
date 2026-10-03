@@ -1433,14 +1433,7 @@ def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
         # assigned in get_boss_char or the APK resets it to level 0.
         attr_other_fields.extend([(4, 1), (15, 2)])
     attr_oth = encode_sproto(attr_other_fields)
-    # Send the same combat values as both base and current attributes.
-    # The client-side NPC 510 handler applies these directly to the existing local object.
-    attr_base = encode_sproto([
-        (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
-        (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
-        (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
-        (12, stats['defa']), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
-    ])
+    attr_base = encode_sproto([(0, stats['hp_max'])])
     attr_all_data = [
         (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
         (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
