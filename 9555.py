@@ -379,9 +379,10 @@ try:
                     flash_num = int(parts[7]) if parts[7].isdigit() else 1
                     require_num = int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else flash_num
                     source_nid = parts[6]
+                    # Keep the original mission NpcID for stat calculation.
+                    # 9901 is a percentage-template Hulk; send_npc_create()
+                    # maps it to client-safe 90009 only at packet encoding time.
                     nid = source_nid
-                    if nid == "9901":
-                        nid = "90009" # Mission 1001 source template -> concrete Level 1 Hulk in NpcData
                     KILL_TARGET_SPAWNS[row_id].append({
                         'map': parts[2],
                         'x': int(parts[3]),
@@ -1887,7 +1888,10 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
                 send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
-    # 2. Spawn Mission targets defined by the APK data.
+    # 2. Spawn mission targets defined by the APK data.
+    # Map 11 mission-1001 targets are created by the client-side
+    # KillTargetMissionData path. Keep this server-authoritative for Map 11
+    # only after the client patch disables its duplicate local spawn.
     if picked_char:
         for mid, mdata in picked_char.get('active_missions', {}).items():
             if mdata['state'] == 1:
