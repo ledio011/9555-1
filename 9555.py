@@ -1373,7 +1373,10 @@ def get_npc_attr(nid, player_level=1):
         atk_std = adapt.get('atk', ld.get('atk', [40])[0] if isinstance(ld.get('atk'), list) else 40)
         def_std = adapt.get('def', ld.get('def', [100])[0] if isinstance(ld.get('def'), list) else 100)
         hit_std = adapt.get('hit', ld.get('hit', [2844])[0] if isinstance(ld.get('hit'), list) else 2844)
-        eva_std = adapt.get('def', 100)
+        # AdaptData has a dedicated DGEStd field for Dodge/EVA.
+        # Mission 9901 uses a 10000 coefficient, so use the original
+        # level-scaled DGEStd value rather than DefStd.
+        eva_std = adapt.get('dge', 100)
         cri_std = adapt.get('cri', 351)
         res_std = adapt.get('res', 0)
         exd_std = adapt.get('exd', 0)
