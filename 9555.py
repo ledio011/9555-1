@@ -12,9 +12,8 @@ NPC_INST_MAP = {} # inst_id -> nid (to resolve rewards)
 NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 DEAD_NPC_SET = set() # duplicate death/reward prevention set
-M1001_LOCAL_HULK_IDS = {} # connection identity -> local Hulk instance IDs
-M1001_HULK_STATS_SENT = set() # (connection identity, instance id) configured via npc_create
-M1001_SERVER_NPCS = {} # connection identity -> server-side Mission 1001 Hulk instance IDs
+M1001_LOCAL_HULK_IDS = {} # connection identity -> the two local Mission 1001 Hulk instance IDs
+M1001_HULK_STATS_SENT = set() # (connection identity, instance id) configured through tag 509
 
 # Load Mission Data
 missions_data = {}
@@ -1425,8 +1424,8 @@ def get_npc_attr(nid, player_level=1):
         'power': power
     }
 
-def send_m1001_hulk_stats(conn, inst_id, x=6287, z=3512, o=0):
-    stats = {
+def get_m1001_hulk_stats():
+    return {
         'hp_max': 2200,
         'atk': 80,
         'def': 140,
@@ -1445,6 +1444,9 @@ def send_m1001_hulk_stats(conn, inst_id, x=6287, z=3512, o=0):
         'cria': 3792,
         'lv': 5
     }
+
+def send_m1001_hulk_stats(conn, inst_id):
+    stats = get_m1001_hulk_stats()
     attr = encode_sproto([
         (0, int(inst_id)),
         (1, "9901"),
@@ -1461,9 +1463,9 @@ def send_m1001_hulk_stats(conn, inst_id, x=6287, z=3512, o=0):
         (12, stats['crd']),
         (13, stats['crr']),
         (14, stats['defa']),
-        (15, int(x)),
-        (16, int(z)),
-        (17, int(o)),
+        (15, 6287),
+        (16, 3512),
+        (17, 0),
         (18, stats['lv']),
         (19, 0),
         (20, 0),
@@ -1769,10 +1771,10 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         return
     spawned_maps.add(map_str)
 
-    def send_npc_create(nid, name, x, z, o, override_stats=None):
+    def send_npc_create(nid, name, x, z, o):
         global GLOBAL_INST_COUNTER
         player_lvl = picked_char.get('level', 1) if picked_char else 1
-        npc_stats = override_stats if override_stats is not None else get_npc_attr(nid, player_lvl)
+        npc_stats = get_npc_attr(nid, player_lvl)
         hp_cur = npc_stats['hp_max']
         hp_max = npc_stats['hp_max']
         atk = npc_stats['atk']
@@ -1970,43 +1972,10 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
                 send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
-    if map_str == "11" and picked_char:
-        mission_1001 = picked_char.get('active_missions', {}).get('1001', {})
-        if mission_1001.get('state') == 1:
-            server_ids = M1001_SERVER_NPCS.setdefault(connection_id, set())
-            live_ids = [sid for sid in server_ids if NPC_HP_MAP.get(sid, 0) > 0]
-            if len(live_ids) < 2:
-                player_pos = picked_char.get('pos', [29860, 100, -17005, 0])
-                base_x = int(player_pos[0])
-                base_z = int(player_pos[2])
-                spawn_range = 500
-                manual_stats = {
-                    'hp_max': 2200,
-                    'atk': 80,
-                    'def': 140,
-                    'hit': 3411,
-                    'eva': 155,
-                    'cri': 421,
-                    'res': 0,
-                    'exd': 0,
-                    'exr': 0,
-                    'crd': 15000,
-                    'crr': 0,
-                    'defa': 3792,
-                    'dgea': 7583,
-                    'resa': 3792,
-                    'hita': 379,
-                    'cria': 3792,
-                    'lv': 5
-                }
-                for _ in range(2 - len(live_ids)):
-                    x = base_x + random.randint(-spawn_range, spawn_range)
-                    z = base_z + random.randint(-spawn_range, spawn_range)
-                    inst_id = send_npc_create("9901", "Hulk", x, z, 0, manual_stats)
-                    if inst_id:
-                        server_ids.add(inst_id)
-                print(f"[M1001 SERVER HULK] spawned={len([sid for sid in server_ids if NPC_HP_MAP.get(sid, 0) > 0])} stats=LV5 HP=2200 ATK=80 DEF=140")
-
+    # 2. Tutorial KillTarget NPCs are client-local.
+    # SceneManager.CheckKillTargetMission() creates these through
+    # CitySimController.GetNpc() and reports their death with local_npc_die.
+    # Do not spawn a second server-side copy here.
 def sync_mission_data(picked_char):
     own_missions_list = []
     for mid, mdata in picked_char.get('active_missions', {}).items():
@@ -3335,11 +3304,11 @@ def client_handler(conn, addr):
                                     send_rpc_push(618, relife_req)
                         elif target_id in NPC_HP_MAP or (picked_char and target_id != picked_char['id']):
                             target_nid = NPC_INST_MAP.get(target_id)
+                            hulk_ids = M1001_LOCAL_HULK_IDS.setdefault(id(conn), set())
+                            active_1001 = picked_char.get('active_missions', {}).get('1001', {})
 
-                            if picked_char.get('map_id') == '11' and target_nid is None:
-                                active_1001 = picked_char.get('active_missions', {}).get('1001', {})
-                                hulk_ids = M1001_LOCAL_HULK_IDS.setdefault(id(conn), set())
-                                if active_1001.get('state') == 1 and len(hulk_ids) < 2:
+                            if picked_char.get('map_id') == '11' and active_1001.get('state') == 1:
+                                if target_nid is None and len(hulk_ids) < 2:
                                     target_nid = "9901"
                                     NPC_INST_MAP[target_id] = target_nid
                                     hulk_ids.add(target_id)
@@ -3350,23 +3319,18 @@ def client_handler(conn, addr):
                                 NPC_INST_MAP[target_id] = target_nid
 
                             nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
-
-                            if picked_char.get('map_id') == '11' and nid_str == '9901':
-                                hulk_ids = M1001_LOCAL_HULK_IDS.setdefault(id(conn), set())
-                                hulk_ids.add(target_id)
-                                hulk_key = (id(conn), target_id)
-                                if hulk_key not in M1001_HULK_STATS_SENT:
-                                    hulk_stats = send_m1001_hulk_stats(conn, target_id)
-                                    if hulk_stats is not None:
-                                        M1001_HULK_STATS_SENT.add(hulk_key)
-                                        NPC_HP_MAP[target_id] = hulk_stats['hp_max']
-
-                            # Mission 1001 targets NPC 9901.
-                            # Original client logic treats 9901 as a percentage-template NPC:
-                            # its 10000 coefficients are applied to AdaptData for the
-                            # player's current level. Do NOT replace it with the fixed
-                            # level-1 stats of concrete NPC 90009.
                             defender_stats = get_npc_attr(nid_str, picked_char.get('level', 1))
+
+                            if picked_char.get('map_id') == '11' and target_id in hulk_ids and nid_str == '9901':
+                                hulk_key = (id(conn), target_id)
+                                hulk_stats = get_m1001_hulk_stats()
+                                defender_stats = hulk_stats
+                                if hulk_key not in M1001_HULK_STATS_SENT:
+                                    refreshed = send_m1001_hulk_stats(conn, target_id)
+                                    if refreshed is not None:
+                                        M1001_HULK_STATS_SENT.add(hulk_key)
+                                        defender_stats = refreshed
+                                        NPC_HP_MAP[target_id] = refreshed['hp_max']
 
                             if target_id not in NPC_HP_MAP:
                                 NPC_HP_MAP[target_id] = defender_stats['hp_max']
@@ -3457,8 +3421,6 @@ def client_handler(conn, addr):
                     else: DEAD_NPC_SET.add(inst_id)
 
                 if inst_id and inst_id in NPC_HP_MAP: del NPC_HP_MAP[inst_id]
-                if inst_id in M1001_SERVER_NPCS.get(id(conn), set()):
-                    M1001_SERVER_NPCS[id(conn)].discard(inst_id)
 
                 if picked_char and not is_duplicate:
                     if die_type in [2, 6]:
