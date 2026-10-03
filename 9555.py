@@ -1422,30 +1422,6 @@ def get_npc_attr(nid, player_level=1):
         'power': power
     }
 
-TUTORIAL_M1001_HULK_STATS = {
-    'hp_max': 1000,
-    'atk': 40,
-    'def': 100,
-    'hit': 2844,
-    'eva': 129,
-    'cri': 351,
-    'res': 0,
-    'exd': 0,
-    'exr': 0,
-    'crd': 15000,
-    'crr': 0,
-    'defa': 3158,
-    'dgea': 6317,
-    'resa': 3158,
-    'hita': 316,
-    'cria': 3158,
-    'lv': 1,
-    'power': 15060
-}
-
-def get_tutorial_m1001_hulk_attr():
-    return dict(TUTORIAL_M1001_HULK_STATS)
-
 def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
     """Sends TAG 510 to sync NPC stats."""
     # The dominance zombie is initially added to camp 2 by tag 544.  Omitting
