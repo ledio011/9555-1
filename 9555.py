@@ -1913,10 +1913,10 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             server_ids = M1001_SERVER_NPCS.setdefault(connection_id, set())
             live_ids = [sid for sid in server_ids if NPC_HP_MAP.get(sid, 0) > 0]
             if len(live_ids) < 2:
-                placement = KILL_TARGET_SPAWNS.get("1", [{}])[0]
-                base_x = int(placement.get('x', 6287))
-                base_z = int(placement.get('z', 3512))
-                spawn_range = int(placement.get('range', 500))
+                player_pos = picked_char.get('pos', [29860, 100, -17005, 0])
+                base_x = int(player_pos[0])
+                base_z = int(player_pos[2])
+                spawn_range = 500
                 manual_stats = {
                     'hp_max': 2200,
                     'atk': 80,
@@ -1953,8 +1953,6 @@ def sync_mission_data(picked_char):
         # ownmission schema: missionId(0), missionstate(1), missionquality(2), parm(3)
         # FIX: APK logic for SyncMissionList requires int.Parse(mid) for main missions check
         state_for_client = int(mdata['state'])
-        if str(mid) == "1001" and state_for_client == 1:
-            state_for_client = 0
         m_bytes = encode_sproto([
             (0, str(mid)),
             (1, state_for_client),
