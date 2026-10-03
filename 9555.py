@@ -1758,7 +1758,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         if str(nid) == "9901":
             print(
                 "[M1001 HULK STATS] "
-                f"orig_nid=9901 client_nid=90009 "
+                f"npcdataid=9901 "
                 f"lv={lvl} HP={hp_cur}/{hp_max} ATK={atk} DEF={df} "
                 f"HIT={hit} EVA={eva} CRI={cri} RES={res} "
                 f"EXD={exd} EXR={exr} CRD={crd} CRR={crr} "
@@ -1772,10 +1772,11 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         NPC_INST_MAP[inst_id] = str(nid) # Resolver mapping
 
         # Handle composite models like "PartA;PartB;PartC" to prevent client crashes
+        # Mission 1001's real NPCDataID is 9901. Do not translate it
+        # to concrete/test NPC 90009: the APK's NPCData lookup and stat
+        # initialization must receive the original 9901 template ID.
         final_nid = str(nid)
-        if final_nid == "9901":
-            final_nid = "90009"
-        elif ";" in final_nid:
+        if ";" in final_nid:
             if "XD_A" in final_nid: final_nid = "100"
             elif "QJ_A" in final_nid: final_nid = "104"
             elif "NQS_A" in final_nid: final_nid = "105"
