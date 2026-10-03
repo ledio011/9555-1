@@ -12,6 +12,7 @@ NPC_INST_MAP = {} # inst_id -> nid (to resolve rewards)
 NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 DEAD_NPC_SET = set() # duplicate death/reward prevention set
+M1001_SERVER_NPCS = {} # connection identity -> server-side Mission 1001 Hulk instance IDs
 
 # Load Mission Data
 missions_data = {}
@@ -1906,63 +1907,42 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
                 send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
-    # 2. Spawn Mission targets defined by the APK data.
-    if picked_char:
-        for mid, mdata in picked_char.get('active_missions', {}).items():
-            if mdata.get('state') != 1:
-                continue
-
-            cfg = missions_data.get(mid)
-            if not cfg:
-                continue
-
-            logic_id = str(cfg.get('logic_id', ''))
-            spawn_key = logic_id if logic_id in KILL_TARGET_SPAWNS else str(mid)
-            if spawn_key not in KILL_TARGET_SPAWNS:
-                continue
-
-            for spawn in KILL_TARGET_SPAWNS[spawn_key]:
-                if str(spawn.get('map')) != map_str:
-                    continue
-
-                for _ in range(int(spawn.get('num', 1))):
-                    nid = str(spawn.get('nid', ''))
-                    stats_override = None
-
-                    if str(mid) == "1001" and nid == "9901":
-                        stats_override = get_npc_attr(nid, picked_char.get('level', 1))
-                        defaults = {
-                            'hp_max': 2200,
-                            'atk': 80,
-                            'def': 140,
-                            'hit': 3411,
-                            'eva': 155,
-                            'cri': 421,
-                            'res': 0,
-                            'exd': 0,
-                            'exr': 0,
-                            'crd': 15000,
-                            'crr': 0,
-                            'defa': 3792,
-                            'dgea': 7583,
-                            'resa': 3792,
-                            'hita': 379,
-                            'cria': 3792,
-                            'lv': 5
-                        }
-                        for key, value in defaults.items():
-                            current = stats_override.get(key)
-                            if current is None:
-                                stats_override[key] = value
-
-                    send_npc_create(
-                        nid,
-                        f"Quest_{nid}",
-                        int(spawn.get('x', 0)),
-                        int(spawn.get('z', 0)),
-                        0,
-                        stats_override
-                    )
+    if map_str == "11" and picked_char:
+        mission_1001 = picked_char.get('active_missions', {}).get('1001', {})
+        if mission_1001.get('state') == 1:
+            server_ids = M1001_SERVER_NPCS.setdefault(connection_id, set())
+            live_ids = [sid for sid in server_ids if NPC_HP_MAP.get(sid, 0) > 0]
+            if len(live_ids) < 2:
+                player_pos = picked_char.get('pos', [29860, 100, -17005, 0])
+                base_x = int(player_pos[0])
+                base_z = int(player_pos[2])
+                spawn_range = 500
+                manual_stats = {
+                    'hp_max': 2200,
+                    'atk': 80,
+                    'def': 140,
+                    'hit': 3411,
+                    'eva': 155,
+                    'cri': 421,
+                    'res': 0,
+                    'exd': 0,
+                    'exr': 0,
+                    'crd': 15000,
+                    'crr': 0,
+                    'defa': 3792,
+                    'dgea': 7583,
+                    'resa': 3792,
+                    'hita': 379,
+                    'cria': 3792,
+                    'lv': 5
+                }
+                for _ in range(2 - len(live_ids)):
+                    x = base_x + random.randint(-spawn_range, spawn_range)
+                    z = base_z + random.randint(-spawn_range, spawn_range)
+                    inst_id = send_npc_create("9901", "Hulk", x, z, 0, manual_stats)
+                    if inst_id:
+                        server_ids.add(inst_id)
+                print(f"[M1001 SERVER HULK] spawned={len([sid for sid in server_ids if NPC_HP_MAP.get(sid, 0) > 0])} stats=LV5 HP=2200 ATK=80 DEF=140")
 
 def sync_mission_data(picked_char):
     own_missions_list = []
@@ -3407,6 +3387,8 @@ def client_handler(conn, addr):
                     else: DEAD_NPC_SET.add(inst_id)
 
                 if inst_id and inst_id in NPC_HP_MAP: del NPC_HP_MAP[inst_id]
+                if inst_id in M1001_SERVER_NPCS.get(id(conn), set()):
+                    M1001_SERVER_NPCS[id(conn)].discard(inst_id)
 
                 if picked_char and not is_duplicate:
                     if die_type in [2, 6]:
