@@ -1886,7 +1886,9 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
     # 2. Spawn Mission targets defined by the APK data.
-    if picked_char:
+    # For Map 11 (TUTORIAL_CAR), the client's SceneManager.CheckKillTargetMission() and CheckTargetCarMission()
+    # spawn mission targets locally via CitySimController. Creating server NPCs via Tag 509 for Map 11 causes duplicate spawns.
+    if picked_char and map_str != "11":
         for mid, mdata in picked_char.get('active_missions', {}).items():
             if mdata['state'] == 1:
                 cfg = missions_data.get(mid)
