@@ -378,11 +378,9 @@ try:
                     if row_id not in KILL_TARGET_SPAWNS: KILL_TARGET_SPAWNS[row_id] = []
                     flash_num = int(parts[7]) if parts[7].isdigit() else 1
                     require_num = int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else flash_num
-                    source_nid = parts[6]
-                    # Keep the original mission NpcID for stat calculation.
-                    # 9901 is a percentage-template Hulk; send_npc_create()
-                    # maps it to client-safe 90009 only at packet encoding time.
-                    nid = source_nid
+                    nid = parts[6]
+                    if nid == "9901":
+                        nid = "90009" # Map scaling 9901 template to absolute Level 1 Hulk in NpcData (1000 HP, 40 ATK, 100 DEF)
                     KILL_TARGET_SPAWNS[row_id].append({
                         'map': parts[2],
                         'x': int(parts[3]),
@@ -390,7 +388,6 @@ try:
                         'range': int(parts[5]) if len(parts) > 5 and parts[5].lstrip('-').isdigit() else 500,
                         'o': 0,
                         'nid': nid,
-                        'source_nid': source_nid,
                         'num': flash_num,
                         'require': require_num
                     })
@@ -1373,10 +1370,7 @@ def get_npc_attr(nid, player_level=1):
         atk_std = adapt.get('atk', ld.get('atk', [40])[0] if isinstance(ld.get('atk'), list) else 40)
         def_std = adapt.get('def', ld.get('def', [100])[0] if isinstance(ld.get('def'), list) else 100)
         hit_std = adapt.get('hit', ld.get('hit', [2844])[0] if isinstance(ld.get('hit'), list) else 2844)
-        # AdaptData has a dedicated DGEStd field for Dodge/EVA.
-        # Mission 9901 uses a 10000 coefficient, so use the original
-        # level-scaled DGEStd value rather than DefStd.
-        eva_std = adapt.get('dge', 100)
+        eva_std = adapt.get('def', 100)
         cri_std = adapt.get('cri', 351)
         res_std = adapt.get('res', 0)
         exd_std = adapt.get('exd', 0)
@@ -1728,31 +1722,16 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         cria = npc_stats.get('cria', 3158)
         lvl = npc_stats['lv']
 
-        # Debug Mission 1001 Hulk (NPC 9901) stats before encoding the
-        # npc_attribute packet. This lets us verify the server-side values
-        # independently from how the APK renders them.
-        if str(nid) == "9901":
-            print(
-                "[M1001 HULK STATS] "
-                f"npcdataid=9901 "
-                f"lv={lvl} HP={hp_cur}/{hp_max} ATK={atk} DEF={df} "
-                f"HIT={hit} EVA={eva} CRI={cri} RES={res} "
-                f"EXD={exd} EXR={exr} CRD={crd} CRR={crr} "
-                f"DEFA={defa} DGEA={dgea} RESA={resa} "
-                f"HITA={hita} CRIA={cria} POWER={npc_stats.get('power', 0)}"
-            )
-
         GLOBAL_INST_COUNTER += 1
         inst_id = GLOBAL_INST_COUNTER
         NPC_HP_MAP[inst_id] = hp_max
         NPC_INST_MAP[inst_id] = str(nid) # Resolver mapping
 
         # Handle composite models like "PartA;PartB;PartC" to prevent client crashes
-        # Mission 1001's real NPCDataID is 9901. Do not translate it
-        # to concrete/test NPC 90009: the APK's NPCData lookup and stat
-        # initialization must receive the original 9901 template ID.
         final_nid = str(nid)
-        if ";" in final_nid:
+        if final_nid == "9901":
+            final_nid = "90009"
+        elif ";" in final_nid:
             if "XD_A" in final_nid: final_nid = "100"
             elif "QJ_A" in final_nid: final_nid = "104"
             elif "NQS_A" in final_nid: final_nid = "105"
@@ -1906,10 +1885,20 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
                 send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
-    # 2. Tutorial KillTarget NPCs are client-local.
-    # SceneManager.CheckKillTargetMission() creates these through
-    # CitySimController.GetNpc() and reports their death with local_npc_die.
-    # Do not spawn a second server-side copy here.
+    # 2. Spawn Mission targets defined by the APK data.
+    if picked_char:
+        for mid, mdata in picked_char.get('active_missions', {}).items():
+            if mdata['state'] == 1:
+                cfg = missions_data.get(mid)
+                if cfg:
+                    logic_id = str(cfg.get('logic_id', ''))
+                    # The client looks up KillTargetMissionData by LogicID (matching DataManager.GetKillTargetMissionDataById).
+                    spawn_key = logic_id if logic_id in KILL_TARGET_SPAWNS else str(mid)
+                    if spawn_key in KILL_TARGET_SPAWNS:
+                        for s in KILL_TARGET_SPAWNS[spawn_key]:
+                            if str(s['map']) == map_str:
+                                for _ in range(s['num']): send_npc_create(s['nid'], f"Quest_{s['nid']}", s['x'], s['z'], 0)
+
 def sync_mission_data(picked_char):
     own_missions_list = []
     for mid, mdata in picked_char.get('active_missions', {}).items():
@@ -1918,10 +1907,9 @@ def sync_mission_data(picked_char):
         if len(parm) < 8: parm += [0]*(8-len(parm))
         # ownmission schema: missionId(0), missionstate(1), missionquality(2), parm(3)
         # FIX: APK logic for SyncMissionList requires int.Parse(mid) for main missions check
-        state_for_client = int(mdata['state'])
         m_bytes = encode_sproto([
             (0, str(mid)),
-            (1, state_for_client),
+            (1, int(mdata['state'])),
             (2, 0), # missionquality
             (3, [int(x) for x in parm])
         ])
@@ -2273,25 +2261,13 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                 logic_id = str(cfg.get('logic_id', ''))
                 spawn_key = logic_id if logic_id in KILL_TARGET_SPAWNS else str(mid)
                 spawn_nids = set()
-                spawn_maps = set()
                 if spawn_key in KILL_TARGET_SPAWNS:
                     for s in KILL_TARGET_SPAWNS[spawn_key]:
                         spawn_nids.add(str(s['nid']))
-                        if s.get('source_nid'):
-                            spawn_nids.add(str(s['source_nid']))
-                        if s.get('map') is not None:
-                            spawn_maps.add(str(s['map']))
-
-                # KillTargetMissionData defines the scene as part of the target.
-                # Only count the target when the player is on that scene, and accept
-                # both the original NpcID (e.g. 9901) and the concrete server NPC
-                # (e.g. 90009) used to represent it.
-                on_target_map = not spawn_maps or str(picked_char.get('map_id', '')) in spawn_maps
-                target_ids = set(spawn_nids)
-                if target:
-                    target_ids.add(target)
-                if on_target_map:
-                    matched = target_value in target_ids
+                if target in ("9901", "90009", "1001") or target_value in ("9901", "90009", "1001"):
+                    matched = target_value in ("9901", "90009", "1001")
+                else:
+                    matched = target == target_value or target_value in spawn_nids
         elif logic_type == 19 and event == 'car':
             # The client sends type 2 for a normal car robbery without an
             # NPC/car id, so its event type is the authoritative discriminator.
@@ -2894,12 +2870,27 @@ def client_handler(conn, addr):
 
             elif msg == 112: # accept_mission
                 if picked_char:
-                    mid = body.get(0, b"").decode('utf-8')
+                    mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
                     res = accept_mission_logic(picked_char, mid)
                     print(f"[MISSION ACCEPT REQ] mid={mid} result={res}")
                     if res:
                         save_chars(all_accounts_chars)
                         print(f"[MISSION ACCEPT] mission_id={mid}")
+                        m_entry = picked_char.get('active_missions', {}).get(mid, {})
+                        parm = m_entry.get('parm', [0]*8)
+                        if len(parm) < 8: parm += [0]*(8-len(parm))
+                        own_bytes = encode_sproto([
+                            (0, str(mid)),
+                            (1, int(m_entry.get('state', 1))),
+                            (2, 0),
+                            (3, [int(x) for x in parm])
+                        ])
+                        send_rpc_push(520, encode_sproto([
+                            (0, str(mid)),
+                            (1, 0),
+                            (2, 0),
+                            (3, own_bytes)
+                        ]))
                     if session is not None:
                         ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                         conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -2907,7 +2898,7 @@ def client_handler(conn, addr):
 
             elif msg == 113: # complete_mission
                 if picked_char:
-                    mid = body.get(0, b"").decode('utf-8')
+                    mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
                     m_entry = picked_char.get('active_missions', {}).get(mid)
                     print(f"[MISSION COMPLETE REQ] mid={mid} entry_exists={m_entry is not None} state={m_entry['state'] if m_entry else 'N/A'}")
                     if m_entry and m_entry['state'] == 2:
@@ -2954,7 +2945,7 @@ def client_handler(conn, addr):
                                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
                             # Push Sync sequence
-                            send_rpc_push(521, encode_sproto([(0, mid), (1, 1)])) # Success feedback
+                            send_rpc_push(521, encode_sproto([(0, mid), (1, 0)])) # Success feedback
                             sync_char_attrs_rpc(conn, picked_char)               # Stats update
                             send_rpc_push(519, sync_mission_data(picked_char))   # Mission UI update
                             if popup_items:
@@ -2979,15 +2970,33 @@ def client_handler(conn, addr):
                 if picked_char and mid in picked_char.get('active_missions', {}):
                     del picked_char['active_missions'][mid]
                     save_chars(all_accounts_chars)
-                    send_rpc_push(522, encode_sproto([(0, mid)]))
+                    send_rpc_push(522, encode_sproto([(0, mid), (1, 0)]))
                     send_rpc_push(519, sync_mission_data(picked_char))
                     print(f"[MISSION ABANDON] mission_id={mid}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif msg == 121: # request_daily_mission
+                if picked_char:
+                    for dmid, dmdata in picked_char.get('active_missions', {}).items():
+                        mcfg = missions_data.get(dmid, {})
+                        if mcfg.get('class') == 4:
+                            parm = dmdata.get('parm', [0]*8)
+                            if len(parm) < 8: parm += [0]*(8-len(parm))
+                            own_bytes = encode_sproto([
+                                (0, str(dmid)),
+                                (1, int(dmdata.get('state', 1))),
+                                (2, 0),
+                                (3, [int(x) for x in parm])
+                            ])
+                            send_rpc_push(530, encode_sproto([(0, own_bytes)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
             elif msg == 524: # set_mission_param
-                mid = body.get(0, b"").decode('utf-8')
+                mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
                 idx = get_val_int(body, 1); val = get_val_int(body, 2)
                 if picked_char and mid in picked_char.get('active_missions', {}):
                     picked_char['active_missions'][mid]['parm'][idx-1] = val
@@ -2998,7 +3007,7 @@ def client_handler(conn, addr):
                     send_rpc_push(519, sync_mission_data(picked_char))
 
             elif msg == 523: # set_mission_state
-                mid = body.get(0, b"").decode('utf-8')
+                mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
                 state = get_val_int(body, 1)
                 if picked_char and mid in picked_char.get('active_missions', {}):
                     picked_char['active_missions'][mid]['state'] = state
@@ -3237,47 +3246,19 @@ def client_handler(conn, addr):
                                     ])
                                     send_rpc_push(618, relife_req)
                         elif target_id in NPC_HP_MAP or (picked_char and target_id != picked_char['id']):
-                            # Tutorial map 11 creates the Hulk locally, so the client
-                            # sends its local AOI instance id (for example 197/198),
-                            # not NPCDataID 9901. Resolve those local ids explicitly
-                            # to the real Mission 1001 target instead of relying on the
-                            # generic fallback below.
-                            target_nid = NPC_INST_MAP.get(target_id)
-                            if not target_nid and picked_char.get('map_id') == '11':
-                                target_nid = "9901"
-                                NPC_INST_MAP[target_id] = target_nid
-                                print(f"[M1001 ID FIX] local_inst={target_id} -> npc_id=9901")
-                            if not target_nid:
-                                target_nid = "9901"
-                                NPC_INST_MAP[target_id] = target_nid
+                            # Damage to NPC/Monster/Boss (including local client NPCs)
+                            target_nid = NPC_INST_MAP.get(target_id, "9901")
+                            NPC_INST_MAP[target_id] = target_nid
 
                             nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
-
-                            # Mission 1001 targets NPC 9901.
-                            # Original client logic treats 9901 as a percentage-template NPC:
-                            # its 10000 coefficients are applied to AdaptData for the
-                            # player's current level. Do NOT replace it with the fixed
-                            # level-1 stats of concrete NPC 90009.
                             defender_stats = get_npc_attr(nid_str, picked_char.get('level', 1))
 
                             if target_id not in NPC_HP_MAP:
-                                # The tutorial Hulk is client-local: before the first
-                                # hit the server has never seen its instance id. Seed
-                                # the authoritative HP from NPC 9901/AdaptData and
-                                # send the full attributes using the SAME local id.
                                 NPC_HP_MAP[target_id] = defender_stats['hp_max']
-                                print(
-                                    f"[M1001 HULK ID INIT] inst={target_id} npc_id=9901 "
-                                    f"lv={defender_stats['lv']} "
-                                    f"HP={defender_stats['hp_max']} ATK={defender_stats['atk']} "
-                                    f"DEF={defender_stats['def']} HIT={defender_stats['hit']} "
-                                    f"EVA={defender_stats['eva']} CRI={defender_stats['cri']}"
-                                )
-                                sync_npc_attrs_rpc(conn, target_id, defender_stats, NPC_HP_MAP[target_id])
 
                             NPC_HP_MAP[target_id] -= dmg
 
-                            # Synchronize the post-hit HP using the local instance id.
+                            # Synchronization of target HP to ensure bar update (Tag 510)
                             sync_npc_attrs_rpc(conn, target_id, defender_stats, max(0, NPC_HP_MAP[target_id]))
 
                             if NPC_HP_MAP[target_id] <= 0:
