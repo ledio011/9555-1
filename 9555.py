@@ -2948,6 +2948,22 @@ def client_handler(conn, addr):
 
                             # Push Sync sequence
                             send_rpc_push(521, encode_sproto([(0, mid), (1, 0)])) # Success feedback
+                            if is_chained and next_mid:
+                                next_m_entry = picked_char.get('active_missions', {}).get(str(next_mid), {})
+                                next_parm = next_m_entry.get('parm', [0]*8)
+                                if len(next_parm) < 8: next_parm += [0]*(8-len(next_parm))
+                                next_own_bytes = encode_sproto([
+                                    (0, str(next_mid)),
+                                    (1, int(next_m_entry.get('state', 1))),
+                                    (2, 0),
+                                    (3, [int(x) for x in next_parm])
+                                ])
+                                send_rpc_push(520, encode_sproto([
+                                    (0, str(next_mid)),
+                                    (1, 0),
+                                    (2, 0),
+                                    (3, next_own_bytes)
+                                ]))
                             sync_char_attrs_rpc(conn, picked_char)               # Stats update
                             send_rpc_push(519, sync_mission_data(picked_char))   # Mission UI update
                             if popup_items:
