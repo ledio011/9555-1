@@ -55,44 +55,17 @@ try:
     if not os.path.isdir(text_asset_root):
         text_asset_root = os.path.join(script_dir, "Decompiled", "assets", "Bundle", "TextAsset")
 
-    # Load decompiled missions.json if present
-    json_md_paths = [
-        os.path.join(script_dir, "dec&normal", "Decompiled", "missions.json"),
-        os.path.join(script_dir, "decompiled_src", "missions.json"),
-        os.path.join(script_dir, "missions.json"),
-    ]
-    for p in json_md_paths:
-        if os.path.exists(p):
-            with open(p, "r", encoding='utf-8') as f:
-                raw_m = json.load(f)
-                for mid_k, mv in raw_m.items():
-                    missions_data[str(mid_k)] = {
-                        'id': str(mv.get('id', mid_k)),
-                        'name': mv.get('name', ''),
-                        'class': int(mv.get('class', 0)),
-                        'logic_type': int(mv.get('logic_type', 0)),
-                        'logic_id': str(mv.get('logic_id', '')),
-                        'target_id': str(mv.get('target_id', '')),
-                        'pre_id': str(mv.get('pre_id', '')),
-                        'next_id': str(mv.get('next_id', '')),
-                        'min_level': int(mv.get('min_level', 1)),
-                        'require_num': int(mv.get('require_num', 1)),
-                        'target_type': mv.get('target_type', ''),
-                        'map_id': str(mv.get('map_id', '')),
-                        'story_id': str(mv.get('story_id', '')),
-                        'reward_ids': [str(x) for x in mv.get('reward_ids', [])]
-                    }
-            print(f"[MISSION JSON LOADED] count={len(missions_data)}")
-            break
-
+    # Load authoritative MissionData TextAsset first
     md_path = os.path.join(text_asset_root, "MissionData")
-    if not missions_data and os.path.exists(md_path):
+    if os.path.exists(md_path):
         with open(md_path, "r", encoding='utf-8') as f:
             for line in f:
                 parts = line.strip().split(",")
                 if len(parts) > 23 and parts[0] == "*" and parts[1].isdigit():
                     mid = parts[1]
                     missions_data[mid] = {
+                        'id': mid,
+                        'name': parts[2] if len(parts) > 2 else '',
                         'class': int(parts[6]) if parts[6].isdigit() else 0,
                         'logic_type': int(parts[7]) if parts[7].isdigit() else 0,
                         'logic_id': parts[9],
@@ -103,6 +76,48 @@ try:
                         'reward_ids': [parts[25] if len(parts)>25 else "", parts[27] if len(parts)>27 else "", parts[29] if len(parts)>29 else ""]
                     }
         print(f"[MISSION DATA LOADED] count={len(missions_data)}")
+
+    # Merge decompiled missions.json if present (supplementing missing missions/fields)
+    json_md_paths = [
+        os.path.join(script_dir, "dec&normal", "Decompiled", "missions.json"),
+        os.path.join(script_dir, "decompiled_src", "missions.json"),
+        os.path.join(script_dir, "missions.json"),
+    ]
+    for p in json_md_paths:
+        if os.path.exists(p):
+            with open(p, "r", encoding='utf-8') as f:
+                raw_m = json.load(f)
+                for mid_k, mv in raw_m.items():
+                    smid = str(mid_k)
+                    if smid not in missions_data:
+                        missions_data[smid] = {
+                            'id': str(mv.get('id', smid)),
+                            'name': mv.get('name', ''),
+                            'class': int(mv.get('class', 0)),
+                            'logic_type': int(mv.get('logic_type', 0)),
+                            'logic_id': str(mv.get('logic_id', '')),
+                            'target_id': str(mv.get('target_id', '')),
+                            'pre_id': str(mv.get('pre_id', '')),
+                            'next_id': str(mv.get('next_id', '')),
+                            'min_level': int(mv.get('min_level', 1)),
+                            'require_num': int(mv.get('require_num', 1)),
+                            'target_type': mv.get('target_type', ''),
+                            'map_id': str(mv.get('map_id', '')),
+                            'story_id': str(mv.get('story_id', '')),
+                            'reward_ids': [str(x) for x in mv.get('reward_ids', [])]
+                        }
+                    else:
+                        m_entry = missions_data[smid]
+                        if 'reward_ids' not in m_entry or not any(m_entry['reward_ids']):
+                            m_entry['reward_ids'] = [str(x) for x in mv.get('reward_ids', [])]
+                        if 'require_num' in mv and 'require_num' not in m_entry:
+                            m_entry['require_num'] = int(mv.get('require_num', 1))
+                        if 'map_id' in mv and not m_entry.get('map_id'):
+                            m_entry['map_id'] = str(mv.get('map_id', ''))
+                        if 'story_id' in mv and not m_entry.get('story_id'):
+                            m_entry['story_id'] = str(mv.get('story_id', ''))
+            print(f"[MISSION JSON MERGED] count={len(missions_data)}")
+            break
 
     # Load decompiled mission_rewards.json if present
     json_rd_paths = [
