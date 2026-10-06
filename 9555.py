@@ -2033,24 +2033,19 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         return
 
     # 1. Spawn Static NPCs & Monsters
-    # Map 11 (TUTORIAL_CAR) is fully client-side: CitySimController spawns all ambient NPCs
-    # and CheckKillTargetMission spawns mission KillTarget NPCs. Server spawning them causes
-    # duplicates (4 Hulks instead of 2) and infinite respawns on re-entry.
-    if map_str != "11" and map_str in STATIC_NPC_DATA:
+    # Server spawns ALL NPCs with proper absolute stats from _map11_monsters override.
+    # The client also spawns NPCs on TUTORIAL_CAR maps, but server-spawned ones have correct stats.
+    if map_str in STATIC_NPC_DATA:
         for m in STATIC_NPC_DATA[map_str]:
             cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}"})
             send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
-    if map_str != "11" and map_str in MONSTER_DATA:
+    if map_str in MONSTER_DATA:
         for i, m in enumerate(MONSTER_DATA[map_str]):
             cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
             send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
     # 2. Spawn Mission targets defined by the APK data.
-    # Map 11 (TUTORIAL_CAR) client spawns KillTarget NPCs via CheckKillTargetMission.
-    # Skip server-side spawning for map 11 to avoid duplicates.
-    if map_str == "11":
-        return
     if picked_char:
         for mid, mdata in picked_char.get('active_missions', {}).items():
             if mdata['state'] == 1:
@@ -3500,25 +3495,37 @@ def client_handler(conn, addr):
                             target_nid = NPC_INST_MAP.get(target_id)
                             if target_nid is None:
                                 # Client-spawned NPC not in our map — try to resolve the actual NPC type.
-                                # On map 11 (TUTORIAL_CAR) the client spawns all NPCs locally; match
-                                # against active KillTarget mission spawns to find the real npcId.
+                                # On map 11 (TUTORIAL_CAR) the client spawns all NPCs locally.
+                                # First, check if the target_id itself is a known NPC type.
                                 target_nid = str(target_id)
-                                if picked_char and str(picked_char.get('map_id')) == '11':
-                                    for _mid, _md in picked_char.get('active_missions', {}).items():
-                                        if _md.get('state') != 1:
-                                            continue
-                                        _cfg = missions_data.get(_mid)
-                                        if not _cfg or _cfg.get('logic_type') not in (1, 4, 11, 17, 23):
-                                            continue
-                                        _lid = str(_cfg.get('logic_id', ''))
-                                        _skey = _lid if _lid in KILL_TARGET_SPAWNS else str(_mid)
-                                        if _skey in KILL_TARGET_SPAWNS:
-                                            for _s in KILL_TARGET_SPAWNS[_skey]:
-                                                if str(_s['map']) == '11':
-                                                    target_nid = str(_s['nid'])
-                                                    break
+                                if str(target_id) in NPC_CONFIG:
+                                    target_nid = str(target_id)
+                                elif picked_char and str(picked_char.get('map_id')) == '11':
+                                    # Try to match against all map 11 MonsterData entries
+                                    for _data_source in [STATIC_NPC_DATA.get('11', []), MONSTER_DATA.get('11', [])]:
                                         if target_nid != str(target_id):
                                             break
+                                        for _m in _data_source:
+                                            if str(_m['nid']) == str(target_id):
+                                                target_nid = str(_m['nid'])
+                                                break
+                                    # Also check KillTarget mission spawns
+                                    if target_nid == str(target_id):
+                                        for _mid, _md in picked_char.get('active_missions', {}).items():
+                                            if _md.get('state') != 1:
+                                                continue
+                                            _cfg = missions_data.get(_mid)
+                                            if not _cfg or _cfg.get('logic_type') not in (1, 4, 11, 17, 23):
+                                                continue
+                                            _lid = str(_cfg.get('logic_id', ''))
+                                            _skey = _lid if _lid in KILL_TARGET_SPAWNS else str(_mid)
+                                            if _skey in KILL_TARGET_SPAWNS:
+                                                for _s in KILL_TARGET_SPAWNS[_skey]:
+                                                    if str(_s['map']) == '11':
+                                                        target_nid = str(_s['nid'])
+                                                        break
+                                            if target_nid != str(target_id):
+                                                break
                             NPC_INST_MAP[target_id] = target_nid
 
                             nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
