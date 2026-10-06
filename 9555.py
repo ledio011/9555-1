@@ -1039,7 +1039,7 @@ def sync_main_player_visual(picked_char, send_rpc_push):
 def get_boss_char(inst_id, did):
     # Domin 1 boss stats and visual (XD profession)
     # These names are server placeholders, not names supplied by the APK data.
-    name = "XK7NQ2VJ"
+    name = "Ash Viper"
     prof = 0
 
     # VERIFIED ORIGINAL BOSS DATA: Level 3
