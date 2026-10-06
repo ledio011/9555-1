@@ -1099,12 +1099,13 @@ def get_boss_char(inst_id, did):
     ])
 
 # Skill System Constants
+# Starter skills per profession: 3 basic attacks + 1 dodge + 1 active skill
+# Additional active skills are granted by weapon skins (LabelID system), not by level
 PROF_SKILLS = {
-    0: {"atk": ["101", "102", "103"], "dodge": "104", "actives": ["105", "106", "107", "108", "109", "110"]},
-    1: {"atk": ["201", "202", "203"], "dodge": "204", "actives": ["205", "206", "207", "208", "209", "210"]},
-    2: {"atk": ["301", "302", "303"], "dodge": "304", "actives": ["305", "306", "307", "308", "309", "310"]}
+    0: {"atk": ["101", "102", "103"], "dodge": "104", "starter_active": "105"},
+    1: {"atk": ["201", "202", "203"], "dodge": "204", "starter_active": "205"},
+    2: {"atk": ["301", "302", "303"], "dodge": "304", "starter_active": "305"}
 }
-SKILL_UNLOCK_LVS = [1, 1, 1, 1, 1, 1]
 
 def get_skill_upgrade_cost(lv):
     if lv < 0: return 0
@@ -1127,32 +1128,32 @@ def get_skill_upgrade_cost(lv):
     return 20000000
 
 def build_skills_map(prof, char_level, skill_levels=None):
+    """Build the skill dictionary sent to the client via sync_skill_info (tag 540).
+    Only sends starter skills: 3 basic attacks + 1 dodge + 1 active skill.
+    Additional active skills are granted by weapon skins (LabelID system), not by level."""
     prof = int(prof)
     if skill_levels is None: skill_levels = {}
     p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
     smap = {}
 
-    # Include all basic attack combo chain skills (101, 102, 103 / 201, 202, 203 / 301, 302, 303)
+    # Basic attack combo chain (101, 102, 103 / 201, 202, 203 / 301, 302, 303)
     atk_skills = p["atk"] if isinstance(p["atk"], list) else [p["atk"]]
     for sid in atk_skills:
         smap[sid] = encode_sproto([(0, sid), (1, skill_levels.get(sid, 0)), (2, 0), (3, 1), (4, 0), (5, False)])
 
-    # Dodge / Roll (104 / 204 / 304)
+    # Dodge / Roll (104 / 204 / 304) - Index 3
     smap[p["dodge"]] = encode_sproto([(0, p["dodge"]), (1, skill_levels.get(p["dodge"], 0)), (2, 3), (3, 1), (4, 1), (5, False)])
 
-    # Active Skills
-    for i in range(len(p["actives"])):
-        sid = p["actives"][i]
-        unlock_lv = SKILL_UNLOCK_LVS[i]
-        if char_level >= unlock_lv:
-            smap[sid] = encode_sproto([
-                (0, sid),
-                (1, skill_levels.get(sid, 0)),
-                (2, 4 + i),
-                (3, unlock_lv),
-                (4, 2 + i),
-                (5, False)
-            ])
+    # Starter active skill (105 / 205 / 305) - Index 4 (first active skill slot)
+    starter_active = p["starter_active"]
+    smap[starter_active] = encode_sproto([
+        (0, starter_active),
+        (1, skill_levels.get(starter_active, 0)),
+        (2, 4),       # indexPos - first active skill slot
+        (3, 1),       # unlockLevel - available from level 1
+        (4, 2),       # indexPos2 - skill bar position
+        (5, False)    # disable - not disabled
+    ])
     return smap
 
 def get_general(c):
@@ -2542,12 +2543,18 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
     print("[DEBUG] AFTER MAP ENTER")
 
 def is_skill_locked(sid, level, prof):
+    """Check if a skill is locked. Since skills are not unlocked by level,
+    only the starter active skill is available. Additional skills come from weapon skins."""
     p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
-    if sid in p["actives"]:
-        idx = p["actives"].index(sid)
-        if level < SKILL_UNLOCK_LVS[idx]:
-            return True, SKILL_UNLOCK_LVS[idx]
-    return False, 0
+    # Only the starter active skill is available; all others come from weapon skins
+    if sid == p["starter_active"]:
+        return False, 0
+    # Check if it's a basic attack or dodge
+    atk_skills = p["atk"] if isinstance(p["atk"], list) else [p["atk"]]
+    if sid in atk_skills or sid == p["dodge"]:
+        return False, 0
+    # Any other skill is not owned yet (comes from weapon skins)
+    return True, 999
 
 def serve_resource_http(conn, initial_data):
     """Serve APK updater files on the game-server port.
