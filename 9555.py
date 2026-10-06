@@ -1,31 +1,57 @@
 import socket
 import struct
 import threading
-import os
 import time
+import os
 
 HOST = "0.0.0.0"
 PORT = int(os.getenv("PORT", "15678"))
 
-def decode_packet(payload):
-    # Placeholder until the real Sproto schema/decoder is connected.
-    return {
-        "TAG": "?",
-        "TYPE": "?",
-        "NAME": "?",
-        "SESSION": "?",
-        "REQUEST": "?",
-        "RESPONSE": "?",
-        "PUSH": "?",
-        "FIELDS": []
-    }
+# Plotësohet automatikisht me emrat që identifikohen nga protokolli.
+REQUEST_NAMES = {
+    2: "visitor",
+    3: "verfiy",
+    4: "login",
+    7: "update_game_server",
+    100: "map_ready",
+    103: "character_list",
+    104: "character_create",
+    105: "character_pick",
+    118: "random_name",
+    218: "heartbeat",
+    503: "enter_map",
+    504: "main_player_create",
+    505: "aoi_add",
+    614: "sync_common_data",
+    654: "start_enter_game",
+}
 
-def handle_client(conn, addr):
+def show_request(number, payload):
+    print("\n" + "=" * 80)
+    print(f"REQUEST #{number}")
+    print("=" * 80)
+
+    print(f"FRAME SIZE   : {len(payload) + 2}")
+    print(f"PAYLOAD SIZE : {len(payload)}")
+
+    # Deri sa paketa të dekodohet Sproto,
+    # ruajmë çdo byte të paketës pa humbur asgjë.
+    print(f"PAYLOAD      : {payload.hex(' ')}")
+
+    print("ASCII        :", "".join(
+        chr(x) if 32 <= x <= 126 else "."
+        for x in payload
+    ))
+
+    print("=" * 80)
+
+
+def client(conn, addr):
     ip, port = addr
-    print(f"\n[+] CONNECT {ip}:{port}")
+    print(f"\n[+] CLIENT CONNECTED: {ip}:{port}")
 
     buffer = b""
-    frame_no = 0
+    request_number = 0
 
     try:
         while True:
@@ -37,46 +63,25 @@ def handle_client(conn, addr):
             buffer += data
 
             while len(buffer) >= 2:
-                payload_size = struct.unpack(">H", buffer[:2])[0]
-                frame_size = payload_size + 2
+                payload_len = struct.unpack(">H", buffer[:2])[0]
+                frame_len = payload_len + 2
 
-                if len(buffer) < frame_size:
+                if len(buffer) < frame_len:
                     break
 
-                payload = buffer[2:frame_size]
-                buffer = buffer[frame_size:]
+                payload = buffer[2:frame_len]
+                buffer = buffer[frame_len:]
 
-                frame_no += 1
-                info = decode_packet(payload)
+                request_number += 1
 
-                print()
-                print("=" * 60)
-                print(f"[FRAME #{frame_no}] {ip}:{port}")
-                print("=" * 60)
-
-                print(f"TAG       : {info['TAG']}")
-                print(f"TYPE      : {info['TYPE']}")
-                print(f"NAME      : {info['NAME']}")
-                print(f"SESSION   : {info['SESSION']}")
-                print(f"REQUEST   : {info['REQUEST']}")
-                print(f"RESPONSE  : {info['RESPONSE']}")
-                print(f"PUSH      : {info['PUSH']}")
-
-                if info["FIELDS"]:
-                    print("FIELDS:")
-                    for key, value in info["FIELDS"]:
-                        print(f"  {key} = {value}")
-                else:
-                    print("FIELDS    : ?")
-
-                print("=" * 60)
+                show_request(request_number, payload)
 
     except Exception as e:
-        print(f"[ERROR] {ip}:{port} -> {e}")
+        print(f"[ERROR] {ip}:{port}: {e}")
 
     finally:
         conn.close()
-        print(f"[-] DISCONNECT {ip}:{port}")
+        print(f"[-] CLIENT DISCONNECTED: {ip}:{port}")
 
 
 def main():
@@ -84,17 +89,19 @@ def main():
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     server.bind((HOST, PORT))
-    server.listen(50)
+    server.listen(100)
 
-    print("[*] ATG Protocol Analyzer")
-    print(f"[*] Listening on {HOST}:{PORT}")
-    print("[*] Waiting for frames...")
+    print("[*] ATG CLIENT REQUEST LOGGER")
+    print(f"[*] Listening: {HOST}:{PORT}")
+    print("[*] Capturing EVERY client → server frame")
+    print("[*] No server responses are generated.")
+    print()
 
     while True:
         conn, addr = server.accept()
 
         threading.Thread(
-            target=handle_client,
+            target=client,
             args=(conn, addr),
             daemon=True
         ).start()
