@@ -1,39 +1,84 @@
+import os
+import re
 import socket
 import struct
 import traceback
-import os
-import time
+from datetime import datetime
 
 HOST = "0.0.0.0"
 PORT = 15678
 
+SERVER_SOURCE = "9555.py"
 RAW_DIR = "raw_requests"
-os.makedirs(RAW_DIR, exist_ok=True)
 
-# Vetëm emërtim nga kodi real i 9555.py.
-# KJO NUK përcakton se çfarë request-i do të bëjë klienti.
-REQUEST_NAMES = {
-    4: "login",
-    7: "update_game_server",
-    100: "map_ready",
-    101: "move",
-    103: "character_list",
-    104: "character_create",
-    105: "character_pick",
-    108: "leave_copy_scene",
-    112: "accept_mission",
-    113: "complete_mission",
-    118: "random_name",
-    193: "car_chase_result",
-    218: "heartbeat",
-    220: "start_battle",
-}
+os.makedirs(RAW_DIR, exist_ok=True)
 
 request_counter = 0
 
 
 # ============================================================
-# SPROTO PACK / UNPACK
+# LOAD ACTUAL REQUEST HANDLERS FROM 9555.py
+# ============================================================
+
+def load_server_handlers(path):
+    handlers = {}
+
+    if not os.path.isfile(path):
+        print(f"[!] SERVER SOURCE NOT FOUND: {path}")
+        return handlers
+
+    try:
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            source = f.read()
+    except Exception as e:
+        print(f"[!] Cannot read {path}: {e}")
+        return handlers
+
+    # Examples detected:
+    # if msg == 4:       # login
+    # elif msg == 103:   # character_list
+    # if msg == 108:
+    #
+    # Also accepts:
+    # if msg==4:
+    # elif msg==103:
+
+    pattern = re.compile(
+        r'^\s*(?:if|elif)\s+msg\s*==\s*(\d+)\s*:\s*(?:#\s*(.*))?$',
+        re.MULTILINE
+    )
+
+    for match in pattern.finditer(source):
+        tag = int(match.group(1))
+        comment = (match.group(2) or "").strip()
+
+        # Search forward a little for a useful comment if this line
+        # does not contain one.
+        if not comment:
+            line_end = match.end()
+            next_text = source[line_end:line_end + 300]
+
+            cm = re.search(
+                r'\n\s*#\s*([^\n]+)',
+                next_text
+            )
+
+            if cm:
+                comment = cm.group(1).strip()
+
+        handlers[tag] = {
+            "name": comment if comment else f"MSG_{tag}",
+            "source_line": source[:match.start()].count("\n") + 1,
+        }
+
+    return handlers
+
+
+SERVER_HANDLERS = load_server_handlers(SERVER_SOURCE)
+
+
+# ============================================================
+# SPROTO UNPACK
 # ============================================================
 
 def sproto_unpack(data):
@@ -67,36 +112,8 @@ def sproto_unpack(data):
     return bytes(out)
 
 
-def sproto_pack(data):
-    out = bytearray()
-    i = 0
-    n = len(data)
-
-    while i < n:
-        chunk = data[i:i + 8]
-        i += len(chunk)
-
-        mask = 0
-        body = bytearray()
-
-        for bit, value in enumerate(chunk):
-            if value != 0:
-                mask |= (1 << bit)
-                body.append(value)
-
-        if len(chunk) == 8 and mask == 0:
-            # Literal zero block
-            out.append(0)
-            continue
-
-        out.append(mask)
-        out.extend(body)
-
-    return bytes(out)
-
-
 # ============================================================
-# SPROTO DECODER
+# SPROTO DECODE
 # ============================================================
 
 def decode_sproto(data, offset=0):
@@ -108,48 +125,66 @@ def decode_sproto(data, offset=0):
     try:
         fn = struct.unpack_from("<H", data, offset)[0]
 
-        h_ptr = offset + 2
-        b_ptr = offset + 2 + fn * 2
+        header_start = offset + 2
+        body_start = offset + 2 + fn * 2
 
-        if b_ptr > len(data):
+        if body_start > len(data):
             return fields
 
-        curr_tag = -1
+        current_tag = -1
+        body_ptr = body_start
 
         for i in range(fn):
-            pos = h_ptr + i * 2
+            header_ptr = header_start + i * 2
 
-            if pos + 2 > len(data):
+            if header_ptr + 2 > len(data):
                 break
 
-            v = struct.unpack_from("<H", data, pos)[0]
+            value = struct.unpack_from(
+                "<H",
+                data,
+                header_ptr
+            )[0]
 
-            if v == 0:
-                curr_tag += 1
+            if value == 0:
+                current_tag += 1
 
-                if b_ptr + 4 <= len(data):
-                    length = struct.unpack_from("<I", data, b_ptr)[0]
-                    b_ptr += 4
+                if body_ptr + 4 <= len(data):
+                    length = struct.unpack_from(
+                        "<I",
+                        data,
+                        body_ptr
+                    )[0]
 
-                    if b_ptr + length <= len(data):
-                        fields[curr_tag] = data[b_ptr:b_ptr + length]
-                        b_ptr += length
+                    body_ptr += 4
 
-            elif v == 1:
-                curr_tag += 1
+                    if body_ptr + length <= len(data):
+                        fields[current_tag] = (
+                            data[body_ptr:
+                                 body_ptr + length]
+                        )
 
-            elif v & 1:
-                curr_tag += (v >> 1) + 1
+                        body_ptr += length
+
+            elif value == 1:
+                current_tag += 1
+
+            elif value & 1:
+                current_tag += (value >> 1) + 1
 
             else:
-                curr_tag += 1
-                fields[curr_tag] = (v >> 1) - 1
+                current_tag += 1
+                fields[current_tag] = (value >> 1) - 1
 
     except Exception:
-        pass
+        return fields
 
     return fields
 
+
+# ============================================================
+# INTEGER FROM SPROTO FIELD
+# ============================================================
 
 def get_int(fields, tag, default=None):
     value = fields.get(tag)
@@ -160,187 +195,248 @@ def get_int(fields, tag, default=None):
     if isinstance(value, int):
         return value
 
-    if isinstance(value, bytes):
-        if len(value) == 1:
-            return value[0]
+    if not isinstance(value, (bytes, bytearray)):
+        return default
 
-        if len(value) == 2:
-            return int.from_bytes(value, "little", signed=True)
+    size = len(value)
 
-        if len(value) == 4:
-            return int.from_bytes(value, "little", signed=True)
+    try:
+        if size == 1:
+            return int.from_bytes(
+                value,
+                "little",
+                signed=True
+            )
 
-        if len(value) == 8:
-            return int.from_bytes(value, "little", signed=True)
+        if size == 2:
+            return int.from_bytes(
+                value,
+                "little",
+                signed=True
+            )
+
+        if size == 4:
+            return int.from_bytes(
+                value,
+                "little",
+                signed=True
+            )
+
+        if size == 8:
+            return int.from_bytes(
+                value,
+                "little",
+                signed=True
+            )
+    except Exception:
+        pass
 
     return default
 
 
-def decode_value(value):
-    if isinstance(value, int):
-        return value
+# ============================================================
+# SAFE FIELD DISPLAY
+# ============================================================
 
-    if not isinstance(value, bytes):
-        return value
+def display_field(value):
+    if isinstance(value, int):
+        return str(value)
+
+    if not isinstance(value, (bytes, bytearray)):
+        return repr(value)
 
     if len(value) == 0:
-        return ""
+        return "EMPTY"
 
-    # Integer-like values
+    # Try UTF-8 first.
+    try:
+        text_value = value.decode("utf-8")
+
+        if all(
+            ch.isprintable() or ch in "\r\n\t"
+            for ch in text_value
+        ):
+            return repr(text_value)
+    except Exception:
+        pass
+
+    # Integer-looking binary field.
     if len(value) in (1, 2, 4, 8):
         try:
-            i = int.from_bytes(value, "little", signed=True)
-
-            # Keep printable strings when they clearly are strings.
-            try:
-                s = value.decode("utf-8")
-                if all((c.isprintable() or c in "\r\n\t") for c in s):
-                    return repr(s)
-            except Exception:
-                pass
-
-            return i
+            number = int.from_bytes(
+                value,
+                "little",
+                signed=True
+            )
+            return f"{number} [0x{value.hex()}]"
         except Exception:
             pass
 
-    # String
-    try:
-        s = value.decode("utf-8")
-
-        if all((c.isprintable() or c in "\r\n\t") for c in s):
-            return repr(s)
-    except Exception:
-        pass
-
-    # Nested sproto
-    try:
-        nested = decode_sproto(value)
-
-        if nested:
-            return {
-                f"tag_{k}": decode_value(v)
-                for k, v in nested.items()
-            }
-    except Exception:
-        pass
-
-    return "0x" + value.hex()
+    return f"BYTES[{len(value)}] 0x{value.hex()}"
 
 
 # ============================================================
-# REQUEST DECODER
+# REQUEST BODY DECODE
 # ============================================================
 
-def decode_client_request(raw):
-    """
-    Actual Sproto RPC package:
-
-        tag 0 = request/message id
-        tag 1 = session
-
-        remaining bytes = request body
-    """
-
+def decode_request(raw):
     package = decode_sproto(raw, 0)
 
-    msg = get_int(package, 0)
-    session = get_int(package, 1)
+    message_id = get_int(
+        package,
+        0,
+        None
+    )
 
-    # Same offset logic used by 9555.py
+    session = get_int(
+        package,
+        1,
+        None
+    )
+
     if len(raw) >= 2:
-        fn = struct.unpack_from("<H", raw, 0)[0]
-        body_offset = 2 + fn * 2
+        function_count = struct.unpack_from(
+            "<H",
+            raw,
+            0
+        )[0]
+
+        body_offset = 2 + function_count * 2
     else:
         body_offset = len(raw)
 
-    body = decode_sproto(raw, body_offset)
+    body = decode_sproto(
+        raw,
+        body_offset
+    )
 
-    return msg, session, body
+    return message_id, session, body
 
 
 # ============================================================
-# REQUEST REPORT
+# SAVE RAW REQUEST
 # ============================================================
 
-def print_request(number, msg, session, body, raw):
-    name = REQUEST_NAMES.get(msg)
+def save_request(number, raw):
+    filename = os.path.join(
+        RAW_DIR,
+        f"request_{number:05d}.bin"
+    )
+
+    try:
+        with open(filename, "wb") as f:
+            f.write(raw)
+    except Exception as e:
+        print(f"[!] RAW SAVE ERROR: {e}")
+
+
+# ============================================================
+# PRINT SERVER HANDLER TABLE
+# ============================================================
+
+def print_loaded_handlers():
+    print()
+    print("============================================================")
+    print(" REQUEST HANDLERS FOUND IN 9555.py")
+    print("============================================================")
+
+    if not SERVER_HANDLERS:
+        print("NONE FOUND")
+    else:
+        for tag in sorted(SERVER_HANDLERS):
+            info = SERVER_HANDLERS[tag]
+
+            print(
+                f"TAG {tag:<4} "
+                f"NAME={info['name']:<35} "
+                f"LINE={info['source_line']}"
+            )
+
+    print("============================================================")
+    print()
+
+
+# ============================================================
+# PRINT REQUEST
+# ============================================================
+
+def print_request(number, tag, session, body, raw):
+    info = SERVER_HANDLERS.get(tag)
 
     print()
-    print("=" * 72)
+    print("================================================================")
     print(f"REQUEST #{number}")
+    print("================================================================")
 
-    if name:
-        print(f"TAG      = {msg}")
-        print(f"NAME     = {name}")
+    print(f"TAG       = {tag}")
+
+    if info:
+        print(f"SERVER    = HANDLER EXISTS")
+        print(f"NAME      = {info['name']}")
+        print(f"CODE LINE = {info['source_line']}")
     else:
-        print(f"TAG      = {msg}")
-        print("NAME     = NOT_IN_9555_HANDLER")
+        print("SERVER    = MISSING HANDLER")
+        print("NAME      = CLIENT REQUEST NOT IMPLEMENTED IN 9555.py")
 
-    print(f"SESSION  = {session}")
+    print(f"SESSION   = {session}")
     print("DIRECTION = CLIENT -> SERVER")
+    print(f"RAW_SIZE  = {len(raw)} bytes")
 
     if body:
         print("FIELDS:")
 
-        for tag, value in sorted(body.items()):
+        for field_tag in sorted(body):
             print(
-                f"    FIELD[{tag}] = "
-                f"{decode_value(value)}"
+                f"    FIELD[{field_tag}] = "
+                f"{display_field(body[field_tag])}"
             )
     else:
-        print("FIELDS   = {}")
+        print("FIELDS    = {}")
 
-    print(f"RAW_SIZE = {len(raw)} bytes")
-    print("=" * 72)
+    print("================================================================")
 
-    if not name:
+    if info is None:
         print()
-        print(">>> MISSING REQUEST HANDLER DETECTED <<<")
-        print(f">>> CLIENT SENT TAG {msg}")
-        print(">>> 9555.py does not have a known handler for this tag")
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        print("MISSING REQUEST DETECTED")
+        print(f"CLIENT SENT TAG {tag}")
+        print("9555.py HAS NO msg == TAG HANDLER")
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         print()
 
 
 # ============================================================
-# RAW REQUEST SAVE
+# TCP FRAME READER
 # ============================================================
 
-def save_raw(number, raw):
-    path = os.path.join(
-        RAW_DIR,
-        f"request_{number:04d}.bin"
-    )
-
-    with open(path, "wb") as f:
-        f.write(raw)
-
-
-# ============================================================
-# READ ONE TCP FRAME
-# ============================================================
-
-def recv_frame(conn, buffer):
+def read_frame(conn, buffer):
     while True:
 
-        # Need 2-byte big-endian frame size
+        # 2-byte BIG-ENDIAN packet size
         if len(buffer) >= 2:
-            size = struct.unpack(">H", buffer[:2])[0]
+            frame_size = struct.unpack(
+                ">H",
+                buffer[:2]
+            )[0]
 
-            if len(buffer) >= 2 + size:
-                frame = buffer[2:2 + size]
-                buffer = buffer[2 + size:]
+            complete_size = 2 + frame_size
+
+            if len(buffer) >= complete_size:
+                frame = buffer[2:complete_size]
+                buffer = buffer[complete_size:]
+
                 return frame, buffer
 
-        data = conn.recv(65536)
+        chunk = conn.recv(65536)
 
-        if not data:
+        if not chunk:
             return None, buffer
 
-        buffer += data
+        buffer += chunk
 
 
 # ============================================================
-# SERVER
+# CLIENT CONNECTION
 # ============================================================
 
 def handle_client(conn, addr):
@@ -354,65 +450,55 @@ def handle_client(conn, addr):
     try:
         while True:
 
-            packed, buffer = recv_frame(conn, buffer)
+            packed, buffer = read_frame(
+                conn,
+                buffer
+            )
 
             if packed is None:
                 break
 
-            if not packed:
+            if len(packed) == 0:
                 continue
 
-            try:
-                raw = sproto_unpack(packed)
+            # Sproto compression/literal unpack
+            raw = sproto_unpack(packed)
 
-                msg, session, body = decode_client_request(raw)
+            tag, session, body = decode_request(raw)
 
-                request_counter += 1
-                number = request_counter
+            request_counter += 1
 
-                save_raw(number, raw)
+            number = request_counter
 
-                print_request(
-                    number,
-                    msg,
-                    session,
-                    body,
-                    raw
-                )
+            save_request(
+                number,
+                raw
+            )
 
-                # ==================================================
-                # IMPORTANT:
-                #
-                # KETU futet serveri yt real.
-                #
-                # Mos vendosim:
-                #
-                #   if request == 1: login
-                #   if request == 2: character_list
-                #
-                # sepse klienti duhet të vendosë vetë çfarë kërkon.
-                #
-                # ==================================================
+            print_request(
+                number,
+                tag,
+                session,
+                body,
+                raw
+            )
 
-                response = handle_real_request(
-                    conn,
-                    msg,
-                    session,
-                    body
-                )
+            # IMPORTANT:
+            #
+            # NO RESPONSE IS GENERATED HERE.
+            # NO REQUEST IS INVENTED HERE.
+            #
+            # We only inspect what the REAL CLIENT sent.
+            #
 
-                if response:
-                    send_frame(conn, response)
-
-            except Exception as e:
-                print()
-                print("[!] REQUEST DECODE ERROR")
-                print(f"    {e}")
-                traceback.print_exc()
+    except ConnectionResetError:
+        pass
 
     except Exception as e:
         print()
-        print(f"[!] CLIENT ERROR {addr}: {e}")
+        print("[!] CONNECTION ERROR")
+        print(f"    {e}")
+        traceback.print_exc()
 
     finally:
         try:
@@ -420,170 +506,49 @@ def handle_client(conn, addr):
         except Exception:
             pass
 
+        print()
         print(f"[-] CLIENT DISCONNECTED: {addr}")
 
 
 # ============================================================
-# REAL SERVER HANDLER
-# ============================================================
-
-def handle_real_request(conn, msg, session, body):
-
-    """
-    KJO është pika ku futet kodi ekzistues i 9555.py.
-
-    Request-i vjen nga CLIENT.
-    Nuk krijojmë request artificial.
-
-    msg = tag real që dërgoi APK-ja.
-    session = session real.
-    body = payload real.
-
-    Handler-i ekzistues duhet të prodhojë response-in real.
-    """
-
-    # ----------------------------------------------------------
-    # Këtu duhet të transferohen handler-at REALË nga 9555.py.
-    # ----------------------------------------------------------
-
-    if msg == 4:
-        return handle_login(session, body)
-
-    elif msg == 7:
-        return handle_update_game_server(session, body)
-
-    elif msg == 100:
-        return handle_map_ready(session, body)
-
-    elif msg == 101:
-        return handle_move(session, body)
-
-    elif msg == 103:
-        return handle_character_list(session, body)
-
-    elif msg == 104:
-        return handle_character_create(session, body)
-
-    elif msg == 105:
-        return handle_character_pick(session, body)
-
-    elif msg == 108:
-        return handle_leave_copy_scene(session, body)
-
-    elif msg == 112:
-        return handle_accept_mission(session, body)
-
-    elif msg == 113:
-        return handle_complete_mission(session, body)
-
-    elif msg == 118:
-        return handle_random_name(session, body)
-
-    elif msg == 193:
-        return handle_car_chase_result(session, body)
-
-    elif msg == 218:
-        return handle_heartbeat(session, body)
-
-    elif msg == 220:
-        return handle_start_battle(session, body)
-
-    else:
-        # Nuk e shpikim request-in.
-        #
-        # Ky është request REAL i APK-së që serveri aktual
-        # nuk e ka handler-in.
-        print()
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print(f"MISSING SERVER HANDLER: TAG {msg}")
-        print("CLIENT SENT THIS REQUEST BUT 9555.py DOES NOT HANDLE IT")
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-
-        return None
-
-
-# ============================================================
-# FRAME SEND
-# ============================================================
-
-def send_frame(conn, raw):
-    packed = sproto_pack(raw)
-
-    packet = struct.pack(">H", len(packed)) + packed
-
-    conn.sendall(packet)
-
-
-# ============================================================
-# PLACEHOLDER ONLY FOR EXISTING 9555 HANDLERS
-# ============================================================
-#
-# Këto NUK duhet të jenë përgjigje të shpikura.
-# Duhet të zëvendësohen me funksionet ekzistuese të 9555.py.
-#
-
-def handle_login(session, body):
-    return existing_9555_login(session, body)
-
-
-def handle_update_game_server(session, body):
-    return existing_9555_update_game_server(session, body)
-
-
-def handle_map_ready(session, body):
-    return existing_9555_map_ready(session, body)
-
-
-def handle_move(session, body):
-    return existing_9555_move(session, body)
-
-
-def handle_character_list(session, body):
-    return existing_9555_character_list(session, body)
-
-
-def handle_character_create(session, body):
-    return existing_9555_character_create(session, body)
-
-
-def handle_character_pick(session, body):
-    return existing_9555_character_pick(session, body)
-
-
-def handle_leave_copy_scene(session, body):
-    return existing_9555_leave_copy_scene(session, body)
-
-
-def handle_accept_mission(session, body):
-    return existing_9555_accept_mission(session, body)
-
-
-def handle_complete_mission(session, body):
-    return existing_9555_complete_mission(session, body)
-
-
-def handle_random_name(session, body):
-    return existing_9555_random_name(session, body)
-
-
-def handle_car_chase_result(session, body):
-    return existing_9555_car_chase_result(session, body)
-
-
-def handle_heartbeat(session, body):
-    return existing_9555_heartbeat(session, body)
-
-
-def handle_start_battle(session, body):
-    return existing_9555_start_battle(session, body)
-
-
-# ============================================================
-# START
+# SERVER
 # ============================================================
 
 def main():
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    global SERVER_HANDLERS
+
+    # Reload source every startup.
+    SERVER_HANDLERS = load_server_handlers(
+        SERVER_SOURCE
+    )
+
+    print()
+    print("============================================================")
+    print(" ATG CLIENT REQUEST DISCOVERY SERVER")
+    print("============================================================")
+    print(f"LISTENING       = {HOST}:{PORT}")
+    print(f"SOURCE          = {SERVER_SOURCE}")
+    print(
+        f"HANDLERS FOUND  = "
+        f"{len(SERVER_HANDLERS)}"
+    )
+    print(
+        "MODE            = CLIENT REQUEST DISCOVERY"
+    )
+    print(
+        "RESPONSES       = DISABLED"
+    )
+    print(
+        "REQUESTS        = DISCOVERED FROM REAL CLIENT"
+    )
+    print("============================================================")
+
+    print_loaded_handlers()
+
+    server = socket.socket(
+        socket.AF_INET,
+        socket.SOCK_STREAM
+    )
 
     server.setsockopt(
         socket.SOL_SOCKET,
@@ -591,18 +556,16 @@ def main():
         1
     )
 
-    server.bind((HOST, PORT))
+    server.bind(
+        (HOST, PORT)
+    )
+
     server.listen(20)
 
-    print()
-    print("============================================================")
-    print(" ATG CLIENT REQUEST ANALYZER / SERVER")
-    print("============================================================")
-    print(f"LISTENING: {HOST}:{PORT}")
-    print("CLIENT REQUESTS ARE DISCOVERED FROM THE TCP STREAM")
-    print("NOT FROM A PREDEFINED REQUEST SEQUENCE")
-    print("============================================================")
-    print()
+    print(
+        f"[*] Listening on "
+        f"{HOST}:{PORT}"
+    )
 
     while True:
         conn, addr = server.accept()
