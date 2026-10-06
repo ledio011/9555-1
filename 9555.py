@@ -3506,27 +3506,15 @@ def client_handler(conn, addr):
                                     ])
                                     send_rpc_push(618, relife_req)
                         elif target_id in NPC_HP_MAP or (picked_char and target_id != picked_char['id']):
-                            # Damage to NPC/Monster/Boss (including local client NPCs)
+                            # Map 11 NPCs are fully client-side - skip all server-side HP/death handling
+                            if picked_char and str(picked_char.get('map_id')) == '11':
+                                # Only advance missions for Map 11 kills, don't manage NPC stats
+                                target_nid = NPC_INST_MAP.get(target_id, str(target_id))
+                                advance_missions(picked_char, send_rpc_push, 'kill', target_id=target_nid)
+                                continue
+
+                            # Damage to NPC/Monster/Boss (server-spawned only)
                             target_nid = NPC_INST_MAP.get(target_id, str(target_id))
-                            # For map 11 client-spawned NPCs, try to resolve the NPC type from
-                            # active KillTarget missions so stats are applied correctly.
-                            if target_nid == str(target_id) and picked_char and str(picked_char.get('map_id')) == '11':
-                                for _mid, _md in picked_char.get('active_missions', {}).items():
-                                    if _md.get('state') != 1:
-                                        continue
-                                    _cfg = missions_data.get(_mid)
-                                    if not _cfg or _cfg.get('logic_type') not in (1, 4, 11, 17, 23):
-                                        continue
-                                    _lid = str(_cfg.get('logic_id', ''))
-                                    _skey = _lid if _lid in KILL_TARGET_SPAWNS else str(_mid)
-                                    if _skey in KILL_TARGET_SPAWNS:
-                                        for _s in KILL_TARGET_SPAWNS[_skey]:
-                                            if str(_s['map']) == '11':
-                                                target_nid = str(_s['nid'])
-                                                break
-                                    if target_nid != str(target_id):
-                                        break
-                                    break
                             NPC_INST_MAP[target_id] = target_nid
 
                             nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
@@ -3546,11 +3534,7 @@ def client_handler(conn, addr):
                                     continue
                                 DEAD_NPC_SET.add(target_id)
 
-                                # For map 11, do NOT send TAG 506 (aoi_remove) - the client manages
-                                # NPC lifecycle (death animation, respawn) locally. Server removing
-                                # NPCs causes them to stay dead on the ground without respawning.
-                                if str(picked_char.get('map_id')) != '11':
-                                    send_rpc_push(506, encode_sproto([(0, target_id)]))
+                                send_rpc_push(506, encode_sproto([(0, target_id)]))
 
                                 # BOSS DEATH HANDLING
                                 if target_id == picked_char.get('boss_inst_id'):
