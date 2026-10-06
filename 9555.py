@@ -1879,20 +1879,6 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         ph = encode_sproto([(0, 509)]); pf = sproto_pack(ph + encode_sproto([(0, attr)]))
         try: conn.sendall(struct.pack(">H", len(pf)) + pf)
         except: pass
-
-        # TAG 505: aoi_add - also send as aoi_add for client ObjManager compatibility
-        # The handler expects a character field with full NPC data
-        char_data = encode_sproto([
-            (0, inst_id), (1, final_nid), (2, hp_cur), (3, hp_max), (4, atk), (5, df),
-            (6, hit), (7, eva), (8, cri), (9, exd), (10, exr), (11, res), (12, crd), (13, crr), (14, defa),
-            (15, x), (16, z), (17, o), (18, lvl), (21, name),
-            (24, dgea), (25, resa), (26, hita), (27, cria)
-        ])
-        aoi_add_ph = encode_sproto([(0, 505)])
-        aoi_add_pf = sproto_pack(aoi_add_ph + encode_sproto([(0, char_data)]))
-        try: conn.sendall(struct.pack(">H", len(aoi_add_pf)) + aoi_add_pf)
-        except: pass
-
         return inst_id
 
     # Check for EXP Stage maps (223..229)
