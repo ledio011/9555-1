@@ -333,6 +333,43 @@ try:
                     }
         print(f"[NPC CONFIG LOADED] count={len(NPC_CONFIG)}")
 
+    # Override map 11 mission monsters (9901-9905) with proper absolute stats
+    # These are percentage-based in NpcData with level 9999, which causes incorrect stats
+    # Force absolute values matching level 1 single-player mission monsters
+    _map11_monsters = {
+        '9901': {'name': 'Hulk', 'model': 'NPC_Nan_013', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
+        '9902': {'name': 'Hip Guy', 'model': 'NPC_Nan_022', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
+        '9903': {'name': 'PoliceMan', 'model': 'NPC_Nan_023', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
+        '9904': {'name': 'Beat Striker', 'model': 'NPC_Nan_036', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
+        '9905': {'name': 'Body Guard', 'model': 'NPC_Nan_017', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
+    }
+    for _nid, _override in _map11_monsters.items():
+        if _nid in NPC_CONFIG:
+            NPC_CONFIG[_nid].update(_override)
+            NPC_CONFIG[_nid]['is_abs'] = True
+        else:
+            NPC_CONFIG[_nid] = {
+                'name': _override['name'],
+                'model': _override['model'],
+                'level': _override['level'],
+                'type': 0,
+                'is_abs': True,
+                'skill_group': '50001',
+                'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000,
+                'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000,
+                'exd_coe': 10000, 'exr_coe': 10000, 'crd_coe': 10000, 'crr_coe': 10000,
+                'anti_stun_coe': 10000, 'anti_knock_down_coe': 10000,
+                'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000,
+                'atk_abs': _override['atk_abs'], 'hp_abs': _override['hp_abs'], 'def_abs': _override['def_abs'],
+                'hit_abs': _override['hit_abs'], 'eva_abs': _override['eva_abs'], 'cri_abs': _override['cri_abs'],
+                'res_abs': _override['res_abs'], 'exd_abs': _override['exd_abs'], 'exr_abs': _override['exr_abs'],
+                'crd_abs': _override['crd_abs'], 'crr_abs': _override['crr_abs'],
+                'anti_stun_abs': _override['anti_stun_abs'], 'anti_knock_down_abs': _override['anti_knock_down_abs'],
+                'defa_abs': _override['defa_abs'], 'dgea_abs': _override['dgea_abs'],
+                'resa_abs': _override['resa_abs'], 'hita_abs': _override['hita_abs'], 'cria_abs': _override['cria_abs'],
+            }
+    print(f"[MAP11 MONSTER OVERRIDES APPLIED] NPCs={list(_map11_monsters.keys())}")
+
     # Load MonsterData (and split into Monster vs Static NPC)
     mon_path = os.path.join(text_asset_root, "MonsterData")
     if os.path.exists(mon_path):
@@ -394,8 +431,6 @@ try:
                     flash_num = int(parts[7]) if parts[7].isdigit() else 1
                     require_num = int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else flash_num
                     nid = parts[6]
-                    if nid == "9901":
-                        nid = "90009" # Map scaling 9901 template to absolute Level 1 Hulk in NpcData (1000 HP, 40 ATK, 100 DEF)
                     KILL_TARGET_SPAWNS[row_id].append({
                         'map': parts[2],
                         'x': int(parts[3]),
