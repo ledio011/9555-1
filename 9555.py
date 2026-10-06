@@ -2436,7 +2436,8 @@ def init_character_fields(c):
         'active_domin_id': None,
         'boss_inst_id': None,
         'pre_arena_pos': None,
-        'completed_tutorials': []
+        'completed_tutorials': [],
+        'createtime': int(time.time())
     }
     for k, v in fields.items():
         if k not in c: c[k] = v
@@ -2749,14 +2750,14 @@ def client_handler(conn, addr):
 
             elif msg == 103: # character_list
                 chars = get_account_chars(all_accounts_chars, cur_areaId, acc_id)
-                # Sort by last_played descending (internal)
-                chars.sort(key=lambda x: x.get('last_played', 0), reverse=True)
+                # Sort by createtime ascending (oldest created first)
+                chars.sort(key=lambda x: x.get('createtime', 0))
 
                 # The client sorts character_overview.createtime ASCENDING.
-                # To make the last played (newest) show first, we give it the smallest createtime.
+                # Send real createtime so oldest characters appear first.
                 ov_list = []
-                for i, c in enumerate(chars):
-                    ov_list.append(get_char_ov(c, i))
+                for c in chars:
+                    ov_list.append(get_char_ov(c, c.get('createtime', 0)))
 
                 resp = encode_sproto([(0, ov_list)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
