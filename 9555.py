@@ -1,1041 +1,3904 @@
-#!/usr/bin/env python3
-"""
-================================================================================
-  APK Sproto Protocol Inspector & Server 15678 Missing Feature Detector
-  Port: 9555 (Proxy / Server)  <--->  Target: s16.serv00.com:15678
-================================================================================
-This script:
-1. Automatically parses all 409 protocols and 910 Sproto schemas from the APK.
-2. Intercepts/listens to client network traffic (on port 9555 or 15678).
-3. Decodes all incoming client requests (Tags, Sproto types, fields, sessions).
-4. Forwards to server 15678 and detects EVERYTHING missing or unhandled by server 15678.
-5. Displays ALL possible responses (RPC responses and server notifications) for this APK.
-6. Can synthesize valid mock responses so the client proceeds and reveals further missing tags.
-7. Provides full offline catalog inspection (--all, --responses, --dump, --search).
-"""
+import socket, struct, threading, random, json, os, time, traceback, math
 
-import sys
-import os
-import re
-import time
-import json
-import socket
-import select
-import struct
-import threading
-import argparse
+PORT = int(os.environ.get("PORT", 15678))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+CHAR_DB = os.path.join(SCRIPT_DIR, "characters_final.json")
+BAK_DB = CHAR_DB + ".bak"
+TMP_DB = CHAR_DB + ".tmp"
+RESOURCE_ROOT = os.path.join(SCRIPT_DIR, "assets")
+server_session_counter = 8000
+GLOBAL_INST_COUNTER = 3000000
+NPC_INST_MAP = {} # inst_id -> nid (to resolve rewards)
+NPC_HP_MAP = {}   # inst_id -> current hp
+NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
+DEAD_NPC_SET = set() # duplicate death/reward prevention set
 
-# Ensure UTF-8 output on Windows consoles
-if hasattr(sys.stdout, 'reconfigure'):
-    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
-if hasattr(sys.stderr, 'reconfigure'):
-    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+# Load Mission Data
+missions_data = {}
+rewards_data = {}
+LEVEL_DATA = {}
+MONSTER_DATA = {} # mapId -> list of monster spawns
+STATIC_NPC_DATA = {} # mapId -> list of static NPC spawns
+NPC_CONFIG = {}   # npcId -> npc info template
+MAP_CONFIG = {}   # mapId -> map info
+MAP_CONNECT_DATA = {} # (src_id, target_id) -> PosX, PosY, PosZ
+GUILD_CAPTURE_DATA = {} # id -> mapId
+KILL_TARGET_SPAWNS = {} # logicId -> list of spawns
+TARGET_CAR_SPAWNS = {}  # logicId -> list of car spawns
+MISSION_REQUIRE_DATA = {} # logicId -> dict
+MOVE_TARGET_DATA = {}   # logicId -> dict
+SURVEY_DATA = {}        # logicId -> dict
+EFF_CONFIG = {}   # effId -> effect info template
+SKILL_CONFIG = {} # skillId -> skill info template
+MOUNT_CONFIG = {} # garage vehicle id -> client MountData definition
+COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
+SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
+STREET_RACE_REWARD_BY_LEVEL = {} # level -> AdaptData _drop_bc ShowRewardData id
+ADAPT_DATA = {} # level -> dict of std values from AdaptData
+ITEM_CONFIG = {} # itemId -> {type, function}
+FUNCTION_DATA = {} # funcId -> {class, condition, is_download, first_open, unlock_type, side_mission}
+EQUIP_CONFIG = {} # equipId -> {name, lv, class, job, position, base_stat, base_val, model, ...}
+DOWNLOAD_REWARD_DATA = [] # list of (itemId, count, quality) tuples
+SKILL_UPGRADE_DATA = {} # level -> {price_type, price_value}
+RELIFE_DATA = [] # list of {min_count, max_count, use_count}
+SERVER_DATA_LIST = [] # list of server dicts from ServerData
+GAME_CONFIG = {} # key -> value (from ConfigData)
 
-import functools
-print = functools.partial(print, flush=True)
+try:
+    script_dir = os.path.dirname(__file__)
 
-# Enable ANSI colors on Windows terminal
-if os.name == 'nt':
-    os.system('')
+    # Accept both the original folder name and the plural name used by the
+    # deployed resource tree.
+    text_asset_root = os.path.join(script_dir, "assets", "Bundle", "TextAsset")
+    if not os.path.isdir(text_asset_root):
+        text_asset_root = os.path.join(script_dir, "assets", "Bundle", "TextAssets")
+    if not os.path.isdir(text_asset_root):
+        text_asset_root = os.path.join(script_dir, "Decompiled", "assets", "Bundle", "TextAsset")
 
-# ANSI Colors
-C_RESET   = "\033[0m"
-C_BOLD    = "\033[1m"
-C_DIM     = "\033[2m"
-C_RED     = "\033[91m"
-C_GREEN   = "\033[92m"
-C_YELLOW  = "\033[93m"
-C_BLUE    = "\033[94m"
-C_MAGENTA = "\033[95m"
-C_CYAN    = "\033[96m"
-C_WHITE   = "\033[97m"
+    # Load authoritative MissionData TextAsset first
+    md_path = os.path.join(text_asset_root, "MissionData")
+    if os.path.exists(md_path):
+        with open(md_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 23 and parts[0] == "*" and parts[1].isdigit():
+                    mid = parts[1]
+                    missions_data[mid] = {
+                        'id': mid,
+                        'name': parts[2] if len(parts) > 2 else '',
+                        'class': int(parts[6]) if parts[6].isdigit() else 0,
+                        'logic_type': int(parts[7]) if parts[7].isdigit() else 0,
+                        'logic_id': parts[9],
+                        'target_id': parts[11],
+                        'pre_id': parts[12],
+                        'next_id': parts[14],
+                        'min_level': int(parts[23]) if parts[23].isdigit() else 1,
+                        'reward_ids': [parts[25] if len(parts)>25 else "", parts[27] if len(parts)>27 else "", parts[29] if len(parts)>29 else ""]
+                    }
+        print(f"[MISSION DATA LOADED] count={len(missions_data)}")
 
-def c_warn(msg):   return f"{C_YELLOW}{C_BOLD}{msg}{C_RESET}"
-def c_err(msg):    return f"{C_RED}{C_BOLD}{msg}{C_RESET}"
-def c_ok(msg):     return f"{C_GREEN}{C_BOLD}{msg}{C_RESET}"
-def c_info(msg):   return f"{C_CYAN}{msg}{C_RESET}"
-def c_title(msg):  return f"{C_MAGENTA}{C_BOLD}{msg}{C_RESET}"
-def c_bold(msg):   return f"{C_BOLD}{msg}{C_RESET}"
-
-# ==============================================================================
-# 1. Sproto Binary Serialization Engine (CloudWu Sproto Standard)
-# ==============================================================================
-
-class SprotoBinary:
-    @staticmethod
-    def unpack(data: bytes) -> bytes:
-        """Sproto 0-pack unpacking."""
-        out = bytearray()
-        i = 0
-        n = len(data)
-        while i < n:
-            b = data[i]
-            i += 1
-            if b == 0xFF:
-                if i >= n:
-                    break
-                blocks = (data[i] + 1) * 8
-                i += 1
-                out.extend(data[i:i + blocks])
-                i += blocks
-            else:
-                for bit in range(8):
-                    if (b >> bit) & 1:
-                        if i < n:
-                            out.append(data[i])
-                            i += 1
-                        else:
-                            out.append(0)
-                    else:
-                        out.append(0)
-        return bytes(out)
-
-    @staticmethod
-    def pack(data: bytes) -> bytes:
-        """Sproto 0-pack packing."""
-        out = bytearray()
-        n = len(data)
-        ff_src = bytearray()
-        i = 0
-        while i < n:
-            chunk = data[i:i + 8]
-            if len(chunk) < 8:
-                chunk = chunk + b'\x00' * (8 - len(chunk))
-            bitmap = 0
-            nonzero = []
-            for bit, b in enumerate(chunk):
-                if b != 0:
-                    bitmap |= (1 << bit)
-                    nonzero.append(b)
-            if len(nonzero) == 8:
-                ff_src.extend(chunk)
-                if len(ff_src) == 2048:
-                    out.append(0xFF)
-                    out.append(len(ff_src) // 8 - 1)
-                    out.extend(ff_src)
-                    ff_src.clear()
-            else:
-                if ff_src:
-                    out.append(0xFF)
-                    out.append(len(ff_src) // 8 - 1)
-                    out.extend(ff_src)
-                    ff_src.clear()
-                out.append(bitmap)
-                out.extend(nonzero)
-            i += 8
-        if ff_src:
-            out.append(0xFF)
-            out.append(len(ff_src) // 8 - 1)
-            out.extend(ff_src)
-        return bytes(out)
-
-    @staticmethod
-    def decode_struct(data: bytes, schema=None, all_schemas=None):
-        """
-        Decodes a Sproto struct according to schema or dynamically.
-        Returns: (decoded_dict, bytes_consumed)
-        """
-        if len(data) < 2:
-            return {}, 0
-        fn = struct.unpack_from('<H', data, 0)[0]
-        header_sz = 2 + fn * 2
-        if len(data) < header_sz:
-            return {}, 0
-        
-        words = [struct.unpack_from('<H', data, 2 + i * 2)[0] for i in range(fn)]
-        field_entries = []
-        tag = -1
-        for w in words:
-            tag += 1
-            if (w & 1) == 0:
-                val = (w // 2) - 1
-                if val >= 0:
-                    field_entries.append((tag, True, val))
-                else:
-                    field_entries.append((tag, False, None))
-            else:
-                tag += (w // 2)
-        
-        result = {}
-        data_pos = header_sz
-        schema_fields = schema.get('fields', {}) if schema else {}
-
-        for tag, is_inline, inline_val in field_entries:
-            finfo = schema_fields.get(tag, {})
-            fname = finfo.get('name', f"tag_{tag}")
-            ftype = finfo.get('type', 'unknown')
-            wmethod = finfo.get('write_method', '')
-            
-            if is_inline:
-                if 'bool' in ftype.lower() or 'boolean' in wmethod:
-                    result[fname] = bool(inline_val != 0)
-                else:
-                    result[fname] = inline_val
-            else:
-                if data_pos + 4 > len(data):
-                    break
-                sz = struct.unpack_from('<I', data, data_pos)[0]
-                data_pos += 4
-                raw_bytes = data[data_pos:data_pos + sz]
-                data_pos += sz
-                
-                if 'integer' in wmethod or ftype in ('long', 'int', 'short'):
-                    if sz == 4:
-                        result[fname] = struct.unpack('<i', raw_bytes)[0]
-                    elif sz == 8:
-                        result[fname] = struct.unpack('<q', raw_bytes)[0]
-                    else:
-                        result[fname] = int.from_bytes(raw_bytes, 'little', signed=True)
-                elif 'string' in wmethod or ftype == 'string':
-                    try:
-                        result[fname] = raw_bytes.decode('utf-8')
-                    except UnicodeDecodeError:
-                        result[fname] = raw_bytes.hex()
-                elif 'boolean' in wmethod or ftype == 'bool':
-                    result[fname] = (raw_bytes[0] != 0) if len(raw_bytes) > 0 else False
-                elif 'obj' in wmethod or (all_schemas and ftype in all_schemas):
-                    sub_schema = all_schemas.get(ftype, {}) if all_schemas else None
-                    sub_res, _ = SprotoBinary.decode_struct(raw_bytes, sub_schema, all_schemas)
-                    result[fname] = sub_res
-                else:
-                    try:
-                        result[fname] = raw_bytes.decode('utf-8')
-                    except Exception:
-                        result[fname] = f"<hex: {raw_bytes.hex()}>"
-
-        return result, data_pos
-
-    @staticmethod
-    def encode_struct(fields_dict: dict, schema=None, all_schemas=None) -> bytes:
-        """Encodes a dict into Sproto binary data according to schema."""
-        schema_fields = schema.get('fields', {}) if schema else {}
-        tags_to_encode = []
-        for tag, finfo in schema_fields.items():
-            fname = finfo.get('name')
-            if fname in fields_dict:
-                tags_to_encode.append((tag, finfo, fields_dict[fname]))
-        
-        tags_to_encode.sort(key=lambda x: x[0])
-        records = []
-        last_tag = -1
-        data_buf = bytearray()
-        
-        for tag, finfo, val in tags_to_encode:
-            gap = tag - last_tag - 1
-            if gap > 0:
-                skip_record = (gap - 1) * 2 + 1
-                records.append(skip_record)
-            
-            ftype = finfo.get('type', '')
-            wmethod = finfo.get('write_method', '')
-            
-            if 'boolean' in wmethod or ftype == 'bool':
-                bval = 1 if val else 0
-                inline_val = (bval + 1) * 2
-                records.append(inline_val)
-            elif ('integer' in wmethod or ftype in ('long', 'int')) and isinstance(val, int) and 0 <= val < 32767:
-                inline_val = (val + 1) * 2
-                records.append(inline_val)
-            else:
-                records.append(0)
-                if isinstance(val, int):
-                    if -0x80000000 <= val <= 0x7FFFFFFF:
-                        data_buf.extend(struct.pack('<I', 4))
-                        data_buf.extend(struct.pack('<i', val))
-                    else:
-                        data_buf.extend(struct.pack('<I', 8))
-                        data_buf.extend(struct.pack('<q', val))
-                elif isinstance(val, str):
-                    enc = val.encode('utf-8')
-                    data_buf.extend(struct.pack('<I', len(enc)))
-                    data_buf.extend(enc)
-                elif isinstance(val, bytes):
-                    data_buf.extend(struct.pack('<I', len(val)))
-                    data_buf.extend(val)
-                elif isinstance(val, dict):
-                    sub_schema = all_schemas.get(ftype, {}) if all_schemas else None
-                    sub_bin = SprotoBinary.encode_struct(val, sub_schema, all_schemas)
-                    data_buf.extend(struct.pack('<I', len(sub_bin)))
-                    data_buf.extend(sub_bin)
-                else:
-                    data_buf.extend(struct.pack('<I', 0))
-            last_tag = tag
-
-        fn = len(records)
-        hdr = struct.pack('<H', fn) + b''.join(struct.pack('<H', r) for r in records)
-        return hdr + bytes(data_buf)
-
-
-# ==============================================================================
-# 2. APK Protocol & Sproto Schema Database
-# ==============================================================================
-
-class APKSchemaDB:
-    def __init__(self, base_dir=None):
-        if base_dir is None:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-        self.base_dir = base_dir
-        self.proto_file = os.path.join(base_dir, 'assets', 'bin', 'Data', 'Managed', 'Assembly-CSharp', 'Protocol.cs')
-        self.recv_file = os.path.join(base_dir, 'assets', 'bin', 'Data', 'Managed', 'Assembly-CSharp', 'NetReceiver.cs')
-        self.sproto_dir = os.path.join(base_dir, 'assets', 'bin', 'Data', 'Managed', 'Assembly-CSharp', 'SprotoType')
-        self.cache_file = os.path.join(base_dir, 'apk_protocol_schema.json')
-        
-        self.protocols = {}      # tag -> {tag, name, request, response}
-        self.name_to_tag = {}    # name -> tag
-        self.push_handlers = {}  # name -> func
-        self.type_schemas = {}   # full_cls_name -> {name, max_fields, fields: {tag -> finfo}}
-        
-        self.package_schema = {
-            'name': 'Package',
-            'max_fields': 2,
-            'fields': {
-                0: {'tag': 0, 'name': 'type', 'write_method': 'write_integer', 'type': 'long'},
-                1: {'tag': 1, 'name': 'session', 'write_method': 'write_integer', 'type': 'long'}
-            }
-        }
-        self.load()
-
-    def load(self):
-        if os.path.exists(self.cache_file):
-            try:
-                with open(self.cache_file, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                self.protocols = {int(k): v for k, v in data['protocols'].items()}
-                self.name_to_tag = {v['name']: int(k) for k, v in self.protocols.items()}
-                self.push_handlers = data['push_handlers']
-                # Convert field keys to int
-                self.type_schemas = {}
-                for k, v in data['type_schemas'].items():
-                    fields = {int(fk): fv for fk, fv in v['fields'].items()}
-                    self.type_schemas[k] = {'name': v['name'], 'max_fields': v['max_fields'], 'fields': fields}
-                return
-            except Exception:
-                pass
-
-        self._extract_from_source()
-        self._save_cache()
-
-    def _extract_from_source(self):
-        if not os.path.exists(self.proto_file):
-            return
-
-        # 1. Parse Protocol.cs
-        with open(self.proto_file, 'r', encoding='utf-8', errors='ignore') as f:
-            proto_txt = f.read()
-
-        for name, tag in re.findall(r'SetProtocol<Protocol\.(\w+)>\((\d+)\)', proto_txt):
-            t = int(tag)
-            self.protocols[t] = {'tag': t, 'name': name, 'request': None, 'response': None}
-            self.name_to_tag[name] = t
-
-        for name, tag in re.findall(r'SetRequest<SprotoType\.([^\.]+)\.request>\((\d+)\)', proto_txt):
-            t = int(tag)
-            if t in self.protocols:
-                self.protocols[t]['request'] = name
-
-        for name, tag in re.findall(r'SetResponse<SprotoType\.([^\.]+)\.response>\((\d+)\)', proto_txt):
-            t = int(tag)
-            if t in self.protocols:
-                self.protocols[t]['response'] = name
-
-        # 2. Parse NetReceiver.cs
-        if os.path.exists(self.recv_file):
-            with open(self.recv_file, 'r', encoding='utf-8', errors='ignore') as f:
-                recv_txt = f.read()
-            self.push_handlers = dict(re.findall(r'AddHandler<Protocol\.(\w+)>\(new RpcReqHandler\(([^)]+)\)', recv_txt))
-
-        # 3. Parse all SprotoType files
-        if os.path.exists(self.sproto_dir):
-            for fname in os.listdir(self.sproto_dir):
-                if not fname.endswith('.cs'):
-                    continue
-                base_name = os.path.splitext(fname)[0]
-                with open(os.path.join(self.sproto_dir, fname), 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-
-                class_sections = re.split(r'public class (\w+)', content)
-                for i in range(1, len(class_sections), 2):
-                    cls_name = class_sections[i]
-                    cls_body = class_sections[i+1]
-                    full_cls_name = f"{base_name}.{cls_name}" if cls_name in ('request', 'response') else cls_name
-
-                    props = {name: ptype.strip() for ptype, name in re.findall(r'public\s+([\w<>,]+)\s+(\w+)\s*\{\s*get', cls_body) if not name.startswith('Has')}
-                    writes = re.findall(r'this\.serialize\.(write_\w+(?:<[^>]+>)?)\(this\.(\w+),\s*(\d+)\)', cls_body)
-                    mfc = re.search(r'max_field_count\s*=\s*(\d+);', cls_body)
-                    max_fields = int(mfc.group(1)) if mfc else len(writes)
-
-                    fields = {}
-                    for wtype, fname_var, tag_str in writes:
-                        t = int(tag_str)
-                        fields[t] = {
-                            'tag': t,
-                            'name': fname_var,
-                            'write_method': wtype,
-                            'type': props.get(fname_var, 'unknown')
+    # Merge decompiled missions.json if present (supplementing missing missions/fields)
+    json_md_paths = [
+        os.path.join(script_dir, "dec&normal", "Decompiled", "missions.json"),
+        os.path.join(script_dir, "decompiled_src", "missions.json"),
+        os.path.join(script_dir, "missions.json"),
+    ]
+    for p in json_md_paths:
+        if os.path.exists(p):
+            with open(p, "r", encoding='utf-8') as f:
+                raw_m = json.load(f)
+                for mid_k, mv in raw_m.items():
+                    smid = str(mid_k)
+                    if smid not in missions_data:
+                        missions_data[smid] = {
+                            'id': str(mv.get('id', smid)),
+                            'name': mv.get('name', ''),
+                            'class': int(mv.get('class', 0)),
+                            'logic_type': int(mv.get('logic_type', 0)),
+                            'logic_id': str(mv.get('logic_id', '')),
+                            'target_id': str(mv.get('target_id', '')),
+                            'pre_id': str(mv.get('pre_id', '')),
+                            'next_id': str(mv.get('next_id', '')),
+                            'min_level': int(mv.get('min_level', 1)),
+                            'require_num': int(mv.get('require_num', 1)),
+                            'target_type': mv.get('target_type', ''),
+                            'map_id': str(mv.get('map_id', '')),
+                            'story_id': str(mv.get('story_id', '')),
+                            'reward_ids': [str(x) for x in mv.get('reward_ids', [])]
                         }
-                    self.type_schemas[full_cls_name] = {'name': full_cls_name, 'max_fields': max_fields, 'fields': fields}
+                    else:
+                        m_entry = missions_data[smid]
+                        if 'reward_ids' not in m_entry or not any(m_entry['reward_ids']):
+                            m_entry['reward_ids'] = [str(x) for x in mv.get('reward_ids', [])]
+                        if 'require_num' in mv and 'require_num' not in m_entry:
+                            m_entry['require_num'] = int(mv.get('require_num', 1))
+                        if 'map_id' in mv and not m_entry.get('map_id'):
+                            m_entry['map_id'] = str(mv.get('map_id', ''))
+                        if 'story_id' in mv and not m_entry.get('story_id'):
+                            m_entry['story_id'] = str(mv.get('story_id', ''))
+            print(f"[MISSION JSON MERGED] count={len(missions_data)}")
+            break
 
-    def _save_cache(self):
+    # Load decompiled mission_rewards.json if present
+    json_rd_paths = [
+        os.path.join(script_dir, "dec&normal", "Decompiled", "mission_rewards.json"),
+        os.path.join(script_dir, "decompiled_src", "mission_rewards.json"),
+        os.path.join(script_dir, "mission_rewards.json"),
+    ]
+    for p in json_rd_paths:
+        if os.path.exists(p):
+            with open(p, "r", encoding='utf-8') as f:
+                raw_r = json.load(f)
+                for rid_k, rv in raw_r.items():
+                    item_amts = rv.get('item_amounts', [])
+                    rewards_data[str(rid_k)] = {
+                        'exp': int(rv.get('exp', 0)),
+                        'cash': int(rv.get('cash', 0)),
+                        'items': [str(x) for x in rv.get('items', [])],
+                        'item_amounts': item_amts,
+                        'amounts': item_amts
+                    }
+            print(f"[MISSION REWARDS JSON LOADED] count={len(rewards_data)}")
+            break
+
+    rd_path = os.path.join(text_asset_root, "ShowRewardData")
+    if not rewards_data and os.path.exists(rd_path):
+        with open(rd_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 5 and parts[0] == "*" and parts[1].isdigit():
+                    rid = parts[1]
+                    exp, cash = 0, 0
+                    items, amounts = [], []
+                    for i in range(8):
+                        idx_item = 3 + i*3
+                        idx_count = 5 + i*3
+                        if idx_count < len(parts) and parts[idx_item].isdigit():
+                            iid = parts[idx_item]
+                            icount = int(parts[idx_count]) if parts[idx_count].isdigit() else 1
+                            if iid == "2001": exp += icount
+                            elif iid == "1001": cash += icount
+                            else:
+                                items.append(iid)
+                                amounts.append(icount)
+                    rewards_data[rid] = {'exp': exp, 'cash': cash, 'items': items, 'amounts': amounts, 'item_amounts': amounts}
+        print(f"[REWARDS DATA LOADED] count={len(rewards_data)}")
+
+    def is_data(line): return line.startswith("*,") or ("," in line and line.split(",")[1].isdigit())
+
+    # Load EffInfoData
+    eff_path = os.path.join(text_asset_root, "EffInfoData")
+    if os.path.exists(eff_path):
+        with open(eff_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) >= 30 and parts[1].isdigit():
+                    eid = parts[1]
+                    adds = {}
+                    for i in [22, 24, 26, 28]:
+                        if i+1 < len(parts) and parts[i].isdigit():
+                            adds[int(parts[i])] = int(parts[i+1])
+                    EFF_CONFIG[eid] = {
+                        'dmg_fixed': int(parts[3]) if parts[3].isdigit() else 0,
+                        'dmg_fixed_add': int(parts[4]) if parts[4].isdigit() else 0,
+                        'dmg_multi': int(parts[5]) if parts[5].isdigit() else 0,
+                        'dmg_multi_add': int(parts[6]) if parts[6].isdigit() else 0,
+                        'adds': adds
+                    }
+        print(f"[EFF CONFIG LOADED] count={len(EFF_CONFIG)}")
+
+    # Load SkillData
+    skill_path = os.path.join(text_asset_root, "SkillData")
+    if os.path.exists(skill_path):
+        with open(skill_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) >= 30 and parts[1].isdigit():
+                    sid = parts[1]
+                    SKILL_CONFIG[sid] = {
+                        'eff0': parts[24],
+                        'eff1': parts[26] if len(parts) > 26 else "",
+                        'eff2': parts[28] if len(parts) > 28 else ""
+                    }
+        print(f"[SKILL CONFIG LOADED] count={len(SKILL_CONFIG)}")
+
+    # Load BaseLvData for EXP requirements and stats
+    lv_path = os.path.join(text_asset_root, "BaseLvData")
+    if os.path.exists(lv_path):
+        with open(lv_path, "r", encoding='utf-8') as f:
+            for line in f:
+                if is_data(line):
+                    parts = line.strip().split(",")
+                    if len(parts) > 20 and parts[1].isdigit():
+                        lv = int(parts[1])
+                        LEVEL_DATA[lv] = {
+                            'exp': int(parts[3]),
+                            'power': int(parts[2]),
+                            'atk': [int(parts[4]), int(parts[11]), int(parts[18])],
+                            'hp': [int(parts[5]), int(parts[12]), int(parts[19])],
+                            'def': [int(parts[6]), int(parts[13]), int(parts[20])],
+                            'hit': [int(parts[7]), int(parts[14]), int(parts[21])],
+                            'eva': [int(parts[8]), int(parts[15]), int(parts[22])],
+                            'cri': [int(parts[9]), int(parts[16]), int(parts[23])],
+                            'res': [int(parts[10]), int(parts[17]), int(parts[24])],
+                            'exd': [int(parts[25]), int(parts[25]), int(parts[25])],
+                            'exr': [int(parts[26]), int(parts[26]), int(parts[26])],
+                            'crd': [int(parts[27]), int(parts[27]), int(parts[27])],
+                            'crr': [int(parts[28]), int(parts[28]), int(parts[28])],
+                            'defa': int(parts[31]), 'dgea': int(parts[32]), 'resa': int(parts[33]),
+                            'hita': int(parts[34]), 'cria': int(parts[35])
+                        }
+        print(f"[LEVEL TABLE LOADED] levels={len(LEVEL_DATA)}")
+
+    # Load MapInfoData
+    map_info_path = os.path.join(text_asset_root, "MapInfoData")
+    if os.path.exists(map_info_path):
+        with open(map_info_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 8 and parts[1].isdigit():
+                    mid = parts[1]
+                    MAP_CONFIG[mid] = {
+                        'name': parts[2],
+                        'scene': parts[3],
+                        'type': int(parts[4]) if parts[4].isdigit() else 0,
+                        'width': int(parts[6]) if parts[6].isdigit() else 0,
+                        'height': int(parts[7]) if parts[7].isdigit() else 0,
+                        'birth': parts[8],
+                        'teleport_pos': parts[10] if len(parts) > 10 else "",
+                        'open_lv': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 0
+                    }
+        print(f"[MAP CONFIG LOADED] count={len(MAP_CONFIG)}")
+
+    # Load MapConnectInfoData
+    conn_path = os.path.join(text_asset_root, "MapConnectInfoData")
+    if os.path.exists(conn_path):
+        with open(conn_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 6 and parts[1].isdigit():
+                    src = parts[2]
+                    dst = parts[3]
+                    try:
+                        px = float(parts[4])
+                        py = float(parts[5]) if parts[5] else 0.0
+                        pz = float(parts[6])
+                        MAP_CONNECT_DATA[(src, dst)] = (px, py, pz)
+                    except: pass
+        print(f"[MAP CONNECT DATA LOADED] count={len(MAP_CONNECT_DATA)}")
+
+    # Load GuildCaptureData
+    gc_path = os.path.join(text_asset_root, "GuildCaptureData")
+    if os.path.exists(gc_path):
+        with open(gc_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 2 and parts[1].isdigit():
+                    GUILD_CAPTURE_DATA[parts[1]] = parts[2]
+        print(f"[GUILD CAPTURE DATA LOADED] count={len(GUILD_CAPTURE_DATA)}")
+
+    # Load NpcData
+    npc_path = os.path.join(text_asset_root, "NpcData")
+    if os.path.exists(npc_path):
+        with open(npc_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 60 and parts[1].isdigit():
+                    nid = parts[1]
+                    lvl = int(parts[9]) if parts[9].isdigit() else 1
+                    is_abs = "绝对值" in parts[12]
+                    NPC_CONFIG[nid] = {
+                        'name': parts[2],
+                        'model': parts[4],
+                        'level': lvl,
+                        'type': int(parts[13]) if len(parts) > 13 and parts[13].isdigit() else 0,
+                        'is_abs': is_abs,
+                        'skill_group': parts[14] if len(parts) > 14 and parts[14] else '50001',
+                        'atk_coe': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 10000,
+                        'hp_coe': int(parts[27]) if len(parts) > 27 and parts[27].isdigit() else 10000,
+                        'def_coe': int(parts[28]) if len(parts) > 28 and parts[28].isdigit() else 10000,
+                        'hit_coe': int(parts[29]) if len(parts) > 29 and parts[29].isdigit() else 10000,
+                        'eva_coe': int(parts[30]) if len(parts) > 30 and parts[30].isdigit() else 10000,
+                        'cri_coe': int(parts[31]) if len(parts) > 31 and parts[31].isdigit() else 10000,
+                        'res_coe': int(parts[32]) if len(parts) > 32 and parts[32].isdigit() else 10000,
+                        'exd_coe': int(parts[33]) if len(parts) > 33 and parts[33].isdigit() else 10000,
+                        'exr_coe': int(parts[34]) if len(parts) > 34 and parts[34].isdigit() else 10000,
+                        'crd_coe': int(parts[35]) if len(parts) > 35 and parts[35].isdigit() else 10000,
+                        'crr_coe': int(parts[36]) if len(parts) > 36 and parts[36].isdigit() else 10000,
+                        'anti_stun_coe': int(parts[37]) if len(parts) > 37 and parts[37].isdigit() else 10000,
+                        'anti_knock_down_coe': int(parts[38]) if len(parts) > 38 and parts[38].isdigit() else 10000,
+                        'defa_coe': int(parts[39]) if len(parts) > 39 and parts[39].isdigit() else 10000,
+                        'dgea_coe': int(parts[40]) if len(parts) > 40 and parts[40].isdigit() else 10000,
+                        'resa_coe': int(parts[41]) if len(parts) > 41 and parts[41].isdigit() else 10000,
+                        'hita_coe': int(parts[42]) if len(parts) > 42 and parts[42].isdigit() else 10000,
+                        'cria_coe': int(parts[43]) if len(parts) > 43 and parts[43].isdigit() else 10000,
+                        'atk_abs': int(parts[44]) if len(parts) > 44 and parts[44].isdigit() else 0,
+                        'hp_abs': int(parts[45]) if len(parts) > 45 and parts[45].isdigit() else 0,
+                        'def_abs': int(parts[46]) if len(parts) > 46 and parts[46].isdigit() else 0,
+                        'hit_abs': int(parts[47]) if len(parts) > 47 and parts[47].isdigit() else 0,
+                        'eva_abs': int(parts[48]) if len(parts) > 48 and parts[48].isdigit() else 0,
+                        'cri_abs': int(parts[49]) if len(parts) > 49 and parts[49].isdigit() else 0,
+                        'res_abs': int(parts[50]) if len(parts) > 50 and parts[50].isdigit() else 0,
+                        'exd_abs': int(parts[51]) if len(parts) > 51 and parts[51].isdigit() else 0,
+                        'exr_abs': int(parts[52]) if len(parts) > 52 and parts[52].isdigit() else 0,
+                        'crd_abs': int(parts[53]) if len(parts) > 53 and parts[53].isdigit() else 0,
+                        'crr_abs': int(parts[54]) if len(parts) > 54 and parts[54].isdigit() else 0,
+                        'anti_stun_abs': int(parts[55]) if len(parts) > 55 and parts[55].isdigit() else 0,
+                        'anti_knock_down_abs': int(parts[56]) if len(parts) > 56 and parts[56].isdigit() else 0,
+                        'defa_abs': int(parts[57]) if len(parts) > 57 and parts[57].isdigit() else 0,
+                        'dgea_abs': int(parts[58]) if len(parts) > 58 and parts[58].isdigit() else 0,
+                        'resa_abs': int(parts[59]) if len(parts) > 59 and parts[59].isdigit() else 0,
+                        'hita_abs': int(parts[60]) if len(parts) > 60 and parts[60].isdigit() else 0,
+                        'cria_abs': int(parts[61]) if len(parts) > 61 and parts[61].isdigit() else 0,
+                    }
+        print(f"[NPC CONFIG LOADED] count={len(NPC_CONFIG)}")
+
+    # Load MonsterData (and split into Monster vs Static NPC)
+    mon_path = os.path.join(text_asset_root, "MonsterData")
+    if os.path.exists(mon_path):
+        with open(mon_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 6 and parts[1].isdigit():
+                    mid = parts[1]
+                    group = int(parts[2]) if parts[2].isdigit() else 0
+                    nid = parts[3]
+                    entry = {
+                        'nid': nid,
+                        'x': int(parts[4]),
+                        'z': int(parts[5]),
+                        'o': int(parts[6]),
+                        'group': group
+                    }
+                    if group == 9999:
+                        if mid not in STATIC_NPC_DATA: STATIC_NPC_DATA[mid] = []
+                        STATIC_NPC_DATA[mid].append(entry)
+                    else:
+                        if mid not in MONSTER_DATA: MONSTER_DATA[mid] = []
+                        MONSTER_DATA[mid].append(entry)
+        print(f"[MONSTER DATA LOADED] monsters_map={len(MONSTER_DATA)} static_npcs_map={len(STATIC_NPC_DATA)}")
+
+    # Load DailyExpData
+    DAILY_EXP_CONFIG = {}
+    exp_path = os.path.join(text_asset_root, "DailyExpData")
+    if os.path.exists(exp_path):
+        with open(exp_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 6 and parts[1].isdigit():
+                    cid = parts[1]
+                    DAILY_EXP_CONFIG[cid] = {
+                        'wave_count': int(parts[2]) if parts[2].isdigit() else 4,
+                        'group_npc_count': [int(x) for x in parts[3].split("#") if x.isdigit()] or [5, 10, 15, 20],
+                        'group_count': int(parts[4]) if parts[4].isdigit() else 7,
+                        'group_time': int(parts[5]) if parts[5].isdigit() else 60,
+                        'monsters': [x for x in parts[6].split("#") if x]
+                    }
+        print(f"[DAILY EXP CONFIG LOADED] count={len(DAILY_EXP_CONFIG)}")
+
+    # Load KillTargetMissionData (Mission Spawns)
+    # KillTargetMissionData rows are keyed by their own ID column.
+    # Missions reference them via logic_id (MissionData column 9).
+    # Header: *,ID,SceneID,PosX,PosZ,Range,NpcID,FlashNum,RequireNum
+    kt_path = os.path.join(text_asset_root, "KillTargetMissionData")
+    if os.path.exists(kt_path):
+        with open(kt_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 7 and parts[1].isdigit():
+                    row_id = parts[1]
+                    # Skip duplicate 4-digit MissionID override rows (e.g., 1001 with FlashNum=4) in favor of 1-digit LogicIDs (e.g., 1 with FlashNum=2)
+                    if int(row_id) >= 1000 and str(int(row_id) - 1000) in KILL_TARGET_SPAWNS:
+                        continue
+                    if row_id not in KILL_TARGET_SPAWNS: KILL_TARGET_SPAWNS[row_id] = []
+                    flash_num = int(parts[7]) if parts[7].isdigit() else 1
+                    require_num = int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else flash_num
+                    nid = parts[6]
+                    if nid == "9901":
+                        nid = "90009" # Map scaling 9901 template to absolute Level 1 Hulk in NpcData (1000 HP, 40 ATK, 100 DEF)
+                    KILL_TARGET_SPAWNS[row_id].append({
+                        'map': parts[2],
+                        'x': int(parts[3]),
+                        'z': int(parts[4]),
+                        'range': int(parts[5]) if len(parts) > 5 and parts[5].lstrip('-').isdigit() else 500,
+                        'o': 0,
+                        'nid': nid,
+                        'num': flash_num,
+                        'require': require_num
+                    })
+        print(f"[KILL TARGET DATA LOADED] count={len(KILL_TARGET_SPAWNS)}")
+
+    # Load TargetCarMissionData
+    tc_path = os.path.join(text_asset_root, "TargetCarMissionData")
+    if os.path.exists(tc_path):
+        with open(tc_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 6 and parts[1].isdigit():
+                    row_id = parts[1]
+                    if row_id not in TARGET_CAR_SPAWNS: TARGET_CAR_SPAWNS[row_id] = []
+                    require_num = int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else 1
+                    TARGET_CAR_SPAWNS[row_id].append({
+                        'map': parts[2],
+                        'x': int(float(parts[3])),
+                        'z': int(float(parts[4])),
+                        'car_id': parts[6], # e.g. "Chevrolet"
+                        'num': 1,
+                        'require': require_num
+                    })
+        print(f"[TARGET CAR DATA LOADED] count={len(TARGET_CAR_SPAWNS)}")
+
+    # Load MissionRequireData (Counts and NPC targets for generic kill/collect missions)
+    mr_path = os.path.join(text_asset_root, "MissionRequireData")
+    if os.path.exists(mr_path):
+        with open(mr_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 5 and parts[0] == "*" and parts[1].isdigit():
+                    req_id = parts[1]
+                    MISSION_REQUIRE_DATA[req_id] = {
+                        'name': parts[2],
+                        'npc_name': parts[3],
+                        'npc_id': parts[4],
+                        'require_num': int(parts[5]) if parts[5].isdigit() else 1,
+                        'item_id': parts[6] if len(parts) > 6 else ''
+                    }
+        print(f"[MISSION REQUIRE DATA LOADED] count={len(MISSION_REQUIRE_DATA)}")
+
+    # Load MoveTargetMissionData (Arrive Target missions)
+    mt_path = os.path.join(text_asset_root, "MoveTargetMissionData")
+    if os.path.exists(mt_path):
+        with open(mt_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 3 and parts[0] == "*" and parts[1].isdigit():
+                    MOVE_TARGET_DATA[parts[1]] = {
+                        'map_id': parts[2],
+                        'target_num': int(parts[3]) if parts[3].isdigit() else 1,
+                        'target_point': parts[4] if len(parts) > 4 else ''
+                    }
+        print(f"[MOVE TARGET DATA LOADED] count={len(MOVE_TARGET_DATA)}")
+
+    # Load SurveyMissionData (Survey missions)
+    sv_path = os.path.join(text_asset_root, "SurveyMissionData")
+    if os.path.exists(sv_path):
+        with open(sv_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 3 and parts[0] == "*" and parts[1].isdigit():
+                    SURVEY_DATA[parts[1]] = {
+                        'need_num': int(parts[3]) if parts[3].isdigit() else 1
+                    }
+        print(f"[SURVEY DATA LOADED] count={len(SURVEY_DATA)}")
+
+    # Universal Mission Requirements & Placements Enrichment
+    for mid, m in missions_data.items():
+        lt = m.get('logic_type', -1)
+        lid = str(m.get('logic_id', ''))
+        req = m.get('require_num', 1) or 1
+        target = str(m.get('target_id', ''))
+        placement = None
+
+        if lt in (1, 14): # KILLMONSTER, LOCAL_KILL_MONSTER
+            if lid in MISSION_REQUIRE_DATA:
+                req = MISSION_REQUIRE_DATA[lid].get('require_num', req)
+                if not target:
+                    target = MISSION_REQUIRE_DATA[lid].get('npc_id', target)
+        elif lt == 23: # KILL_TARGET_NPC
+            if lid in KILL_TARGET_SPAWNS and KILL_TARGET_SPAWNS[lid]:
+                kt = KILL_TARGET_SPAWNS[lid][0]
+                target = kt.get('nid', target)
+                req = kt.get('require', req)
+                placement = kt
+        elif lt == 24: # TARGET_ROB_CAR
+            if lid in TARGET_CAR_SPAWNS and TARGET_CAR_SPAWNS[lid]:
+                tc = TARGET_CAR_SPAWNS[lid][0]
+                target = tc.get('car_id', target)
+                req = tc.get('require', req)
+                placement = tc
+        elif lt in (3, 4, 15): # COLLECT / MONSTER DROP
+            if lid in MISSION_REQUIRE_DATA:
+                req = MISSION_REQUIRE_DATA[lid].get('require_num', req)
+                if not target:
+                    target = MISSION_REQUIRE_DATA[lid].get('npc_id', target)
+        elif lt in (17, 18, 19, 20): # MASSACRE, DESTROY_CAR, ROB_CAR, IMPACT_NPC
+            if lid in MISSION_REQUIRE_DATA:
+                req = MISSION_REQUIRE_DATA[lid].get('require_num', req)
+        elif lt == 21: # ARRIVE_TARGET
+            if lid in MOVE_TARGET_DATA:
+                req = MOVE_TARGET_DATA[lid].get('target_num', req)
+        elif lt == 6: # SURVEY
+            if lid in SURVEY_DATA:
+                req = SURVEY_DATA[lid].get('need_num', req)
+        elif lt == 7: # LEVEL_UP
+            if lid.isdigit():
+                req = int(lid)
+        elif lt in (25, 131): # CAPTURE
+            req = 1
+            if not target:
+                target = '1105'
+        elif lt in (0, 2, 10, 11, 12, 13, 16) or lt >= 100:
+            req = 1
+
+        m['require_num'] = req
+        m['target_id'] = target
+        if placement:
+            m['placement'] = placement
+    print(f"[MISSION REQUIREMENTS ENRICHED] count={len(missions_data)}")
+
+    # Load the actual garage vehicle definitions.  Only rows marked NeedShow
+    # are player vehicles; GTA traffic rows deliberately remain server-side
+    # scene objects and are not sent to the garage.
+    mount_path = os.path.join(text_asset_root, "MountData")
+    if os.path.exists(mount_path):
+        with open(mount_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 36 and parts[0] == "*" and parts[1]:
+                    if parts[36] == "1":
+                        colors = [x for x in parts[28].split("#") if x]
+                        MOUNT_CONFIG[parts[1]] = {
+                            'colors': colors,
+                            'default_color': parts[29] if parts[29] else (colors[0] if colors else "1"),
+                            'item_id': parts[4]
+                        }
+        print(f"[MOUNT CONFIG LOADED] garage_vehicles={len(MOUNT_CONFIG)}")
+
+    # Daily-copy UI receives its state from TAG 555.  Keep the IDs/types in
+    # lockstep with CopySceneData so client tutorials can locate their target.
+    copy_path = os.path.join(text_asset_root, "CopySceneData")
+    if os.path.exists(copy_path):
+        with open(copy_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 19 and parts[0] == "*" and parts[1].isdigit() and parts[11] == "1":
+                    COPY_SCENE_CONFIG[parts[1]] = {
+                        'map_id': parts[5],
+                        'subtype': int(parts[12]) if parts[12].isdigit() else 0,
+                        'exist_time': int(parts[13]) if parts[13].isdigit() else 0,
+                        'end_time': int(parts[10]) if parts[10].isdigit() else 0,
+                        'max_plays': int(parts[18]) if parts[18].isdigit() else 0,
+                        'min_level': int(parts[19]) if parts[19].isdigit() else 1
+                    }
+        print(f"[COPY SCENE CONFIG LOADED] daily_copies={len(COPY_SCENE_CONFIG)}")
+
+    # Street Race's actual reward preview is resolved by AdaptData's
+    # _drop_bc key, then ShowRewardData.  Read those client tables rather
+    # than inventing rewards in the server.
+    show_reward_path = os.path.join(text_asset_root, "ShowRewardData")
+    if os.path.exists(show_reward_path):
+        with open(show_reward_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(',')
+                if len(parts) >= 5 and parts[0] == '*' and parts[1].isdigit():
+                    rewards = []
+                    for index in range(3, len(parts) - 2, 3):
+                        item_id = parts[index].strip()
+                        quality = int(parts[index + 1]) if parts[index + 1].isdigit() else 0
+                        count_str = parts[index + 2].strip()
+                        count = int(count_str) if count_str.isdigit() else 1
+
+                        if item_id:
+                            rewards.append((item_id, quality, count))
+                        elif count_str and count_str in ITEM_CONFIG:
+                            rewards.append((count_str, quality, 1))
+                    SHOW_REWARD_CONFIG[parts[1]] = rewards
+
+    adapt_path = os.path.join(text_asset_root, "AdaptData")
+    if os.path.exists(adapt_path):
+        with open(adapt_path, "r", encoding='utf-8') as f:
+            rows = [line.strip().split(',') for line in f if line.strip()]
+        header = next((row for row in rows if len(row) > 1 and row[0] == '*' and row[1] == 'ID'), [])
         try:
-            cache_data = {
-                'protocols': self.protocols,
-                'push_handlers': self.push_handlers,
-                'type_schemas': self.type_schemas
-            }
-            with open(self.cache_file, 'w', encoding='utf-8') as f:
-                json.dump(cache_data, f, indent=2)
+            street_reward_index = header.index('_drop_bc')
+        except ValueError:
+            street_reward_index = -1
+        for parts in rows:
+            if len(parts) > 12 and parts[0] == '*' and parts[1].isdigit():
+                lv = int(parts[1])
+                if street_reward_index >= 0 and len(parts) > street_reward_index:
+                    STREET_RACE_REWARD_BY_LEVEL[lv] = parts[street_reward_index]
+                ADAPT_DATA[lv] = {
+                    'atk': int(parts[2]) if parts[2].isdigit() else 40,
+                    'hp': int(parts[3]) if parts[3].isdigit() else 1000,
+                    'def': int(parts[4]) if parts[4].isdigit() else 100,
+                    'hit': int(parts[5]) if parts[5].isdigit() else 2844,
+                    'dge': int(parts[6]) if parts[6].isdigit() else 129,
+                    'cri': int(parts[7]) if parts[7].isdigit() else 351,
+                    'res': int(parts[8]) if parts[8].isdigit() else 0,
+                    'exd': int(parts[9]) if parts[9].isdigit() else 0,
+                    'exr': int(parts[10]) if parts[10].isdigit() else 0,
+                    'crd': int(parts[11]) if parts[11].isdigit() else 15000,
+                    'crr': int(parts[12]) if parts[12].isdigit() else 0,
+                    'defa': int(parts[15]) if len(parts) > 15 and parts[15].isdigit() else 3158,
+                    'dgea': int(parts[16]) if len(parts) > 16 and parts[16].isdigit() else 6317,
+                    'resa': int(parts[17]) if len(parts) > 17 and parts[17].isdigit() else 3158,
+                    'hita': int(parts[18]) if len(parts) > 18 and parts[18].isdigit() else 316,
+                    'cria': int(parts[19]) if len(parts) > 19 and parts[19].isdigit() else 3158,
+                }
+        print(f"[ADAPT DATA LOADED] count={len(ADAPT_DATA)}")
+
+    item_path = os.path.join(text_asset_root, "ItemData")
+    if os.path.exists(item_path):
+        with open(item_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(',')
+                if len(parts) > 11 and parts[0] == '*' and parts[1]:
+                    ITEM_CONFIG[parts[1]] = {
+                        'type': int(parts[7]) if parts[7].isdigit() else 0,
+                        'function': int(parts[11]) if parts[11].isdigit() else 0
+                    }
+        print(f"[ITEM CONFIG LOADED] items={len(ITEM_CONFIG)}")
+
+    # Load FunctionData (feature unlock gates by level)
+    func_path = os.path.join(text_asset_root, "FunctionData")
+    if os.path.exists(func_path):
+        with open(func_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 8 and parts[0] == "*" and parts[1] and parts[1] not in ("ID",):
+                    fid = parts[1]
+                    FUNCTION_DATA[fid] = {
+                        'class': int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0,
+                        'condition': int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else 0,
+                        'is_download': int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else 0,
+                        'first_open': int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else 0,
+                        'unlock_type': int(parts[10]) if len(parts) > 10 and parts[10].isdigit() else 0,
+                        'side_mission': parts[13] if len(parts) > 13 else ''
+                    }
+        print(f"[FUNCTION DATA LOADED] count={len(FUNCTION_DATA)}")
+
+    # Load EquipData (equipment definitions)
+    equip_path = os.path.join(text_asset_root, "EquipData")
+    if os.path.exists(equip_path):
+        with open(equip_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 16 and parts[0] == "*" and parts[1] and parts[1] not in ("ID",):
+                    eid = parts[1]
+                    EQUIP_CONFIG[eid] = {
+                        'name': parts[2],
+                        'lv': int(parts[3]) if parts[3].isdigit() else 0,
+                        'class': int(parts[4]) if parts[4].isdigit() else 1,
+                        'job': int(parts[6]) if parts[6].lstrip('-').isdigit() else -1,
+                        'position': int(parts[7]) if parts[7].isdigit() else 0,
+                        'base_stat': int(parts[8]) if parts[8].isdigit() else 0,
+                        'base_val': int(parts[9]) if parts[9].isdigit() else 0,
+                        'stat1': int(parts[10]) if len(parts) > 10 and parts[10].isdigit() else 0,
+                        'stat1_val': int(parts[11]) if len(parts) > 11 and parts[11].isdigit() else 0,
+                        'stat2': int(parts[12]) if len(parts) > 12 and parts[12].isdigit() else 0,
+                        'stat2_val': int(parts[13]) if len(parts) > 13 and parts[13].isdigit() else 0,
+                        'model': parts[16] if len(parts) > 16 else '',
+                        'base_skills': parts[23].split('#') if len(parts) > 23 and parts[23] else [],
+                        'weapon_type': int(parts[24]) if len(parts) > 24 and parts[24].isdigit() else 0
+                    }
+        print(f"[EQUIP CONFIG LOADED] count={len(EQUIP_CONFIG)}")
+
+    # Load DownloadRewardData (expansion download rewards)
+    dl_path = os.path.join(text_asset_root, "DownloadRewardData")
+    if os.path.exists(dl_path):
+        with open(dl_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 4 and parts[0] == "*" and parts[1] and parts[1] not in ("ID",):
+                    # Parse triplets: ItemID, ItemCount, Quality
+                    for i in range(2, len(parts) - 2, 3):
+                        item_id = parts[i].strip()
+                        count = int(parts[i+1]) if i+1 < len(parts) and parts[i+1].strip().isdigit() else 0
+                        quality = int(parts[i+2]) if i+2 < len(parts) and parts[i+2].strip().isdigit() else 0
+                        if item_id and count > 0:
+                            DOWNLOAD_REWARD_DATA.append((item_id, count, quality))
+        print(f"[DOWNLOAD REWARD LOADED] items={len(DOWNLOAD_REWARD_DATA)}")
+
+    # Load SkillupgradeData (skill upgrade costs by level)
+    sku_path = os.path.join(text_asset_root, "SkillupgradeData")
+    if os.path.exists(sku_path):
+        with open(sku_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 3 and parts[0] == "*" and parts[1].isdigit():
+                    lv = int(parts[1])
+                    SKILL_UPGRADE_DATA[lv] = {
+                        'price_type': int(parts[2]) if parts[2].isdigit() else 0,
+                        'price_value': int(parts[3]) if parts[3].isdigit() else 0
+                    }
+        print(f"[SKILL UPGRADE DATA LOADED] levels={len(SKILL_UPGRADE_DATA)}")
+
+    # Load RelifeData (respawn tier config)
+    relife_path = os.path.join(text_asset_root, "RelifeData")
+    if os.path.exists(relife_path):
+        with open(relife_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 4 and parts[0] == "*" and parts[1].isdigit():
+                    RELIFE_DATA.append({
+                        'id': int(parts[1]),
+                        'min_count': int(parts[2]) if parts[2].isdigit() else 0,
+                        'max_count': int(parts[3]) if parts[3].isdigit() else 999999,
+                        'use_count': int(parts[4]) if parts[4].isdigit() else 1
+                    })
+        RELIFE_DATA.sort(key=lambda x: x['min_count'])
+        print(f"[RELIFE DATA LOADED] tiers={len(RELIFE_DATA)}")
+
+    # Load ServerData (server list definitions)
+    srv_path = os.path.join(text_asset_root, "ServerData")
+    if os.path.exists(srv_path):
+        with open(srv_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 15 and parts[0] == "*" and parts[1].isdigit():
+                    SERVER_DATA_LIST.append({
+                        'id': int(parts[1]),
+                        'name': parts[2],
+                        'state': int(parts[3]) if parts[3].isdigit() else 0,
+                        'area': int(parts[4]) if parts[4].isdigit() else 0,
+                        'timezone': int(parts[5]) if parts[5].lstrip('-').isdigit() else 0,
+                        'db_local': int(parts[6]) if parts[6].isdigit() else 0,
+                        'new_char': int(parts[7]) if parts[7].isdigit() else 0,
+                        'server_list': parts[8],
+                        'display_name': parts[9],
+                        'ip': parts[10],
+                        'port': int(parts[11]) if parts[11].isdigit() else 9555,
+                        'rank': int(parts[12]) if parts[12].isdigit() else 0,
+                        'weight': int(parts[13]) if parts[13].isdigit() else 1,
+                        'new_server': int(parts[14]) if parts[14].isdigit() else 0,
+                        'player_state': int(parts[15]) if parts[15].lstrip('-').isdigit() else -4,
+                    })
+        print(f"[SERVER DATA LOADED] servers={len(SERVER_DATA_LIST)}")
+
+    # Load ConfigData (global game configuration)
+    cfg_path = os.path.join(text_asset_root, "ConfigData")
+    if os.path.exists(cfg_path):
+        with open(cfg_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 4 and parts[0] == "*" and parts[1] and parts[1] not in ("Key",):
+                    key = parts[1]
+                    val_type = int(parts[3]) if parts[3].isdigit() else 0
+                    raw_val = parts[4]
+                    if val_type == 0:  # float
+                        try: GAME_CONFIG[key] = float(raw_val)
+                        except: GAME_CONFIG[key] = raw_val
+                    else:  # int
+                        try: GAME_CONFIG[key] = int(raw_val)
+                        except: GAME_CONFIG[key] = raw_val
+        print(f"[GAME CONFIG LOADED] keys={len(GAME_CONFIG)}")
+
+except: traceback.print_exc()
+
+BAK_DB = CHAR_DB + ".bak"
+TMP_DB = CHAR_DB + ".tmp"
+
+def load_chars():
+    """Crash-safe character loader with automatic backup recovery and key normalization."""
+    data = None
+    if os.path.exists(CHAR_DB):
+        try:
+            with open(CHAR_DB, "r", encoding="utf-8") as f:
+                raw_data = json.load(f)
+                if isinstance(raw_data, dict):
+                    data = raw_data
+        except Exception as e:
+            print(f"[WARN] Failed to load {CHAR_DB}: {e}")
+
+    if data is None and os.path.exists(BAK_DB):
+        try:
+            with open(BAK_DB, "r", encoding="utf-8") as f:
+                raw_data = json.load(f)
+                if isinstance(raw_data, dict):
+                    print(f"[RECOVERY] Restored character database from {BAK_DB}!")
+                    data = raw_data
+                    try:
+                        with open(CHAR_DB, "w", encoding="utf-8") as out:
+                            json.dump(data, out, indent=4)
+                    except: pass
+        except Exception as e:
+            print(f"[WARN] Failed to load backup {BAK_DB}: {e}")
+
+    if not isinstance(data, dict):
+        return {}
+
+    # Normalize area keys to string so int vs str JSON key lookups always match
+    normalized = {}
+    for area_k, acc_dict in data.items():
+        if isinstance(acc_dict, dict):
+            normalized[str(area_k)] = acc_dict
+    return normalized
+
+def get_account_chars(all_chars, area_id, acc_id):
+    """Safely retrieves character list for account across int/str area_id keys."""
+    if not isinstance(all_chars, dict):
+        return []
+    area_key = str(area_id)
+    acc_dict = all_chars.get(area_key)
+    if acc_dict is None and isinstance(area_id, int):
+        acc_dict = all_chars.get(area_id)
+    if isinstance(acc_dict, dict):
+        return acc_dict.get(acc_id, [])
+    return []
+
+def save_chars(data):
+    """Crash-safe atomic writer to prevent character loss during kill -9."""
+    if not isinstance(data, dict):
+        return
+    # Guard against accidental wipe: never overwrite a non-empty database on disk with an empty dict
+    if not data:
+        if os.path.exists(CHAR_DB) and os.path.getsize(CHAR_DB) > 10:
+            print("[SAVE GUARD] Refusing to overwrite non-empty CHAR_DB with empty dictionary!")
+            return
+    try:
+        # 1. Write new state to temporary file
+        with open(TMP_DB, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+            f.flush()
+            os.fsync(f.fileno())
+
+        # 2. Backup current good database file if it exists
+        if os.path.exists(CHAR_DB) and os.path.getsize(CHAR_DB) > 10:
+            try:
+                with open(CHAR_DB, "r", encoding="utf-8") as src, open(BAK_DB, "w", encoding="utf-8") as dst:
+                    dst.write(src.read())
+                    dst.flush()
+                    os.fsync(dst.fileno())
+            except: pass
+
+        # 3. Atomic rename guarantees either old file or new file exists intact
+        os.replace(TMP_DB, CHAR_DB)
+    except Exception as e:
+        print(f"[ERROR] Failed atomic save_chars: {e}")
+
+all_accounts_chars = load_chars()
+
+def generate_unique_char_id():
+    return int(time.time() * 1000) % 1000000000
+
+def get_area_id(serverId):
+    try:
+        sid = int(serverId)
+        if sid == 1 or (300 <= sid < 400): return 1 # Europe
+        if sid == 2 or (600 <= sid < 700): return 2 # Asia
+        if sid == 3 or (10 <= sid < 100): return 0 # America
+    except: pass
+    return 0
+
+def get_val_int(fields, tag, default=0):
+    val = fields.get(tag)
+    if val is None: return default
+    if isinstance(val, int): return val
+    if isinstance(val, (bytes, bytearray)):
+        if len(val) == 4: return struct.unpack("<i", val)[0]
+        if len(val) == 8: return struct.unpack("<q", val)[0]
+        if len(val) == 1: return val[0]
+    return default
+
+def encode_sproto(fields, fn=None):
+    if not fields: return struct.pack("<H", 0)
+    fields.sort(key=lambda x: x[0])
+    header = []; body = bytearray(); last_tag = -1
+    for tag, val in fields:
+        skip = tag - last_tag - 1
+        if skip > 0: header.append(2 * (skip - 1) + 1)
+
+        if val is None:
+            header.append(1)
+        elif isinstance(val, bool):
+            header.append((1 if val else 0) * 2 + 2)
+        elif isinstance(val, int):
+            if 0 <= val <= 32766:
+                header.append((val + 1) * 2)
+            else:
+                header.append(0)
+                if -2147483648 <= val <= 2147483647:
+                    body += struct.pack("<I", 4) + struct.pack("<i", val)
+                else:
+                    body += struct.pack("<I", 8) + struct.pack("<q", val)
+        elif isinstance(val, (str, bytes, bytearray, list, dict)):
+            header.append(0)
+            if isinstance(val, str):
+                v = val.encode('utf-8')
+            elif isinstance(val, list):
+                if val and isinstance(val[0], int):
+                    # Use 8-byte integers (long) for compatibility with List<long>
+                    v = b"\x08" + b"".join([struct.pack("<q", item) for item in val])
+                else:
+                    items = []
+                    for item in val:
+                        if isinstance(item, str): item = item.encode('utf-8')
+                        elif isinstance(item, (bytes, bytearray)): pass
+                        else: item = str(item).encode('utf-8')
+                        items.append(struct.pack("<I", len(item)) + item)
+                    v = b"".join(items)
+            elif isinstance(val, dict):
+                # A Sproto map is encoded as an array of its elements
+                items = []
+                for item in val.values():
+                    if isinstance(item, (bytes, bytearray)):
+                        items.append(struct.pack("<I", len(item)) + item)
+                    else:
+                        items.append(struct.pack("<I", 1) + (b'\x01' if item else b'\x00'))
+                v = b"".join(items)
+            else:
+                v = val
+            body += struct.pack("<I", len(v)) + v
+        last_tag = tag
+
+    fn_val = fn if fn is not None else len(header)
+    res = struct.pack("<H", fn_val)
+    for h in header: res += struct.pack("<H", h)
+    return res + body
+
+def sproto_pack(data):
+    out = bytearray()
+    for i in range(0, len(data), 8):
+        chunk = data[i:i+8]
+        if len(chunk) < 8: chunk += b'\x00' * (8 - len(chunk))
+        mask = 0
+        for j in range(8):
+            if chunk[j] != 0: mask |= (1 << j)
+        if mask == 0xFF:
+            out.append(0xFF); out.append(0); out.extend(chunk)
+        else:
+            out.append(mask)
+            for j in range(8):
+                if mask & (1 << j): out.append(chunk[j])
+    return bytes(out)
+
+def sproto_unpack(data):
+    out = bytearray(); i = 0; n = len(data)
+    while i < n:
+        mask = data[i]; i += 1
+        if mask == 0xFF:
+            if i >= n: break
+            count = (data[i] + 1) * 8; i += 1
+            out.extend(data[i:i+count]); i += count
+        else:
+            for bit in range(8):
+                if mask & (1 << bit):
+                    if i < n: out.append(data[i]); i += 1
+                else: out.append(0)
+    return bytes(out)
+
+def decode_sproto(data, offset=0):
+    if len(data) < offset + 2: return {}
+    fn = struct.unpack("<H", data[offset:offset+2])[0]
+    h_ptr, b_ptr = offset + 2, offset + 2 + fn*2
+    fields, curr_tag = {}, -1
+    for i in range(fn):
+        v = struct.unpack("<H", data[h_ptr + i*2 : h_ptr + i*2 + 2])[0]
+        if v == 0:
+            curr_tag += 1
+            if b_ptr + 4 <= len(data):
+                l = struct.unpack("<I", data[b_ptr:b_ptr+4])[0]
+                fields[curr_tag] = data[b_ptr+4:b_ptr+4+l]
+                b_ptr += 4 + l
+        elif v == 1:
+            curr_tag += 1
+        elif v & 1:
+            curr_tag += (v >> 1) + 1
+        else:
+            curr_tag += 1
+            fields[curr_tag] = (v >> 1) - 1
+    return fields
+
+def decode_sproto_list(data):
+    """Decodes a Sproto array of objects from raw bytes."""
+    if not data: return []
+    res = []
+    ptr = 0
+    while ptr < len(data):
+        if ptr + 4 > len(data): break
+        l = struct.unpack("<I", data[ptr:ptr+4])[0]
+        res.append(data[ptr+4 : ptr+4+l])
+        ptr += 4 + l
+    return res
+
+def get_visual(name, prof, mount_id='', mount_color='', mount_state=0):
+    m = {0:{"m":"100","h":"XD_A_T","b":"XD_A_S","l":"XD_A_X","w":"XD_A_WQ"},
+         1:{"m":"104","h":"QJ_A_T","b":"QJ_A_S","l":"QJ_A_X","w":"QJ_A_WQ"},
+         2:{"m":"105","h":"NQS_A_T","b":"NQS_A_S","l":"NQS_A_X","w":"NQS_A_WQ"}}
+    v = m.get(prof, m[1])
+    fields = [(0, name), (1, v["m"]), (2, v["h"]), (3, v["b"]),
+              (4, v["l"]), (5, v["w"]), (10, 0)]
+    # characterVisual uses protocol tags 12-14 for the selected vehicle.
+    # MountId is required by the Street Race UI even while the player is not
+    # currently driving in the city (mount_state == 0).
+    if mount_id:
+        fields.extend([(12, str(mount_id)), (13, int(mount_state)),
+                       (14, str(mount_color or ''))])
+    return encode_sproto(fields)
+
+def get_equipped_mount(c):
+    """Return the APK garage vehicle currently equipped by this character."""
+    mounts = c.get('mounts', {})
+    preferred = str(c.get('equipped_mount_id', ''))
+    if preferred and int(mounts.get(preferred, {}).get('state', 0)) == 2:
+        mount_id = preferred
+    else:
+        mount_id = next((str(mid) for mid, state in mounts.items()
+                         if int(state.get('state', 0)) == 2), '')
+    if not mount_id:
+        return '', '', 0
+    cfg = MOUNT_CONFIG.get(mount_id, {})
+    saved = mounts.get(mount_id, {})
+    color = str(saved.get('select') or cfg.get('default_color', ''))
+    return mount_id, color, 1 if c.get('mount_riding', False) else 0
+
+def build_main_player_visual(c):
+    mount_id, mount_color, mount_state = get_equipped_mount(c)
+    return get_visual(c.get('name', 'Hero'), c.get('prof', 0),
+                      mount_id, mount_color, mount_state)
+
+def sync_main_player_visual(picked_char, send_rpc_push):
+    """Push the normal APK AOI visual update after a garage change."""
+    character = encode_sproto([
+        (0, int(picked_char['id'])),
+        (4, build_main_player_visual(picked_char))
+    ])
+    send_rpc_push(510, encode_sproto([(0, character)]))
+
+def get_boss_char(inst_id, did):
+    # Domin 1 boss stats and visual (XD profession)
+    # These names are server placeholders, not names supplied by the APK data.
+    name = "XK7NQ2VJ"
+    prof = 0
+
+    # VERIFIED ORIGINAL BOSS DATA: Level 3
+    lv = 3
+    hp_max = 9560
+    power = 6000
+    atk = 660
+    df = 60
+
+    # Visual
+    v = get_visual(name, prof)
+
+    # attribute_other fields are decoded by ObjZombiePlayer. A non-zero
+    # title_level (4) makes PlayerHeadInfoLogic render the overhead title.
+    # TitleData defines level 1 as a valid title.
+    attr_oth = encode_sproto([
+        (0, hp_max), (1, 0), (2, lv), (3, power), (4, 1), (15, 2)
+    ])
+
+    # Movement: Restore Y=120. Client docking raycasts from Y=150 down.
+    pos_data = encode_sproto([(0, 400), (1, 120), (2, 0), (3, -9000)])
+    mv = encode_sproto([(0, pos_data), (1, pos_data)])
+
+    # ObjZombiePlayer removes a skill from its automatic list after using it.
+    # Supplying the complete XD combat set gives it valid fallbacks to chase
+    # and attack instead of becoming idle when the first skill is unavailable.
+    boss_skill_levels = {
+        "101": 1,
+        "105": 1, "106": 1, "107": 1,
+        "108": 1, "109": 1, "110": 1,
+    }
+    skills_map = build_skills_map(prof, 25, boss_skill_levels)
+
+    # Runtime: attribute(6), attribute_all(7)
+    attr_run = encode_sproto([(0, hp_max), (2, atk), (3, df)])
+
+    # Load level 3 coefficients for Boss
+    ld = LEVEL_DATA.get(3, LEVEL_DATA.get(1))
+    attr_all_data = [
+        (0, hp_max), (2, atk), (3, df),
+        (4, ld['hit'][0]), (5, ld['eva'][0]), (6, ld['cri'][0]), (7, ld['res'][0]),
+        (8, ld['exd'][0]), (9, ld['exr'][0]), (10, ld['crd'][0]), (11, ld['crr'][0]),
+        (12, ld['defa']), (13, 700), (14, 100),
+        (17, ld['dgea']), (18, ld['resa']), (19, ld['hita']), (20, ld['cria'])
+    ]
+    attr_all = encode_sproto(attr_all_data)
+    run = encode_sproto([(6, attr_run), (7, attr_all)])
+
+    return encode_sproto([
+        (0, inst_id),
+        (1, encode_sproto([(0, name), (1, prof), (2, 1), (3, "502"), (4, 1)])), # general
+        (2, attr_oth),
+        (6, v),
+        (7, mv),
+        (8, skills_map),
+        (13, run)
+    ])
+
+# Skill System Constants
+PROF_SKILLS = {
+    0: {"atk": ["101", "102", "103"], "dodge": "104", "actives": ["105", "106", "107", "108", "109", "110"]},
+    1: {"atk": ["201", "202", "203"], "dodge": "204", "actives": ["205", "206", "207", "208", "209", "210"]},
+    2: {"atk": ["301", "302", "303"], "dodge": "304", "actives": ["305", "306", "307", "308", "309", "310"]}
+}
+SKILL_UNLOCK_LVS = [1, 5, 10, 15, 20, 25]
+
+def get_skill_upgrade_cost(lv):
+    if lv < 0: return 0
+    # Data-driven: read from SkillupgradeData TextAsset
+    if SKILL_UPGRADE_DATA:
+        entry = SKILL_UPGRADE_DATA.get(lv)
+        if entry:
+            return entry['price_value']
+        # Level beyond data table
+        max_lv = max(SKILL_UPGRADE_DATA.keys())
+        if lv > max_lv:
+            return SKILL_UPGRADE_DATA[max_lv]['price_value']
+        return 0
+    # Fallback: original hardcoded formula
+    if lv < 15: return (lv + 1) * 10000
+    if lv < 24: return (lv - 13) * 100000 + 100000
+    if lv == 24: return 3000000
+    if lv == 25: return 7000000
+    if lv == 26: return 18000000
+    return 20000000
+
+def build_skills_map(prof, char_level, skill_levels=None):
+    prof = int(prof)
+    if skill_levels is None: skill_levels = {}
+    p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
+    smap = {}
+
+    # Include all basic attack combo chain skills (101, 102, 103 / 201, 202, 203 / 301, 302, 303)
+    atk_skills = p["atk"] if isinstance(p["atk"], list) else [p["atk"]]
+    for sid in atk_skills:
+        smap[sid] = encode_sproto([(0, sid), (1, skill_levels.get(sid, 0)), (2, 0), (3, 1), (4, 0), (5, False)])
+
+    # Dodge / Roll (104 / 204 / 304)
+    smap[p["dodge"]] = encode_sproto([(0, p["dodge"]), (1, skill_levels.get(p["dodge"], 0)), (2, 3), (3, 1), (4, 1), (5, False)])
+
+    # Active Skills
+    for i in range(len(p["actives"])):
+        sid = p["actives"][i]
+        unlock_lv = SKILL_UNLOCK_LVS[i]
+        if char_level >= unlock_lv:
+            smap[sid] = encode_sproto([
+                (0, sid),
+                (1, skill_levels.get(sid, 0)),
+                (2, 4 + i),
+                (3, unlock_lv),
+                (4, 2 + i),
+                (5, False)
+            ])
+    return smap
+
+def get_general(c):
+    return encode_sproto([
+        (0, c.get('name', 'Hero')),
+        (1, c.get('prof', 0)),
+        (2, 1),
+        (3, str(c.get('map_id', '11'))),
+        # general.tutorial: 0 runs the APK's first tutorial; 1 means finished.
+        (4, c.get('tutorial', 0))
+    ])
+
+def get_movement(x, y, z, o=0):
+    pos = encode_sproto([(0, x), (1, y), (2, z), (3, o)])
+    return encode_sproto([(0, pos), (1, pos)])
+
+def get_level_data(level):
+    """Return a valid BaseLvData row, even if a saved character has a bad level."""
+    try:
+        level = int(level)
+    except (TypeError, ValueError):
+        level = 1
+
+    row = LEVEL_DATA.get(level)
+    if isinstance(row, dict):
+        return row
+
+    valid_levels = [key for key, value in LEVEL_DATA.items() if isinstance(value, dict)]
+    if not valid_levels:
+        raise RuntimeError("BaseLvData has no valid level rows")
+    return LEVEL_DATA[min(valid_levels, key=lambda key: abs(key - level))]
+
+def get_relife_config(death_count):
+    if RELIFE_DATA:
+        for cfg in RELIFE_DATA:
+            if cfg['min_count'] <= death_count <= cfg['max_count']:
+                return cfg
+        return RELIFE_DATA[-1]
+    return {'id': 1, 'min_count': 1, 'max_count': 999999, 'use_count': 1}
+
+def get_character_stats(c):
+    """Calculates all character attributes and Power based on profession and level."""
+    lv = c.get('level', 1)
+    prof = c.get('prof', 0)
+    ld = get_level_data(lv)
+
+    # Base attributes from BaseLvData
+    atk = ld['atk'][prof]
+    hp_max = ld['hp'][prof]
+    df = ld['def'][prof]
+    hit = ld['hit'][prof]
+    eva = ld['eva'][prof]
+    cri = ld['cri'][prof]
+    res = ld['res'][prof]
+
+    # Add Weapon ATK from EquipData (starter weapon per profession)
+    starter_wids = {0: "10001", 1: "20001", 2: "30001"}
+    wid = starter_wids.get(prof, "10001")
+    equip = EQUIP_CONFIG.get(wid)
+    weapon_atk = equip['base_val'] if equip and equip.get('base_stat') == 1001 else 180
+    atk += weapon_atk
+
+    # Profession-specific coefficients from GameDefine.cs
+    # XD (0), QJ (1), NQS (2)
+    coeffs = [
+        {"atk":16, "hp":1, "def":11, "hit":2, "eva":5.5, "cri":10, "res":10},
+        {"atk":20, "hp":1, "def":12, "hit":1, "eva":6, "cri":5, "res":10},
+        {"atk":7, "hp":1, "def":7.4, "hit":3, "eva":3.7, "cri":15, "res":10}
+    ][prof]
+
+    # Calculate Power (ComboValue) using the real weighting system found in client coefficients
+    # Multiplied by 3.0 to match original gameplay scaling (approx 60k for starter)
+    raw_power = (atk * coeffs['atk'] + hp_max * coeffs['hp'] + df * coeffs['def'] +
+                 hit * coeffs['hit'] + eva * coeffs['eva'] + cri * coeffs['cri'] + res * coeffs['res'])
+    power = int(raw_power * 3.0)
+
+    return {
+        'atk': atk, 'hp_max': hp_max, 'def': df,
+        'hit': hit, 'eva': eva, 'cri': cri, 'res': res,
+        'power': power, 'lv': lv, 'exp': c.get('exp', 0),
+        'defa': ld['defa'], 'dgea': ld['dgea'], 'resa': ld['resa'],
+        'hita': ld['hita'], 'cria': ld['cria'],
+        'exd': ld['exd'][prof], 'exr': ld['exr'][prof], 'crd': ld['crd'][prof], 'crr': ld['crr'][prof]
+    }
+
+def get_char_ov(c, sort_index=None):
+    gen = get_general(c)
+    stats = get_character_stats(c)
+    attr = encode_sproto([(0, stats['lv']), (1, stats['power'])])
+    # The client sorts character_overview.createtime ASCENDING.
+    # To make last played show first, we use a virtual index as createtime.
+    ctime = sort_index if sort_index is not None else c.get('createtime', int(time.time()))
+    return encode_sproto([
+        (0, c['id']),
+        (1, gen),
+        (2, attr),
+        (3, get_visual(c.get('name', 'Hero'), c.get('prof', 0))),
+        (4, ctime),
+        (5, 0)
+    ])
+
+def get_full_char(c):
+    gen = get_general(c)
+    stats = get_character_stats(c)
+
+    hp_cur = c.get('hp', stats['hp_max'])
+
+    attr_oth = encode_sproto([
+        (0, hp_cur),
+        (1, stats['exp']),
+        (2, stats['lv']),
+        (3, stats['power']),
+        (15, 1)
+    ])
+
+    prop = encode_sproto([(13, c.get('cash', 1000)), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
+    pos = c.get('pos', [29860, 100, -17005, 0])
+    mv = get_movement(pos[0], pos[1], pos[2], pos[3])
+
+    attr_run = encode_sproto([(0, stats['hp_max']), (2, stats['atk']), (3, stats['def'])])
+    # attr_all tags (attribute.cs): 0:max_hp, 2:atk, 3:def, 4:hit, 5:eva, 6:cri, 7:res, 8:exd, 9:exr, 10:crd, 11:crr, 12:defa, 13:mov, 17:dgea, 18:resa, 19:hita, 20:cria
+    attr_all_data = [
+        (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
+        (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
+        (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
+        (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
+    ]
+    attr_all = encode_sproto(attr_all_data)
+    run = encode_sproto([(6, attr_run), (7, attr_all)])
+
+    char_level = stats['lv']
+    skill_levels = c.get('skill_levels', {})
+    skills_map = build_skills_map(c.get('prof', 0), char_level, skill_levels)
+    starter_wids = {0: "10001", 1: "20001", 2: "30001"}
+    wid = starter_wids.get(c.get('prof', 0), "10001")
+    equip = EQUIP_CONFIG.get(wid)
+    equip_class = equip['class'] if equip else 1
+    w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, equip_class), (5, 1), (6, 1), (7, [0]*8)])
+    equip_map = {5: w1}
+
+    # character.download: the APK treats 2 as completed.  Sending 1 again on
+    # reconnect would reopen the optional download/reward UI forever, even
+    # though MSG 270 was already persisted for this character.
+    download_state = 2 if c.get('download_complete') else 1
+    return encode_sproto([
+        (0, c['id']),
+        (1, gen),
+        (2, attr_oth),
+        (5, prop),
+        (6, build_main_player_visual(c)),
+        (7, mv),
+        (8, skills_map),
+        (9, equip_map),
+        (12, 0),
+        (13, run),
+        (15, download_state)
+    ])
+
+def sync_char_attrs_rpc(conn, picked_char):
+    """Sends TAG 510 (aoi_update_attribute) to sync all stats."""
+    stats = get_character_stats(picked_char)
+    hp_cur = picked_char.get('hp', stats['hp_max'])
+
+    # attribute_other (Tag 1 in character_aoi_attribute)
+    attr_oth = encode_sproto([
+        (0, hp_cur), (1, stats['exp']), (2, stats['lv']), (3, stats['power']), (15, 1)
+    ])
+
+    # attribute (Tag 2 in character_aoi_attribute)
+    attr_base = encode_sproto([(0, stats['hp_max']), (2, stats['atk']), (3, stats['def'])])
+
+    # attribute_all (Tag 3 in character_aoi_attribute)
+    attr_all = encode_sproto([
+        (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
+        (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
+        (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
+        (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
+    ])
+
+    prop = encode_sproto([(13, picked_char.get('cash', 0))])
+
+    aoi_attr = encode_sproto([
+        (0, picked_char['id']), (1, attr_oth), (2, attr_base), (3, attr_all), (5, prop)
+    ])
+
+    print(f"[PLAYER SYNC] HP={hp_cur}/{stats['hp_max']} POWER={stats['power']} LV={stats['lv']}")
+    try:
+        ph_p = encode_sproto([(0, 510)])
+        pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_attr)]))
+        conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+    except: pass
+
+def get_npc_attr(nid, player_level=1):
+    cfg = NPC_CONFIG.get(str(nid))
+    if not cfg:
+        return {
+            'hp_max': 1000, 'atk': 40, 'def': 100, 'hit': 2844, 'eva': 100, 'cri': 351, 'res': 0,
+            'lv': player_level, 'defa': 3158, 'dgea': 6317, 'resa': 3158, 'hita': 316, 'cria': 3158,
+            'exd': 0, 'exr': 0, 'crd': 15000, 'crr': 0, 'power': 1000
+        }
+
+    lvl = cfg.get('level', 1)
+    if lvl == 9999:
+        lvl = player_level
+
+    max_lv = max(ADAPT_DATA.keys()) if ADAPT_DATA else (max(LEVEL_DATA.keys()) if LEVEL_DATA else 1)
+    effective_lv = min(lvl, max_lv)
+    adapt = ADAPT_DATA.get(effective_lv, ADAPT_DATA.get(1, {}))
+    ld = LEVEL_DATA.get(effective_lv, LEVEL_DATA.get(1, {}))
+
+    if cfg.get('is_abs'):
+        hp = cfg.get('hp_abs', 1000)
+        atk = cfg.get('atk_abs', 40)
+        df = cfg.get('def_abs', 100)
+        hit = cfg.get('hit_abs', 2844)
+        eva = cfg.get('eva_abs', 100)
+        cri = cfg.get('cri_abs', 351)
+        res = cfg.get('res_abs', 0)
+        exd = cfg.get('exd_abs', 0)
+        exr = cfg.get('exr_abs', 0)
+        crd = cfg.get('crd_abs', 15000)
+        crr = cfg.get('crr_abs', 0)
+        defa = cfg.get('defa_abs', 3158)
+        dgea = cfg.get('dgea_abs', 6317)
+        resa = cfg.get('resa_abs', 3158)
+        hita = cfg.get('hita_abs', 316)
+        cria = cfg.get('cria_abs', 3158)
+    else:
+        hp_std = adapt.get('hp', ld.get('hp', [1000])[0] if isinstance(ld.get('hp'), list) else 1000)
+        atk_std = adapt.get('atk', ld.get('atk', [40])[0] if isinstance(ld.get('atk'), list) else 40)
+        def_std = adapt.get('def', ld.get('def', [100])[0] if isinstance(ld.get('def'), list) else 100)
+        hit_std = adapt.get('hit', ld.get('hit', [2844])[0] if isinstance(ld.get('hit'), list) else 2844)
+        eva_std = adapt.get('def', 100)
+        cri_std = adapt.get('cri', 351)
+        res_std = adapt.get('res', 0)
+        exd_std = adapt.get('exd', 0)
+        exr_std = adapt.get('exr', 0)
+        crd_std = adapt.get('crd', 15000)
+        crr_std = adapt.get('crr', 0)
+        defa_std = adapt.get('defa', 3158)
+        dgea_std = adapt.get('dgea', 6317)
+        resa_std = adapt.get('resa', 3158)
+        hita_std = adapt.get('hita', 316)
+        cria_std = adapt.get('cria', 3158)
+
+        hp = (cfg.get('hp_coe', 10000) * hp_std) // 10000
+        atk = (cfg.get('atk_coe', 10000) * atk_std) // 10000
+        df = (cfg.get('def_coe', 10000) * def_std) // 10000
+        hit = (cfg.get('hit_coe', 10000) * hit_std) // 10000
+        eva = (cfg.get('eva_coe', 10000) * eva_std) // 10000
+        cri = (cfg.get('cri_coe', 10000) * cri_std) // 10000
+        res = (cfg.get('res_coe', 10000) * res_std) // 10000
+        exd = (cfg.get('exd_coe', 10000) * exd_std) // 10000
+        exr = (cfg.get('exr_coe', 10000) * exr_std) // 10000
+        crd = (cfg.get('crd_coe', 10000) * crd_std) // 10000
+        crr = (cfg.get('crr_coe', 10000) * crr_std) // 10000
+        defa = (cfg.get('defa_coe', 10000) * defa_std) // 10000
+        dgea = (cfg.get('dgea_coe', 10000) * dgea_std) // 10000
+        resa = (cfg.get('resa_coe', 10000) * resa_std) // 10000
+        hita = (cfg.get('hita_coe', 10000) * hita_std) // 10000
+        cria = (cfg.get('cria_coe', 10000) * cria_std) // 10000
+
+    if cfg.get('hp_abs', 0) > hp: hp = cfg['hp_abs']
+    if cfg.get('atk_abs', 0) > atk: atk = cfg['atk_abs']
+    if cfg.get('def_abs', 0) > df: df = cfg['def_abs']
+
+    prof_coeffs = {"atk": 16, "hp": 1, "def": 11}
+    raw_power = (atk * prof_coeffs['atk'] + hp * prof_coeffs['hp'] + df * prof_coeffs['def'])
+    power = int(raw_power * 3.0)
+
+    return {
+        'hp_max': hp, 'atk': atk, 'def': df,
+        'hit': hit, 'eva': eva, 'cri': cri, 'res': res,
+        'lv': lvl, 'defa': defa, 'dgea': dgea, 'resa': resa, 'hita': hita, 'cria': cria,
+        'exd': exd, 'exr': exr, 'crd': crd, 'crr': crr,
+        'power': power
+    }
+
+def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
+    """Sends TAG 510 to sync NPC stats."""
+    # The dominance zombie is initially added to camp 2 by tag 544.  Omitting
+    # camp here makes the APK decode it as camp 0 and move it out of
+    # DominSceneManager's CampList[2], so rank_pvp_start never enables its AI.
+    attr_other_fields = [(0, hp_cur), (2, stats['lv'])]
+    if NPC_INST_MAP.get(inst_id, '').startswith('BOSS_'):
+        # TAG 510 arrives immediately after TAG 544.  Preserve the title
+        # assigned in get_boss_char or the APK resets it to level 0.
+        attr_other_fields.extend([(4, 1), (15, 2)])
+    attr_oth = encode_sproto(attr_other_fields)
+    attr_base = encode_sproto([(0, stats['hp_max'])])
+    attr_all_data = [
+        (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
+        (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
+        (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
+        (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
+    ]
+    attr_all = encode_sproto(attr_all_data)
+    aoi_attr = encode_sproto([(0, inst_id), (1, attr_oth), (2, attr_base), (3, attr_all)])
+    try:
+        ph_p = encode_sproto([(0, 510)])
+        pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_attr)]))
+        conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+    except: pass
+
+def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_area=False, pvp_scale=1.0):
+    """Original Damage calculation reproduced from CharacterAttributeData.cs"""
+    prefix = "[AREA DAMAGE]" if is_area else "[COMBAT]"
+
+    # 1. Get Skill Multipliers from EffInfoData
+    skill_cfg = SKILL_CONFIG.get(skill_id, {})
+    eff_id = skill_cfg.get('eff0', "10000") # Default to NormalAttack if not found
+    eff_cfg = EFF_CONFIG.get(eff_id, {
+        'dmg_fixed': 0, 'dmg_fixed_add': 0, 'dmg_multi': 10000, 'dmg_multi_add': 0, 'adds': {}
+    })
+
+    skill_damage = eff_cfg['dmg_fixed'] + eff_cfg['dmg_fixed_add'] * skill_lv
+    skill_scale = (eff_cfg['dmg_multi'] + (eff_cfg['dmg_multi_add'] or 0) * skill_lv) / 10000.0
+
+    # PvP Scale handling (num3 in CharacterAttributeData.cs)
+    pvp_mult = pvp_scale
+    if attacker_stats.get('power', 0) > defender_stats.get('power', 0):
+        pvp_mult += 0.05
+
+    # 2. Check Hit/Dodge
+    skill_shit = eff_cfg['adds'].get(3001, 0) / 10000.0
+    hit_p = min((attacker_stats['hit'] + 1.0) / (attacker_stats['hita'] + attacker_stats['hit'] + 1.0), 1.0)
+    dge_p = min((defender_stats['eva'] + 1.0) / (defender_stats['dgea'] + defender_stats['eva'] + 1.0), 0.5)
+
+    hit_prob = 1.0
+    roll_hit = random.random()
+
+    if is_area:
+        print(f"{prefix} HIT CHECK: roll={roll_hit:.3f} prob={hit_prob:.3f} (hit_p={hit_p:.3f}, dge_p={dge_p:.3f}, skill={skill_shit:.3f})")
+        print(f"{prefix} STATS: AtkHIT={attacker_stats['hit']} AtkHITA={attacker_stats['hita']} DefEVA={defender_stats['eva']} DefDGEA={defender_stats['dgea']}")
+
+    if roll_hit > hit_prob:
+        if is_area: print(f"{prefix} RESULT: MISS")
+        return 0, False, False # MISS
+
+    # 3. Check Crit
+    skill_scri = eff_cfg['adds'].get(3002, 0) / 10000.0
+    cri_p = min((attacker_stats['cri'] + 1.0) / (attacker_stats['cri'] + attacker_stats['cria'] + 1.0), 0.9)
+    res_p = min((defender_stats['res'] + 1.0) / (defender_stats['res'] + defender_stats['resa'] + 1.0), 0.8)
+
+    cri_prob = cri_p - res_p + skill_scri
+    is_cri = random.random() < cri_prob
+
+    # 4. Calculate Damage
+    scaled_damage = skill_damage * pvp_mult
+    scaled_scale = skill_scale * pvp_mult
+
+    base_dmg = attacker_stats['atk'] * scaled_scale + scaled_damage
+    def_red = min((defender_stats['def'] + 1.0) / (defender_stats['def'] + attacker_stats['defa']), 0.5)
+
+    # 5. Handling Critical Multiplier
+    crit_mult = 1.0
+    if is_cri:
+        crit_mult = max(1.0, min(1.0 + (attacker_stats['crd'] - defender_stats['crr']) / 10000.0, 2.0))
+
+    # 6. Final Formula with Random Variance [0.95, 1.05]
+    rand_var = random.randint(0, 1000) / 1000.0 + 0.95
+
+    skill_sexd = eff_cfg['adds'].get(3003, 0) / 10000.0
+    exd_factor = 1.0 + (attacker_stats['exd'] - defender_stats['exr']) / 10000.0 + skill_sexd
+
+    final_dmg = crit_mult * base_dmg * rand_var * (1.0 - def_red) * exd_factor
+
+    if is_area:
+        print(f"{prefix} RESULT: HIT dmg={int(final_dmg)} base={base_dmg:.1f} red={def_red:.3f} crit={crit_mult:.2f} exd={exd_factor:.2f} var={rand_var:.3f}")
+
+    return int(max(1, final_dmg)), True, is_cri
+
+def spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state, exp_cfg, send_npc_func):
+    subwave = (exp_state['cur_group'] - 1) * 4 + exp_state['cur_wave']
+    exp_state['subwave'] = subwave
+    exp_state['wave_kills'] = 0
+    exp_state['active_monsters'] = []
+
+    mon_group_id = str(exp_state['copy_id']) + "1"
+    mon_entries = MONSTER_DATA.get(mon_group_id, [])
+
+    subwave_spawns = [m for m in mon_entries if m.get('group') == subwave]
+    if not subwave_spawns:
+        subwave_spawns = [m for m in mon_entries if m.get('group') == ((subwave - 1) % 28) + 1]
+    if not subwave_spawns:
+        subwave_spawns = mon_entries[:5]
+
+    for m in subwave_spawns:
+        cfg = NPC_CONFIG.get(m['nid'], {'name': f"ExpMonster_{m['nid']}"})
+        inst_id = send_npc_func(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
+        if inst_id and inst_id not in exp_state['active_monsters']:
+            exp_state['active_monsters'].append(inst_id)
+
+    print(f"[EXP STAGE] Spawned copy={exp_state['copy_id']} group={exp_state['cur_group']} wave={exp_state['cur_wave']} subwave={subwave} monsters={len(exp_state['active_monsters'])}")
+
+def get_exp_stage_full_reward(char_lv):
+    """Resolve exact EXP Stage reward from ShowRewardData (21000 + char_lv)."""
+    try:
+        lv = max(1, min(int(char_lv), 80))
+    except (TypeError, ValueError):
+        lv = 1
+
+    reward_id = str(21000 + lv)
+    rewards = SHOW_REWARD_CONFIG.get(reward_id, [])
+    if rewards:
+        for item_id, qual, count in rewards:
+            if item_id == "2001":
+                return count
+    return 195000
+
+def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
+    exp_state['ai_active'] = False
+    copy_id = exp_state['copy_id']
+    char_lv = picked_char.get('level', 1) if picked_char else 1
+
+    full_exp = get_exp_stage_full_reward(char_lv)
+    total_max_kills = 350
+    ratio = min(1.0, exp_state['total_kills'] / total_max_kills) if total_max_kills > 0 else 1.0
+
+    exp_reward = int(full_exp * ratio) if win else int(full_exp * ratio * 0.5)
+    cash_reward = int(exp_reward * 0.1)
+
+    if picked_char:
+        rewards = [("2001", 0, exp_reward), ("1001", 0, cash_reward)]
+        grant_item_rewards(picked_char, rewards, conn, send_rpc_push)
+
+    res_items = [
+        encode_sproto([(0, "2001"), (1, exp_reward), (3, 0)]),
+        encode_sproto([(0, "1001"), (1, cash_reward), (3, 0)])
+    ]
+
+    # Tag 552: copy_scene_result (subType=12, id=copy_id, win=win, gradeFlag=1, grade=3 if win else 1, items=res_items)
+    send_rpc_push(552, encode_sproto([
+        (0, 12), (1, copy_id), (2, win), (3, 1), (4, 3 if win else 1), (5, res_items)
+    ]))
+
+    if picked_char:
+        if win:
+            advance_missions(picked_char, send_rpc_push, 'dungeon', target_id='105')
+            advance_missions(picked_char, send_rpc_push, 'level')
+            saved_pos = picked_char.get('pre_copy_pos')
+            picked_char['pre_copy_pos'] = None
+
+            def leave_exp_copy():
+                start_map_transition(conn, picked_char, "11", send_rpc_push, override_pos=saved_pos)
+
+            timer = threading.Timer(5.0, leave_exp_copy)
+            timer.daemon = True
+            timer.start()
+        else:
+            # Tag 618: notice_relife_player triggers RebirthUIRoot Respawn UI
+            death_count = picked_char.get('death_count', 0) + 1
+            picked_char['death_count'] = death_count
+            relife_cfg = get_relife_config(death_count)
+            relife_req = encode_sproto([
+                (0, relife_cfg['id']),
+                (1, 0),
+                (2, "9202"), # typically 9202 is the rebirth item
+                (3, picked_char['id']),
+                (4, picked_char['name']),
+                (5, relife_cfg['use_count'])
+            ])
+            send_rpc_push(618, relife_req)
+
+        picked_char.pop('exp_stage_state', None)
+
+    print(f"[EXP STAGE] Finished copy={copy_id} win={win} total_kills={exp_state['total_kills']} exp={exp_reward} cash={cash_reward}")
+
+def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid):
+    if not picked_char: return
+
+    exp_state = picked_char.get('exp_stage_state')
+    if exp_state and inst_id:
+        active_monsters = exp_state.get('active_monsters', [])
+        if inst_id in active_monsters:
+            active_monsters.remove(inst_id)
+            exp_state['wave_kills'] += 1
+            exp_state['total_kills'] += 1
+
+            exp_cfg = DAILY_EXP_CONFIG.get(exp_state['copy_id'], {})
+            wave_reqs = exp_cfg.get('group_npc_count', [5, 10, 15, 20])
+            req_kills = wave_reqs[min(exp_state['cur_wave'] - 1, len(wave_reqs) - 1)]
+
+            send_rpc_push(683, encode_sproto([
+                (0, exp_state['copy_id']),
+                (1, exp_state['cur_wave'] - 1),
+                (2, exp_state['end_time']),
+                (3, exp_state['cur_group']),
+                (4, exp_state['wave_kills']),
+                (5, exp_state['total_kills'])
+            ]))
+
+            def send_npc_wrapper(nid, name, x, z, o):
+                global GLOBAL_INST_COUNTER
+                npc_stats = get_npc_attr(nid)
+                hp_cur = npc_stats['hp_max']
+                hp_max = npc_stats['hp_max']
+                atk = npc_stats['atk']
+                df = npc_stats['def']
+                lvl = npc_stats['lv']
+
+                GLOBAL_INST_COUNTER += 1
+                i_id = GLOBAL_INST_COUNTER
+                NPC_HP_MAP[i_id] = hp_max
+                NPC_INST_MAP[i_id] = str(nid)
+
+                final_nid = str(nid)
+                if ";" in final_nid:
+                    if "XD_A" in final_nid: final_nid = "100"
+                    elif "QJ_A" in final_nid: final_nid = "104"
+                    elif "NQS_A" in final_nid: final_nid = "105"
+
+                attr = encode_sproto([
+                    (0, i_id), (1, final_nid), (2, hp_cur), (3, hp_max), (4, atk), (5, df),
+                    (15, x), (16, z), (17, o), (18, lvl), (21, name)
+                ])
+                ph = encode_sproto([(0, 509)])
+                pf = sproto_pack(ph + encode_sproto([(0, attr)]))
+                try: conn.sendall(struct.pack(">H", len(pf)) + pf)
+                except: pass
+                return i_id
+
+            if len(active_monsters) == 0 or exp_state['wave_kills'] >= req_kills:
+                if exp_state['cur_wave'] < exp_cfg.get('wave_count', 4):
+                    exp_state['cur_wave'] += 1
+                    spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state, exp_cfg, send_npc_wrapper)
+                else:
+                    if exp_state['cur_group'] < exp_cfg.get('group_count', 7):
+                        exp_state['cur_group'] += 1
+                        exp_state['cur_wave'] = 1
+                        spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state, exp_cfg, send_npc_wrapper)
+                    else:
+                        finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True)
+
+    if npcid and npcid != "None":
+        npc_stats = get_npc_attr(npcid)
+        npc_lv = npc_stats.get('lv', 1)
+        char_lv = picked_char.get('level', 1)
+
+        exp_kill, cash_kill = calculate_npc_kill_rewards(char_lv, npc_lv)
+        kill_rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
+        grant_item_rewards(picked_char, kill_rewards, conn, send_rpc_push)
+
+        send_rpc_push(638, encode_sproto([(0, [
+            encode_sproto([(0, "2001"), (1, exp_kill), (3, 0)]),
+            encode_sproto([(0, "1001"), (1, cash_kill), (3, 0)])
+        ])]))
+
+        advance_missions(picked_char, send_rpc_push, 'kill', target_id=npcid)
+        advance_missions(picked_char, send_rpc_push, 'level')
+
+def spawn_map_npcs(conn, map_id, picked_char=None):
+    """Spawns all NPCs, Monsters, and Traffic defined in data for the map."""
+    map_str = str(map_id)
+    connection_id = id(conn)
+    spawned_maps = NPC_SPAWNED_MAPS.setdefault(connection_id, set())
+    if map_str in spawned_maps:
+        print(f"[NPC SPAWN] already sent map={map_str} to this connection")
+        return
+    spawned_maps.add(map_str)
+
+    def send_npc_create(nid, name, x, z, o):
+        global GLOBAL_INST_COUNTER
+        player_lvl = picked_char.get('level', 1) if picked_char else 1
+        npc_stats = get_npc_attr(nid, player_lvl)
+        hp_cur = npc_stats['hp_max']
+        hp_max = npc_stats['hp_max']
+        atk = npc_stats['atk']
+        df = npc_stats['def']
+        hit = npc_stats.get('hit', 2844)
+        eva = npc_stats.get('eva', 100)
+        cri = npc_stats.get('cri', 351)
+        exd = npc_stats.get('exd', 0)
+        exr = npc_stats.get('exr', 0)
+        res = npc_stats.get('res', 0)
+        crd = npc_stats.get('crd', 15000)
+        crr = npc_stats.get('crr', 0)
+        defa = npc_stats.get('defa', 3158)
+        dgea = npc_stats.get('dgea', 6317)
+        resa = npc_stats.get('resa', 3158)
+        hita = npc_stats.get('hita', 316)
+        cria = npc_stats.get('cria', 3158)
+        lvl = npc_stats['lv']
+
+        GLOBAL_INST_COUNTER += 1
+        inst_id = GLOBAL_INST_COUNTER
+        NPC_HP_MAP[inst_id] = hp_max
+        NPC_INST_MAP[inst_id] = str(nid) # Resolver mapping
+
+        # Handle composite models like "PartA;PartB;PartC" to prevent client crashes
+        final_nid = str(nid)
+        if final_nid == "9901":
+            final_nid = "90009"
+        elif ";" in final_nid:
+            if "XD_A" in final_nid: final_nid = "100"
+            elif "QJ_A" in final_nid: final_nid = "104"
+            elif "NQS_A" in final_nid: final_nid = "105"
+
+        # npc_attribute schema:
+        # id(0), npcdataid(1), hp(2), max_hp(3), atk(4), def(5), hit(6), eva(7), cri(8), exd(9), exr(10), res(11), crd(12), crr(13), defa(14),
+        # x(15), z(16), o(17), level(18), player_name(21), dgea(24), resa(25), hita(26), cria(27)
+        attr = encode_sproto([
+            (0, inst_id), (1, final_nid), (2, hp_cur), (3, hp_max), (4, atk), (5, df),
+            (6, hit), (7, eva), (8, cri), (9, exd), (10, exr), (11, res), (12, crd), (13, crr), (14, defa),
+            (15, x), (16, z), (17, o), (18, lvl), (21, name),
+            (24, dgea), (25, resa), (26, hita), (27, cria)
+        ])
+        ph = encode_sproto([(0, 509)]); pf = sproto_pack(ph + encode_sproto([(0, attr)]))
+        try: conn.sendall(struct.pack(">H", len(pf)) + pf)
+        except: pass
+        return inst_id
+
+    # Check for EXP Stage maps (223..229)
+    if map_str in ["223", "224", "225", "226", "227", "228", "229"]:
+        exp_cfg = DAILY_EXP_CONFIG.get(map_str, DAILY_EXP_CONFIG.get("223", {
+            'wave_count': 4, 'group_npc_count': [5, 10, 15, 20], 'group_count': 7, 'group_time': 60,
+            'monsters': [f"{map_str}1", f"{map_str}2", f"{map_str}3", f"{map_str}4"]
+        }))
+        end_time = int(time.time()) + 600
+        exp_state = {
+            'copy_id': map_str,
+            'cur_group': 1,
+            'cur_wave': 1,
+            'subwave': 1,
+            'wave_kills': 0,
+            'total_kills': 0,
+            'start_time': int(time.time()),
+            'end_time': end_time,
+            'active_monsters': [],
+            'monster_pos': {},
+            'ai_active': True
+        }
+        if picked_char:
+            picked_char['exp_stage_state'] = exp_state
+
+        def push_wrapper(tag, data):
+            try:
+                ph_p = encode_sproto([(0, tag)])
+                pf_p = sproto_pack(ph_p + data)
+                conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+            except: pass
+
+        push_wrapper(629, encode_sproto([(0, end_time), (1, 0)]))
+        push_wrapper(683, encode_sproto([
+            (0, map_str), (1, 0), (2, end_time), (3, 1), (4, 0), (5, 0)
+        ]))
+
+        if picked_char:
+            advance_missions(picked_char, push_wrapper, 'dungeon', target_id='105')
+            push_wrapper(519, sync_mission_data(picked_char))
+
+        def local_send_npc(nid, name, x, z, o):
+            inst_id = send_npc_create(nid, name, x, z, o)
+            if inst_id:
+                exp_state['monster_pos'][inst_id] = [x / 100.0, z / 100.0]
+            return inst_id
+
+        spawn_exp_stage_subwave_internal(conn, push_wrapper, picked_char, exp_state, exp_cfg, local_send_npc)
+
+        def run_exp_monster_ai():
+            if not picked_char or not exp_state.get('ai_active') or picked_char.get('map_id') != map_str:
+                return
+            if picked_char.get('hp', 0) <= 0:
+                return
+
+            player_pos = picked_char.get('pos', [0, 100, 0, 0])
+            px = player_pos[0] / 100.0 if abs(player_pos[0]) > 200 else player_pos[0]
+            pz = player_pos[2] / 100.0 if abs(player_pos[2]) > 200 else player_pos[2]
+
+            player_stats = get_character_stats(picked_char)
+
+            for inst_id in list(exp_state.get('active_monsters', [])):
+                if NPC_HP_MAP.get(inst_id, 0) <= 0:
+                    continue
+                target_nid = NPC_INST_MAP.get(inst_id)
+                if not target_nid:
+                    continue
+
+                m_pos = exp_state['monster_pos'].setdefault(inst_id, [6.94, -11.37])
+                mx, mz = m_pos[0], m_pos[1]
+
+                dx = px - mx
+                dz = pz - mz
+                dist = math.sqrt(dx * dx + dz * dz)
+
+                if dist > 2.2:
+                    step = min(4.5, dist - 1.5)
+                    new_mx = mx + (dx / dist) * step
+                    new_mz = mz + (dz / dist) * step
+                    exp_state['monster_pos'][inst_id] = [new_mx, new_mz]
+
+                    pos_obj = encode_sproto([
+                        (0, int(new_mx * 100)),
+                        (1, 0),
+                        (2, int(new_mz * 100)),
+                        (3, 0)
+                    ])
+                    m_move = encode_sproto([(0, pos_obj)])
+                    char_move = encode_sproto([
+                        (0, inst_id),
+                        (1, m_move),
+                        (2, False)
+                    ])
+                    push_wrapper(507, encode_sproto([(0, char_move)]))
+                else:
+                    monster_cfg = NPC_CONFIG.get(target_nid, {})
+                    monster_stats = get_npc_attr(target_nid)
+                    monster_skill = monster_cfg.get('skill_group', '50001') or '50001'
+
+                    dmg, is_hit, is_cri = get_combat_damage(monster_stats, player_stats, skill_id=monster_skill, skill_lv=1)
+
+                    push_wrapper(508, encode_sproto([(0, inst_id), (1, picked_char['id']), (2, monster_skill)]))
+
+                    if is_hit and dmg > 0:
+                        picked_char['hp'] = max(0, picked_char['hp'] - dmg)
+                        push_wrapper(128, encode_sproto([(0, picked_char['id']), (1, dmg), (2, monster_skill)]))
+                        sync_char_attrs_rpc(conn, picked_char)
+                        print(f"[EXP STAGE AI] Monster {inst_id} attacked player for {dmg} damage! Player HP={picked_char['hp']}")
+
+                        if picked_char['hp'] <= 0:
+                            print(f"[EXP STAGE AI] Player {picked_char['id']} died in EXP Stage!")
+                            finish_exp_stage(conn, push_wrapper, picked_char, exp_state, win=False)
+                            return
+
+            if exp_state.get('ai_active') and picked_char.get('map_id') == map_str:
+                timer = threading.Timer(0.8, run_exp_monster_ai)
+                timer.daemon = True
+                timer.start()
+
+        ai_timer = threading.Timer(0.8, run_exp_monster_ai)
+        ai_timer.daemon = True
+        ai_timer.start()
+        return
+
+    # 1. Spawn Static NPCs & Monsters
+    # Map 11 (TUTORIAL_CAR) handles spawning locally on client.
+    if map_str != "11":
+        if map_str in STATIC_NPC_DATA:
+            for m in STATIC_NPC_DATA[map_str]:
+                cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}"})
+                send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
+
+        if map_str in MONSTER_DATA:
+            for i, m in enumerate(MONSTER_DATA[map_str]):
+                cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
+                send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
+
+    # 2. Spawn Mission targets defined by the APK data.
+    # For Map 11 (TUTORIAL_CAR), the client's SceneManager.CheckKillTargetMission() and CheckTargetCarMission()
+    # spawn mission targets locally via CitySimController. Creating server NPCs via Tag 509 for Map 11 causes duplicate spawns.
+    if picked_char and map_str != "11":
+        for mid, mdata in picked_char.get('active_missions', {}).items():
+            if mdata['state'] == 1:
+                cfg = missions_data.get(mid)
+                if cfg:
+                    logic_id = str(cfg.get('logic_id', ''))
+                    # The client looks up KillTargetMissionData by LogicID (matching DataManager.GetKillTargetMissionDataById).
+                    spawn_key = logic_id if logic_id in KILL_TARGET_SPAWNS else str(mid)
+                    if spawn_key in KILL_TARGET_SPAWNS:
+                        for s in KILL_TARGET_SPAWNS[spawn_key]:
+                            if str(s['map']) == map_str:
+                                for _ in range(s['num']): send_npc_create(s['nid'], f"Quest_{s['nid']}", s['x'], s['z'], 0)
+
+def sync_mission_data(picked_char):
+    own_missions_list = []
+    for mid, mdata in picked_char.get('active_missions', {}).items():
+        # Ensure parm has 8 elements and is long list
+        parm = mdata.get('parm', [0]*8)
+        if len(parm) < 8: parm += [0]*(8-len(parm))
+        # ownmission schema: missionId(0), missionstate(1), missionquality(2), parm(3)
+        # FIX: APK logic for SyncMissionList requires int.Parse(mid) for main missions check
+        m_bytes = encode_sproto([
+            (0, str(mid)),
+            (1, int(mdata['state'])),
+            (2, 0), # missionquality
+            (3, [int(x) for x in parm])
+        ])
+        own_missions_list.append(m_bytes)
+
+    last_main = picked_char.get('last_main_mission_id', "-1")
+    if last_main == "" or last_main == "None": last_main = "-1"
+
+    # sync_mission.request schema: missions(0), last_missionId(1), sidedone_mission(2)
+    # FIX: missions must be encoded as a Sproto array of objects (concatenated length-prefixed chunks)
+    data_list = [
+        (0, own_missions_list),
+        (1, str(last_main)),
+        (2, [int(x) for x in picked_char.get('completed_side_missions', []) if x])
+    ]
+    return encode_sproto(data_list)
+
+def sync_inventory_data(picked_char):
+    items = {}
+    inv = picked_char.get('inventory', [])
+    for i in range(len(inv)):
+        item = inv[i]
+        guid = i + 10000
+        items[guid] = encode_sproto([
+            (0, guid),       # indexId
+            (1, item['id']), # itemId
+            (2, True),       # bindflag
+            (5, item['amount']) # stack
+        ])
+    return encode_sproto([(0, items)])
+
+def add_to_inventory(picked_char, item_id, amount):
+    if 'inventory' not in picked_char: picked_char['inventory'] = []
+    for item in picked_char['inventory']:
+        if item['id'] == item_id:
+            item['amount'] += amount
+            return
+    picked_char['inventory'].append({'id': item_id, 'amount': amount})
+
+def build_mount_info(picked_char):
+    """Build the exact mount map consumed by the APK garage handlers.
+
+    Vehicle meshes, icons and colour shaders remain APK/resource-bundle data;
+    this state only records whether a garage vehicle is owned/equipped and
+    which of the MountData colours have been unlocked/selected.
+    """
+    mount_state = picked_char.setdefault('mounts', {})
+    result = {}
+    for mount_id, cfg in MOUNT_CONFIG.items():
+        saved = mount_state.setdefault(mount_id, {})
+        state = int(saved.get('state', 0))
+        selected = str(saved.get('select') or cfg['default_color'])
+        if selected not in cfg['colors']:
+            selected = cfg['default_color']
+        unlocked = set(str(x) for x in saved.get('unlocked_colors', [cfg['default_color']]))
+        unlocked.add(cfg['default_color'])
+        colors = {}
+        for color_id in cfg['colors']:
+            colors[color_id] = encode_sproto([(0, color_id), (1, 1 if color_id in unlocked else 0)])
+        result[mount_id] = encode_sproto([(0, mount_id), (1, state), (2, colors), (3, selected)])
+    return result
+
+def mount_id_from_voucher(item_id):
+    for mount_id, cfg in MOUNT_CONFIG.items():
+        if cfg.get('item_id') == str(item_id):
+            return mount_id
+    return None
+
+def field_text(fields, tag, default=''):
+    value = fields.get(tag, default)
+    if isinstance(value, (bytes, bytearray)):
+        return value.decode('utf-8', errors='replace')
+    return str(value) if value is not None else default
+
+def current_daily_stamp():
+    """The server's daily-copy reset key (UTC calendar day adjusted for 03:00 AM reset)."""
+    adjusted_time = time.time() - (3 * 3600)
+    return time.strftime('%Y-%m-%d', time.gmtime(adjusted_time))
+
+def ensure_daily_copy_state(picked_char):
+    """Reset the APK-configured daily attempts once per calendar day at 03:00 AM."""
+    state = picked_char.setdefault('daily_copy_state', {})
+    stamp = current_daily_stamp()
+    if state.get('day') != stamp:
+        state['day'] = stamp
+        state['remaining'] = {}
+        state['best_times'] = {}
+    return state
+
+def calculate_npc_kill_rewards(player_level, npc_level=1):
+    """Calculates balanced EXP and Cash rewards for killing/hitting an NPC based on BaseLvData."""
+    try:
+        player_level = max(1, min(int(player_level), 80))
+    except (TypeError, ValueError):
+        player_level = 1
+
+    try:
+        npc_level = int(npc_level)
+        if npc_level > 200 or npc_level <= 0:
+            npc_level = player_level
+    except (TypeError, ValueError):
+        npc_level = player_level
+
+    # Effective level capped to prevent low-level power leveling
+    effective_lv = min(player_level, npc_level + 2)
+
+    # Get required EXP for effective level from BaseLvData
+    req_data = LEVEL_DATA.get(effective_lv, LEVEL_DATA.get(1, {'exp': 400}))
+    req_exp = req_data.get('exp', 400)
+
+    # Grant ~0.8% of level required EXP per NPC kill
+    exp_reward = max(3, int(req_exp * 0.008))
+
+    # Cash reward scales smoothly with effective level
+    cash_reward = max(10, effective_lv * 15 + 10)
+
+    return exp_reward, cash_reward
+
+def copy_attempts_remaining(picked_char, copy_id, cfg):
+    state = ensure_daily_copy_state(picked_char)
+    remaining = state.setdefault('remaining', {})
+    if copy_id not in remaining or copy_id in ["223", "224", "225", "226", "227", "228", "229"]:
+        remaining[copy_id] = int(cfg.get('max_plays', 3))
+    return max(0, int(remaining[copy_id]))
+
+def street_race_rewards(level):
+    """Return exactly the level-resolved _drop_bc ShowRewardData items."""
+    try:
+        level = int(level)
+    except (TypeError, ValueError):
+        level = 1
+    level = max(1, min(level, 80))
+    reward_id = STREET_RACE_REWARD_BY_LEVEL.get(level)
+    if not reward_id:
+        eligible = [lv for lv in STREET_RACE_REWARD_BY_LEVEL if lv <= level]
+        reward_id = STREET_RACE_REWARD_BY_LEVEL[max(eligible)] if eligible else ''
+    return SHOW_REWARD_CONFIG.get(str(reward_id), [])
+
+def sync_copy_scenes(picked_char):
+    """Build TAG 555 from the APK's CopySceneData definitions."""
+    level = int(picked_char.get('level', 1))
+    # CopySceneData contains the level variants for each daily activity.  The
+    # client expects one current copy per subtype, not every future/parallel
+    # Street Race row.  Select the highest unlocked level bracket; ties use
+    # the first configured ID (e.g. Street Race 211 at level 4).
+    selected = {}
+    for copy_id, cfg in COPY_SCENE_CONFIG.items():
+        if level < cfg['min_level']:
+            continue
+        try:
+            numeric_id = int(copy_id)
+        except (TypeError, ValueError):
+            numeric_id = 0
+        rank = (int(cfg['min_level']), -numeric_id)
+        subtype = cfg['subtype']
+        if subtype not in selected or rank > selected[subtype][0]:
+            selected[subtype] = (rank, copy_id, cfg)
+    copies = {}
+    for _, copy_id, cfg in selected.values():
+        # copyscene_info: ID, CurNum, BestGrade, Type, str, enable, state, Type2.
+        # Type=1 marks a daily copy.  The client finds the Street Race entry
+        # through CopySceneData.SubType == 7, rather than a server-made ID.
+        state = ensure_daily_copy_state(picked_char)
+        best_grade = state.get('best_times', {}).get(copy_id)
+        best_str = state.get('best_times_str', {}).get(copy_id)
+
+        info_fields = [
+            (0, copy_id),
+            (1, copy_attempts_remaining(picked_char, copy_id, cfg)),
+            (3, 1),
+            (5, True),
+            (6, 0),
+            (7, cfg['subtype'])
+        ]
+        if best_grade is not None:
+            info_fields.append((2, int(best_grade)))
+        if best_str:
+            info_fields.append((4, str(best_str)))
+
+        copies[copy_id] = encode_sproto(info_fields)
+    return encode_sproto([(0, copies)])
+
+def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None):
+    """Grants EXP, Cash, and Inventory items, handles level-ups, and syncs attributes."""
+    exp_gained = 0
+    cash_gained = 0
+    inv_changed = False
+
+    for entry in rewards_list:
+        item_id = str(entry[0])
+        amount = int(entry[2]) if len(entry) > 2 else int(entry[1])
+        if item_id == "2001":  # EXP
+            exp_gained += amount
+        elif item_id == "1001":  # Cash
+            cash_gained += amount
+        else:  # Inventory items / currency
+            add_to_inventory(picked_char, item_id, amount)
+            inv_changed = True
+
+    if exp_gained > 0:
+        picked_char['exp'] = picked_char.get('exp', 0) + exp_gained
+        while True:
+            lv = picked_char.get('level', 1)
+            rd = LEVEL_DATA.get(lv)
+            if rd and picked_char['exp'] >= rd['exp']:
+                picked_char['exp'] -= rd['exp']
+                picked_char['level'] = lv + 1
+                new_stats = get_character_stats(picked_char)
+                picked_char['hp'] = new_stats['hp_max']
+                print(f"[LEVEL UP] CharID={picked_char['id']} NewLevel={picked_char['level']} HP Restored to {picked_char['hp']}")
+            else:
+                break
+
+    if cash_gained > 0:
+        picked_char['cash'] = picked_char.get('cash', 0) + cash_gained
+
+    save_chars(all_accounts_chars)
+
+    if (exp_gained > 0 or cash_gained > 0) and conn:
+        sync_char_attrs_rpc(conn, picked_char)
+
+    if inv_changed and send_rpc_push:
+        send_rpc_push(611, sync_inventory_data(picked_char))
+
+def give_mission_rewards(picked_char, mid):
+    """Resolves rewards by profession and calculates level ups using BaseLvData."""
+    try:
+        m = missions_data.get(mid)
+        if not m or not m.get('reward_ids'): return 0, 0, [], []
+
+        prof = picked_char.get('prof', 0)
+        rids = m['reward_ids']
+        rid = rids[prof] if prof < len(rids) else rids[0]
+        reward = rewards_data.get(rid)
+        if not reward: return 0, 0, [], []
+
+        added_exp = reward.get('exp', 0)
+        added_cash = reward.get('cash', 0)
+
+        picked_char['cash'] = picked_char.get('cash', 0) + added_cash
+        picked_char['exp'] = picked_char.get('exp', 0) + added_exp
+
+        while True:
+            lv = picked_char.get('level', 1)
+            req_data = LEVEL_DATA.get(lv)
+            if not req_data: break
+            if picked_char['exp'] >= req_data['exp']:
+                picked_char['exp'] -= req_data['exp']
+                picked_char['level'] = lv + 1
+                # Level Up: Fully Restore HP
+                new_stats = get_character_stats(picked_char)
+                picked_char['hp'] = new_stats['hp_max']
+                print(f"[LEVEL UP] CharID={picked_char['id']} NewLevel={picked_char['level']} HP Restored to {picked_char['hp']}")
+            else: break
+
+        # Send original reward popup (Tag 638)
+        # item schema: itemId(0), itemCount(1), quality(3)
+        popup_items = [
+            encode_sproto([(0, "2001"), (1, added_exp), (3, 0)]),
+            encode_sproto([(0, "1001"), (1, added_cash), (3, 0)])
+        ]
+
+        items, amts = reward.get('items', []), reward.get('item_amounts', [])
+        granted_items = []
+        for i in range(len(items)):
+            if items[i]:
+                amt = amts[i] if i < len(amts) else 1
+                popup_items.append(encode_sproto([(0, items[i]), (1, amt), (3, 0)]))
+                add_to_inventory(picked_char, items[i], amt)
+                granted_items.append((items[i], amt))
+
+        # The caller sends TAG 638 after ret_complete_mission (521).  The APK
+        # opens MissionPassShowRoot from 521; sending the reward first lets
+        # that UI cover the SimpleRewardRoot popup.
+        return added_exp, added_cash, granted_items, popup_items
+    except:
+        traceback.print_exc()
+        return 0, 0, [], []
+
+def accept_mission_logic(picked_char, mid):
+    if mid not in missions_data:
+        print(f"[accept_mission_logic] FAILED: {mid} not in missions_data")
+        return False
+    m = missions_data[mid]
+    pre_id = m.get('pre_id', "")
+    is_main_chain = (
+            m.get('class') == 1
+            and pre_id
+            and str(picked_char.get('last_main_mission_id', "")) == str(pre_id)
+    )
+    if picked_char.get('level', 1) < m.get('min_level', 0) and not is_main_chain:
+        print(f"[accept_mission_logic] FAILED: level too low {picked_char.get('level')} < {m.get('min_level')}")
+        return False
+
+    if pre_id:
+        if m.get('class') == 1:
+            if str(picked_char.get('last_main_mission_id', "")) != str(pre_id):
+                print(f"[accept_mission_logic] FAILED: last_main {picked_char.get('last_main_mission_id')} != pre_id {pre_id}")
+                return False
+        else:
+            try:
+                ipre = int(pre_id)
+                if ipre not in picked_char.get('completed_side_missions', []):
+                    print(f"[accept_mission_logic] FAILED: side pre_id {ipre} not in completed {picked_char.get('completed_side_missions')}")
+                    return False
+            except: return False
+
+    if 'active_missions' not in picked_char: picked_char['active_missions'] = {}
+    if mid in picked_char['active_missions']:
+        print(f"[accept_mission_logic] FAILED: {mid} already active")
+        return False
+    try:
+        imid = int(mid)
+        if imid in picked_char.get('completed_side_missions', []):
+            print(f"[accept_mission_logic] FAILED: {mid} already in completed_side")
+            return False
+    except: pass
+    if str(mid) == str(picked_char.get('last_main_mission_id')):
+        print(f"[accept_mission_logic] FAILED: {mid} is last_main_mission_id")
+        return False
+
+    parm = [0]*8; parm[7] = int(time.time())
+    picked_char['active_missions'][mid] = {'state': 1, 'parm': parm, 'accept_time': int(time.time())}
+    return True
+
+def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type=0, map_id=None):
+    """Apply one authoritative gameplay event to every active mission."""
+    updated = False
+    for mid, mdata in picked_char.get('active_missions', {}).items():
+        if mdata.get('state') != 1:
+            continue
+        cfg = missions_data.get(mid)
+        if not cfg:
+            continue
+
+        logic_type = cfg.get('logic_type')
+        target = str(cfg.get('target_id', ''))
+        target_value = str(target_id) if target_id is not None else ''
+        matched = False
+
+        if logic_type == 7 and event == 'level':
+            mdata['parm'][0] = max(mdata['parm'][0], int(picked_char.get('level', 1)))
+            matched = True
+        elif logic_type in [1, 4, 11, 17, 23] and event == 'kill':
+            if logic_type == 17:
+                matched = True
+            else:
+                # Match target NPC from MissionData or spawned NPCs from KillTargetMissionData
+                logic_id = str(cfg.get('logic_id', ''))
+                spawn_key = logic_id if logic_id in KILL_TARGET_SPAWNS else str(mid)
+                spawn_nids = set()
+                if spawn_key in KILL_TARGET_SPAWNS:
+                    for s in KILL_TARGET_SPAWNS[spawn_key]:
+                        spawn_nids.add(str(s['nid']))
+                if target in ("9901", "90009", "1001") or target_value in ("9901", "90009", "1001"):
+                    matched = target_value in ("9901", "90009", "1001")
+                else:
+                    matched = target == target_value or target_value in spawn_nids
+        elif logic_type == 19 and event == 'car':
+            # The client sends type 2 for a normal car robbery without an
+            # NPC/car id, so its event type is the authoritative discriminator.
+            matched = die_type == 2
+        elif logic_type == 24 and event == 'car':
+            # Target-car robbery (mission 1002) sends only type 6.  The
+            # request intentionally has no npcid, therefore we match on type.
+            matched = die_type == 6
+        elif logic_type == 20 and event == 'impact':
+            matched = die_type == 3 and (not target or target == target_value)
+        elif logic_type in [0, 2, 6, 21] and event == 'interact':
+            if logic_type == 21 and die_type == 4:
+                # Arrive Target sends missionId as target_id
+                matched = (target_value == mid)
+            else:
+                matched = not target or target == target_value or str(cfg.get('logic_id', '')) == target_value
+        elif logic_type in [3, 4] and event == 'pickup':
+            # Collect Item / Monster Drop matches on logic_id (item ID)
+            matched = str(cfg.get('logic_id')) == target_value
+        elif logic_type == 25 and event in ['capture', 'kill']:
+            # LogicType 25 (Capture/Boss Kill) - match target NPC or KillTargetMissionData spawns
+            logic_id = str(cfg.get('logic_id', ''))
+            spawn_key = logic_id if logic_id in KILL_TARGET_SPAWNS else str(mid)
+            spawn_nids = set()
+            if spawn_key in KILL_TARGET_SPAWNS:
+                for s in KILL_TARGET_SPAWNS[spawn_key]:
+                    spawn_nids.add(str(s['nid']))
+            matched = not target or target == target_value or str(cfg.get('logic_id', '')) == target_value or target_value in spawn_nids
+        elif logic_type in [102, 103, 105, 106, 107, 108, 110, 113, 114, 117, 119, 120, 132] and event == 'dungeon':
+            # Dungeon/Guide entry missions advance on specific 'dungeon' events with matching logic_id
+            matched = str(cfg.get('logic_id')) == str(target_id)
+        elif logic_type == 114 and event == 'world_boss':
+            matched = True
+        elif logic_type == 7 and event == 'map':
+            matched = target == str(map_id)
+
+        if not matched:
+            continue
+
+        required = int(cfg.get('count') or cfg.get('require_num') or 1)
+        logic_id = str(cfg.get('logic_id', ''))
+
+        if logic_type in [1, 4, 11, 17, 23]: # Kill
+            spawn_key = logic_id if logic_id in KILL_TARGET_SPAWNS else str(mid)
+            if spawn_key in KILL_TARGET_SPAWNS:
+                required = KILL_TARGET_SPAWNS[spawn_key][0].get('require', 1)
+        elif logic_type == 25: # Capture / Boss
+            required = 1
+        elif logic_type == 24: # Target Car
+            if logic_id in TARGET_CAR_SPAWNS:
+                required = TARGET_CAR_SPAWNS[logic_id][0].get('require', 1)
+
+        if logic_type in [2, 6, 102, 103, 105, 106, 107, 108, 110, 113, 114, 117, 119, 120, 132]:
+            required = 1
+        if logic_type == 7:
+            # Level missions: logic_id IS the required level
+            required = int(cfg.get('logic_id') or 1)
+            progress = int(mdata['parm'][0])
+        else:
+            mdata['parm'][0] = min(required, int(mdata['parm'][0]) + 1)
+            progress = mdata['parm'][0]
+
+        send_rpc_push(524, encode_sproto([(0, mid), (1, 1), (2, progress)]))
+        if progress >= required:
+            mdata['state'] = 2
+            send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+        updated = True
+
+    if updated:
+        save_chars(all_accounts_chars)
+        send_rpc_push(519, sync_mission_data(picked_char))
+    return updated
+
+def init_character_fields(c):
+    fields = {
+        'level': 1, 'exp': 0, 'cash': 1000,
+        'skill_levels': {},
+        'active_missions': {},
+        'completed_side_missions': [],
+        'last_main_mission_id': "-1",
+        'inventory': [],
+        'pos': [29860, 100, -17005, 0],
+        'map_id': "11",
+        'tutorial': 0,
+        'download_complete': False,
+        'mounts': {},
+        'equipped_mount_id': '',
+        'mount_riding': False,
+        'daily_copy_state': {},
+        'active_copy_id': None,
+        'pre_copy_pos': None,
+        'active_domin_id': None,
+        'boss_inst_id': None,
+        'pre_arena_pos': None
+    }
+    for k, v in fields.items():
+        if k not in c: c[k] = v
+
+    # Initialize or restore HP if not set or if dead
+    stats = get_character_stats(c)
+    if 'hp' not in c or c.get('hp', 0) <= 0:
+        c['hp'] = stats['hp_max']
+
+def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, override_pos=None):
+    if picked_char and picked_char.get('hp', 0) <= 0:
+        stats = get_character_stats(picked_char)
+        picked_char['hp'] = stats['hp_max']
+
+    src_map = picked_char.get('map_id', '11')
+    target_map_id = str(target_map_id)
+    picked_char['map_id'] = target_map_id
+    scene_name = "Unknown"
+
+    # Update position
+    landing_pos = override_pos
+    if not landing_pos and target_map_id == "502":
+        # Lord Battle: Restore verified MapInfo coordinates (Y=120)
+        landing_pos = [-400, 120, 0, 9000]
+        print(f"[TELEPORT] Lord Battle Map 502 start pos={landing_pos}")
+
+    # 1. Try teleport portal heuristic
+    if not landing_pos and (target_map_id, src_map) in MAP_CONNECT_DATA:
+        px, py, pz = MAP_CONNECT_DATA[(target_map_id, src_map)]
+        # Liberty City height fix: ensure player is above NavMesh
+        y_coord = int(py * 100)
+        if target_map_id == "101" or target_map_id == "105":
+            y_coord = 200
+        landing_pos = [int(px * 100), y_coord, int(pz * 100), 0]
+        print(f"[TELEPORT] Transition {src_map} -> {target_map_id} using portal heuristic: {landing_pos}")
+
+    # 2. Fallback to birth pos
+    if not landing_pos and target_map_id in MAP_CONFIG:
+        birth = MAP_CONFIG[target_map_id]['birth']
+        scene_name = MAP_CONFIG[target_map_id]['scene']
+        if birth:
+            parts = birth.split('#')
+            if len(parts) >= 3:
+                # Fix: If height is 0, set it to a safe level
+                y_coord = int(parts[1])
+                if target_map_id == "101" or target_map_id == "105":
+                    y_coord = 200 # Safe height above floor
+                elif y_coord == 0:
+                    y_coord = 100
+
+                landing_pos = [int(parts[0]), y_coord, int(parts[2]), int(parts[3]) if len(parts) > 3 else 0]
+                print(f"[TELEPORT] Spawn fix map={target_map_id} pos={landing_pos}")
+
+    if landing_pos:
+        picked_char['pos'] = landing_pos
+    else:
+        print(f"[MAP CONFIG MISSING] map_id={target_map_id}")
+
+    save_chars(all_accounts_chars)
+    # TAG 503: enter_map
+    print("[DEBUG] BEFORE MAP ENTER")
+    try:
+        ph_p = encode_sproto([(0, 503)])
+        # mapInfoId(0), line_index(1), line_count(2)
+        data = encode_sproto([(0, target_map_id), (1, 0), (2, 1)])
+        pf_p = sproto_pack(ph_p + data)
+        conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+        print(f"[M1003 DEBUG] TX 503 map_id={target_map_id}")
+        print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
+        print(f"[MAP ENTER SEND] map_id={target_map_id} scene={scene_name} pos={picked_char['pos']}")
+
+        # TAG 504: main_player_create
+        send_rpc_push(504, encode_sproto([
+            (0, get_full_char(picked_char)),
+            (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
+        ]))
+        print(f"[MAIN PLAYER CREATE SEND] map_id={target_map_id}")
+
+        # TAG 505: aoi_add (NPCs)
+        spawn_map_npcs(conn, target_map_id, picked_char)
+
+        # BOSS SPAWN for Dominance Map 502
+        if target_map_id == "502":
+            did = picked_char.get('active_domin_id', '1')
+            global GLOBAL_INST_COUNTER
+            GLOBAL_INST_COUNTER += 1
+            boss_inst_id = GLOBAL_INST_COUNTER
+            picked_char['boss_inst_id'] = boss_inst_id
+            picked_char['boss_pos'] = [400, 120, 0, -9000]
+
+            boss_stats = get_npc_attr("1105")
+            NPC_HP_MAP[boss_inst_id] = boss_stats['hp_max']
+            NPC_INST_MAP[boss_inst_id] = "BOSS_" + did
+            # The APK cannot create the zombie player (or the VS panel) until
+            # map_ready.  Remember it here; MSG 100 sends the actual tag 544.
+            picked_char['boss_waiting_for_map_ready'] = True
+            print(f"[M1003 DEBUG] Prepared Boss did={did} inst={boss_inst_id} max_hp={boss_stats['hp_max']} (awaiting map_ready)")
+
+    except Exception:
+        print("[!] FAILED TO SEND MAP ENTER TRANSITION")
+        traceback.print_exc()
+    print("[DEBUG] AFTER MAP ENTER")
+
+def is_skill_locked(sid, level, prof):
+    p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
+    if sid in p["actives"]:
+        idx = p["actives"].index(sid)
+        if level < SKILL_UNLOCK_LVS[idx]:
+            return True, SKILL_UNLOCK_LVS[idx]
+    return False, 0
+
+def serve_resource_http(conn, initial_data):
+    """Serve APK updater files on the game-server port.
+
+    The updater requests /RES_205/... over HTTP.  Restrict this handler to
+    versioned resource paths below assets so an HTTP request cannot read game
+    data or arbitrary server files.
+    """
+    try:
+        request = initial_data
+        while b"\r\n\r\n" not in request and len(request) < 16384:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            request += chunk
+        first_line = request.split(b"\r\n", 1)[0].decode("ascii", "ignore")
+        parts = first_line.split()
+        if len(parts) < 2 or parts[0] not in ("GET", "HEAD"):
+            conn.sendall(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
+            return
+        relative_path = parts[1].split("?", 1)[0].lstrip("/")
+        normalized = os.path.normpath(relative_path).replace("\\", "/")
+        if not normalized.startswith("RES_") or normalized.startswith("../"):
+            conn.sendall(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+            return
+        local_path = os.path.abspath(os.path.join(RESOURCE_ROOT, normalized))
+        resource_root = os.path.abspath(RESOURCE_ROOT) + os.sep
+        if not local_path.startswith(resource_root) or not os.path.isfile(local_path):
+            print(f"[HTTP 9555] 404 {normalized}")
+            conn.sendall(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
+            return
+        size = os.path.getsize(local_path)
+        headers = (
+                b"HTTP/1.1 200 OK\r\n"
+                + b"Content-Length: " + str(size).encode("ascii") + b"\r\n"
+                + b"Content-Type: application/octet-stream\r\n"
+                + b"Connection: close\r\n\r\n"
+        )
+        conn.sendall(headers)
+        if parts[0] == "GET":
+            with open(local_path, "rb") as resource_file:
+                while True:
+                    block = resource_file.read(65536)
+                    if not block:
+                        break
+                    conn.sendall(block)
+        print(f"[HTTP 9555] 200 {normalized} ({size} bytes)")
+    except Exception as exc:
+        print(f"[HTTP 9555] failed: {exc}")
+    finally:
+        try:
+            conn.close()
         except Exception:
             pass
 
-    def get_protocol(self, tag: int):
-        return self.protocols.get(tag)
+def client_handler(conn, addr):
+    print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
+    global server_session_counter
+    send_lock = threading.Lock()
 
-    def get_schema(self, schema_name: str):
-        return self.type_schemas.get(schema_name)
+    def send_rpc_push(tag, data):
+        try:
+            ph_p = encode_sproto([(0, tag)])
+            pf_p = sproto_pack(ph_p + data)
+            # The arena start is delayed so the client can show its VS panel.
+            # Serialise writes because that delay runs in a timer thread.
+            with send_lock:
+                conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+            print(f"[TX] PUSH TAG={tag} SIZE={len(data)}")
+        except Exception:
+            print(f"[!] FAILED TO SEND PUSH TAG={tag}")
+            traceback.print_exc()
 
-    def get_possible_responses(self, tag: int):
-        """
-        Returns all possible responses for a given request Tag:
-        - Inline RPC response (if defined)
-        - Any related server-to-client push notifications triggered in game flow
-        """
-        proto = self.protocols.get(tag)
-        if not proto:
-            return None
-        
-        results = {
-            'rpc_response': None,
-            'related_pushes': []
-        }
-        
-        if proto['response']:
-            rsp_key = f"{proto['response']}.response"
-            schema = self.get_schema(rsp_key)
-            results['rpc_response'] = {
-                'name': proto['response'],
-                'full_type': f"SprotoType.{rsp_key}",
-                'schema': schema,
-                'sample': self.generate_default_sample(schema)
-            }
-            
-        # Check associated push responses (e.g. for mission, login, map, etc.)
-        pname = proto['name']
-        for push_name in self.push_handlers:
-            push_tag = self.name_to_tag.get(push_name)
-            # Find related notifications
-            if push_name.startswith(f"ret_{pname}") or push_name == f"ret_{pname}" or (pname in push_name and push_name != pname):
-                push_proto = self.protocols.get(push_tag, {})
-                push_schema_key = f"{push_proto.get('request')}.request" if push_proto.get('request') else push_name
-                push_schema = self.get_schema(push_schema_key)
-                results['related_pushes'].append({
-                    'tag': push_tag,
-                    'name': push_name,
-                    'full_type': f"SprotoType.{push_schema_key}",
-                    'schema': push_schema,
-                    'sample': self.generate_default_sample(push_schema)
-                })
+    def schedule_domin_return(restore_hp=False):
+        """Return after the Capture mission's APK-localized five-second exit notice."""
+        if not picked_char or picked_char.get('domin_return_scheduled'):
+            return
+        picked_char['domin_return_scheduled'] = True
+        picked_char['domin_return_restore_hp'] = restore_hp
 
-        return results
-
-    def generate_default_sample(self, schema):
-        """Generates a default working dictionary for mock response."""
-        if not schema or not schema.get('fields'):
-            return {}
-        res = {}
-        for tag, finfo in schema['fields'].items():
-            fname = finfo['name']
-            ftype = finfo.get('type', '')
-            wmethod = finfo.get('write_method', '')
-            
-            if 'bool' in ftype or 'boolean' in wmethod:
-                res[fname] = True
-            elif 'string' in ftype or 'string' in wmethod:
-                if 'version' in fname.lower():
-                    res[fname] = "1.012.017"
-                else:
-                    res[fname] = "ok"
-            elif 'integer' in wmethod or ftype in ('long', 'int'):
-                if fname == 'errno' or fname == 'type':
-                    res[fname] = 0  # Success
-                elif 'id' in fname.lower() or 'level' in fname.lower():
-                    res[fname] = 1
-                else:
-                    res[fname] = 0
-            elif 'obj' in wmethod:
-                res[fname] = {}
-            else:
-                res[fname] = 0
-        return res
-
-
-# ==============================================================================
-# 3. Missing Feature Tracker & Inspector Logger
-# ==============================================================================
-
-class MissingTracker:
-    def __init__(self):
-        self.lock = threading.Lock()
-        self.missing_requests = {} # tag -> {'count': int, 'last_seen': float, 'name': str, 'req_type': str, 'sample_req': dict, 'rsp_info': dict}
-        self.handled_requests = {} # tag -> count
-
-    def record_missing(self, tag: int, name: str, req_type: str, req_payload: dict, rsp_info: dict, session: int):
-        with self.lock:
-            if tag not in self.missing_requests:
-                self.missing_requests[tag] = {
-                    'tag': tag,
-                    'name': name,
-                    'req_type': req_type,
-                    'count': 0,
-                    'sessions': set(),
-                    'last_seen': time.time(),
-                    'sample_req': req_payload,
-                    'rsp_info': rsp_info
-                }
-            self.missing_requests[tag]['count'] += 1
-            self.missing_requests[tag]['sessions'].add(session)
-            self.missing_requests[tag]['last_seen'] = time.time()
-            self.missing_requests[tag]['sample_req'] = req_payload
-
-    def record_handled(self, tag: int):
-        with self.lock:
-            self.handled_requests[tag] = self.handled_requests.get(tag, 0) + 1
-
-    def print_summary(self):
-        with self.lock:
-            print(f"\n{C_BOLD}{'='*80}{C_RESET}")
-            print(f"{C_YELLOW}{C_BOLD}   [SERVER 15678 MISSING REQUESTS SUMMARY REPORT]{C_RESET}")
-            print(f"{C_BOLD}{'='*80}{C_RESET}")
-            if not self.missing_requests:
-                print(f" {C_GREEN}No missing requests detected yet! All requests were handled.{C_RESET}\n")
+        def leave_after_notice(seconds_left):
+            if not picked_char or picked_char.get('map_id') != '502':
                 return
-            
-            print(f" Total Unique Tags Missing: {C_RED}{len(self.missing_requests)}{C_RESET}\n")
-            for tag, info in sorted(self.missing_requests.items()):
-                print(f" {C_RED}{C_BOLD}* Tag {tag:>3d} [{info['name']}]{C_RESET}  (Missed {info['count']} times)")
-                print(f"   - Client Sproto Request:  {C_CYAN}{info['req_type']}{C_RESET}")
-                print(f"   - Last Request Payload:   {info['sample_req']}")
-                
-                rsp = info['rsp_info'].get('rpc_response') if info['rsp_info'] else None
-                if rsp:
-                    print(f"   - {C_GREEN}REQUIRED APK RESPONSE:{C_RESET} {C_BOLD}{rsp['full_type']}{C_RESET}")
-                    schema = rsp.get('schema')
-                    if schema and schema.get('fields'):
-                        for ftag, finfo in schema['fields'].items():
-                            print(f"       [{ftag}] {finfo['name']:<18s} ({finfo['type']})")
-                    print(f"   - {C_CYAN}Sample Response JSON:{C_RESET} {json.dumps(rsp.get('sample', {}))}")
+            if seconds_left > 0:
+                # Localization 200302: "You will leave the scene after {0} seconds".
+                send_rpc_push(529, encode_sproto([
+                    (0, f"You will leave the scene after {seconds_left} seconds"),
+                    (1, True)
+                ]))
+                timer = threading.Timer(1.0, leave_after_notice, args=(seconds_left - 1,))
+                timer.daemon = True
+                timer.start()
+                return
+
+            return_pos = picked_char.get('pre_arena_pos')
+            if picked_char.pop('domin_return_restore_hp', False):
+                # A map transition recreates the main player with this value.
+                # Restore only after the exit countdown, never in the arena.
+                picked_char['hp'] = get_character_stats(picked_char)['hp_max']
+            picked_char['boss_inst_id'] = None
+            picked_char['active_domin_id'] = None
+            picked_char['pre_arena_pos'] = None
+            picked_char['domin_return_scheduled'] = False
+            # The APK has no dedicated "close arena timer" packet. Its
+            # notify_copy_start_info handler closes the timer immediately for
+            # an elapsed end_time, before the map transition begins.
+            send_rpc_push(629, encode_sproto([(0, int(time.time())), (1, 2)]))
+            start_map_transition(conn, picked_char, '11', send_rpc_push, override_pos=return_pos)
+            print('[M1003 DEBUG] Arena exit countdown finished; returned to saved city position')
+
+        leave_after_notice(5)
+
+    def schedule_street_race_return():
+        """Apply CopySceneData.EndTime (five seconds) after a race result."""
+        if not picked_char or picked_char.get('street_race_return_scheduled'):
+            return
+        copy_id = str(picked_char.get('active_copy_id') or '')
+        cfg = COPY_SCENE_CONFIG.get(copy_id)
+        if not cfg or cfg.get('subtype') != 7:
+            return
+        picked_char['street_race_return_scheduled'] = True
+        delay = int(cfg.get('end_time') or 5)
+
+        def leave_after_notice(seconds_left):
+            if not picked_char or picked_char.get('active_copy_id') != copy_id:
+                return
+            if seconds_left > 0:
+                # This follows the CopySceneData EndTime=5 for every Street
+                # Race route and uses the same APK dialog notification path
+                # as the other local copy exits.
+                send_rpc_push(529, encode_sproto([
+                    (0, f"You will leave the scene after {seconds_left} seconds"),
+                    (1, True)
+                ]))
+                timer = threading.Timer(1.0, leave_after_notice, args=(seconds_left - 1,))
+                timer.daemon = True
+                timer.start()
+                return
+
+            return_pos = picked_char.get('pre_copy_pos')
+            picked_char['pre_copy_pos'] = None
+            picked_char['active_copy_id'] = None
+            picked_char['street_race_return_scheduled'] = False
+            save_chars(all_accounts_chars)
+            start_map_transition(conn, picked_char, '11', send_rpc_push, override_pos=return_pos)
+            print(f"[STREET RACE] exit countdown finished; returned after copy={copy_id}")
+
+        leave_after_notice(delay)
+
+    try:
+        # HTTP updater traffic begins with GET/HEAD; game packets begin with a
+        # two-byte big-endian Sproto frame length.  Peek without consuming it.
+        initial = conn.recv(4, socket.MSG_PEEK)
+        if initial.startswith(b"GET ") or initial.startswith(b"HEAD"):
+            serve_resource_http(conn, b"")
+            return
+        while True:
+            h_bytes = conn.recv(2)
+            if not h_bytes: break
+            size = struct.unpack(">H", h_bytes)[0]
+            data = b""
+            while len(data) < size:
+                chunk = conn.recv(size - len(data))
+                if not chunk: break
+                data += chunk
+            if len(data) < size: break
+
+            raw = sproto_unpack(data); pkg = decode_sproto(raw, 0)
+            msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
+            print(f"[RX] MSG={msg} SESSION={session}")
+            off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
+
+            if msg == 2: # visitor
+                new_id = acc_id if acc_id and acc_id != "0" else f"100{random.randint(1000, 9999)}"
+                acc_id = new_id
+                resp = encode_sproto([(0, 0), (1, new_id), (2, "key123")])
+                ph = encode_sproto([(1, session)]) if session is not None else encode_sproto([(0, 2)])
+                pf = sproto_pack(ph + resp)
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 3: # verfiy
+                req_id = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, acc_id))
+                if req_id: acc_id = req_id
+                resp = encode_sproto([(0, 0), (1, int(time.time()) % 100000), (2, ""), (3, ""), (4, "1.012.017"), (5, "205")])
+                ph = encode_sproto([(1, session)]) if session is not None else encode_sproto([(0, 3)])
+                pf = sproto_pack(ph + resp)
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 4: # login
+                acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
+                sid = get_val_int(body, 5, 1); cur_areaId = str(get_area_id(sid))
+                # sync_common_data: serverTime(0), time_offset(2), func_info(9), pvp_scale(4), seed(12), server_level(13), start_time(14)
+                resp = encode_sproto([
+                    (0, 2), (1, "1.012.017"), (2, "205"), (3, 1),
+                    # pvp_scale = 1.0 (10000), seed = random
+                    (4, 10000), (12, random.randint(1, 10000))
+                ])
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 103: # character_list
+                chars = get_account_chars(all_accounts_chars, cur_areaId, acc_id)
+                # Sort by last_played descending (internal)
+                chars.sort(key=lambda x: x.get('last_played', 0), reverse=True)
+
+                # The client sorts character_overview.createtime ASCENDING.
+                # To make the last played (newest) show first, we give it the smallest createtime.
+                ov_list = []
+                for i, c in enumerate(chars):
+                    ov_list.append(get_char_ov(c, i))
+
+                resp = encode_sproto([(0, ov_list)])
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 104: # character_create
+                c_data = decode_sproto(body.get(0, b""))
+                name = c_data.get(0, b"").decode('utf-8') if isinstance(c_data.get(0), bytes) else str(c_data.get(0, "Hero"))
+                prof = get_val_int(c_data, 1, 0); cid = generate_unique_char_id()
+                cur_area_key = str(cur_areaId)
+                if cur_area_key not in all_accounts_chars: all_accounts_chars[cur_area_key] = {}
+                if acc_id not in all_accounts_chars[cur_area_key]: all_accounts_chars[cur_area_key][acc_id] = []
+                nc = {'id': cid, 'name': name, 'prof': prof}
+                init_character_fields(nc)
+                all_accounts_chars[cur_area_key][acc_id].append(nc); save_chars(all_accounts_chars)
+                resp = encode_sproto([(0, get_char_ov(nc)), (1, 0)])
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 105: # character_pick
+                char_id = get_val_int(body, 0)
+                picked_char = next((c for c in get_account_chars(all_accounts_chars, cur_areaId, acc_id) if c['id'] == char_id), None)
+                resp = encode_sproto([(0, 1 if picked_char else 0)])
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+                if picked_char:
+                    picked_char['last_played'] = int(time.time())
+                    print(f"[CHARACTER PICK] id={picked_char['id']} level={picked_char.get('level')}")
+                    init_character_fields(picked_char)
+                    # Initial Mission Assignment for new characters
+                    has_active_main = False
+                    for active_id in picked_char['active_missions']:
+                        if missions_data.get(active_id, {}).get('class') == 1:
+                            has_active_main = True
+                            break
+
+                    if picked_char.get('last_main_mission_id') in [None, "", "-1", "0"] and not has_active_main:
+                        if accept_mission_logic(picked_char, "1001"):
+                            print(f"[MISSION ACCEPT] mission_id=1001 (Starting mission)")
+
+                    save_chars(all_accounts_chars)
+
+                    # Correct Sequence: 614 -> 611 -> 540 -> 519 -> 503
+
+                    # 614: sync_common_data (data-driven from FunctionData)
+                    char_level = picked_char.get('level', 1)
+                    if FUNCTION_DATA:
+                        fids = []
+                        for fid, finfo in FUNCTION_DATA.items():
+                            fc = finfo['class']
+                            # class 0: default open
+                            if fc == 0:
+                                fids.append(fid)
+                            elif fc == 1:
+                                # class 1: level-gated -> unlock when level >= condition
+                                if char_level >= finfo['condition']:
+                                    fids.append(fid)
+                            elif fc == 4:
+                                # class 4: tutorial record -> only unlock if completed
+                                if fid in picked_char.get('completed_tutorials', []):
+                                    fids.append(fid)
+                    else:
+                        # Fallback: original hardcoded list
+                        fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
+                    funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
+                    send_rpc_push(614, encode_sproto([
+                        (0, int(time.time())), (2, 0), (4, 10000), (9, funcs), (12, random.randint(1, 10000)), (13, 1), (14, int(time.time()))
+                    ]))
+
+                    # 611: inventory_sync
+                    send_rpc_push(611, sync_inventory_data(picked_char))
+
+                    # 592: backpack_sync
+                    send_rpc_push(592, encode_sproto([(0, {})]))
+
+                    # 616: fashion_sync
+                    send_rpc_push(616, encode_sproto([(0, {})]))
+
+                    # 510: initial stats sync
+                    sync_char_attrs_rpc(conn, picked_char)
+
+                    # 540: skill_sync
+                    smap = build_skills_map(picked_char['prof'], picked_char['level'], picked_char.get('skill_levels', {}))
+                    send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
+
+                    # 519: mission_sync
+                    send_rpc_push(519, sync_mission_data(picked_char))
+
+                    # TAG 503: enter_map
+                    mid = str(picked_char.get('map_id', '11'))
+                    scene_name = "Unknown"
+                    if mid in MAP_CONFIG:
+                        scene_name = MAP_CONFIG[mid]['scene']
+                    else:
+                        print(f"[MAP CONFIG MISSING] map_id={mid}")
+
+                    print("[DEBUG] BEFORE MAP ENTER")
+                    try:
+                        ph_p = encode_sproto([(0, 503)])
+                        data = encode_sproto([(0, mid), (1, 0), (2, 1)])
+                        pf_p = sproto_pack(ph_p + data)
+                        conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+                        print(f"[M1003 DEBUG] TX 503 map_id={mid}")
+                        print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
+                        print(f"[MAP ENTER SEND] map_id={mid} scene={scene_name} pos={picked_char['pos']}")
+
+                        # TAG 504: main_player_create
+                        send_rpc_push(504, encode_sproto([
+                            (0, get_full_char(picked_char)),
+                            (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
+                        ]))
+                        print(f"[MAIN PLAYER CREATE SEND] map_id={mid}")
+
+                        # TAG 505: aoi_add (NPCs)
+                        spawn_map_npcs(conn, mid, picked_char)
+
+                    except Exception:
+                        print("[!] FAILED TO SEND INITIAL MAP ENTER")
+                        traceback.print_exc()
+                    print("[DEBUG] AFTER MAP ENTER")
+
+            elif msg == 100: # map_ready
+                if picked_char:
+                    mid = picked_char.get('map_id', '11')
+                    print(f"[MAP READY RECEIVED] map_id={mid}")
+                    if mid in ["223", "224", "225", "226", "227", "228", "229"]:
+                        exp_state = picked_char.get('exp_stage_state')
+                        if exp_state:
+                            send_rpc_push(629, encode_sproto([(0, exp_state['end_time']), (1, 0)]))
+                            send_rpc_push(683, encode_sproto([
+                                (0, exp_state['copy_id']),
+                                (1, exp_state['cur_wave'] - 1),
+                                (2, exp_state['end_time']),
+                                (3, exp_state['cur_group']),
+                                (4, exp_state['wave_kills']),
+                                (5, exp_state['total_kills'])
+                            ]))
+                            print(f"[EXP STAGE] map_ready sent 629 & 683 updates for copy={mid}")
+                    if mid == "502":
+                        # Map 502 exposes its match timer only through this APK tag.
+                        send_rpc_push(629, encode_sproto([(0, int(time.time()) + 60), (1, 0)]))
+
+                        def arena_timeout():
+                            if picked_char and picked_char.get('map_id') == '502':
+                                print('[M1003 DEBUG] Arena 60s timeout reached; returning')
+                                schedule_domin_return(restore_hp=True)
+
+                        t = threading.Timer(60.0, arena_timeout)
+                        t.daemon = True
+                        t.start()
+
+                        boss_id = picked_char.get('boss_inst_id')
+                        if boss_id and picked_char.pop('boss_waiting_for_map_ready', False):
+                            did = picked_char.get('active_domin_id', '1')
+                            boss_stats = get_npc_attr("1105")
+                            # Tag 544 creates ObjZombiePlayer and opens the VS UI.
+                            send_rpc_push(544, encode_sproto([(0, get_boss_char(boss_id, did))]))
+                            sync_npc_attrs_rpc(conn, boss_id, boss_stats, NPC_HP_MAP.get(boss_id, boss_stats['hp_max']))
+                            print(f"[M1003 DEBUG] Spawned Boss did={did} inst={boss_id} after map_ready")
+
+                            # Tag 547 closes the VS UI and activates the APK's
+                            # built-in zombie auto-fight.  Sending it immediately
+                            # makes the VS UI invisible, so keep it on screen first.
+                            def start_domin_battle(expected_boss_id=boss_id):
+                                if (picked_char.get('map_id') == '502'
+                                        and picked_char.get('boss_inst_id') == expected_boss_id
+                                        and NPC_HP_MAP.get(expected_boss_id, 0) > 0):
+                                    send_rpc_push(547, encode_sproto([]))
+                                    print(f"[M1003 DEBUG] Arena started boss={expected_boss_id}; APK zombie AI enabled")
+                            arena_timer = threading.Timer(2.5, start_domin_battle)
+                            arena_timer.daemon = True
+                            arena_timer.start()
+                    send_rpc_push(519, sync_mission_data(picked_char))
+
+            elif msg == 101: # move
+                p_raw = body.get(0)
+                if p_raw and picked_char:
+                    pd = decode_sproto(p_raw)
+                    picked_char['pos'] = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
+                    # Persistent save for safety
+                    save_chars(all_accounts_chars)
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, p_raw)]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 112: # accept_mission
+                if picked_char:
+                    mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
+                    res = accept_mission_logic(picked_char, mid)
+                    print(f"[MISSION ACCEPT REQ] mid={mid} result={res}")
+                    if res:
+                        save_chars(all_accounts_chars)
+                        print(f"[MISSION ACCEPT] mission_id={mid}")
+                        m_entry = picked_char.get('active_missions', {}).get(mid, {})
+                        parm = m_entry.get('parm', [0]*8)
+                        if len(parm) < 8: parm += [0]*(8-len(parm))
+                        own_bytes = encode_sproto([
+                            (0, str(mid)),
+                            (1, int(m_entry.get('state', 1))),
+                            (2, 0),
+                            (3, [int(x) for x in parm])
+                        ])
+                        send_rpc_push(520, encode_sproto([
+                            (0, str(mid)),
+                            (1, 0),
+                            (2, 0),
+                            (3, own_bytes)
+                        ]))
+                    if session is not None:
+                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                        conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    send_rpc_push(519, sync_mission_data(picked_char))
+
+            elif msg == 113: # complete_mission
+                if picked_char:
+                    mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
+                    m_entry = picked_char.get('active_missions', {}).get(mid)
+                    print(f"[MISSION COMPLETE REQ] mid={mid} entry_exists={m_entry is not None} state={m_entry['state'] if m_entry else 'N/A'}")
+                    if m_entry and m_entry['state'] == 2:
+                        m_cfg = missions_data.get(mid)
+                        if m_cfg:
+                            print(f"[MISSION CHAIN] completed={mid} last_main_before={picked_char.get('last_main_mission_id')}")
+                            exp_add, cash_add, items_add, popup_items = give_mission_rewards(picked_char, mid)
+                            print(f"[MISSION REWARD] mission={mid} exp={exp_add} cash={cash_add} items={items_add}")
+
+                            # Mission Chain and Unlocking logic
+                            is_chained = False
+                            if m_cfg.get('class') == 1:
+                                picked_char['last_main_mission_id'] = mid
+                                print(f"[MISSION CHAIN] updated last_main={mid}")
+                                # Auto-chain to next Main Mission
+                                next_mid = m_cfg.get('next_id')
+                                if next_mid and str(next_mid) in missions_data:
+                                    res = accept_mission_logic(picked_char, str(next_mid))
+                                    print(f"[MISSION NEXT] previous={mid} next={next_mid} accepted={res}")
+                                    is_chained = res
+                            else:
+                                try:
+                                    imid = int(mid)
+                                    if imid not in picked_char.get('completed_side_missions', []):
+                                        picked_char['completed_side_missions'].append(imid)
+                                except: pass
+
+                            del picked_char['active_missions'][mid]
+                            # Main-chain level goals may be accepted after the
+                            # preceding mission's reward has already raised
+                            # the player.  Re-evaluate the newly accepted
+                            # level mission immediately, otherwise mission
+                            # 1005 can remain at 0/5 until a later NPC event.
+                            if is_chained and next_mid and str(next_mid) in missions_data:
+                                next_cfg = missions_data[str(next_mid)]
+                                if next_cfg.get('logic_type') == 7:
+                                    advance_missions(picked_char, send_rpc_push, 'level')
+                            save_chars(all_accounts_chars)
+                            print(f"[MISSION COMPLETE] mission_id={mid} chained={is_chained}")
+
+                            # Standard completion response
+                            if session is not None:
+                                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+                            # Push Sync sequence
+                            send_rpc_push(521, encode_sproto([(0, mid), (1, 0)])) # Success feedback
+                            if is_chained and next_mid:
+                                next_m_entry = picked_char.get('active_missions', {}).get(str(next_mid), {})
+                                next_parm = next_m_entry.get('parm', [0]*8)
+                                if len(next_parm) < 8: next_parm += [0]*(8-len(next_parm))
+                                next_own_bytes = encode_sproto([
+                                    (0, str(next_mid)),
+                                    (1, int(next_m_entry.get('state', 1))),
+                                    (2, 0),
+                                    (3, [int(x) for x in next_parm])
+                                ])
+                                send_rpc_push(520, encode_sproto([
+                                    (0, str(next_mid)),
+                                    (1, 0),
+                                    (2, 0),
+                                    (3, next_own_bytes)
+                                ]))
+                            sync_char_attrs_rpc(conn, picked_char)               # Stats update
+                            send_rpc_push(519, sync_mission_data(picked_char))   # Mission UI update
+                            if popup_items:
+                                send_rpc_push(638, encode_sproto([(0, popup_items)]))
+                            if items_add:
+                                send_rpc_push(611, sync_inventory_data(picked_char)) # Inventory sync
+                            if mid == '1003' and picked_char.get('map_id') == '502':
+                                # Tag 521 invokes the APK's MissionPassShowRoot path. Start
+                                # the exit sequence only after that response has been pushed.
+                                schedule_domin_return()
+                        else:
+                            if session is not None:
+                                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                                conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    else:
+                        if session is not None:
+                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                            conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 114: # abandon_mission
+                mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
+                if picked_char and mid in picked_char.get('active_missions', {}):
+                    del picked_char['active_missions'][mid]
+                    save_chars(all_accounts_chars)
+                    send_rpc_push(522, encode_sproto([(0, mid), (1, 0)]))
+                    send_rpc_push(519, sync_mission_data(picked_char))
+                    print(f"[MISSION ABANDON] mission_id={mid}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 121: # request_daily_mission
+                if picked_char:
+                    for dmid, dmdata in picked_char.get('active_missions', {}).items():
+                        mcfg = missions_data.get(dmid, {})
+                        if mcfg.get('class') == 4:
+                            parm = dmdata.get('parm', [0]*8)
+                            if len(parm) < 8: parm += [0]*(8-len(parm))
+                            own_bytes = encode_sproto([
+                                (0, str(dmid)),
+                                (1, int(dmdata.get('state', 1))),
+                                (2, 0),
+                                (3, [int(x) for x in parm])
+                            ])
+                            send_rpc_push(530, encode_sproto([(0, own_bytes)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 524: # set_mission_param
+                mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
+                idx = get_val_int(body, 1); val = get_val_int(body, 2)
+                if picked_char and mid in picked_char.get('active_missions', {}):
+                    picked_char['active_missions'][mid]['parm'][idx-1] = val
+                    save_chars(all_accounts_chars)
+                    if session is not None:
+                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                        conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    send_rpc_push(519, sync_mission_data(picked_char))
+
+            elif msg == 523: # set_mission_state
+                mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
+                state = get_val_int(body, 1)
+                if picked_char and mid in picked_char.get('active_missions', {}):
+                    picked_char['active_missions'][mid]['state'] = state
+                    save_chars(all_accounts_chars)
+                    if session is not None:
+                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                        conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    send_rpc_push(519, sync_mission_data(picked_char))
+
+            elif msg == 130: # skill_level_up
+                sid = body.get(0, b"").decode('utf-8')
+                cur_lv = get_val_int(body, 1)
+                if picked_char:
+                    cost = get_skill_upgrade_cost(cur_lv)
+                    if picked_char.get('cash', 0) >= cost and picked_char.get('level', 1) > cur_lv + 1:
+                        picked_char['cash'] -= cost
+                        picked_char['skill_levels'][sid] = cur_lv + 1
+                        save_chars(all_accounts_chars)
+                        smap = build_skills_map(picked_char['prof'], picked_char['level'], picked_char['skill_levels'])
+                        send_rpc_push(540, encode_sproto([(0, smap), (1, True)]))
+                        sync_char_attrs_rpc(conn, picked_char)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 102: # skill_use
+                sid = body.get(1, b"").decode('utf-8'); tid = get_val_int(body, 0); alist = body.get(3, [])
+                if picked_char:
+                    locked, req_lv = is_skill_locked(sid, picked_char.get('level', 1), picked_char.get('prof', 0))
+                    if locked:
+                        print(f"[SKILL LOCKED] sid={sid} req={req_lv}")
+                        send_rpc_push(529, encode_sproto([(0, "#{100681}"), (1, True)]))
+                    else:
+                        # Do not echo Tag 508 back to the casting player.
+                        # The casting player executes skill effects locally on client.
+                        pass
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 235: # request_mount_info
+                if picked_char:
+                    # ret_mount_info.mount_info(0): every garage vehicle with
+                    # its configured colour list, ownership and selected colour.
+                    send_rpc_push(630, encode_sproto([(0, build_mount_info(picked_char))]))
+                    print(f"[MOUNT] sent garage state vehicles={len(MOUNT_CONFIG)}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg in (236, 237): # mount_equip / mount_unequip
+                mount_id = field_text(body, 0)
+                if picked_char and mount_id in MOUNT_CONFIG:
+                    mounts = picked_char.setdefault('mounts', {})
+                    target = mounts.setdefault(mount_id, {})
+                    if int(target.get('state', 0)) > 0:
+                        if msg == 236:
+                            for state in mounts.values():
+                                if int(state.get('state', 0)) == 2:
+                                    state['state'] = 1
+                            target['state'] = 2
+                            picked_char['equipped_mount_id'] = mount_id
+                        else:
+                            target['state'] = 1
+                            if str(picked_char.get('equipped_mount_id', '')) == mount_id:
+                                picked_char['equipped_mount_id'] = ''
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(631, encode_sproto([(0, build_mount_info(picked_char)), (1, mount_id)]))
+                        # The normal city garage response updates only the
+                        # garage panel.  The APK's Street Race gate reads
+                        # MainPlayer.MountId, so mirror the equipped vehicle
+                        # into the live player visual immediately.
+                        sync_main_player_visual(picked_char, send_rpc_push)
+                        print(f"[MOUNT] {'equipped' if msg == 236 else 'unequipped'} id={mount_id}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 241: # mount_use_color / colour purchase or selection
+                mount_id = field_text(body, 0)
+                color_id = field_text(body, 1)
+                if picked_char and mount_id in MOUNT_CONFIG and color_id in MOUNT_CONFIG[mount_id]['colors']:
+                    mounts = picked_char.setdefault('mounts', {})
+                    mount = mounts.setdefault(mount_id, {})
+                    if int(mount.get('state', 0)) == 2:
+                        unlocked = set(str(x) for x in mount.get('unlocked_colors', []))
+                        unlocked.add(MOUNT_CONFIG[mount_id]['default_color'])
+                        unlocked.add(color_id)
+                        mount['unlocked_colors'] = sorted(unlocked, key=lambda x: (len(x), x))
+                        mount['select'] = color_id
+                        save_chars(all_accounts_chars)
+                        # ret_mount_use_color needs the full map as well as the
+                        # selected vehicle/colour; omitting the map is the cause
+                        # of PlayerCarRootLogic's null-reference crash.
+                        send_rpc_push(632, encode_sproto([
+                            (0, build_mount_info(picked_char)), (1, mount_id), (2, color_id)
+                        ]))
+                        sync_main_player_visual(picked_char, send_rpc_push)
+                        print(f"[MOUNT] colour selected id={mount_id} color={color_id}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 267: # change_mount_state (refresh an existing vehicle state)
+                mount_id = field_text(body, 0)
+                if picked_char and mount_id in MOUNT_CONFIG:
+                    mount = picked_char.setdefault('mounts', {}).setdefault(mount_id, {})
+                    if int(mount.get('state', 0)) == 3:
+                        mount['state'] = 1
+                        save_chars(all_accounts_chars)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 323: # buy_car_shop
+                mount_id = field_text(body, 0)
+                if picked_char and mount_id in MOUNT_CONFIG:
+                    mount = picked_char.setdefault('mounts', {}).setdefault(mount_id, {})
+                    if int(mount.get('state', 0)) == 0:
+                        mount['state'] = 1
+                        mount.setdefault('select', MOUNT_CONFIG[mount_id]['default_color'])
+                        mount.setdefault('unlocked_colors', [MOUNT_CONFIG[mount_id]['default_color']])
+                        save_chars(all_accounts_chars)
+                    # ret_buy_car_shop.mountId(0), state(1)
+                    send_rpc_push(691, encode_sproto([(0, mount_id), (1, int(mount.get('state', 1)))]))
+                    print(f"[MOUNT] garage purchase id={mount_id}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 115: # use_item, including vehicle exchange vouchers
+                index_id = get_val_int(body, 0, -1)
+                success = 0
+                if picked_char:
+                    inventory = picked_char.get('inventory', [])
+                    item_index = index_id - 10000
+                    if 0 <= item_index < len(inventory):
+                        item = inventory[item_index]
+                        mount_id = mount_id_from_voucher(item.get('id'))
+                        if mount_id:
+                            mount = picked_char.setdefault('mounts', {}).setdefault(mount_id, {})
+                            mount['state'] = max(1, int(mount.get('state', 0)))
+                            mount.setdefault('select', MOUNT_CONFIG[mount_id]['default_color'])
+                            mount.setdefault('unlocked_colors', [MOUNT_CONFIG[mount_id]['default_color']])
+                            item['amount'] -= 1
+                            if item['amount'] < 1:
+                                inventory.pop(item_index)
+                            success = 1
+                            save_chars(all_accounts_chars)
+                            send_rpc_push(611, sync_inventory_data(picked_char))
+                            send_rpc_push(630, encode_sproto([(0, build_mount_info(picked_char))]))
+                            print(f"[MOUNT] voucher redeemed item={item.get('id')} vehicle={mount_id}")
+                        elif item.get('id') in ITEM_CONFIG:
+                            cfg = ITEM_CONFIG[item['id']]
+                            if cfg['type'] == 18: # REMAIN ticket
+                                subtype = cfg['function']
+                                state = ensure_daily_copy_state(picked_char)
+                                # Find all copy IDs for this subtype and reset their remaining counts.
+                                # The client uses Item 9205 (SubType 7) for Street Race.
+                                for copy_id, sc_cfg in COPY_SCENE_CONFIG.items():
+                                    if sc_cfg['subtype'] == subtype:
+                                        state['remaining'][copy_id] = sc_cfg['max_plays']
+                                item['amount'] -= 1
+                                if item['amount'] < 1:
+                                    inventory.pop(item_index)
+                                success = 1
+                                save_chars(all_accounts_chars)
+                                send_rpc_push(611, sync_inventory_data(picked_char))
+                                send_rpc_push(555, sync_copy_scenes(picked_char))
+                                print(f"[TICKET] used item={item['id']} for subtype={subtype}")
+                send_rpc_push(526, encode_sproto([(0, success), (1, index_id)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg in (238, 239): # use_mount / unuse_mount
+                # The APK applies the visual mount/dismount locally.  Persist
+                # the packet acknowledgement so it never stalls on a request.
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 128: # local_character_attack (Boss counter-attack)
+                target_id = get_val_int(body, 0)
+                dmg = get_val_int(body, 1)
+                eff_id = body.get(2, b"").decode('utf-8')
+
+                if picked_char and target_id == picked_char['id']:
+                    is_area = (picked_char.get('map_id') == "502")
+                    if is_area:
+                        print(f"[AREA BOSS ATTACK] dmg={dmg} eff={eff_id}")
+
+                    new_hp = picked_char.get('hp', 0) - dmg
+                    picked_char['hp'] = max(0, new_hp)
+                    sync_char_attrs_rpc(conn, picked_char)
+                    if picked_char['hp'] == 0 and picked_char.get('map_id') == '502':
+                        print('[M1003 DEBUG] Player died in arena; scheduling loss return')
+                        schedule_domin_return(restore_hp=True)
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 111: # accept_damge
+                if picked_char:
+                    dlist_raw = body.get(0, b"")
+                    dlist = decode_sproto_list(dlist_raw)
+                    print(f"[COMBAT] RX 111 count={len(dlist)}")
+                    for d_bytes in dlist:
+                        d = decode_sproto(d_bytes)
+                        target_id = get_val_int(d, 0)
+                        dmg = get_val_int(d, 1)
+                        # Tag 4 is bool cri. Sproto bool is encoded as int in header.
+                        is_cri = get_val_int(d, 4, 0) == 1
+
+                        print(f"[COMBAT] accept_damge target={target_id} dmg={dmg} cri={is_cri}")
+
+                        if target_id == picked_char['id']:
+                            # Damage to player
+                            new_hp = picked_char.get('hp', 0) - dmg
+                            picked_char['hp'] = max(0, new_hp)
+                            sync_char_attrs_rpc(conn, picked_char)
+                            if picked_char['hp'] == 0:
+                                if picked_char.get('map_id') == '502':
+                                    print('[M1003 DEBUG] Player died in arena; scheduling loss return')
+                                    schedule_domin_return(restore_hp=True)
+                                else:
+                                    death_count = picked_char.get('death_count', 0) + 1
+                                    picked_char['death_count'] = death_count
+                                    relife_cfg = get_relife_config(death_count)
+                                    relife_req = encode_sproto([
+                                        (0, relife_cfg['id']), (1, 0), (2, "9202"),
+                                        (3, picked_char['id']), (4, picked_char['name']),
+                                        (5, relife_cfg['use_count'])
+                                    ])
+                                    send_rpc_push(618, relife_req)
+                        elif target_id in NPC_HP_MAP or (picked_char and target_id != picked_char['id']):
+                            # Damage to NPC/Monster/Boss (including local client NPCs)
+                            target_nid = NPC_INST_MAP.get(target_id, "9901")
+                            NPC_INST_MAP[target_id] = target_nid
+
+                            nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
+                            defender_stats = get_npc_attr(nid_str, picked_char.get('level', 1))
+
+                            if target_id not in NPC_HP_MAP:
+                                NPC_HP_MAP[target_id] = defender_stats['hp_max']
+
+                            NPC_HP_MAP[target_id] -= dmg
+
+                            # Synchronization of target HP to ensure bar update (Tag 510)
+                            sync_npc_attrs_rpc(conn, target_id, defender_stats, max(0, NPC_HP_MAP[target_id]))
+
+                            if NPC_HP_MAP[target_id] <= 0:
+                                # Ensure death is processed exactly once
+                                if target_id in DEAD_NPC_SET:
+                                    continue
+                                DEAD_NPC_SET.add(target_id)
+
+                                # BOSS DEATH HANDLING
+                                if target_id == picked_char.get('boss_inst_id'):
+                                    # Send final HP=0 sync before ending scene to trigger client animation
+                                    if defender_stats:
+                                        a_oth_fields = [(0, 0), (2, defender_stats['lv'])]
+                                        if NPC_INST_MAP.get(target_id, '').startswith('BOSS_'):
+                                            a_oth_fields.extend([(4, 1), (15, 2)])
+                                        a_oth = encode_sproto(a_oth_fields)
+                                        aoi_attr = encode_sproto([(0, target_id), (1, a_oth)])
+                                        send_rpc_push(510, encode_sproto([(0, aoi_attr)]))
+
+                                    did = picked_char.get('active_domin_id', '1')
+                                    print(f"[M1003 DEBUG] Boss {target_id} killed by client dmg. Winning did={did}")
+                                    # Find the active capture mission and use its target_id
+                                    cap_target = did
+                                    for act_m, act_mdata in list(picked_char.get('active_missions', {}).items()):
+                                        cap_cfg = missions_data.get(act_m, {})
+                                        if cap_cfg.get('logic_type') == 25:
+                                            cap_target = str(cap_cfg.get('target_id', did))
+                                            break
+                                    advance_missions(picked_char, send_rpc_push, 'capture', target_id=cap_target)
+                                    picked_char['boss_inst_id'] = None
+                                else:
+                                    on_npc_killed(conn, send_rpc_push, picked_char, target_id, target_nid)
+
+                    if session is not None:
+                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                        conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 307 or msg == 127: # local_npc_die (307) or single_copy_scene_npc_die (127)
+                npcid = None
+                inst_id = None
+                die_type = 0
+
+                if msg == 307:
+                    val0 = body.get(0)
+                    if isinstance(val0, bytes): s_val0 = val0.decode('utf-8')
+                    elif val0 is not None: s_val0 = str(val0)
+                    else: s_val0 = ""
+
+                    die_type = get_val_int(body, 3)
+                    try:
+                        inst_id = int(s_val0)
+                        npcid = NPC_INST_MAP.get(inst_id)
+                    except: pass
+                    if not npcid: npcid = s_val0
                 else:
-                    print(f"   - {C_YELLOW}Expected Action:{C_RESET} Server must accept/process or send push notifications.")
-                    pushes = info['rsp_info'].get('related_pushes', []) if info['rsp_info'] else []
-                    if pushes:
-                        print(f"   - {C_GREEN}Possible Server Push Notifications:{C_RESET}")
-                        for p in pushes:
-                            print(f"       * Tag {p['tag']}: {p['name']} ({p['full_type']})")
-                print(f" {C_DIM}{'-'*76}{C_RESET}")
-            print()
+                    val0 = body.get(0)
+                    if isinstance(val0, int): inst_id = val0
+                    elif isinstance(val0, (bytes, bytearray)):
+                        if len(val0) == 8: inst_id = struct.unpack("<q", val0)[0]
+                        elif len(val0) == 4: inst_id = struct.unpack("<i", val0)[0]
 
+                    val1 = body.get(1)
+                    if isinstance(val1, bytes): npcid = val1.decode('utf-8')
+                    elif val1 is not None: npcid = str(val1)
 
-# ==============================================================================
-# 4. Core Network Proxy & Missing Server 15678 Inspector
-# ==============================================================================
+                    die_type = get_val_int(body, 4)
+                    if not npcid and inst_id:
+                        npcid = NPC_INST_MAP.get(inst_id)
 
-class InspectorProxy:
-    def __init__(self, listen_host='0.0.0.0', listen_port=9555, target_host='s16.serv00.com', target_port=15678, auto_mock=True, db=None):
-        self.listen_host = listen_host
-        self.listen_port = listen_port
-        self.target_host = target_host
-        self.target_port = target_port
-        self.auto_mock = auto_mock
-        self.db = db or APKSchemaDB()
-        self.tracker = MissingTracker()
-        self.running = False
-        self.server_sock = None
+                is_duplicate = False
+                if inst_id is not None and inst_id > 1000000:
+                    if inst_id in DEAD_NPC_SET: is_duplicate = True
+                    else: DEAD_NPC_SET.add(inst_id)
 
-    def start(self):
-        self.running = True
-        self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.server_sock.bind((self.listen_host, self.listen_port))
-        self.server_sock.listen(10)
-        
-        print(f"\n{C_GREEN}{C_BOLD}{'='*80}{C_RESET}")
-        print(f"{C_GREEN}{C_BOLD}   APK PROTOCOL INSPECTOR & SERVER 15678 DETECTOR STARTED{C_RESET}")
-        print(f"{C_GREEN}{C_BOLD}{'='*80}{C_RESET}")
-        print(f" * Local Inspector Listening on : {C_BOLD}{self.listen_host}:{self.listen_port}{C_RESET}")
-        print(f" * Target Remote Game Server    : {C_BOLD}{self.target_host}:{self.target_port}{C_RESET}")
-        print(f" * Auto-Mock Missing Responses  : {C_BOLD}{'ENABLED (Client will proceed)' if self.auto_mock else 'DISABLED'}{C_RESET}")
-        print(f" * Loaded APK Protocols         : {C_BOLD}{len(self.db.protocols)} protocols, {len(self.db.type_schemas)} Sproto schemas{C_RESET}")
-        print(f"{C_GREEN}{C_BOLD}{'-'*80}{C_RESET}")
-        print(f" {C_YELLOW}Point your APK client to port {self.listen_port}. Everything client requests will be shown below!{C_RESET}\n")
+                if inst_id and inst_id in NPC_HP_MAP: del NPC_HP_MAP[inst_id]
 
+                if picked_char and not is_duplicate:
+                    if die_type in [2, 6]:
+                        advance_missions(picked_char, send_rpc_push, 'car', die_type=die_type)
+
+                    on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid)
+
+                    if die_type == 3:
+                        advance_missions(picked_char, send_rpc_push, 'impact', target_id=npcid)
+                    elif die_type == 4:
+                        # For ARRIVE_TARGET, npcid field is the mission ID.
+                        advance_missions(picked_char, send_rpc_push, 'interact', target_id=npcid, die_type=die_type)
+
+                    advance_missions(picked_char, send_rpc_push, 'level')
+                    sync_char_attrs_rpc(conn, picked_char)
+                    save_chars(all_accounts_chars)
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 137: # rank_pvp_other_player_die
+                # RankPVPLocalSceneManager sends this after the APK's zombie
+                # opponent has died locally. Treat it as an idempotent arena
+                # win fallback; normal damage processing may already have
+                # completed the same battle.
+                if picked_char and picked_char.get('map_id') == '502':
+                    boss_id = picked_char.get('boss_inst_id')
+                    if boss_id and boss_id in NPC_HP_MAP and NPC_HP_MAP[boss_id] > 0:
+                        NPC_HP_MAP[boss_id] = 0
+                        boss_stats = get_npc_attr('1105')
+                        sync_npc_attrs_rpc(conn, boss_id, boss_stats, 0)
+                        did = picked_char.get('active_domin_id', '1')
+                        print(f"[M1003 DEBUG] RX 137 zombie died; winning did={did}")
+                        # Capture wins update mission progress, not copy_scene_result (552).
+                        cap_target = did
+                        for act_m, act_mdata in list(picked_char.get('active_missions', {}).items()):
+                            cap_cfg = missions_data.get(act_m, {})
+                            if cap_cfg.get('logic_type') == 25:
+                                cap_target = str(cap_cfg.get('target_id', did))
+                                break
+                        advance_missions(picked_char, send_rpc_push, 'capture', target_id=cap_target)
+                        picked_char['boss_inst_id'] = None
+                        DEAD_NPC_SET.add(boss_id)
+                    else:
+                        print('[M1003 DEBUG] RX 137 ignored; arena win was already processed')
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 311: # enter_domin_pk_scene
+                did = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
+                print(f"[M1003 DEBUG] RX 311 domin_id={did}")
+                if picked_char:
+                    # RESET HP TO MAX FOR AREA DUEL
+                    picked_char['hp'] = get_character_stats(picked_char)['hp_max']
+                    # SAVE LATEST POSITION EXACTLY (Ensure list copy)
+                    latest_pos = picked_char.get('pos', [34611, 100, -49480, 8632])
+                    picked_char['pre_arena_pos'] = list(latest_pos)
+                    print(f"[M1003 DEBUG] Saved pre-arena pos: {picked_char['pre_arena_pos']}")
+                    picked_char['active_domin_id'] = did
+                    start_map_transition(conn, picked_char, "502", send_rpc_push)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 298: # impact_npc (Vehicle collision / running over NPC)
+                impact_type = get_val_int(body, 0)
+                print(f"[*] Vehicle impact with NPC type={impact_type}")
+                if picked_char:
+                    char_lv = picked_char.get('level', 1)
+                    exp_impact, cash_impact = calculate_npc_kill_rewards(char_lv, npc_level=1)
+                    impact_rewards = [("2001", 0, exp_impact), ("1001", 0, cash_impact)]
+                    grant_item_rewards(picked_char, impact_rewards, conn, send_rpc_push)
+
+                    # Send floating reward popup tip (Tag 638)
+                    send_rpc_push(638, encode_sproto([(0, [
+                        encode_sproto([(0, "2001"), (1, exp_impact), (3, 0)]),
+                        encode_sproto([(0, "1001"), (1, cash_impact), (3, 0)])
+                    ])]))
+
+                    advance_missions(picked_char, send_rpc_push, 'impact')
+                    advance_missions(picked_char, send_rpc_push, 'level')
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 107: # enter_copy_scene
+                copy_id = field_text(body, 0)
+                cfg = COPY_SCENE_CONFIG.get(copy_id)
+                if picked_char and copy_id in ["223", "224", "225", "226", "227", "228", "229"]:
+                    remaining = copy_attempts_remaining(picked_char, copy_id, cfg or {'max_plays': 3})
+                    if remaining > 0:
+                        if picked_char.get('pre_copy_pos') is None:
+                            picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                        state = ensure_daily_copy_state(picked_char)
+                        state['remaining'][copy_id] = remaining - 1
+                        picked_char['active_copy_id'] = copy_id
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(555, sync_copy_scenes(picked_char))
+                        advance_missions(picked_char, send_rpc_push, 'dungeon', target_id=copy_id)
+                        start_map_transition(conn, picked_char, copy_id, send_rpc_push)
+                        print(f"[EXP STAGE] entered id={copy_id} remaining={remaining - 1}")
+                    else:
+                        print(f"[EXP STAGE] denied id={copy_id}; daily attempts exhausted")
+                elif picked_char and cfg and cfg['subtype'] == 7:
+                    remaining = copy_attempts_remaining(picked_char, copy_id, cfg)
+                    if remaining > 0:
+                        if picked_char.get('pre_copy_pos') is None:
+                            picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                        state = ensure_daily_copy_state(picked_char)
+                        state['remaining'][copy_id] = remaining - 1
+                        picked_char['active_copy_id'] = copy_id
+                        picked_char['street_race_return_scheduled'] = False
+                        save_chars(all_accounts_chars)
+                        start_map_transition(conn, picked_char, cfg['map_id'], send_rpc_push)
+                        send_rpc_push(555, sync_copy_scenes(picked_char))
+                        advance_missions(picked_char, send_rpc_push, 'dungeon', target_id=copy_id)
+                        print(f"[STREET RACE] entered id={copy_id} remaining={remaining - 1}/{cfg['max_plays']}")
+                    else:
+                        print(f"[STREET RACE] denied id={copy_id}; daily attempts exhausted")
+                elif picked_char:
+                    advance_missions(picked_char, send_rpc_push, 'dungeon', target_id=copy_id)
+                    start_map_transition(conn, picked_char, copy_id, send_rpc_push)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 193: # car_chase_result
+                active_copy_id = str(picked_char.get('active_copy_id') or '') if picked_char else ''
+                cfg = COPY_SCENE_CONFIG.get(active_copy_id)
+                won = get_val_int(body, 0, 0) == 1
+                elapsed = max(0, get_val_int(body, 1, 0))
+                path_str = field_text(body, 2)
+                if picked_char and cfg and cfg['subtype'] == 7:
+                    state = ensure_daily_copy_state(picked_char)
+                    best_times = state.setdefault('best_times', {})
+                    best_strs = state.setdefault('best_times_str', {})
+                    old_time = best_times.get(active_copy_id)
+                    new_record = won and (old_time is None or elapsed < int(old_time))
+                    if won:
+                        if new_record:
+                            best_times[active_copy_id] = elapsed
+                            best_strs[active_copy_id] = path_str
+                    rewards = street_race_rewards(picked_char.get('level', 1)) if won else []
+                    if won and rewards:
+                        grant_item_rewards(picked_char, rewards, conn, send_rpc_push)
+
+                    result_items = [encode_sproto([(0, item_id), (1, amount), (3, quality)])
+                                    for item_id, quality, amount in rewards]
+                    # car_copy_result (TAG 608) is the dedicated APK Street
+                    # Race result panel.  It supplies reward icons, time,
+                    # rank placeholders, Continue/Exit and Repeat.
+                    send_rpc_push(608, encode_sproto([
+                        (0, won), (1, result_items), (2, -1), (3, -1),
+                        (4, elapsed), (5, 1 if new_record else 0), (6, active_copy_id)
+                    ]))
+                    if won:
+                        advance_missions(picked_char, send_rpc_push, 'level')
+                    send_rpc_push(555, sync_copy_scenes(picked_char))
+                    schedule_street_race_return()
+                    print(f"[STREET RACE] result id={active_copy_id} win={won} time={elapsed} rewards={rewards}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 191: # request_top_rank_list
+                sort_type = get_val_int(body, 0)
+                items = []
+                if sort_type == 7: # RANK_TYPE.CAR (Street Race)
+                    # For street race rank, we can show characters who have records.
+                    # We'll collect all characters across all accounts and sort by best time.
+                    all_best_times = []
+                    for area_dict in all_accounts_chars.values():
+                        if isinstance(area_dict, dict):
+                            for char_list in area_dict.values():
+                                if isinstance(char_list, list):
+                                    for c_data in char_list:
+                                        if isinstance(c_data, dict):
+                                            char_name = c_data.get('name', 'Hero')
+                                            c_state = c_data.get('daily_copy_state', {})
+                                            b_times = c_state.get('best_times', {})
+                                            times = [int(t) for t in b_times.values() if t is not None]
+                                            if times:
+                                                all_best_times.append((min(times), char_name, c_data))
+
+                    # Sort by time ASCENDING
+                    all_best_times.sort(key=lambda x: x[0])
+                    for i, (b_time, name, c_data) in enumerate(all_best_times[:50]):
+                        items.append(encode_sproto([
+                            (0, i + 1),        # id (rank position)
+                            (1, b_time),       # score (time)
+                            (2, name),         # name
+                            (3, c_data.get('profession', 1)), # profession
+                            (4, str(sort_type)) # sortType
+                        ]))
+
+                send_rpc_push(598, encode_sproto([(0, items), (1, sort_type)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 132: # relife_player (Revive player)
+                if picked_char:
+                    p_stats = get_character_stats(picked_char)
+                    picked_char['hp'] = p_stats['hp_max']
+                    sync_char_attrs_rpc(conn, picked_char)
+
+                    # Send Sproto Tag 512 (aoi_relife_player)
+                    relife_char = encode_sproto([
+                        (0, picked_char['id']),
+                        (1, p_stats['hp_max']),
+                        (2, int(picked_char['pos'][0])),
+                        (3, int(picked_char['pos'][1])),
+                        (4, int(picked_char['pos'][2]))
+                    ])
+                    send_rpc_push(512, encode_sproto([(0, relife_char)]))
+                    save_chars(all_accounts_chars)
+                    print(f"[REVIVE] Player {picked_char['id']} revived with HP={p_stats['hp_max']}")
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 220: # start_battle (Street Race & EXP Stage start)
+                if picked_char and picked_char.get('active_copy_id'):
+                    copy_id = picked_char['active_copy_id']
+                    cfg = COPY_SCENE_CONFIG.get(copy_id)
+                    if cfg and cfg['subtype'] == 7:
+                        duration = int(cfg.get('exist_time') or 900)
+                        send_rpc_push(629, encode_sproto([(0, int(time.time()) + duration), (1, 0)]))
+                        print(f"[STREET RACE] started timer for id={copy_id} duration={duration}s")
+                if picked_char and picked_char.get('exp_stage_state'):
+                    exp_state = picked_char['exp_stage_state']
+                    send_rpc_push(629, encode_sproto([(0, exp_state['end_time']), (1, 0)]))
+                    send_rpc_push(683, encode_sproto([
+                        (0, exp_state['copy_id']),
+                        (1, exp_state['cur_wave'] - 1),
+                        (2, exp_state['end_time']),
+                        (3, exp_state['cur_group']),
+                        (4, exp_state['wave_kills']),
+                        (5, exp_state['total_kills'])
+                    ]))
+                    print(f"[EXP STAGE] start_battle sent 629 & 683 updates for copy={exp_state['copy_id']}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg in [106, 246, 273, 207, 201, 322]:
+                # Scene/Dungeon Entry
+                mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
+                print(f"[RX] Scene Entry: {mid} (MSG={msg})")
+                if picked_char:
+                    start_map_transition(conn, picked_char, mid, send_rpc_push)
+                    if msg == 201: # world_boss
+                        advance_missions(picked_char, send_rpc_push, 'world_boss')
+                        send_rpc_push(552, encode_sproto([(0, 1), (1, mid), (2, True)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 7: # update_game_server
+                # Tag 2 in response is the game_server list.
+                servers = []
+                if SERVER_DATA_LIST:
+                    for s in SERVER_DATA_LIST:
+                        # Pack each server definition
+                        s_data = encode_sproto([
+                            (0, s['id']), (1, s['name']), (2, s['ip']), (3, s['port']),
+                            (4, s['state']), (5, s['player_state']), (6, s['area']),
+                            (7, s['db_local']), (8, s['timezone']), (9, s['new_char']),
+                            (10, s['new_server'])
+                        ])
+                        servers.append(s_data)
+                else:
+                    # Fallback
+                    server = encode_sproto([
+                        (0, 302), (1, "EU-001"), (2, "s16.serv00.com"), (3, 15678),
+                        (4, 1), (5, -4), (6, 1), (7, 1), (8, 1), (9, 1), (10, 0)
+                    ])
+                    servers.append(server)
+                resp = encode_sproto([(2, servers)])
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 270: # download_finish
+                if picked_char and not picked_char.get('download_complete'):
+                    picked_char['download_complete'] = True
+                    # Expansion Rewards from DownloadRewardData
+                    if DOWNLOAD_REWARD_DATA:
+                        for item_id, count, quality in DOWNLOAD_REWARD_DATA:
+                            add_to_inventory(picked_char, item_id, count)
+                    else:
+                        # Fallback
+                        add_to_inventory(picked_char, "9301", 1)
+                        add_to_inventory(picked_char, "9011", 10)
+                        add_to_inventory(picked_char, "9001", 20)
+                        add_to_inventory(picked_char, "5026", 5)
+                    save_chars(all_accounts_chars)
+
+                    # Sync items and finalize client state
+                    send_rpc_push(611, sync_inventory_data(picked_char))
+                    send_rpc_push(654, encode_sproto([(0, 1)])) # start_enter_game state=1
+                    print(f"[REWARD] Expansion finalized and rewards granted for player {picked_char['id']}")
+                elif picked_char:
+                    print(f"[REWARD] Player {picked_char['id']} already claimed expansion rewards.")
+                    # Keep the current client session consistent with the
+                    # persisted completion state if it repeats MSG 270.
+                    send_rpc_push(654, encode_sproto([(0, 1)]))
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 306: # tutorial_finish
+                # The APK sends this before scheduling its optional-download tip.
+                # It is an RPC request, so it must receive an empty success reply.
+                if picked_char:
+                    picked_char['tutorial'] = 1
+                    save_chars(all_accounts_chars)
+                print("[TUTORIAL] tutorial_finish acknowledged")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg in [118, 218, 145, 202, 210, 225, 242, 252, 253, 254, 255, 257, 258, 261, 266, 278, 296, 299, 313, 319]:
+                resp_data = encode_sproto([])
+                if msg == 118: resp_data = encode_sproto([(0, f"User_{random.randint(100,999)}")])
+                elif msg == 218: resp_data = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))])
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp_data)
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+                if msg == 145 and picked_char:
+                    send_rpc_push(555, sync_copy_scenes(picked_char))
+                    print(f"[COPY] sent daily copy state level={picked_char.get('level', 1)}")
+
+                elif msg == 253 and picked_char: # request_sign_week_info
+                    day = int(picked_char.get('sign_week_day', 1))
+                    claimed = bool(picked_char.get('sign_week_claimed', False))
+                    send_rpc_push(641, encode_sproto([(0, day), (1, not claimed), (2, False)]))
+
+                elif msg == 255 and picked_char: # sign_week
+                    day = int(picked_char.get('sign_week_day', 1))
+                    picked_char['sign_week_claimed'] = True
+                    picked_char['cash'] = picked_char.get('cash', 0) + 10000
+                    save_chars(all_accounts_chars)
+                    send_rpc_push(643, encode_sproto([(0, day), (1, False)]))
+                    send_rpc_push(611, sync_inventory_data(picked_char))
+                    sync_char_attrs_rpc(conn, picked_char)
+
+                elif msg == 252 and picked_char: # request_sign_30_day_info
+                    cur_day = int(picked_char.get('sign_30_day', 0))
+                    claimed = bool(picked_char.get('sign_30_claimed', False))
+                    send_rpc_push(640, encode_sproto([(0, cur_day), (1, max(1, cur_day)), (2, 0), (3, not claimed), (4, False), (5, 30), (6, "")]))
+
+                elif msg == 254 and picked_char: # sign_30_day
+                    cur_day = int(picked_char.get('sign_30_day', 0)) + 1
+                    picked_char['sign_30_day'] = cur_day
+                    picked_char['sign_30_claimed'] = True
+                    picked_char['cash'] = picked_char.get('cash', 0) + 20000
+                    save_chars(all_accounts_chars)
+                    send_rpc_push(642, encode_sproto([(0, cur_day), (1, cur_day), (2, 0), (3, False), (4, False), (5, 30), (6, "")]))
+                    send_rpc_push(611, sync_inventory_data(picked_char))
+                    sync_char_attrs_rpc(conn, picked_char)
+
+                elif msg == 258 and picked_char: # request_daily_buy
+                    d_buys = {
+                        "1": encode_sproto([(0, "1"), (1, 0)]),
+                        "2": encode_sproto([(0, "2"), (1, 0)]),
+                        "3": encode_sproto([(0, "3"), (1, 0)]),
+                    }
+                    send_rpc_push(646, encode_sproto([(0, d_buys)]))
+
+                elif msg == 261 and picked_char: # request_daily_active
+                    d_acts = {str(i): encode_sproto([(0, str(i)), (1, 0), (2, 0)]) for i in range(1, 15)}
+                    d_rews = {str(i): encode_sproto([(0, str(i)), (1, 0)]) for i in range(1, 5)}
+                    send_rpc_push(649, encode_sproto([(0, 0), (1, d_acts), (2, d_rews)]))
+
+                elif msg == 225 and picked_char: # request_activity_info
+                    now_ts = int(time.time())
+                    acts = {
+                        "1": encode_sproto([(0, 1), (1, now_ts - 3600), (2, now_ts + 86400 * 30), (3, 0), (4, 86400), (5, 1)])
+                    }
+                    send_rpc_push(619, encode_sproto([(0, acts)]))
+
+                elif msg == 202 and picked_char: # request_tower_copy_info
+                    t_info = encode_sproto([(0, 0), (1, 100), (2, 1), (3, 1), (4, 0), (5, 0)])
+                    send_rpc_push(606, encode_sproto([(0, t_info), (1, [])]))
+
+                elif msg == 242 and picked_char: # request_slot_info
+                    send_rpc_push(633, encode_sproto([(0, 0), (1, 0), (2, 0)]))
+
+                elif msg == 257 and picked_char: # request_invest_pack
+                    send_rpc_push(645, encode_sproto([(0, {})]))
+
+                elif msg == 296 and picked_char: # req_level_reward
+                    send_rpc_push(674, encode_sproto([(0, {})]))
+
+            elif msg == 310:  # request_domin_info
+                print("[M1003 DEBUG] RX 310 request_domin_info")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+                v_p = encode_sproto([
+                    (0, "Ash Viper"),
+                    (1, "100"),
+                    (2, "XD_A_T"),
+                    (3, "XD_A_S"),
+                    (4, "XD_A_X"),
+                    (5, "XD_A_WQ"),
+                    (10, 0)
+                ])
+
+                g_p = encode_sproto([
+                    (0, "Ash Viper"),
+                    (1, 0)
+                ])
+
+                ao_p = encode_sproto([
+                    (2, 1),
+                    (3, 6000),
+                    # CitySimController creates the Dominance zombie from
+                    # ret_domin_info.character_look and reads title_level.
+                    (4, 1),
+                    (15, 5)
+                ])
+
+                cl_p = encode_sproto([
+                    (0, 0),
+                    (1, g_p),
+                    (3, ao_p),
+                    (4, v_p)
+                ])
+
+                di_p = encode_sproto([
+                    (0, "1"),
+                    (8, 0),
+                    (9, 0)
+                ])
+
+                resp_p = encode_sproto([
+                    (0, [di_p]),
+                    (1, [cl_p])
+                ])
+
+                print("[M1003 DEBUG] TX 684 ret_domin_info domin_id=1 state=0")
+                send_rpc_push(684, resp_p)
+
+            elif msg == 178: # update_misison_parm
+                mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
+                if picked_char:
+                    # Survey interaction sends msg 178
+                    advance_missions(picked_char, send_rpc_push, 'interact', target_id=mid)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 179: # update_misison_complete
+                mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
+                if picked_char and mid in picked_char.get('active_missions', {}):
+                    picked_char['active_missions'][mid]['state'] = 2
+                    save_chars(all_accounts_chars)
+                    send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                    send_rpc_push(519, sync_mission_data(picked_char))
+                    print(f"[MISSION DIALOG COMPLETE] mission_id={mid}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 119: # ask_pickup_item
+                iid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
+                if picked_char:
+                    advance_missions(picked_char, send_rpc_push, 'pickup', target_id=iid)
+                    advance_missions(picked_char, send_rpc_push, 'interact', target_id=iid)
+                    add_to_inventory(picked_char, iid, 1)
+                    send_rpc_push(611, sync_inventory_data(picked_char))
+                if session is not None:
+                    resp = encode_sproto([(0, 0)])
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 108: # leave_copy_scene
+                if picked_char:
+                    if picked_char.get('active_copy_id'):
+                        saved_pos = picked_char.get('pre_copy_pos')
+                        picked_char['pre_copy_pos'] = None
+                        picked_char['active_copy_id'] = None
+                        picked_char['street_race_return_scheduled'] = False
+                    else:
+                        saved_pos = picked_char.get('pre_arena_pos')
+                        picked_char['pre_arena_pos'] = None
+                    start_map_transition(conn, picked_char, "11", send_rpc_push, override_pos=saved_pos)
+                    save_chars(all_accounts_chars)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif session is not None:
+                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+    except Exception as exc:
+        print(f"[!] Client handler exception for {addr}: {exc}")
+        traceback.print_exc()
+    finally:
         try:
-            while self.running:
-                client_sock, client_addr = self.server_sock.accept()
-                t = threading.Thread(target=self._handle_client_connection, args=(client_sock, client_addr), daemon=True)
-                t.start()
-        except KeyboardInterrupt:
-            print(f"\n{C_YELLOW}Shutting down inspector...{C_RESET}")
-        finally:
-            self.running = False
-            if self.server_sock:
-                self.server_sock.close()
-            self.tracker.print_summary()
+            conn_id = id(conn)
+            if conn_id in NPC_SPAWNED_MAPS:
+                del NPC_SPAWNED_MAPS[conn_id]
+            conn.close()
+        except Exception:
+            pass
+        print(f"[-] Client disconnected: {addr}")
 
-    def _connect_to_target(self):
+def start_server():
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    if hasattr(socket, "SO_REUSEPORT"):
         try:
-            target_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            target_sock.settimeout(3.0)
-            target_sock.connect((self.target_host, self.target_port))
-            target_sock.settimeout(None)
-            return target_sock
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except Exception:
+            pass
+    server.bind(("0.0.0.0", PORT))
+    server.listen(20)
+    print(f"GAME SERVER 9555 READY ON PORT {PORT}")
+    while True:
+        try:
+            cl, ad = server.accept()
+            threading.Thread(target=client_handler, args=(cl, ad), daemon=True).start()
         except Exception as e:
-            return None
+            print(f"[!] Accept error: {e}")
 
-    def _handle_client_connection(self, client_sock, client_addr):
-        client_ip, client_port = client_addr
-        print(f"{C_GREEN}[+] APK Client Connected from {client_ip}:{client_port}{C_RESET}")
-
-        target_sock = self._connect_to_target()
-        if target_sock:
-            print(f"{C_BLUE}[+] Connected to target server {self.target_host}:{self.target_port}{C_RESET}")
-        else:
-            print(f"{C_RED}[!] Target server {self.target_host}:{self.target_port} NOT reachable! Operating in Standalone Emulation Mode.{C_RESET}")
-
-        client_buf = bytearray()
-        target_buf = bytearray()
-        
-        # Pending requests awaiting server response: session -> (tag, proto_name, req_type, req_dict, timestamp)
-        pending_requests = {}
-        pending_lock = threading.Lock()
-
-        def parse_packets(buf: bytearray):
-            packets = []
-            while len(buf) >= 2:
-                pkt_len = (buf[0] << 8) | buf[1]
-                if pkt_len <= 0 or pkt_len > 65535:
-                    # Invalid framing, drop byte
-                    buf.pop(0)
-                    continue
-                if len(buf) < pkt_len + 2:
-                    break
-                # Extract full packet
-                pkt_data = bytes(buf[2:pkt_len + 2])
-                del buf[:pkt_len + 2]
-                packets.append(pkt_data)
-            return packets
-
-        while self.running:
-            rlist = [client_sock]
-            if target_sock:
-                rlist.append(target_sock)
-
-            try:
-                readable, _, exceptional = select.select(rlist, [], rlist, 0.5)
-            except Exception:
-                break
-
-            if exceptional:
-                break
-
-            # Check for timed out pending requests on server 15678
-            now = time.time()
-            with pending_lock:
-                timed_out = []
-                for sess, info in pending_requests.items():
-                    if now - info['timestamp'] > 2.5: # 2.5s timeout
-                        timed_out.append(sess)
-                
-                for sess in timed_out:
-                    info = pending_requests.pop(sess)
-                    self._on_server_missing_response(client_sock, info, sess)
-
-            for s in readable:
-                if s is client_sock:
-                    try:
-                        data = client_sock.recv(4096)
-                        if not data:
-                            print(f"{C_YELLOW}[-] Client {client_ip}:{client_port} Disconnected{C_RESET}")
-                            if target_sock: target_sock.close()
-                            return
-                        client_buf.extend(data)
-                        
-                        pkts = parse_packets(client_buf)
-                        for pkt in pkts:
-                            self._process_client_packet(pkt, client_sock, target_sock, pending_requests, pending_lock)
-
-                    except Exception as e:
-                        print(f"{C_RED}[!] Error reading from client: {e}{C_RESET}")
-                        if target_sock: target_sock.close()
-                        return
-
-                elif s is target_sock:
-                    try:
-                        data = target_sock.recv(4096)
-                        if not data:
-                            print(f"{C_RED}[!] Server {self.target_host}:{self.target_port} closed connection!{C_RESET}")
-                            target_sock.close()
-                            target_sock = None
-                            continue
-                        target_buf.extend(data)
-                        
-                        pkts = parse_packets(target_buf)
-                        for pkt in pkts:
-                            self._process_server_packet(pkt, client_sock, pending_requests, pending_lock)
-
-                    except Exception as e:
-                        print(f"{C_RED}[!] Error reading from server 15678: {e}{C_RESET}")
-                        if target_sock:
-                            target_sock.close()
-                            target_sock = None
-
-    def _process_client_packet(self, raw_packed, client_sock, target_sock, pending_requests, pending_lock):
-        """Processes a packet from the APK client."""
-        try:
-            unpacked = SprotoBinary.unpack(raw_packed)
-            pkg, pkg_size = SprotoBinary.decode_struct(unpacked, self.db.package_schema, self.db.type_schemas)
-        except Exception as e:
-            print(f"{C_RED}[!] Failed to unpack client Sproto packet: {e}{C_RESET}")
-            return
-
-        tag = pkg.get('type')
-        session = pkg.get('session')
-
-        proto = self.db.get_protocol(tag) if tag is not None else None
-        pname = proto['name'] if proto else f"Unknown_Tag_{tag}"
-        req_type_name = f"{proto['request']}.request" if (proto and proto.get('request')) else pname
-        req_schema = self.db.get_schema(req_type_name)
-
-        req_payload, _ = SprotoBinary.decode_struct(unpacked[pkg_size:], req_schema, self.db.type_schemas)
-        all_possible_responses = self.db.get_possible_responses(tag) if tag is not None else None
-
-        print(f"\n{C_CYAN}{C_BOLD}{'='*80}{C_RESET}")
-        print(f"{C_CYAN}{C_BOLD}>>> [CLIENT REQUEST DETECTED] <<<{C_RESET}")
-        print(f"  * {C_BOLD}Tag ID:{C_RESET}          {C_YELLOW}{C_BOLD}{tag}{C_RESET} ({C_WHITE}{pname}{C_RESET})")
-        print(f"  * {C_BOLD}Client Session:{C_RESET}  {session}")
-        print(f"  * {C_BOLD}Sproto Type:{C_RESET}     {C_GREEN}SprotoType.{req_type_name}{C_RESET}")
-        print(f"  * {C_BOLD}Request Fields:{C_RESET}")
-        if req_payload:
-            for k, v in req_payload.items():
-                print(f"      {C_WHITE}{k:<18s}{C_RESET} = {C_CYAN}{repr(v)}{C_RESET}")
-        else:
-            print(f"      {C_DIM}(no parameters / empty request){C_RESET}")
-
-        # Show all responses that are possible for this APK
-        self._print_all_possible_responses(tag, pname, all_possible_responses)
-
-        # Forward to target server 15678 if connected
-        forwarded = False
-        if target_sock:
-            try:
-                frame = len(raw_packed).to_bytes(2, 'big') + raw_packed
-                target_sock.sendall(frame)
-                forwarded = True
-                print(f"  * {C_BLUE}Forwarded to Server 15678... Waiting for server response...{C_RESET}")
-            except Exception as e:
-                print(f"  * {C_RED}Failed to forward to Server 15678: {e}{C_RESET}")
-
-        if session is not None and proto and proto.get('response'):
-            # This request expects an RPC response
-            with pending_lock:
-                pending_requests[session] = {
-                    'tag': tag,
-                    'name': pname,
-                    'req_type': req_type_name,
-                    'req_payload': req_payload,
-                    'rsp_info': all_possible_responses,
-                    'timestamp': time.time(),
-                    'forwarded': forwarded
-                }
-            
-            if not target_sock:
-                # Target server is not available, immediately trigger missing & mock response
-                with pending_lock:
-                    info = pending_requests.pop(session, None)
-                if info:
-                    self._on_server_missing_response(client_sock, info, session)
-        else:
-            # One-way request or notification
-            print(f"  * {C_DIM}Note: Client does not expect inline RPC response session for this tag.{C_RESET}")
-            if not target_sock:
-                self.tracker.record_missing(tag, pname, req_type_name, req_payload, all_possible_responses, session or 0)
-        
-        print(f"{C_CYAN}{C_BOLD}{'='*80}{C_RESET}\n")
-
-    def _process_server_packet(self, raw_packed, client_sock, pending_requests, pending_lock):
-        """Processes a packet from server 15678."""
-        try:
-            unpacked = SprotoBinary.unpack(raw_packed)
-            pkg, pkg_size = SprotoBinary.decode_struct(unpacked, self.db.package_schema, self.db.type_schemas)
-        except Exception as e:
-            print(f"{C_RED}[!] Failed to unpack server 15678 packet: {e}{C_RESET}")
-            return
-
-        session = pkg.get('session')
-        tag = pkg.get('type')
-
-        matched_req = None
-        if session is not None:
-            with pending_lock:
-                matched_req = pending_requests.pop(session, None)
-
-        if matched_req:
-            self.tracker.record_handled(matched_req['tag'])
-            print(f"\n{C_GREEN}{C_BOLD}[SERVER 15678 RESPONDED]{C_RESET} for Session {session} (Tag {matched_req['tag']}: {matched_req['name']})")
-        elif tag is not None:
-            proto = self.db.get_protocol(tag)
-            pname = proto['name'] if proto else f"tag_{tag}"
-            print(f"\n{C_GREEN}{C_BOLD}[SERVER 15678 PUSH NOTIFICATION]{C_RESET} Tag {tag}: {pname}")
-
-        # Forward server packet to client
-        try:
-            frame = len(raw_packed).to_bytes(2, 'big') + raw_packed
-            client_sock.sendall(frame)
-        except Exception as e:
-            print(f"{C_RED}[!] Failed to forward server response to client: {e}{C_RESET}")
-
-    def _on_server_missing_response(self, client_sock, req_info, session):
-        """Called when server 15678 does NOT respond or is missing the response."""
-        tag = req_info['tag']
-        pname = req_info['name']
-        req_type = req_info['req_type']
-        req_payload = req_info['req_payload']
-        rsp_info = req_info['rsp_info']
-
-        self.tracker.record_missing(tag, pname, req_type, req_payload, rsp_info, session)
-
-        print(f"\n{C_RED}{C_BOLD}{'!'*80}{C_RESET}")
-        print(f"{C_RED}{C_BOLD}>>> [MISSING FROM SERVER 15678] <<< {C_RESET}")
-        print(f"{C_RED}{C_BOLD}SERVER 15678 DID NOT RESPOND TO CLIENT REQUEST!{C_RESET}")
-        print(f"  * {C_BOLD}Requested Tag:{C_RESET}    {C_YELLOW}{C_BOLD}{tag}{C_RESET} ({pname})")
-        print(f"  * {C_BOLD}Session ID:{C_RESET}       {session}")
-        print(f"  * {C_BOLD}Sproto Type:{C_RESET}      {req_type}")
-        print(f"  * {C_BOLD}Client Payload:{C_RESET}   {req_payload}")
-        print(f"{C_RED}{C_BOLD}{'-'*80}{C_RESET}")
-        
-        rpc_rsp = rsp_info.get('rpc_response') if rsp_info else None
-        if rpc_rsp:
-            print(f"  {C_YELLOW}{C_BOLD}>>> WHAT SERVER 15678 MUST SEND TO SATISFY THIS APK: <<<{C_RESET}")
-            print(f"  * {C_BOLD}Expected Sproto Response:{C_RESET} {C_GREEN}{rpc_rsp['full_type']}{C_RESET}")
-            schema = rpc_rsp.get('schema')
-            if schema and schema.get('fields'):
-                print(f"  * {C_BOLD}Response Fields Needed by APK:{C_RESET}")
-                for ftag, finfo in schema['fields'].items():
-                    print(f"      [{ftag}] {finfo['name']:<18s} : {C_CYAN}{finfo['type']}{C_RESET}")
-            sample = rpc_rsp.get('sample', {})
-            print(f"  * {C_BOLD}Sample Working Response Payload:{C_RESET}")
-            print(f"      {C_GREEN}{json.dumps(sample)}{C_RESET}")
-        
-        # Send mock response if auto_mock is enabled so client can proceed!
-        if self.auto_mock and rpc_rsp:
-            try:
-                mock_payload = rpc_rsp.get('sample', {})
-                rsp_schema = rpc_rsp.get('schema')
-                
-                # 1. Encode response package (session only, no type)
-                pkg_data = {'session': session}
-                pkg_bytes = SprotoBinary.encode_struct(pkg_data, self.db.package_schema, self.db.type_schemas)
-                
-                # 2. Encode mock response body
-                body_bytes = SprotoBinary.encode_struct(mock_payload, rsp_schema, self.db.type_schemas)
-                
-                # 3. Combine and pack
-                combined = pkg_bytes + body_bytes
-                packed = SprotoBinary.pack(combined)
-                frame = len(packed).to_bytes(2, 'big') + packed
-                
-                client_sock.sendall(frame)
-                print(f"  {C_MAGENTA}{C_BOLD}[AUTO-MOCK SENT]{C_RESET} Sent synthesized response {rpc_rsp['name']} to client!")
-                print(f"  {C_MAGENTA}-> APK client unblocked and proceeding to next request...{C_RESET}")
-            except Exception as e:
-                print(f"  {C_RED}[!] Failed to send mock response: {e}{C_RESET}")
-
-        print(f"{C_RED}{C_BOLD}{'!'*80}{C_RESET}\n")
-
-    def _print_all_possible_responses(self, tag, pname, rsp_info):
-        """Displays all responses that are possible for this APK."""
-        if not rsp_info:
-            return
-
-        rpc_rsp = rsp_info.get('rpc_response')
-        pushes = rsp_info.get('related_pushes', [])
-
-        print(f"\n  {C_GREEN}{C_BOLD}[ALL POSSIBLE RESPONSES FOR THIS APK]{C_RESET}")
-        if rpc_rsp:
-            print(f"  {C_BOLD}1. Inline RPC Response:{C_RESET}")
-            print(f"     * Type: {C_GREEN}{rpc_rsp['full_type']}{C_RESET}")
-            schema = rpc_rsp.get('schema')
-            if schema and schema.get('fields'):
-                for ftag, finfo in schema['fields'].items():
-                    print(f"       [{ftag}] {finfo['name']:<18s} ({finfo['type']})")
-            print(f"     * Sample JSON: {C_DIM}{json.dumps(rpc_rsp.get('sample', {}))}{C_RESET}")
-        else:
-            print(f"  {C_DIM}1. Inline RPC Response: None (client doesn't wait for RPC return session){C_RESET}")
-
-        if pushes:
-            print(f"  {C_BOLD}2. Triggered Server Push Notifications (APK NetReceiver Handlers):{C_RESET}")
-            for p in pushes:
-                print(f"     * Tag {p['tag']}: {C_CYAN}{p['name']}{C_RESET} ({p['full_type']})")
-                pschema = p.get('schema')
-                if pschema and pschema.get('fields'):
-                    for ftag, finfo in pschema['fields'].items():
-                        print(f"         [{ftag}] {finfo['name']:<16s} ({finfo['type']})")
-
-
-# ==============================================================================
-# 5. CLI Catalog Inspection & Export Commands
-# ==============================================================================
-
-def cmd_dump_all(db: APKSchemaDB, outfile='apk_protocol_reference.json'):
-    """Dumps all 409 protocols and their responses to a clean JSON file."""
-    catalog = []
-    for tag, p in sorted(db.protocols.items()):
-        req_schema_name = f"{p['request']}.request" if p['request'] else None
-        req_schema = db.get_schema(req_schema_name) if req_schema_name else None
-        
-        rsp_schema_name = f"{p['response']}.response" if p['response'] else None
-        rsp_schema = db.get_schema(rsp_schema_name) if rsp_schema_name else None
-        
-        entry = {
-            'tag': tag,
-            'protocol_name': p['name'],
-            'client_request': {
-                'sproto_type': req_schema_name,
-                'fields': list(req_schema['fields'].values()) if req_schema else []
-            },
-            'server_response': {
-                'sproto_type': rsp_schema_name,
-                'fields': list(rsp_schema['fields'].values()) if rsp_schema else [],
-                'sample': db.generate_default_sample(rsp_schema) if rsp_schema else None
-            },
-            'is_push_handler': p['name'] in db.push_handlers,
-            'push_handler_func': db.push_handlers.get(p['name'])
-        }
-        catalog.append(entry)
-
-    with open(outfile, 'w', encoding='utf-8') as f:
-        json.dump(catalog, f, indent=2)
-
-    print(f"{C_GREEN}{C_BOLD}[+] Exported {len(catalog)} protocols to '{outfile}'!{C_RESET}")
-    print(f" Total protocols with direct response: {len([c for c in catalog if c['server_response']['sproto_type']])}")
-    print(f" Total server push notifications:      {len([c for c in catalog if c['is_push_handler']])}")
-
-def cmd_show_responses(db: APKSchemaDB):
-    """Prints all possible responses in the APK."""
-    print(f"\n{C_GREEN}{C_BOLD}{'='*80}{C_RESET}")
-    print(f"{C_GREEN}{C_BOLD}   ALL POSSIBLE RESPONSES IN THIS APK ({len(db.protocols)} TOTAL PROTOCOLS){C_RESET}")
-    print(f"{C_GREEN}{C_BOLD}{'='*80}{C_RESET}\n")
-
-    print(f"{C_YELLOW}{C_BOLD}--- PART 1: DIRECT RPC RESPONSES (Client Waits For Session Reply) ---{C_RESET}")
-    for tag, p in sorted(db.protocols.items()):
-        if p['response']:
-            rsp_key = f"{p['response']}.response"
-            schema = db.get_schema(rsp_key)
-            print(f"\n{C_CYAN}{C_BOLD}Tag {tag:>3d}: Protocol '{p['name']}'{C_RESET}")
-            print(f"  * Request:  {p['request']}.request")
-            print(f"  * Response: {C_GREEN}{rsp_key}{C_RESET}")
-            if schema and schema.get('fields'):
-                print(f"  * Fields:")
-                for ftag, finfo in schema['fields'].items():
-                    print(f"      [{ftag}] {finfo['name']:<18s} : {finfo['type']}")
-            print(f"  * Sample:   {json.dumps(db.generate_default_sample(schema))}")
-
-    print(f"\n\n{C_YELLOW}{C_BOLD}--- PART 2: SERVER PUSH NOTIFICATIONS / EVENT RESPONSES ({len(db.push_handlers)} TOTAL) ---{C_RESET}")
-    for name, handler in sorted(db.push_handlers.items()):
-        tag = db.name_to_tag.get(name, -1)
-        proto = db.get_protocol(tag)
-        req_key = f"{proto['request']}.request" if (proto and proto.get('request')) else name
-        schema = db.get_schema(req_key)
-        print(f" * Tag {tag:>3d} | {C_WHITE}{name:<32s}{C_RESET} -> {C_CYAN}{handler}{C_RESET}")
-    print()
-
-def cmd_search(db: APKSchemaDB, query: str):
-    """Searches protocols, tags, and sproto types."""
-    query = query.lower()
-    matches = []
-    for tag, p in db.protocols.items():
-        if query in str(tag) or query in p['name'].lower() or (p['request'] and query in p['request'].lower()) or (p['response'] and query in p['response'].lower()):
-            matches.append((tag, p))
-
-    print(f"\n{C_BOLD}Search Results for '{query}' ({len(matches)} matches):{C_RESET}")
-    for tag, p in sorted(matches, key=lambda x: x[0]):
-        print(f" Tag {tag:>3d}: {C_CYAN}{p['name']:<28s}{C_RESET} | Req: {p['request']} | Rsp: {p['response']}")
-        if p['response']:
-            schema = db.get_schema(f"{p['response']}.response")
-            if schema and schema.get('fields'):
-                field_strs = [f"{f['name']}({f['type']})" for f in schema['fields'].values()]
-                print(f"          -> Rsp Fields: {', '.join(field_strs)}")
-    print()
-
-
-# ==============================================================================
-# 6. Main Entry Point
-# ==============================================================================
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="APK Sproto Protocol Inspector & Server 15678 Missing Feature Detector",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python 9555.py                        # Run proxy on port 9555, forwarding to s16.serv00.com:15678
-  python 9555.py --server               # Run standalone emulator on port 9555
-  python 9555.py --target 127.0.0.1:15678 # Forward to a local server on port 15678
-  python 9555.py --responses            # List all possible responses for this APK
-  python 9555.py --dump                 # Export full APK protocol dictionary to JSON
-  python 9555.py --search login         # Search for 'login' protocols and schemas
-        """
-    )
-    parser.add_argument('-p', '--port', type=int, default=9555, help="Port to listen on (default: 9555)")
-    parser.add_argument('-b', '--bind', type=str, default='0.0.0.0', help="IP address to bind on (default: 0.0.0.0)")
-    parser.add_argument('-t', '--target', type=str, default='s16.serv00.com:15678', help="Target server address host:port (default: s16.serv00.com:15678)")
-    parser.add_argument('--server', action='store_true', help="Run standalone server without forwarding to 15678")
-    parser.add_argument('--no-mock', action='store_true', help="Do NOT synthesize mock responses for missing tags")
-    parser.add_argument('--responses', action='store_true', help="Print all possible responses for this APK and exit")
-    parser.add_argument('--dump', action='store_true', help="Dump full protocol & response catalog to JSON and exit")
-    parser.add_argument('--search', type=str, default=None, help="Search protocols, tags, or sproto types")
-
-    args = parser.parse_args()
-
-    # Load APK Database
-    db = APKSchemaDB()
-
-    if args.responses:
-        cmd_show_responses(db)
-        return
-
-    if args.dump:
-        cmd_dump_all(db)
-        return
-
-    if args.search:
-        cmd_search(db, args.search)
-        return
-
-    # Parse target
-    if args.server:
-        target_host = None
-        target_port = None
-    else:
-        if ':' in args.target:
-            target_host, port_str = args.target.split(':', 1)
-            target_port = int(port_str)
-        else:
-            target_host = args.target
-            target_port = 15678
-
-    proxy = InspectorProxy(
-        listen_host=args.bind,
-        listen_port=args.port,
-        target_host=target_host or '127.0.0.1',
-        target_port=target_port or 15678,
-        auto_mock=(not args.no_mock),
-        db=db
-    )
-
-    if args.server:
-        proxy.target_host = None
-        proxy.target_port = None
-
-    proxy.start()
-
-if __name__ == '__main__':
-    main()
+if __name__ == "__main__":
+    start_server()
