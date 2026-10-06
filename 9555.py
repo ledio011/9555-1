@@ -2802,6 +2802,7 @@ def client_handler(conn, addr):
 
                     # 614: sync_common_data (data-driven from FunctionData)
                     char_level = picked_char.get('level', 1)
+                    player_tutorial = picked_char.get('tutorial', 0)
                     if FUNCTION_DATA:
                         fids = []
                         for fid, finfo in FUNCTION_DATA.items():
@@ -2820,7 +2821,16 @@ def client_handler(conn, addr):
                     else:
                         # Fallback: original hardcoded list
                         fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
-                    funcs = {fid: encode_sproto([(0, fid), (1, 1)]) for fid in fids}
+                    # Build func_info: state=1 means tutorial completed, state=0 means tutorial pending
+                    # For MAIN_MISSION (100), state depends on whether player has completed the tutorial
+                    funcs = {}
+                    for fid in fids:
+                        if fid == "100":
+                            # MAIN_MISSION: state=1 only if tutorial is already finished
+                            func_state = 1 if player_tutorial == 1 else 0
+                        else:
+                            func_state = 1
+                        funcs[fid] = encode_sproto([(0, fid), (1, func_state)])
                     send_rpc_push(614, encode_sproto([
                         (0, int(time.time())), (2, 0), (4, 10000), (9, funcs), (12, random.randint(1, 10000)), (13, 1), (14, int(time.time()))
                     ]))
