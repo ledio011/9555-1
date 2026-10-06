@@ -1104,7 +1104,7 @@ PROF_SKILLS = {
     1: {"atk": ["201", "202", "203"], "dodge": "204", "actives": ["205", "206", "207", "208", "209", "210"]},
     2: {"atk": ["301", "302", "303"], "dodge": "304", "actives": ["305", "306", "307", "308", "309", "310"]}
 }
-SKILL_UNLOCK_LVS = [1, 5, 10, 15, 20, 25]
+SKILL_UNLOCK_LVS = [1, 1, 1, 1, 1, 1]
 
 def get_skill_upgrade_cost(lv):
     if lv < 0: return 0
