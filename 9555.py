@@ -1,30 +1,23 @@
 import socket
 import struct
 import threading
-import time
 import os
+import time
 
 HOST = "0.0.0.0"
 PORT = int(os.getenv("PORT", "15678"))
 
-def hex_dump(data):
-    return " ".join(f"{b:02X}" for b in data)
-
-def ascii_dump(data):
-    return "".join(chr(b) if 32 <= b <= 126 else "." for b in data)
-
-def classify(payload):
-    """
-    Pa Sproto decoder/schema nuk mund të përcaktojmë
-    me siguri TAG/REQUEST/RESPONSE/PUSH.
-    """
+def decode_packet(payload):
+    # Placeholder until the real Sproto schema/decoder is connected.
     return {
-        "TAG": "UNKNOWN",
-        "TYPE": "UNKNOWN",
-        "SESSION": "UNKNOWN",
-        "REQUEST": "UNKNOWN",
-        "RESPONSE": "UNKNOWN",
-        "PUSH": "UNKNOWN",
+        "TAG": "?",
+        "TYPE": "?",
+        "NAME": "?",
+        "SESSION": "?",
+        "REQUEST": "?",
+        "RESPONSE": "?",
+        "PUSH": "?",
+        "FIELDS": []
     }
 
 def handle_client(conn, addr):
@@ -32,69 +25,54 @@ def handle_client(conn, addr):
     print(f"\n[+] CONNECT {ip}:{port}")
 
     buffer = b""
-    request_no = 0
+    frame_no = 0
 
     try:
         while True:
-            chunk = conn.recv(65535)
+            data = conn.recv(65535)
 
-            if not chunk:
+            if not data:
                 break
 
-            buffer += chunk
+            buffer += data
 
             while len(buffer) >= 2:
-                # 2-byte big-endian frame length
-                payload_len = struct.unpack(">H", buffer[:2])[0]
-                frame_len = payload_len + 2
+                payload_size = struct.unpack(">H", buffer[:2])[0]
+                frame_size = payload_size + 2
 
-                if len(buffer) < frame_len:
+                if len(buffer) < frame_size:
                     break
 
-                frame = buffer[:frame_len]
-                buffer = buffer[frame_len:]
+                payload = buffer[2:frame_size]
+                buffer = buffer[frame_size:]
 
-                payload = frame[2:]
-                request_no += 1
-
-                info = classify(payload)
-
-                print("\n" + "=" * 90)
-                print(f"[FRAME #{request_no}] {ip}:{port}")
-                print("=" * 90)
-
-                print(f"FRAME_SIZE   : {len(frame)}")
-                print(f"PAYLOAD_SIZE : {len(payload)}")
+                frame_no += 1
+                info = decode_packet(payload)
 
                 print()
-                print(f"TAG          : {info['TAG']}")
-                print(f"TYPE         : {info['TYPE']}")
-                print(f"SESSION      : {info['SESSION']}")
-                print(f"REQUEST      : {info['REQUEST']}")
-                print(f"RESPONSE     : {info['RESPONSE']}")
-                print(f"PUSH         : {info['PUSH']}")
+                print("=" * 60)
+                print(f"[FRAME #{frame_no}] {ip}:{port}")
+                print("=" * 60)
 
-                print()
-                print("PAYLOAD HEX  :", hex_dump(payload))
-                print("PAYLOAD RAW  :", repr(payload))
-                print("PAYLOAD ASCII:", ascii_dump(payload))
+                print(f"TAG       : {info['TAG']}")
+                print(f"TYPE      : {info['TYPE']}")
+                print(f"NAME      : {info['NAME']}")
+                print(f"SESSION   : {info['SESSION']}")
+                print(f"REQUEST   : {info['REQUEST']}")
+                print(f"RESPONSE  : {info['RESPONSE']}")
+                print(f"PUSH      : {info['PUSH']}")
 
-                print("=" * 90)
+                if info["FIELDS"]:
+                    print("FIELDS:")
+                    for key, value in info["FIELDS"]:
+                        print(f"  {key} = {value}")
+                else:
+                    print("FIELDS    : ?")
 
-                # Save raw frame
-                os.makedirs("raw_requests", exist_ok=True)
-
-                filename = (
-                    f"raw_requests/"
-                    f"{ip.replace('.', '_')}_{port}_"
-                    f"{int(time.time()*1000)}_{request_no}.bin"
-                )
-
-                with open(filename, "wb") as f:
-                    f.write(frame)
+                print("=" * 60)
 
     except Exception as e:
-        print(f"[ERROR] {ip}:{port}: {e}")
+        print(f"[ERROR] {ip}:{port} -> {e}")
 
     finally:
         conn.close()
@@ -104,7 +82,6 @@ def handle_client(conn, addr):
 def main():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
     server.bind((HOST, PORT))
     server.listen(50)
@@ -112,18 +89,15 @@ def main():
     print("[*] ATG Protocol Analyzer")
     print(f"[*] Listening on {HOST}:{PORT}")
     print("[*] Waiting for frames...")
-    print()
 
     while True:
         conn, addr = server.accept()
 
-        thread = threading.Thread(
+        threading.Thread(
             target=handle_client,
             args=(conn, addr),
             daemon=True
-        )
-
-        thread.start()
+        ).start()
 
 
 if __name__ == "__main__":
