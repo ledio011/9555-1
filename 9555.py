@@ -2435,7 +2435,8 @@ def init_character_fields(c):
         'pre_copy_pos': None,
         'active_domin_id': None,
         'boss_inst_id': None,
-        'pre_arena_pos': None
+        'pre_arena_pos': None,
+        'completed_tutorials': []
     }
     for k, v in fields.items():
         if k not in c: c[k] = v
@@ -2815,19 +2816,29 @@ def client_handler(conn, addr):
                                 if char_level >= finfo['condition']:
                                     fids.append(fid)
                             elif fc == 4:
-                                # class 4: tutorial record -> only unlock if completed
-                                if fid in picked_char.get('completed_tutorials', []):
-                                    fids.append(fid)
+                                # class 4: tutorial record -> always include so client can track state
+                                fids.append(fid)
                     else:
                         # Fallback: original hardcoded list
                         fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
                     # Build func_info: state=1 means tutorial completed, state=0 means tutorial pending
                     # For MAIN_MISSION (100), state depends on whether player has completed the tutorial
+                    # For class 4 tutorial records (e.g. 4083 ROB_CAR_TIP), state depends on completed_tutorials
+                    completed_tutorials = picked_char.get('completed_tutorials', [])
+                    # Build a set of class-4 function IDs for quick lookup
+                    class4_fids = set()
+                    if FUNCTION_DATA:
+                        for fid, finfo in FUNCTION_DATA.items():
+                            if finfo['class'] == 4:
+                                class4_fids.add(fid)
                     funcs = {}
                     for fid in fids:
                         if fid == "100":
                             # MAIN_MISSION: state=1 only if tutorial is already finished
                             func_state = 1 if player_tutorial == 1 else 0
+                        elif fid in class4_fids:
+                            # Class 4 tutorial records: state=1 if completed, state=0 if pending
+                            func_state = 1 if fid in completed_tutorials else 0
                         else:
                             func_state = 1
                         funcs[fid] = encode_sproto([(0, fid), (1, func_state)])
@@ -3799,6 +3810,21 @@ def client_handler(conn, addr):
                     picked_char['tutorial'] = 1
                     save_chars(all_accounts_chars)
                 print("[TUTORIAL] tutorial_finish acknowledged")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 268: # unlock_function_complete - client reports tutorial/function completion
+                # Schema: ID(0) string, state(1) long
+                func_id = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
+                func_state = get_val_int(body, 1)
+                if picked_char and func_id:
+                    if 'completed_tutorials' not in picked_char:
+                        picked_char['completed_tutorials'] = []
+                    if func_id not in picked_char['completed_tutorials']:
+                        picked_char['completed_tutorials'].append(func_id)
+                        save_chars(all_accounts_chars)
+                    print(f"[TUTORIAL COMPLETE] func_id={func_id} state={func_state}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
