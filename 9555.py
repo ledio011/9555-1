@@ -1678,11 +1678,15 @@ def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid):
             if len(active_monsters) == 0 or exp_state['wave_kills'] >= req_kills:
                 if exp_state['cur_wave'] < exp_cfg.get('wave_count', 4):
                     exp_state['cur_wave'] += 1
+                    # TAG 515: next_wave - notify client about new wave
+                    send_rpc_push(515, encode_sproto([(0, exp_state['cur_wave'])]))
                     spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state, exp_cfg, send_npc_wrapper)
                 else:
                     if exp_state['cur_group'] < exp_cfg.get('group_count', 7):
                         exp_state['cur_group'] += 1
                         exp_state['cur_wave'] = 1
+                        # TAG 515: next_wave - notify client about new wave
+                        send_rpc_push(515, encode_sproto([(0, exp_state['cur_wave'])]))
                         spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state, exp_cfg, send_npc_wrapper)
                     else:
                         finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True)
@@ -1703,6 +1707,30 @@ def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid):
 
         advance_missions(picked_char, send_rpc_push, 'kill', target_id=npcid)
         advance_missions(picked_char, send_rpc_push, 'level')
+
+        # TAG 527: drop_item_info - spawn a dropped item on the ground from the killed monster
+        # drop_item_info schema: serverId(0), pos_x(1), pos_z(2), type(3), item(4), ownServerId(5/tag 7)
+        if inst_id:
+            player_pos = picked_char.get('pos', [0, 100, 0, 0])
+            drop_x = player_pos[0] + random.randint(-500, 500)
+            drop_z = player_pos[2] + random.randint(-500, 500)
+            global GLOBAL_INST_COUNTER
+            GLOBAL_INST_COUNTER += 1
+            drop_inst_id = GLOBAL_INST_COUNTER
+            # item schema: itemId(0), itemCount(1), quality(2/tag 3), id(3/tag 4), count2(4/tag 5)
+            drop_item = encode_sproto([
+                (0, "1001"),   # itemId
+                (1, cash_kill), # itemCount (stack count)
+                (3, 0)          # quality
+            ])
+            send_rpc_push(527, encode_sproto([
+                (0, drop_inst_id),  # serverId
+                (1, drop_x),        # pos_x
+                (2, drop_z),        # pos_z
+                (3, 0),             # type (0 = monster drop)
+                (4, drop_item),     # item object
+                (7, picked_char['id'])  # ownServerId (encoded as tag 7)
+            ]))
 
 def spawn_map_npcs(conn, map_id, picked_char=None):
     """Spawns all NPCs, Monsters, and Traffic defined in data for the map."""
@@ -1763,6 +1791,20 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         ph = encode_sproto([(0, 509)]); pf = sproto_pack(ph + encode_sproto([(0, attr)]))
         try: conn.sendall(struct.pack(">H", len(pf)) + pf)
         except: pass
+
+        # TAG 505: aoi_add - also send as aoi_add for client ObjManager compatibility
+        # The handler expects a character field with full NPC data
+        char_data = encode_sproto([
+            (0, inst_id), (1, final_nid), (2, hp_cur), (3, hp_max), (4, atk), (5, df),
+            (6, hit), (7, eva), (8, cri), (9, exd), (10, exr), (11, res), (12, crd), (13, crr), (14, defa),
+            (15, x), (16, z), (17, o), (18, lvl), (21, name),
+            (24, dgea), (25, resa), (26, hita), (27, cria)
+        ])
+        aoi_add_ph = encode_sproto([(0, 505)])
+        aoi_add_pf = sproto_pack(aoi_add_ph + encode_sproto([(0, char_data)]))
+        try: conn.sendall(struct.pack(">H", len(aoi_add_pf)) + aoi_add_pf)
+        except: pass
+
         return inst_id
 
     # Check for EXP Stage maps (223..229)
@@ -1858,6 +1900,21 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                     ])
                     push_wrapper(507, encode_sproto([(0, char_move)]))
                 else:
+                    # TAG 513: aoi_stop_move - NPC stops moving when it reaches player
+                    pos_obj_stop = encode_sproto([
+                        (0, int(mx * 100)),
+                        (1, 0),
+                        (2, int(mz * 100)),
+                        (3, 0)
+                    ])
+                    m_move_stop = encode_sproto([(0, pos_obj_stop)])
+                    char_move_stop = encode_sproto([
+                        (0, inst_id),
+                        (1, m_move_stop),
+                        (2, False)
+                    ])
+                    push_wrapper(513, encode_sproto([(0, char_move_stop)]))
+
                     monster_cfg = NPC_CONFIG.get(target_nid, {})
                     monster_stats = get_npc_attr(target_nid)
                     monster_skill = monster_cfg.get('skill_group', '50001') or '50001'
@@ -3213,6 +3270,29 @@ def client_handler(conn, addr):
                                 send_rpc_push(555, sync_copy_scenes(picked_char))
                                 print(f"[TICKET] used item={item['id']} for subtype={subtype}")
                 send_rpc_push(526, encode_sproto([(0, success), (1, index_id)]))
+                
+                # TAG 525: update_item - notify client about individual item change
+                # update_item schema: containertype(0), indexId(1), gameitem(2)
+                # gameitem schema: indexId(0), itemId(1), bindflag(2), level(3), flags(4), stack(5), quality(6), parm(7), appraise(8)
+                if success and picked_char:
+                    inventory = picked_char.get('inventory', [])
+                    item_index = index_id - 10000
+                    if 0 <= item_index < len(inventory):
+                        item = inventory[item_index]
+                        gi = encode_sproto([
+                            (0, index_id),          # indexId
+                            (1, item['id']),        # itemId
+                            (2, False),             # bindflag
+                            (3, 0),                 # level
+                            (5, item.get('amount', 1)),  # stack
+                            (6, 0)                  # quality
+                        ])
+                        send_rpc_push(525, encode_sproto([
+                            (0, 1),  # containertype: ITEM_BACKPACK
+                            (1, index_id),
+                            (2, gi)
+                        ]))
+                
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3259,6 +3339,24 @@ def client_handler(conn, addr):
 
                         print(f"[COMBAT] accept_damge target={target_id} dmg={dmg} cri={is_cri}")
 
+                        # TAG 511: show_damage_board - damage number popups
+                        # acceptdamge schema: id(0), damage(1), skillId(2), effinfoId(3), cri(4), parm(5-8)
+                        dmg_item = encode_sproto([
+                            (0, target_id),
+                            (1, dmg),
+                            (2, "50001"),  # skillId
+                            (3, "50001"),  # effinfoId
+                            (4, is_cri)     # cri (bool)
+                        ])
+                        send_rpc_push(511, encode_sproto([(0, [dmg_item])]))
+
+                        # TAG 514: hit_action - hit animation effect
+                        send_rpc_push(514, encode_sproto([
+                            (0, target_id),
+                            (1, picked_char['id']),
+                            (2, "50001")  # effinfoId for default hit effect
+                        ]))
+
                         if target_id == picked_char['id']:
                             # Damage to player
                             new_hp = picked_char.get('hp', 0) - dmg
@@ -3299,6 +3397,9 @@ def client_handler(conn, addr):
                                 if target_id in DEAD_NPC_SET:
                                     continue
                                 DEAD_NPC_SET.add(target_id)
+
+                                # TAG 506: aoi_remove - remove NPC from scene when it dies
+                                send_rpc_push(506, encode_sproto([(0, target_id)]))
 
                                 # BOSS DEATH HANDLING
                                 if target_id == picked_char.get('boss_inst_id'):
@@ -3688,6 +3789,92 @@ def client_handler(conn, addr):
                     picked_char['tutorial'] = 1
                     save_chars(all_accounts_chars)
                 print("[TUTORIAL] tutorial_finish acknowledged")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 110: # chat
+                if picked_char:
+                    chat_type = get_val_int(body, 0)
+                    chat_msg = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1, ''))
+                    # TAG 528: ret_chat - echo chat message back to client
+                    # chat_item schema: senderId(0), senderName(1), tellId(2), tellName(3),
+                    #   chatInfo(4), chattype(5), linktype(6), intdata(7), stringdata(8),
+                    #   senderProfession(9), level(10), combValue(11), guildId(12), guildName(13), chatInfo2(14)
+                    chat_item = encode_sproto([
+                        (0, picked_char['id']),     # senderId
+                        (1, picked_char['name']),   # senderName
+                        (2, 0),                     # tellId (0 = global chat)
+                        (3, ""),                    # tellName
+                        (4, chat_msg),              # chatInfo (the message text)
+                        (5, chat_type),             # chattype
+                        (6, 0),                     # linktype
+                        (10, picked_char.get('level', 1))  # level
+                    ])
+                    send_rpc_push(528, encode_sproto([(0, [chat_item])]))
+                    print(f"[CHAT] type={chat_type} from={picked_char['name']} msg={chat_msg[:50]}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg in (109, 161, 163, 166): # team requests: req_invite_team, req_join_team, update_team_setting, leave_team
+                # TAG 516: invite_join_team - sent when someone invites you to team
+                # TAG 517: req_invite_team_result - result of invite acceptance
+                # TAG 518: update_team - team state update
+                # update_team.request schema: team(0) - where team has id(0), teamleader(1), count(2),
+                #   isVerfiy(3), teammembers(4), goalId(5), minLevel(6), maxLevel(7), recruit(8)
+                if picked_char and msg == 109:
+                    # Invite sent - send invite to target and result back
+                    target_id = get_val_int(body, 0)
+                    # TAG 516: invite_join_team - notify the invited player
+                    # invite_join_team.request: teamid(0), member(1), goalId(2)
+                    # teammember schema: id(0), teamid(1), name(2), level(3)
+                    member_info = encode_sproto([
+                        (0, picked_char['id']),
+                        (2, picked_char['name']),
+                        (3, picked_char.get('level', 1))
+                    ])
+                    send_rpc_push(516, encode_sproto([
+                        (0, 0),           # teamid
+                        (1, member_info),  # member
+                        (2, "")            # goalId
+                    ]))
+                    # TAG 517: req_invite_team_result - ok(0), id(1)
+                    send_rpc_push(517, encode_sproto([(0, 0), (1, target_id)]))
+                    # TAG 518: update_team - send proper team object
+                    team_obj = encode_sproto([
+                        (0, 0),   # id
+                        (2, 0),   # count
+                        (4, {})   # teammembers (empty dict)
+                    ])
+                    send_rpc_push(518, encode_sproto([(0, team_obj)]))
+                elif picked_char and msg == 161:
+                    # Join team request - send result
+                    teamid = get_val_int(body, 0)
+                    # TAG 517: req_invite_team_result - ok(0), id(1)
+                    send_rpc_push(517, encode_sproto([(0, 0), (1, picked_char['id'])]))
+                    team_obj = encode_sproto([
+                        (0, teamid),
+                        (2, 0),   # count
+                        (4, {})   # teammembers
+                    ])
+                    send_rpc_push(518, encode_sproto([(0, team_obj)]))
+                elif picked_char and msg == 166:
+                    # Leave team - send empty team update
+                    team_obj = encode_sproto([
+                        (0, 0),
+                        (2, 0),
+                        (4, {})
+                    ])
+                    send_rpc_push(518, encode_sproto([(0, team_obj)]))
+                elif picked_char and msg == 163:
+                    # Update team setting
+                    team_obj = encode_sproto([
+                        (0, 0),
+                        (2, 0),
+                        (4, {})
+                    ])
+                    send_rpc_push(518, encode_sproto([(0, team_obj)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
