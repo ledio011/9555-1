@@ -2033,20 +2033,21 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         return
 
     # 1. Spawn Static NPCs & Monsters
-    # Map 11 (TUTORIAL_CAR) handles spawning locally on client.
-    if map_str != "11":
-        if map_str in STATIC_NPC_DATA:
-            for m in STATIC_NPC_DATA[map_str]:
-                cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}"})
-                send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
+    # Map 11 (TUTORIAL_CAR) client spawns its own copies from NpcData with wrong stats.
+    # Server spawns them here with proper absolute stats from the _map11_monsters override.
+    if map_str in STATIC_NPC_DATA:
+        for m in STATIC_NPC_DATA[map_str]:
+            cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}"})
+            send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
-        if map_str in MONSTER_DATA:
-            for i, m in enumerate(MONSTER_DATA[map_str]):
-                cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
-                send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
+    if map_str in MONSTER_DATA:
+        for i, m in enumerate(MONSTER_DATA[map_str]):
+            cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
+            send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
     # 2. Spawn Mission targets defined by the APK data.
-    # Map 11 mission targets are now spawned server-side so they receive proper stats.
+    # Map 11 (TUTORIAL_CAR) client also spawns KillTarget NPCs locally via CitySimController.GetNpc()
+    # with wrong stats from NpcData. Server spawns them here with proper absolute stats.
     if picked_char:
         for mid, mdata in picked_char.get('active_missions', {}).items():
             if mdata['state'] == 1:
