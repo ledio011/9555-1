@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import socket, struct, threading, random, json, os, time, traceback, math
 
 PORT = int(os.environ.get("PORT", 15678))
@@ -334,97 +333,6 @@ try:
                     }
         print(f"[NPC CONFIG LOADED] count={len(NPC_CONFIG)}")
 
-    # Override ALL map 11 mission monsters with proper absolute stats
-    # These are percentage-based in NpcData with level 9999, which causes incorrect stats
-    # Force absolute values matching level 1 single-player mission monsters
-    # Covers 9901-9905 (mission targets), 9501-9505 (side missions), 9910-9916 (later missions)
-    _map11_monsters = {
-        '9901': {'name': 'Hulk', 'model': 'NPC_Nan_013', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9902': {'name': 'Hip Guy', 'model': 'NPC_Nan_022', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9903': {'name': 'PoliceMan', 'model': 'NPC_Nan_023', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9904': {'name': 'Beat Striker', 'model': 'NPC_Nan_036', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9905': {'name': 'Body Guard', 'model': 'NPC_Nan_017', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9501': {'name': 'Hulk', 'model': 'NPC_Nan_013', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9502': {'name': 'Hip Guy', 'model': 'NPC_Nan_022', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9503': {'name': 'PoliceMan', 'model': 'NPC_Nan_023', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9504': {'name': 'Beat Striker', 'model': 'NPC_Nan_036', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9505': {'name': 'The Pain', 'model': 'BOSS_Nan_006', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9910': {'name': 'Hulk', 'model': 'NPC_Nan_013', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9911': {'name': 'Hip Guy', 'model': 'NPC_Nan_022', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9912': {'name': 'PoliceMan', 'model': 'NPC_Nan_023', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9913': {'name': 'Beat Striker', 'model': 'NPC_Nan_036', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9914': {'name': 'Body Guard', 'model': 'NPC_Nan_017', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9915': {'name': 'Gentle Fighter', 'model': 'NPC_Nan_018', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9916': {'name': 'Gang Member', 'model': 'NPC_Nan_022', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        # Map 11 ambient civilians and auto-generated NPCs
-        '2001': {'name': 'Civilian', 'model': 'NPC_Nan_002_Talk', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '2003': {'name': 'Civilian', 'model': 'NPC_Nan_005_Talk', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '2004': {'name': 'Civilian', 'model': 'NPC_Nan_017_Talk', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '2005': {'name': 'Civilian', 'model': 'NPC_Nan_022_Talk', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '2006': {'name': 'Police', 'model': 'NPC_Nan_023_Talk', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '2007': {'name': 'Civilian', 'model': 'NPC_Nan_027_Talk', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '2008': {'name': 'Civilian', 'model': 'NPC_Nan_029_Talk', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '2009': {'name': 'Civilian', 'model': 'NPC_Nan_036_Talk', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '2010': {'name': 'Civilian', 'model': 'NPC_Nv_002_Talk', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '2011': {'name': 'Civilian', 'model': 'NPC_Nv_003_Talk', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '2012': {'name': 'Civilian', 'model': 'NPC_Nv_004_Talk', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '2013': {'name': 'Civilian', 'model': 'NPC_Nv_005_Talk', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9906': {'name': 'Civilian', 'model': 'NPC_Nan_017', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9907': {'name': 'Civilian', 'model': 'NPC_Nan_005', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9908': {'name': 'Civilian', 'model': 'NPC_Nv_002_Mission', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9909': {'name': 'Police', 'model': 'NPC_Nan_047', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9917': {'name': 'Civilian', 'model': 'NPC_Nan_017', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9918': {'name': 'Civilian', 'model': 'NPC_Nan_005', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9919': {'name': 'Civilian', 'model': 'NPC_Nv_002_Mission', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9920': {'name': 'Fight Dog', 'model': 'NPC_Dog', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9921': {'name': 'Civilian', 'model': 'NPC_Nv_004', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9922': {'name': 'Civilian', 'model': 'NPC_Nv_005', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        # Map 11 gang territory NPCs
-        '1105': {'name': 'Gang NPC', 'model': 'XD_A', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '1106': {'name': 'Gang NPC', 'model': 'XD_A', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '1107': {'name': 'Gang NPC', 'model': 'XD_A', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '1108': {'name': 'Gang NPC', 'model': 'XD_A', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        # Map 11 additional civilians (1501-1512)
-        '1501': {'name': 'William', 'model': 'NPC_Nan_008', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '1502': {'name': 'White', 'model': 'NPC_Nan_012', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '1503': {'name': 'Tomas.A', 'model': 'NPC_Nan_003', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '1504': {'name': 'Mr.casino', 'model': 'NPC_Nan_012', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '1505': {'name': 'Clain', 'model': 'NPC_Nan_012', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '1506': {'name': 'Business man', 'model': 'NPC_Nan_012', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '1507': {'name': 'Philip', 'model': 'NPC_Nan_012', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '1508': {'name': 'Grant', 'model': 'NPC_Nan_012', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '1509': {'name': 'Waiter', 'model': 'NPC_Nan_017', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '1510': {'name': 'Jofors', 'model': 'NPC_Nan_019', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '1511': {'name': 'Secret Owner', 'model': 'NPC_Nv_010', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '1512': {'name': 'Administrator', 'model': 'NPC_Nan_005', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-    }
-    for _nid, _override in _map11_monsters.items():
-        if _nid in NPC_CONFIG:
-            NPC_CONFIG[_nid].update(_override)
-            NPC_CONFIG[_nid]['is_abs'] = True
-        else:
-            NPC_CONFIG[_nid] = {
-                'name': _override['name'],
-                'model': _override['model'],
-                'level': _override['level'],
-                'type': 0,
-                'is_abs': True,
-                'skill_group': '50001',
-                'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000,
-                'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000,
-                'exd_coe': 10000, 'exr_coe': 10000, 'crd_coe': 10000, 'crr_coe': 10000,
-                'anti_stun_coe': 10000, 'anti_knock_down_coe': 10000,
-                'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000,
-                'atk_abs': _override['atk_abs'], 'hp_abs': _override['hp_abs'], 'def_abs': _override['def_abs'],
-                'hit_abs': _override['hit_abs'], 'eva_abs': _override['eva_abs'], 'cri_abs': _override['cri_abs'],
-                'res_abs': _override['res_abs'], 'exd_abs': _override['exd_abs'], 'exr_abs': _override['exr_abs'],
-                'crd_abs': _override['crd_abs'], 'crr_abs': _override['crr_abs'],
-                'anti_stun_abs': _override['anti_stun_abs'], 'anti_knock_down_abs': _override['anti_knock_down_abs'],
-                'defa_abs': _override['defa_abs'], 'dgea_abs': _override['dgea_abs'],
-                'resa_abs': _override['resa_abs'], 'hita_abs': _override['hita_abs'], 'cria_abs': _override['cria_abs'],
-            }
-    print(f"[MAP11 MONSTER OVERRIDES APPLIED] NPCs={list(_map11_monsters.keys())}")
-
     # Load MonsterData (and split into Monster vs Static NPC)
     mon_path = os.path.join(text_asset_root, "MonsterData")
     if os.path.exists(mon_path):
@@ -486,6 +394,8 @@ try:
                     flash_num = int(parts[7]) if parts[7].isdigit() else 1
                     require_num = int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else flash_num
                     nid = parts[6]
+                    if nid == "9901":
+                        nid = "90009" # Map scaling 9901 template to absolute Level 1 Hulk in NpcData (1000 HP, 40 ATK, 100 DEF)
                     KILL_TARGET_SPAWNS[row_id].append({
                         'map': parts[2],
                         'x': int(parts[3]),
@@ -616,40 +526,23 @@ try:
             m['placement'] = placement
     print(f"[MISSION REQUIREMENTS ENRICHED] count={len(missions_data)}")
 
-    # Load ALL vehicle definitions from MountData.
-    # Verified against Decompiled/assets/Bundle/TextAsset/MountData header row:
-    # ID(1), CarName(2), Desc(3), ItemID(4), Quality(5), Lv(6), Status1(7), Value1(8),
-    # Status2(9), Value2(10), Status3(11), Value3(12), Status4(13), Value4(14),
-    # ModelId(15), ShadowHeight(16), GetDesc(17), CarIcon(18), ModelPosX(19),
-    # ModelPosY(20), ModelPosZ(21), MaxHP(22), ATK(23), MaxSpeed(24), MaxSteerAngle(25),
-    # MaxAcceleration(26), BrakeAcceleration(27), ColorStr(28), DefaultColorId(29),
-    # LightPosX(30), LightPosY(31), LightPosZ(32), NameHeight(33), StartTime(34),
-    # EndTime(35), NeedShow(36), IsShowPlayer(37), GTALinkCarId(38), CamDis(39),
-    # CamHeight(40), IsMotor(41), GetPath(42), PriceType(43), Price(44)
-    #
-    # NeedShow=1 vehicles go to the garage UI.  NeedShow=0 vehicles (motorcycles,
-    # GTA traffic) are still loaded so the server can resolve their data when the
-    # client spawns them.  IsMotor=1 marks motorcycles for correct animation handling.
+    # Load the actual garage vehicle definitions.  Only rows marked NeedShow
+    # are player vehicles; GTA traffic rows deliberately remain server-side
+    # scene objects and are not sent to the garage.
     mount_path = os.path.join(text_asset_root, "MountData")
     if os.path.exists(mount_path):
         with open(mount_path, "r", encoding='utf-8') as f:
             for line in f:
                 parts = line.strip().split(",")
                 if len(parts) > 36 and parts[0] == "*" and parts[1]:
-                    colors = [x for x in parts[28].split("#") if x]
-                    is_motor = int(parts[41]) if len(parts) > 41 and parts[41].isdigit() else 0
-                    MOUNT_CONFIG[parts[1]] = {
-                        'colors': colors,
-                        'default_color': parts[29] if parts[29] else (colors[0] if colors else "1"),
-                        'item_id': parts[4],
-                        'need_show': int(parts[36]) if parts[36].isdigit() else 0,
-                        'is_motor': is_motor,
-                        'model_id': parts[15] if len(parts) > 15 else '',
-                        'gta_link_car_id': parts[38] if len(parts) > 38 else ''
-                    }
-        garage_count = sum(1 for v in MOUNT_CONFIG.values() if v.get('need_show') == 1)
-        motor_count = sum(1 for v in MOUNT_CONFIG.values() if v.get('is_motor') == 1)
-        print(f"[MOUNT CONFIG LOADED] total={len(MOUNT_CONFIG)} garage={garage_count} motorcycles={motor_count}")
+                    if parts[36] == "1":
+                        colors = [x for x in parts[28].split("#") if x]
+                        MOUNT_CONFIG[parts[1]] = {
+                            'colors': colors,
+                            'default_color': parts[29] if parts[29] else (colors[0] if colors else "1"),
+                            'item_id': parts[4]
+                        }
+        print(f"[MOUNT CONFIG LOADED] garage_vehicles={len(MOUNT_CONFIG)}")
 
     # Daily-copy UI receives its state from TAG 555.  Keep the IDs/types in
     # lockstep with CopySceneData so client tutorials can locate their target.
@@ -1880,7 +1773,9 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
 
         # Handle composite models like "PartA;PartB;PartC" to prevent client crashes
         final_nid = str(nid)
-        if ";" in final_nid:
+        if final_nid == "9901":
+            final_nid = "90009"
+        elif ";" in final_nid:
             if "XD_A" in final_nid: final_nid = "100"
             elif "QJ_A" in final_nid: final_nid = "104"
             elif "NQS_A" in final_nid: final_nid = "105"
@@ -1897,6 +1792,20 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         ph = encode_sproto([(0, 509)]); pf = sproto_pack(ph + encode_sproto([(0, attr)]))
         try: conn.sendall(struct.pack(">H", len(pf)) + pf)
         except: pass
+
+        # TAG 505: aoi_add - also send as aoi_add for client ObjManager compatibility
+        # The handler expects a character field with full NPC data
+        char_data = encode_sproto([
+            (0, inst_id), (1, final_nid), (2, hp_cur), (3, hp_max), (4, atk), (5, df),
+            (6, hit), (7, eva), (8, cri), (9, exd), (10, exr), (11, res), (12, crd), (13, crr), (14, defa),
+            (15, x), (16, z), (17, o), (18, lvl), (21, name),
+            (24, dgea), (25, resa), (26, hita), (27, cria)
+        ])
+        aoi_add_ph = encode_sproto([(0, 505)])
+        aoi_add_pf = sproto_pack(aoi_add_ph + encode_sproto([(0, char_data)]))
+        try: conn.sendall(struct.pack(">H", len(aoi_add_pf)) + aoi_add_pf)
+        except: pass
+
         return inst_id
 
     # Check for EXP Stage maps (223..229)
@@ -2037,24 +1946,22 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         return
 
     # 1. Spawn Static NPCs & Monsters
-    # Map 11 (TUTORIAL_CAR) is fully client-side: CitySimController spawns all ambient NPCs,
-    # CheckKillTargetMission spawns mission NPCs, and cars spawn at their map-defined positions.
-    # Server must NOT spawn anything on map 11 to avoid duplicates and broken positions.
-    if map_str != "11" and map_str in STATIC_NPC_DATA:
-        for m in STATIC_NPC_DATA[map_str]:
-            cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}"})
-            send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
+    # Map 11 (TUTORIAL_CAR) handles spawning locally on client.
+    if map_str != "11":
+        if map_str in STATIC_NPC_DATA:
+            for m in STATIC_NPC_DATA[map_str]:
+                cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}"})
+                send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
-    if map_str != "11" and map_str in MONSTER_DATA:
-        for i, m in enumerate(MONSTER_DATA[map_str]):
-            cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
-            send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
+        if map_str in MONSTER_DATA:
+            for i, m in enumerate(MONSTER_DATA[map_str]):
+                cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
+                send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
     # 2. Spawn Mission targets defined by the APK data.
-    # Map 11 mission targets are spawned by the client. Skip server-side spawning.
-    if map_str == "11":
-        return
-    if picked_char:
+    # For Map 11 (TUTORIAL_CAR), the client's SceneManager.CheckKillTargetMission() and CheckTargetCarMission()
+    # spawn mission targets locally via CitySimController. Creating server NPCs via Tag 509 for Map 11 causes duplicate spawns.
+    if picked_char and map_str != "11":
         for mid, mdata in picked_char.get('active_missions', {}).items():
             if mdata['state'] == 1:
                 cfg = missions_data.get(mid)
@@ -2123,17 +2030,10 @@ def build_mount_info(picked_char):
     Vehicle meshes, icons and colour shaders remain APK/resource-bundle data;
     this state only records whether a garage vehicle is owned/equipped and
     which of the MountData colours have been unlocked/selected.
-
-    Only vehicles with NeedShow=1 are sent to the garage UI.  Vehicles with
-    NeedShow=0 (motorcycles, GTA traffic) remain in MOUNT_CONFIG for server-side
-    resolution but are not displayed in the garage.
     """
     mount_state = picked_char.setdefault('mounts', {})
     result = {}
     for mount_id, cfg in MOUNT_CONFIG.items():
-        # Filter: only send NeedShow=1 vehicles to the garage UI
-        if cfg.get('need_show', 0) != 1:
-            continue
         saved = mount_state.setdefault(mount_id, {})
         state = int(saved.get('state', 0))
         selected = str(saved.get('select') or cfg['default_color'])
@@ -2439,8 +2339,8 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                 if spawn_key in KILL_TARGET_SPAWNS:
                     for s in KILL_TARGET_SPAWNS[spawn_key]:
                         spawn_nids.add(str(s['nid']))
-                if target in ("9901", "1001") or target_value in ("9901", "1001"):
-                    matched = target_value in ("9901", "1001")
+                if target in ("9901", "90009", "1001") or target_value in ("9901", "90009", "1001"):
+                    matched = target_value in ("9901", "90009", "1001")
                 else:
                     matched = target == target_value or target_value in spawn_nids
         elif logic_type == 19 and event == 'car':
@@ -3506,15 +3406,8 @@ def client_handler(conn, addr):
                                     ])
                                     send_rpc_push(618, relife_req)
                         elif target_id in NPC_HP_MAP or (picked_char and target_id != picked_char['id']):
-                            # Map 11 NPCs are fully client-side - skip all server-side HP/death handling
-                            if picked_char and str(picked_char.get('map_id')) == '11':
-                                # Only advance missions for Map 11 kills, don't manage NPC stats
-                                target_nid = NPC_INST_MAP.get(target_id, str(target_id))
-                                advance_missions(picked_char, send_rpc_push, 'kill', target_id=target_nid)
-                                continue
-
-                            # Damage to NPC/Monster/Boss (server-spawned only)
-                            target_nid = NPC_INST_MAP.get(target_id, str(target_id))
+                            # Damage to NPC/Monster/Boss (including local client NPCs)
+                            target_nid = NPC_INST_MAP.get(target_id, "9901")
                             NPC_INST_MAP[target_id] = target_nid
 
                             nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
@@ -3534,6 +3427,7 @@ def client_handler(conn, addr):
                                     continue
                                 DEAD_NPC_SET.add(target_id)
 
+                                # TAG 506: aoi_remove - remove NPC from scene when it dies
                                 send_rpc_push(506, encode_sproto([(0, target_id)]))
 
                                 # BOSS DEATH HANDLING
