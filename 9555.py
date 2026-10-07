@@ -3103,7 +3103,7 @@ def client_handler(conn, addr):
                                 requester_name = ch.get('name', f'Player{req_id}')
                                 requester_level = ch.get('level', 1)
                                 requester_prof = ch.get('prof', 0)
-                                requester_combat = ch.get('combat', 0)
+                                requester_combat = get_character_stats(ch)['power']
                                 requester_guildId = ch.get('guildId', 0)
                                 requester_guildName = ch.get('guildName', '')
                                 break
@@ -3116,7 +3116,7 @@ def client_handler(conn, addr):
                                             requester_name = ch.get('name', f'Player{req_id}')
                                             requester_level = ch.get('level', 1)
                                             requester_prof = ch.get('prof', 0)
-                                            requester_combat = ch.get('combat', 0)
+                                            requester_combat = get_character_stats(ch)['power']
                                             requester_guildId = ch.get('guildId', 0)
                                             requester_guildName = ch.get('guildName', '')
                                             break
@@ -4554,7 +4554,7 @@ def client_handler(conn, addr):
                                     target_name = ch.get('name', f'Player{target_id}')
                                     target_level = ch.get('level', 1)
                                     target_prof = ch.get('prof', 0)
-                                    target_combat = ch.get('combat', 0)
+                                    target_combat = get_character_stats(ch)['power']
                                     target_state = ch.get('state', 1)
                                     target_guildId = ch.get('guildId', 0)
                                     target_guildName = ch.get('guildName', '')
@@ -4568,7 +4568,7 @@ def client_handler(conn, addr):
                                                 target_name = ch.get('name', f'Player{target_id}')
                                                 target_level = ch.get('level', 1)
                                                 target_prof = ch.get('prof', 0)
-                                                target_combat = ch.get('combat', 0)
+                                                target_combat = get_character_stats(ch)['power']
                                                 target_state = 0
                                                 target_guildId = ch.get('guildId', 0)
                                                 target_guildName = ch.get('guildName', '')
@@ -4618,7 +4618,8 @@ def client_handler(conn, addr):
                                     tgt_name = ch.get('name', f'Player{target_id}')
                                     tgt_level = ch.get('level', 1)
                                     tgt_prof = ch.get('prof', 0)
-                                    tgt_combat = ch.get('combat', 0)
+                                    tgt_stats = get_character_stats(ch)
+                                    tgt_combat = tgt_stats['power']
                                     tgt_guildId = ch.get('guildId', 0)
                                     tgt_guildName = ch.get('guildName', '')
                                     break
@@ -4630,7 +4631,8 @@ def client_handler(conn, addr):
                                                 tgt_name = ch.get('name', f'Player{target_id}')
                                                 tgt_level = ch.get('level', 1)
                                                 tgt_prof = ch.get('prof', 0)
-                                                tgt_combat = ch.get('combat', 0)
+                                                tgt_stats = get_character_stats(ch)
+                                                tgt_combat = tgt_stats['power']
                                                 tgt_guildId = ch.get('guildId', 0)
                                                 tgt_guildName = ch.get('guildName', '')
                                                 break
@@ -4656,18 +4658,19 @@ def client_handler(conn, addr):
                             send_rpc_push(533, encode_sproto([(0, encode_friend_info(pending_friend))]))
                             # Notify the target player about the incoming friend request
                             # Find target player's connection and send notice_add_friend (msg 536)
+                            sender_stats = get_character_stats(picked_char)
                             sender_friend_info = {
                                 'characterId': my_id,
                                 'friendId': my_id,
                                 'name': picked_char.get('name', f'Player{my_id}'),
                                 'level': picked_char.get('level', 1),
                                 'profession': picked_char.get('prof', 0),
-                                'combValue': picked_char.get('combat', 0),
+                                'combValue': sender_stats['power'],
                                 'state': 1,
                                 'timeInfo': int(time.time()),
                                 'friendType': 2,
-                                'guildId': 0,
-                                'guildName': '',
+                                'guildId': picked_char.get('guildId', 0),
+                                'guildName': picked_char.get('guildName', ''),
                                 'friendScore': 0
                             }
                             notice_data = encode_sproto([(0, encode_friend_info(sender_friend_info))])
@@ -4713,14 +4716,16 @@ def client_handler(conn, addr):
                         enemies = picked_char.get('enemies', [])
                         picked_char['enemies'] = [e for e in enemies if e.get('friendId') != target_id]
                         save_chars(all_accounts_chars)
-                        # BUG FIX: Client be_deleted_friend_handler calls RemoveFriend (wrong dict)
-                        # Use ret_del_friend (535) instead — client calls RemoveFriend which works
-                        # because the client already called RemoveEnemy locally in EnemyItemLogic
-                        send_rpc_push(535, encode_sproto([(0, target_id)]))
+                        # Client already calls RemoveEnemy() locally in EnemyItemLogic.OnClickDeleteBtn()
+                        # Do NOT send ret_del_friend (535) - it calls RemoveFriend() on client,
+                        # which would delete the FRIEND with the same ID, not the enemy.
+                        # Just send session acknowledgment.
                     else: # friend
                         friends = picked_char.get('friends', [])
                         picked_char['friends'] = [f for f in friends if f.get('friendId') != target_id]
                         save_chars(all_accounts_chars)
+                        # For friend deletion, client ret_del_friend_handler calls RemoveFriend()
+                        # which is correct - the client does NOT remove friend locally before sending
                         send_rpc_push(535, encode_sproto([(0, target_id)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -4760,7 +4765,7 @@ def client_handler(conn, addr):
                                     req_name = ch.get('name', f'Player{req_id}')
                                     req_level = ch.get('level', 1)
                                     req_prof = ch.get('prof', 0)
-                                    req_combat = ch.get('combat', 0)
+                                    req_combat = get_character_stats(ch)['power']
                                     req_guildId = ch.get('guildId', 0)
                                     req_guildName = ch.get('guildName', '')
                                     break
@@ -4772,7 +4777,7 @@ def client_handler(conn, addr):
                                                 req_name = ch.get('name', f'Player{req_id}')
                                                 req_level = ch.get('level', 1)
                                                 req_prof = ch.get('prof', 0)
-                                                req_combat = ch.get('combat', 0)
+                                                req_combat = get_character_stats(ch)['power']
                                                 req_guildId = ch.get('guildId', 0)
                                                 req_guildName = ch.get('guildName', '')
                                                 break
@@ -4840,7 +4845,7 @@ def client_handler(conn, addr):
                                 req_name = ch.get('name', f'Player{target_id}')
                                 req_level = ch.get('level', 1)
                                 req_prof = ch.get('prof', 0)
-                                req_combat = ch.get('combat', 0)
+                                req_combat = get_character_stats(ch)['power']
                                 req_guildId = ch.get('guildId', 0)
                                 req_guildName = ch.get('guildName', '')
                                 break
@@ -4852,7 +4857,7 @@ def client_handler(conn, addr):
                                             req_name = ch.get('name', f'Player{target_id}')
                                             req_level = ch.get('level', 1)
                                             req_prof = ch.get('prof', 0)
-                                            req_combat = ch.get('combat', 0)
+                                            req_combat = get_character_stats(ch)['power']
                                             req_guildId = ch.get('guildId', 0)
                                             req_guildName = ch.get('guildName', '')
                                             break
@@ -4898,7 +4903,7 @@ def client_handler(conn, addr):
                                                 'name': picked_char.get('name', f'Player{my_id}'),
                                                 'level': picked_char.get('level', 1),
                                                 'profession': picked_char.get('prof', 0),
-                                                'combValue': picked_char.get('combat', 0),
+                                                'combValue': get_character_stats(picked_char)['power'],
                                                 'state': 1,
                                                 'timeInfo': int(time.time()),
                                                 'friendType': 0,
@@ -4990,7 +4995,7 @@ def client_handler(conn, addr):
                                 'name': oc.get('name', f'Player{oc.get("id", 0)}'),
                                 'level': oc.get('level', 1),
                                 'profession': oc.get('prof', 0),
-                                'combValue': oc.get('combat', 0),
+                                'combValue': get_character_stats(oc)['power'],
                                 'state': 1,
                                 'timeInfo': int(time.time()),
                                 'friendType': 0,
@@ -5023,7 +5028,7 @@ def client_handler(conn, addr):
                                         'name': oc_name,
                                         'level': oc.get('level', 1),
                                         'profession': oc.get('prof', 0),
-                                        'combValue': oc.get('combat', 0),
+                                        'combValue': get_character_stats(oc)['power'],
                                         'state': 1,
                                         'timeInfo': int(time.time()),
                                         'friendType': 0,
@@ -5064,6 +5069,7 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 324: # update_player_map_info (RPC - get enemy location for revenge)
+                # Client sends this as RPC with session - must respond WITH session
                 if picked_char:
                     target_id = get_val_int(body, 0)
                     # Find target player and return their map info
@@ -5086,15 +5092,19 @@ def client_handler(conn, addr):
                             (1, target_char.get('map_id', '11')),
                             (2, pos_obj)
                         ])
-                        # RPC response uses msg 324
-                        send_rpc_push(324, resp_data)
+                        # Send as RPC response with session ID
+                        if session is not None:
+                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp_data)
+                            conn.sendall(struct.pack(">H", len(pf)) + pf)
                         print(f"[RPC] update_player_map_info target={target_id} map={target_char.get('map_id', '11')}")
                     else:
-                        # Target not online
+                        # Target not online - still respond with session
                         resp_data = encode_sproto([(0, 0)])
-                        send_rpc_push(324, resp_data)
+                        if session is not None:
+                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp_data)
+                            conn.sendall(struct.pack(">H", len(pf)) + pf)
                         print(f"[RPC] update_player_map_info target={target_id} not found")
-                if session is not None:
+                elif session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
