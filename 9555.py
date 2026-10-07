@@ -2625,17 +2625,24 @@ def build_mail_update(mi):
     Client wire tags: 0=mailId, 1=sendertype, 3=title, 4=senderTime, 5=receiveId,
                       6=readTime, 7=context, 8=mailState, 9=sortTime, 10=items, 11=expireday
     Note: Wire tag 2 is SKIPPED — title uses wire tag 3, not 2.
+    
+    Items are encoded as Dictionary<string, item> where the key is item.id (string).
+    Client's item SprotoType wire tags: 0=itemId(string), 1=itemCount(long),
+    3=quality(long), 4=id(string), 5=count2(long). Note: wire tag 2 is SKIPPED.
     """
     # Build items as Dictionary<string, item> for wire tag 10
     items_dict = {}
     for it in mi.get('items', []):
-        item_id = str(it.get('itemId', 0))
+        item_key = str(it.get('itemId', 0))  # Dictionary key = item.id
+        # Client's item.cs: itemId(string, wire 0), itemCount(long, wire 1),
+        # quality(long, wire 3), id(string, wire 4)
         item_obj = encode_sproto([
-            (0, it.get('itemId', 0)),
-            (1, it.get('count', 1)),
-            (2, it.get('quality', 0))
+            (0, str(it.get('itemId', 0))),   # itemId as string
+            (1, it.get('count', 1)),          # itemCount as long
+            (3, it.get('quality', 0)),        # quality as long (wire tag 3, NOT 2!)
+            (4, item_key)                     # id as string (dictionary key)
         ])
-        items_dict[item_id] = item_obj
+        items_dict[item_key] = item_obj
     
     return encode_sproto([
         (0, mi.get('mailId', 0)),
@@ -4741,23 +4748,11 @@ def client_handler(conn, addr):
                                         else:
                                             continue
                                         break
-                            # Send ret_add_friend with state=0 (pending) to sender
-                            pending_friend = {
-                                'characterId': target_id,
-                                'friendId': target_id,
-                                'name': tgt_name,
-                                'level': tgt_level,
-                                'profession': tgt_prof,
-                                'combValue': tgt_combat,
-                                'state': 0,
-                                'timeInfo': int(time.time()),
-                                'friendType': 2,
-                                'guildId': tgt_guildId,
-                                'guildName': tgt_guildName,
-                                'friendScore': 0
-                            }
-                            # ret_add_friend: tag 0 = friend_info object
-                            send_rpc_push(533, encode_sproto([(0, encode_friend_info(pending_friend))]))
+                            # Do NOT send ret_add_friend for friend requests (type=0).
+                            # The client removes the entry from its list immediately after sending
+                            # and does not expect a ret_add_friend push. Sending it causes the
+                            # client to crash (AddFriend -> RefreshUI chain with friendType=2).
+                            # The server-side persistence (friend_requests_sent) is sufficient.
                             # Notify the target player about the incoming friend request
                             # Find target player's connection and send notice_add_friend (msg 536)
                             sender_stats = get_character_stats(picked_char)
