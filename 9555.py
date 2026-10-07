@@ -2651,6 +2651,59 @@ def build_mail_update(mi):
         (11, mi.get('expireday', 7))
     ])
 
+def broadcast_aoi_add(target_conn, target_char, sender_conn=None, sender_char=None):
+    """Broadcast aoi_add (msg 505) for a player to all other players on the same map."""
+    if not target_char:
+        return
+    target_map = str(target_char.get('map_id', '11'))
+    target_id = target_char.get('id', 0)
+    pos = target_char.get('pos', [0, 0, 0, 0])
+    # Build character_aoi for the target player
+    # character_aoi: id(0), visual(1), general(2), attribute_other(3), movement(5), runtime(6)
+    visual_bytes = get_visual(target_char.get('name', 'Hero'), target_char.get('prof', 0))
+    gen_bytes = get_general(target_char)
+    stats = get_character_stats(target_char)
+    attr_oth = encode_sproto([
+        (0, target_char.get('hp', stats['hp_max'])),
+        (1, stats['exp']),
+        (2, stats['lv']),
+        (3, stats['power']),
+        (15, 1)
+    ])
+    mv_bytes = get_movement(pos[0], pos[1], pos[2], pos[3])
+    char_aoi = encode_sproto([
+        (0, target_id),
+        (1, visual_bytes),
+        (2, gen_bytes),
+        (3, attr_oth),
+        (5, mv_bytes)
+    ])
+    aoi_data = encode_sproto([(0, char_aoi)])
+    # Send to all other connections that have a character on the same map
+    for c, ch in list(ALL_CONNECTIONS.items()):
+        if ch and ch.get('id', 0) != target_id and str(ch.get('map_id', '11')) == target_map:
+            try:
+                ph_p = encode_sproto([(0, 505)])
+                pf_p = sproto_pack(ph_p + aoi_data)
+                c.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+                print(f"[AOI] Broadcast aoi_add id={target_id} to {ch.get('id', 0)} map={target_map}")
+            except Exception:
+                pass
+
+def broadcast_aoi_remove(char_id, map_id):
+    """Broadcast aoi_remove (msg 506) when a player leaves a map."""
+    map_id = str(map_id)
+    aoi_data = encode_sproto([(0, char_id)])
+    for c, ch in list(ALL_CONNECTIONS.items()):
+        if ch and str(ch.get('map_id', '11')) == map_id:
+            try:
+                ph_p = encode_sproto([(0, 506)])
+                pf_p = sproto_pack(ph_p + aoi_data)
+                c.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+                print(f"[AOI] Broadcast aoi_remove id={char_id} to {ch.get('id', 0)} map={map_id}")
+            except Exception:
+                pass
+
 def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, override_pos=None):
     if picked_char and picked_char.get('hp', 0) <= 0:
         stats = get_character_stats(picked_char)
@@ -2722,6 +2775,13 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
 
         # TAG 505: aoi_add (NPCs)
         spawn_map_npcs(conn, target_map_id, picked_char)
+
+        # Broadcast this player to all other players on the same map
+        broadcast_aoi_add(conn, picked_char)
+        # Send existing players on this map to the new player
+        for c, ch in list(ALL_CONNECTIONS.items()):
+            if ch and ch.get('id', 0) != picked_char.get('id', 0) and str(ch.get('map_id', '11')) == target_map_id:
+                broadcast_aoi_add(c, ch, conn, picked_char)
 
         # BOSS SPAWN for Dominance Map 502
         if target_map_id == "502":
@@ -4675,16 +4735,23 @@ def client_handler(conn, addr):
                             }
                             notice_data = encode_sproto([(0, encode_friend_info(sender_friend_info))])
                             # Send to target player if they are online
+                            target_found = False
+                            print(f"[FRIEND] Looking for target={target_id} in ALL_CONNECTIONS (count={len(ALL_CONNECTIONS)})")
                             for t_conn, t_char in list(ALL_CONNECTIONS.items()):
+                                if t_char:
+                                    print(f"[FRIEND] Checking connection: id={t_char.get('id', 0)} name={t_char.get('name', '')}")
                                 if t_char and t_char.get('id', 0) == target_id:
+                                    target_found = True
                                     try:
                                         ph_p = encode_sproto([(0, 536)])
                                         pf_p = sproto_pack(ph_p + notice_data)
                                         t_conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
                                         print(f"[FRIEND] notice_add_friend sent to target={target_id} from={my_id}")
-                                    except Exception:
-                                        print(f"[FRIEND] Failed to send notice_add_friend to target={target_id}")
+                                    except Exception as e:
+                                        print(f"[FRIEND] Failed to send notice_add_friend to target={target_id}: {e}")
                                     break
+                            if not target_found:
+                                print(f"[FRIEND] Target={target_id} NOT FOUND online - request persisted for next login")
                             # Also add sender to target's friend_requests_received for persistence
                             # Load and update target character data
                             target_updated = False
@@ -5119,6 +5186,9 @@ def client_handler(conn, addr):
         try:
             if conn_id in NPC_SPAWNED_MAPS:
                 del NPC_SPAWNED_MAPS[conn_id]
+            # Broadcast aoi_remove before removing from tracking
+            if picked_char:
+                broadcast_aoi_remove(picked_char.get('id', 0), picked_char.get('map_id', '11'))
             RANDOM_NAME_CALLED.discard(conn_id)
             ALL_CONNECTIONS.pop(conn_id, None)  # Remove from online tracking
             conn.close()
