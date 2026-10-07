@@ -3082,30 +3082,47 @@ def client_handler(conn, addr):
                     # 538: syn_friend_info - sync friend list on login
                     init_social_data(picked_char)
                     for fi in picked_char.get('friends', []):
-                        fi_bytes = encode_friend_info(fi)
+                        fi_for_sync = dict(fi)
+                        fi_for_sync['friendType'] = 0  # UpdateFriendInfo ignores friendType, but keep consistent
+                        fi_bytes = encode_friend_info(fi_for_sync)
                         # syn_friend_info: tag 0 = friend_info object
                         send_rpc_push(538, encode_sproto([(0, fi_bytes)]))
 
-                    # BUG FIX: Push pending friend requests on login so they appear in Request tab
+                    # Push pending friend requests on login so they appear in Request tab
                     for req_id in picked_char.get('friend_requests_received', []):
-                        # Check if the requester is still in friend_requests_sent (request still valid)
-                        # Find the requester's character data to get their name
+                        # Look up requester's real info
                         requester_name = f'Player{req_id}'
                         requester_level = 1
                         requester_prof = 0
                         requester_combat = 0
-                        for area_key, area_chars in all_accounts_chars.items():
-                            for acc_key, char_list in area_chars.items():
-                                for ch in char_list:
-                                    if ch.get('id', 0) == req_id:
-                                        requester_name = ch.get('name', f'Player{req_id}')
-                                        requester_level = ch.get('level', 1)
-                                        requester_prof = ch.get('prof', 0)
-                                        requester_combat = ch.get('combat', 0)
-                                        break
-                            else:
-                                continue
-                            break
+                        requester_guildId = 0
+                        requester_guildName = ''
+                        # Check online players first
+                        for c, ch in list(ALL_CONNECTIONS.items()):
+                            if ch and ch.get('id', 0) == req_id:
+                                requester_name = ch.get('name', f'Player{req_id}')
+                                requester_level = ch.get('level', 1)
+                                requester_prof = ch.get('prof', 0)
+                                requester_combat = ch.get('combat', 0)
+                                requester_guildId = ch.get('guildId', 0)
+                                requester_guildName = ch.get('guildName', '')
+                                break
+                        else:
+                            # Look up from character database
+                            for area_key, area_chars in all_accounts_chars.items():
+                                for acc_key, char_list in area_chars.items():
+                                    for ch in char_list:
+                                        if ch.get('id', 0) == req_id:
+                                            requester_name = ch.get('name', f'Player{req_id}')
+                                            requester_level = ch.get('level', 1)
+                                            requester_prof = ch.get('prof', 0)
+                                            requester_combat = ch.get('combat', 0)
+                                            requester_guildId = ch.get('guildId', 0)
+                                            requester_guildName = ch.get('guildName', '')
+                                            break
+                                    else:
+                                        continue
+                                    break
                         sender_friend_info = {
                             'characterId': req_id,
                             'friendId': req_id,
@@ -3116,8 +3133,8 @@ def client_handler(conn, addr):
                             'state': 1,
                             'timeInfo': int(time.time()),
                             'friendType': 2,
-                            'guildId': 0,
-                            'guildName': '',
+                            'guildId': requester_guildId,
+                            'guildName': requester_guildName,
                             'friendScore': 0
                         }
                         notice_data = encode_sproto([(0, encode_friend_info(sender_friend_info))])
@@ -4524,18 +4541,53 @@ def client_handler(conn, addr):
                                 already = True
                                 break
                         if not already:
+                            # Look up actual target player info for real name/level/profession
+                            target_name = f'Player{target_id}'
+                            target_level = 1
+                            target_prof = 0
+                            target_combat = 0
+                            target_state = 0
+                            target_guildId = 0
+                            target_guildName = ''
+                            for c, ch in list(ALL_CONNECTIONS.items()):
+                                if ch and ch.get('id', 0) == target_id:
+                                    target_name = ch.get('name', f'Player{target_id}')
+                                    target_level = ch.get('level', 1)
+                                    target_prof = ch.get('prof', 0)
+                                    target_combat = ch.get('combat', 0)
+                                    target_state = ch.get('state', 1)
+                                    target_guildId = ch.get('guildId', 0)
+                                    target_guildName = ch.get('guildName', '')
+                                    break
+                            else:
+                                # Target offline - look up from character database
+                                for area_key, area_chars in all_accounts_chars.items():
+                                    for acc_key, char_list in area_chars.items():
+                                        for ch in char_list:
+                                            if ch.get('id', 0) == target_id:
+                                                target_name = ch.get('name', f'Player{target_id}')
+                                                target_level = ch.get('level', 1)
+                                                target_prof = ch.get('prof', 0)
+                                                target_combat = ch.get('combat', 0)
+                                                target_state = 0
+                                                target_guildId = ch.get('guildId', 0)
+                                                target_guildName = ch.get('guildName', '')
+                                                break
+                                    else:
+                                        continue
+                                    break
                             enemy_info = {
-                                'characterId': my_id,
+                                'characterId': target_id,
                                 'friendId': target_id,
-                                'name': f'Player{target_id}',
-                                'level': picked_char.get('level', 1),
-                                'profession': picked_char.get('prof', 0),
-                                'combValue': picked_char.get('combat', 0),
-                                'state': 1,
+                                'name': target_name,
+                                'level': target_level,
+                                'profession': target_prof,
+                                'combValue': target_combat,
+                                'state': target_state,
                                 'timeInfo': int(time.time()),
                                 'friendType': 6,
-                                'guildId': 0,
-                                'guildName': '',
+                                'guildId': target_guildId,
+                                'guildName': target_guildName,
                                 'friendScore': 0
                             }
                             picked_char['enemies'].append(enemy_info)
@@ -4554,19 +4606,50 @@ def client_handler(conn, addr):
                         if not already:
                             picked_char['friend_requests_sent'].append(target_id)
                             save_chars(all_accounts_chars)
+                            # Look up target player info for real name
+                            tgt_name = f'Player{target_id}'
+                            tgt_level = 1
+                            tgt_prof = 0
+                            tgt_combat = 0
+                            tgt_guildId = 0
+                            tgt_guildName = ''
+                            for c, ch in list(ALL_CONNECTIONS.items()):
+                                if ch and ch.get('id', 0) == target_id:
+                                    tgt_name = ch.get('name', f'Player{target_id}')
+                                    tgt_level = ch.get('level', 1)
+                                    tgt_prof = ch.get('prof', 0)
+                                    tgt_combat = ch.get('combat', 0)
+                                    tgt_guildId = ch.get('guildId', 0)
+                                    tgt_guildName = ch.get('guildName', '')
+                                    break
+                            else:
+                                for area_key, area_chars in all_accounts_chars.items():
+                                    for acc_key, char_list in area_chars.items():
+                                        for ch in char_list:
+                                            if ch.get('id', 0) == target_id:
+                                                tgt_name = ch.get('name', f'Player{target_id}')
+                                                tgt_level = ch.get('level', 1)
+                                                tgt_prof = ch.get('prof', 0)
+                                                tgt_combat = ch.get('combat', 0)
+                                                tgt_guildId = ch.get('guildId', 0)
+                                                tgt_guildName = ch.get('guildName', '')
+                                                break
+                                        else:
+                                            continue
+                                        break
                             # Send ret_add_friend with state=0 (pending) to sender
                             pending_friend = {
                                 'characterId': my_id,
                                 'friendId': target_id,
-                                'name': f'Player{target_id}',
-                                'level': picked_char.get('level', 1),
-                                'profession': picked_char.get('prof', 0),
-                                'combValue': picked_char.get('combat', 0),
+                                'name': tgt_name,
+                                'level': tgt_level,
+                                'profession': tgt_prof,
+                                'combValue': tgt_combat,
                                 'state': 0,
                                 'timeInfo': int(time.time()),
                                 'friendType': 2,
-                                'guildId': 0,
-                                'guildName': '',
+                                'guildId': tgt_guildId,
+                                'guildName': tgt_guildName,
                                 'friendScore': 0
                             }
                             # ret_add_friend: tag 0 = friend_info object
@@ -4655,9 +4738,12 @@ def client_handler(conn, addr):
                     # The client extracts the key from each decoded friend_info.friendId
                     friend_dict = {}
                     if req_type == 0: # friends
+                        # CRITICAL: Client FilterFriend skips friendType=1 entirely!
+                        # friendType==2 -> ApplyFriendDic, friendType!=1 -> MainPlayerFriendDic
+                        # So friendType=1 is ignored. Use friendType=0 for confirmed friends.
                         for fi in picked_char.get('friends', []):
                             fi_copy = dict(fi)
-                            fi_copy['friendType'] = 1  # Client FilterFriend: friendType=1 -> MainPlayerFriendDic
+                            fi_copy['friendType'] = 0  # Client FilterFriend: friendType=0 -> MainPlayerFriendDic
                             fi_bytes = encode_friend_info(fi_copy)
                             friend_dict[fi.get('friendId', 0)] = fi_bytes
                     elif req_type == 1: # enemies
@@ -4665,8 +4751,6 @@ def client_handler(conn, addr):
                             ei_copy = dict(ei)
                             ei_copy['friendType'] = 6  # Required by client FilterEnemy
                             ei_bytes = encode_friend_info(ei_copy, is_enemy=True)
-                            # For enemies, after swap the client reads friendId from timeInfo position
-                            # The dict key must match what the client extracts after the swap
                             friend_dict[ei.get('friendId', 0)] = ei_bytes
                     # ret_request_update_friend_useinfo: tag 0 = Dictionary, tag 1 = type
                     resp_data = encode_sproto([
@@ -4695,18 +4779,49 @@ def client_handler(conn, addr):
                         # Add to friends list (acceptor gets requester as friend)
                         if 'friends' not in picked_char:
                             picked_char['friends'] = []
+                        # Look up actual requester info for real name/level/profession
+                        req_name = f'Player{target_id}'
+                        req_level = 1
+                        req_prof = 0
+                        req_combat = 0
+                        req_guildId = 0
+                        req_guildName = ''
+                        for c, ch in list(ALL_CONNECTIONS.items()):
+                            if ch and ch.get('id', 0) == target_id:
+                                req_name = ch.get('name', f'Player{target_id}')
+                                req_level = ch.get('level', 1)
+                                req_prof = ch.get('prof', 0)
+                                req_combat = ch.get('combat', 0)
+                                req_guildId = ch.get('guildId', 0)
+                                req_guildName = ch.get('guildName', '')
+                                break
+                        else:
+                            for area_key, area_chars in all_accounts_chars.items():
+                                for acc_key, char_list in area_chars.items():
+                                    for ch in char_list:
+                                        if ch.get('id', 0) == target_id:
+                                            req_name = ch.get('name', f'Player{target_id}')
+                                            req_level = ch.get('level', 1)
+                                            req_prof = ch.get('prof', 0)
+                                            req_combat = ch.get('combat', 0)
+                                            req_guildId = ch.get('guildId', 0)
+                                            req_guildName = ch.get('guildName', '')
+                                            break
+                                else:
+                                    continue
+                                break
                         new_friend = {
-                            'characterId': my_id,
+                            'characterId': target_id,
                             'friendId': target_id,
-                            'name': f'Player{target_id}',
-                            'level': picked_char.get('level', 1),
-                            'profession': picked_char.get('prof', 0),
-                            'combValue': picked_char.get('combat', 0),
+                            'name': req_name,
+                            'level': req_level,
+                            'profession': req_prof,
+                            'combValue': req_combat,
                             'state': 1,
                             'timeInfo': int(time.time()),
-                            'friendType': 1,
-                            'guildId': 0,
-                            'guildName': '',
+                            'friendType': 0,
+                            'guildId': req_guildId,
+                            'guildName': req_guildName,
                             'friendScore': 0
                         }
                         picked_char['friends'].append(new_friend)
@@ -4729,7 +4844,7 @@ def client_handler(conn, addr):
                                                 break
                                         if not already_friend:
                                             mutual_friend = {
-                                                'characterId': target_id,
+                                                'characterId': my_id,
                                                 'friendId': my_id,
                                                 'name': picked_char.get('name', f'Player{my_id}'),
                                                 'level': picked_char.get('level', 1),
@@ -4737,9 +4852,9 @@ def client_handler(conn, addr):
                                                 'combValue': picked_char.get('combat', 0),
                                                 'state': 1,
                                                 'timeInfo': int(time.time()),
-                                                'friendType': 1,
-                                                'guildId': 0,
-                                                'guildName': '',
+                                                'friendType': 0,
+                                                'guildId': picked_char.get('guildId', 0),
+                                                'guildName': picked_char.get('guildName', ''),
                                                 'friendScore': 0
                                             }
                                             ch['friends'].append(mutual_friend)
