@@ -3086,10 +3086,10 @@ def client_handler(conn, addr):
                         # syn_friend_info: tag 0 = friend_info object
                         send_rpc_push(538, encode_sproto([(0, fi_bytes)]))
 
-                    # 538: syn_friend_info - sync enemy list on login
-                    for ei in picked_char.get('enemies', []):
-                        ei_bytes = encode_friend_info(ei, is_enemy=True)
-                        send_rpc_push(538, encode_sproto([(0, ei_bytes)]))
+                    # Enemies are NOT synced via syn_friend_info on login because
+                    # the client handler routes ALL syn_friend_info to UpdateFriendInfo
+                    # (friends dict), not the enemies dict. Enemies load correctly
+                    # via request_update_friend_useinfo (msg 126) when the tab opens.
 
                     # 531: mail_update - sync mail list on login
                     for mi in picked_char.get('mails', []):
@@ -4482,8 +4482,9 @@ def client_handler(conn, addr):
                             }
                             picked_char['enemies'].append(enemy_info)
                             save_chars(all_accounts_chars)
-                            # syn_friend_info: tag 0 = friend_info object (swap fields for enemy)
-                            send_rpc_push(538, encode_sproto([(0, encode_friend_info(enemy_info, is_enemy=True))]))
+                            # Do NOT send syn_friend_info for enemies — the client handler
+                            # routes all syn_friend_info to UpdateFriendInfo (friends dict).
+                            # Enemies will load correctly via request_update_friend_useinfo.
                     else: # friend request
                         if 'friend_requests_sent' not in picked_char:
                             picked_char['friend_requests_sent'] = []
@@ -4495,7 +4496,7 @@ def client_handler(conn, addr):
                         if not already:
                             picked_char['friend_requests_sent'].append(target_id)
                             save_chars(all_accounts_chars)
-                            # Send ret_add_friend with state=0 (pending)
+                            # Send ret_add_friend with state=0 (pending) to sender
                             pending_friend = {
                                 'characterId': my_id,
                                 'friendId': target_id,
@@ -4505,13 +4506,59 @@ def client_handler(conn, addr):
                                 'combValue': picked_char.get('combat', 0),
                                 'state': 0,
                                 'timeInfo': int(time.time()),
-                                'friendType': 0,
+                                'friendType': 2,
                                 'guildId': 0,
                                 'guildName': '',
                                 'friendScore': 0
                             }
                             # ret_add_friend: tag 0 = friend_info object
                             send_rpc_push(533, encode_sproto([(0, encode_friend_info(pending_friend))]))
+                            # Notify the target player about the incoming friend request
+                            # Find target player's connection and send notice_add_friend (msg 536)
+                            sender_friend_info = {
+                                'characterId': my_id,
+                                'friendId': my_id,
+                                'name': picked_char.get('name', f'Player{my_id}'),
+                                'level': picked_char.get('level', 1),
+                                'profession': picked_char.get('prof', 0),
+                                'combValue': picked_char.get('combat', 0),
+                                'state': 1,
+                                'timeInfo': int(time.time()),
+                                'friendType': 2,
+                                'guildId': 0,
+                                'guildName': '',
+                                'friendScore': 0
+                            }
+                            notice_data = encode_sproto([(0, encode_friend_info(sender_friend_info))])
+                            # Send to target player if they are online
+                            for t_conn, t_char in list(ALL_CONNECTIONS.items()):
+                                if t_char and t_char.get('id', 0) == target_id:
+                                    try:
+                                        ph_p = encode_sproto([(0, 536)])
+                                        pf_p = sproto_pack(ph_p + notice_data)
+                                        t_conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+                                        print(f"[FRIEND] notice_add_friend sent to target={target_id} from={my_id}")
+                                    except Exception:
+                                        print(f"[FRIEND] Failed to send notice_add_friend to target={target_id}")
+                                    break
+                            # Also add sender to target's friend_requests_received for persistence
+                            # Load and update target character data
+                            target_updated = False
+                            for area_key, area_chars in all_accounts_chars.items():
+                                for acc_key, char_list in area_chars.items():
+                                    for ch in char_list:
+                                        if ch.get('id', 0) == target_id:
+                                            if 'friend_requests_received' not in ch:
+                                                ch['friend_requests_received'] = []
+                                            if my_id not in ch['friend_requests_received']:
+                                                ch['friend_requests_received'].append(my_id)
+                                            save_chars(all_accounts_chars)
+                                            target_updated = True
+                                            break
+                                if target_updated:
+                                    break
+                            if target_updated:
+                                break
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
