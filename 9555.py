@@ -4746,6 +4746,55 @@ def client_handler(conn, addr):
                             fi_copy['friendType'] = 0  # Client FilterFriend: friendType=0 -> MainPlayerFriendDic
                             fi_bytes = encode_friend_info(fi_copy)
                             friend_dict[fi.get('friendId', 0)] = fi_bytes
+                        # Include pending friend requests so FilterFriend re-adds them to ApplyFriendDic
+                        for req_id in picked_char.get('friend_requests_received', []):
+                            # Look up requester's real info
+                            req_name = f'Player{req_id}'
+                            req_level = 1
+                            req_prof = 0
+                            req_combat = 0
+                            req_guildId = 0
+                            req_guildName = ''
+                            for c, ch in list(ALL_CONNECTIONS.items()):
+                                if ch and ch.get('id', 0) == req_id:
+                                    req_name = ch.get('name', f'Player{req_id}')
+                                    req_level = ch.get('level', 1)
+                                    req_prof = ch.get('prof', 0)
+                                    req_combat = ch.get('combat', 0)
+                                    req_guildId = ch.get('guildId', 0)
+                                    req_guildName = ch.get('guildName', '')
+                                    break
+                            else:
+                                for area_key, area_chars in all_accounts_chars.items():
+                                    for acc_key, char_list in area_chars.items():
+                                        for ch in char_list:
+                                            if ch.get('id', 0) == req_id:
+                                                req_name = ch.get('name', f'Player{req_id}')
+                                                req_level = ch.get('level', 1)
+                                                req_prof = ch.get('prof', 0)
+                                                req_combat = ch.get('combat', 0)
+                                                req_guildId = ch.get('guildId', 0)
+                                                req_guildName = ch.get('guildName', '')
+                                                break
+                                        else:
+                                            continue
+                                        break
+                            pending_req = {
+                                'characterId': req_id,
+                                'friendId': req_id,
+                                'name': req_name,
+                                'level': req_level,
+                                'profession': req_prof,
+                                'combValue': req_combat,
+                                'state': 0,
+                                'timeInfo': int(time.time()),
+                                'friendType': 2,
+                                'guildId': req_guildId,
+                                'guildName': req_guildName,
+                                'friendScore': 0
+                            }
+                            fi_bytes = encode_friend_info(pending_req)
+                            friend_dict[req_id] = fi_bytes
                     elif req_type == 1: # enemies
                         for ei in picked_char.get('enemies', []):
                             ei_copy = dict(ei)
