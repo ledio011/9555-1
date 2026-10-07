@@ -4627,7 +4627,9 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 124: # add_friend (type 0=friend, 1=enemy/foe)
-                if picked_char:
+                try:
+                    if not picked_char:
+                        raise ValueError("No picked_char")
                     target_id = get_val_int(body, 0)
                     add_type = get_val_int(body, 1)
                     my_id = picked_char.get('id', 0)
@@ -4813,6 +4815,11 @@ def client_handler(conn, addr):
                                     break
                             if target_updated:
                                 break
+                    print(f"[FRIEND] add_friend handler completed successfully for target={target_id}")
+                except Exception as e:
+                    print(f"[FRIEND] ERROR in add_friend handler: {e}")
+                    import traceback
+                    traceback.print_exc()
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
