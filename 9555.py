@@ -793,8 +793,10 @@ try:
                         item_id = parts[i].strip()
                         count = int(parts[i+1]) if i+1 < len(parts) and parts[i+1].strip().isdigit() else 0
                         quality = int(parts[i+2]) if i+2 < len(parts) and parts[i+2].strip().isdigit() else 0
-                        if item_id and count > 0:
+                        if item_id and count > 0 and item_id in ITEM_CONFIG:
                             DOWNLOAD_REWARD_DATA.append((item_id, count, quality))
+                        elif item_id and count > 0 and item_id not in ITEM_CONFIG:
+                            print(f"[WARN] Download reward item {item_id} not found in ItemData, skipping")
         print(f"[DOWNLOAD REWARD LOADED] items={len(DOWNLOAD_REWARD_DATA)}")
 
     # Load SkillupgradeData (skill upgrade costs by level)
@@ -3898,11 +3900,10 @@ def client_handler(conn, addr):
                         for item_id, count, quality in DOWNLOAD_REWARD_DATA:
                             add_to_inventory(picked_char, item_id, count)
                     else:
-                        # Fallback
-                        add_to_inventory(picked_char, "9301", 1)
-                        add_to_inventory(picked_char, "9011", 10)
-                        add_to_inventory(picked_char, "9001", 20)
-                        add_to_inventory(picked_char, "5026", 5)
+                        # Fallback - only items that exist in ItemData
+                        add_to_inventory(picked_char, "5011", 1)   # EXP*100000
+                        add_to_inventory(picked_char, "5012", 1)   # EXP*1000000
+                        add_to_inventory(picked_char, "5026", 5)   # World Channel Speak
                     save_chars(all_accounts_chars)
 
                     # Sync items and finalize client state
