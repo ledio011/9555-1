@@ -14,7 +14,7 @@ NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 DEAD_NPC_SET = set() # duplicate death/reward prevention set
 RANDOM_NAME_CALLED = set()  # connection identities that have had their first random name request
-ALL_CONNECTIONS = {}  # conn_id -> picked_char dict for tracking online players
+ALL_CONNECTIONS = {}  # char_id -> (conn, picked_char) for tracking online players
 
 # Load Mission Data
 missions_data = {}
@@ -992,7 +992,7 @@ def get_val_str(fields, tag, default=''):
 
 def get_online_characters():
     """Return a list of all currently online character dicts."""
-    return [ch for ch in ALL_CONNECTIONS.values() if ch is not None]
+    return [ch for conn, ch in ALL_CONNECTIONS.values() if ch is not None]
 
 def encode_sproto(fields, fn=None):
     if not fields: return struct.pack("<H", 0)
@@ -2680,7 +2680,7 @@ def broadcast_aoi_add(target_conn, target_char, sender_conn=None, sender_char=No
     ])
     aoi_data = encode_sproto([(0, char_aoi)])
     # Send to all other connections that have a character on the same map
-    for c, ch in list(ALL_CONNECTIONS.items()):
+    for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
         if ch and ch.get('id', 0) != target_id and str(ch.get('map_id', '11')) == target_map:
             try:
                 ph_p = encode_sproto([(0, 505)])
@@ -2694,7 +2694,7 @@ def broadcast_aoi_remove(char_id, map_id):
     """Broadcast aoi_remove (msg 506) when a player leaves a map."""
     map_id = str(map_id)
     aoi_data = encode_sproto([(0, char_id)])
-    for c, ch in list(ALL_CONNECTIONS.items()):
+    for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
         if ch and str(ch.get('map_id', '11')) == map_id:
             try:
                 ph_p = encode_sproto([(0, 506)])
@@ -2779,7 +2779,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         # Broadcast this player to all other players on the same map
         broadcast_aoi_add(conn, picked_char)
         # Send existing players on this map to the new player
-        for c, ch in list(ALL_CONNECTIONS.items()):
+        for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
             if ch and ch.get('id', 0) != picked_char.get('id', 0) and str(ch.get('map_id', '11')) == target_map_id:
                 broadcast_aoi_add(c, ch, conn, picked_char)
 
@@ -2877,7 +2877,7 @@ def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
     global server_session_counter, ALL_CONNECTIONS
     conn_id = id(conn)
-    ALL_CONNECTIONS[conn_id] = None  # Register connection, update when char picked
+    # ALL_CONNECTIONS will be updated when character is picked
     send_lock = threading.Lock()
 
     def send_rpc_push(tag, data):
@@ -3052,7 +3052,7 @@ def client_handler(conn, addr):
             elif msg == 105: # character_pick
                 char_id = get_val_int(body, 0)
                 picked_char = next((c for c in get_account_chars(all_accounts_chars, cur_areaId, acc_id) if c['id'] == char_id), None)
-                ALL_CONNECTIONS[conn_id] = picked_char  # Track online character
+                ALL_CONNECTIONS[picked_char.get('id', 0)] = (conn, picked_char)  # Track online character
                 resp = encode_sproto([(0, 1 if picked_char else 0)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -3158,7 +3158,7 @@ def client_handler(conn, addr):
                         requester_guildId = 0
                         requester_guildName = ''
                         # Check online players first
-                        for c, ch in list(ALL_CONNECTIONS.items()):
+                        for r_cid, (r_conn, ch) in list(ALL_CONNECTIONS.items()):
                             if ch and ch.get('id', 0) == req_id:
                                 requester_name = ch.get('name', f'Player{req_id}')
                                 requester_level = ch.get('level', 1)
@@ -4526,7 +4526,7 @@ def client_handler(conn, addr):
                                     ch['mails'].append(mail_entry)
                                     save_chars(all_accounts_chars)
                                     # If target is online, push mail_update to them
-                                    for t_conn, t_char in list(ALL_CONNECTIONS.items()):
+                                    for t_cid, (t_conn, t_char) in list(ALL_CONNECTIONS.items()):
                                         if t_char and t_char.get('id', 0) == receive_id:
                                             try:
                                                 mi_bytes = build_mail_update(mail_entry)
@@ -4609,7 +4609,7 @@ def client_handler(conn, addr):
                             target_state = 0
                             target_guildId = 0
                             target_guildName = ''
-                            for c, ch in list(ALL_CONNECTIONS.items()):
+                            for t_cid, (t_conn, ch) in list(ALL_CONNECTIONS.items()):
                                 if ch and ch.get('id', 0) == target_id:
                                     target_name = ch.get('name', f'Player{target_id}')
                                     target_level = ch.get('level', 1)
@@ -4673,7 +4673,7 @@ def client_handler(conn, addr):
                             tgt_combat = 0
                             tgt_guildId = 0
                             tgt_guildName = ''
-                            for c, ch in list(ALL_CONNECTIONS.items()):
+                            for t_cid, (t_conn, ch) in list(ALL_CONNECTIONS.items()):
                                 if ch and ch.get('id', 0) == target_id:
                                     tgt_name = ch.get('name', f'Player{target_id}')
                                     tgt_level = ch.get('level', 1)
@@ -4737,7 +4737,7 @@ def client_handler(conn, addr):
                             # Send to target player if they are online
                             target_found = False
                             print(f"[FRIEND] Looking for target={target_id} in ALL_CONNECTIONS (count={len(ALL_CONNECTIONS)})")
-                            for t_conn, t_char in list(ALL_CONNECTIONS.items()):
+                            for t_cid, (t_conn, t_char) in list(ALL_CONNECTIONS.items()):
                                 if t_char:
                                     print(f"[FRIEND] Checking connection: id={t_char.get('id', 0)} name={t_char.get('name', '')}")
                                 if t_char and t_char.get('id', 0) == target_id:
@@ -4827,7 +4827,7 @@ def client_handler(conn, addr):
                             req_combat = 0
                             req_guildId = 0
                             req_guildName = ''
-                            for c, ch in list(ALL_CONNECTIONS.items()):
+                            for r_cid, (r_conn, ch) in list(ALL_CONNECTIONS.items()):
                                 if ch and ch.get('id', 0) == req_id:
                                     req_name = ch.get('name', f'Player{req_id}')
                                     req_level = ch.get('level', 1)
@@ -4907,7 +4907,7 @@ def client_handler(conn, addr):
                         req_combat = 0
                         req_guildId = 0
                         req_guildName = ''
-                        for c, ch in list(ALL_CONNECTIONS.items()):
+                        for r_cid, (r_conn, ch) in list(ALL_CONNECTIONS.items()):
                             if ch and ch.get('id', 0) == target_id:
                                 req_name = ch.get('name', f'Player{target_id}')
                                 req_level = ch.get('level', 1)
@@ -4980,7 +4980,7 @@ def client_handler(conn, addr):
                                             }
                                             ch['friends'].append(mutual_friend)
                                             # If requester is online, push syn_friend_info to them
-                                            for t_conn, t_char in list(ALL_CONNECTIONS.items()):
+                                            for t_cid, (t_conn, t_char) in list(ALL_CONNECTIONS.items()):
                                                 if t_char and t_char.get('id', 0) == target_id:
                                                     try:
                                                         fi_bytes = encode_friend_info(mutual_friend)
@@ -5118,9 +5118,9 @@ def client_handler(conn, addr):
                     # Find target player and warp to their location
                     target_conn = None
                     target_char = None
-                    for c, ch in list(ALL_CONNECTIONS.items()):
+                    for t_cid, (t_conn, ch) in list(ALL_CONNECTIONS.items()):
                         if ch and ch.get('id', 0) == target_id:
-                            target_conn = c
+                            target_conn = t_conn
                             target_char = ch
                             break
                     if target_char and 'pos' in target_char:
@@ -5141,7 +5141,7 @@ def client_handler(conn, addr):
                     target_id = get_val_int(body, 0)
                     # Find target player and return their map info
                     target_char = None
-                    for c, ch in list(ALL_CONNECTIONS.items()):
+                    for t_cid, (t_conn, ch) in list(ALL_CONNECTIONS.items()):
                         if ch and ch.get('id', 0) == target_id:
                             target_char = ch
                             break
@@ -5190,7 +5190,9 @@ def client_handler(conn, addr):
             if picked_char:
                 broadcast_aoi_remove(picked_char.get('id', 0), picked_char.get('map_id', '11'))
             RANDOM_NAME_CALLED.discard(conn_id)
-            ALL_CONNECTIONS.pop(conn_id, None)  # Remove from online tracking
+            if picked_char:
+                char_id = picked_char.get('id', 0)
+                ALL_CONNECTIONS.pop(char_id, None)  # Remove from online tracking
             conn.close()
         except Exception:
             pass
