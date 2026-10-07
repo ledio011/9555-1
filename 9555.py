@@ -14,6 +14,7 @@ NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 DEAD_NPC_SET = set() # duplicate death/reward prevention set
 RANDOM_NAME_CALLED = set()  # connection identities that have had their first random name request
+ALL_CONNECTIONS = {}  # conn_id -> picked_char dict for tracking online players
 
 # Load Mission Data
 missions_data = {}
@@ -981,6 +982,18 @@ def get_val_int(fields, tag, default=0):
         if len(val) == 1: return val[0]
     return default
 
+def get_val_str(fields, tag, default=''):
+    """Extract a string value from sproto fields."""
+    val = fields.get(tag)
+    if val is None: return default
+    if isinstance(val, str): return val
+    if isinstance(val, (bytes, bytearray)): return val.decode('utf-8', errors='ignore')
+    return str(val) if val is not None else default
+
+def get_online_characters():
+    """Return a list of all currently online character dicts."""
+    return [ch for ch in ALL_CONNECTIONS.values() if ch is not None]
+
 def encode_sproto(fields, fn=None):
     if not fields: return struct.pack("<H", 0)
     fields.sort(key=lambda x: x[0])
@@ -1010,6 +1023,12 @@ def encode_sproto(fields, fn=None):
                 if val and isinstance(val[0], int):
                     # Use 8-byte integers (long) for compatibility with List<long>
                     v = b"\x08" + b"".join([struct.pack("<q", item) for item in val])
+                elif val and isinstance(val[0], bytes):
+                    # List of sproto objects (e.g., list of encoded friend_info)
+                    items = []
+                    for item in val:
+                        items.append(struct.pack("<I", len(item)) + item)
+                    v = b"".join(items)
                 else:
                     items = []
                     for item in val:
@@ -1019,13 +1038,35 @@ def encode_sproto(fields, fn=None):
                         items.append(struct.pack("<I", len(item)) + item)
                     v = b"".join(items)
             elif isinstance(val, dict):
-                # A Sproto map is encoded as an array of its elements
+                # Sproto map encoded as array of elements
+                # Support dict with bytes values (sproto objects) for Dictionary<long, friend_info>
+                # and dict with simple values for Dictionary<string, item>
                 items = []
-                for item in val.values():
-                    if isinstance(item, (bytes, bytearray)):
-                        items.append(struct.pack("<I", len(item)) + item)
+                for k, item in val.items():
+                    # Encode key
+                    if isinstance(k, int):
+                        # Integer key (long) - encode as 8-byte integer
+                        key_data = struct.pack("<q", k)
+                    elif isinstance(k, str):
+                        key_data = k.encode('utf-8')
                     else:
-                        items.append(struct.pack("<I", 1) + (b'\x01' if item else b'\x00'))
+                        key_data = str(k).encode('utf-8')
+                    # Encode value
+                    if isinstance(item, (bytes, bytearray)):
+                        val_data = item
+                    elif isinstance(item, dict):
+                        # Nested dict as sproto object
+                        val_data = encode_sproto(list(item.items()))
+                    elif isinstance(item, bool):
+                        val_data = b'\x01' if item else b'\x00'
+                    elif isinstance(item, int):
+                        val_data = struct.pack("<q", item)
+                    elif isinstance(item, str):
+                        val_data = item.encode('utf-8')
+                    else:
+                        val_data = b''
+                    items.append(struct.pack("<I", len(key_data)) + key_data)
+                    items.append(struct.pack("<I", len(val_data)) + val_data)
                 v = b"".join(items)
             else:
                 v = val
@@ -2565,6 +2606,62 @@ def init_social_data(c):
     if 'friend_requests_received' not in c:
         c['friend_requests_received'] = []
 
+def encode_friend_info(fi, is_enemy=False):
+    """Encode a friend_info dict as sproto bytes.
+    For enemies (friendType=6), the client swaps friendId and timeInfo on receive.
+    So we send: friendId=timeInfo, timeInfo=friendId for enemies.
+    """
+    friend_id = fi.get('friendId', 0)
+    time_info = fi.get('timeInfo', int(time.time()))
+    # For enemies, swap fields so client swap restores correct values
+    if is_enemy:
+        friend_id, time_info = time_info, friend_id
+    return encode_sproto([
+        (0, fi.get('characterId', 0)),
+        (1, friend_id),
+        (2, fi.get('name', '')),
+        (3, fi.get('level', 1)),
+        (4, fi.get('profession', 0)),
+        (5, fi.get('combValue', 0)),
+        (6, fi.get('state', 1)),
+        (7, time_info),
+        (8, fi.get('friendType', 0)),
+        (9, fi.get('guildId', 0)),
+        (10, fi.get('guildName', '')),
+        (11, fi.get('friendScore', 0))
+    ])
+
+def build_mail_update(mi):
+    """Build a mail_update message (msg 531) from a mail entry dict.
+    Client wire tags: 0=mailId, 1=sendertype, 3=title, 4=senderTime, 5=receiveId,
+                      6=readTime, 7=context, 8=mailState, 9=sortTime, 10=items, 11=expireday
+    Note: Wire tag 2 is SKIPPED — title uses wire tag 3, not 2.
+    """
+    # Build items as Dictionary<string, item> for wire tag 10
+    items_dict = {}
+    for it in mi.get('items', []):
+        item_id = str(it.get('itemId', 0))
+        item_obj = encode_sproto([
+            (0, it.get('itemId', 0)),
+            (1, it.get('count', 1)),
+            (2, it.get('quality', 0))
+        ])
+        items_dict[item_id] = item_obj
+    
+    return encode_sproto([
+        (0, mi.get('mailId', 0)),
+        (1, mi.get('sendertype', 0)),
+        (3, mi.get('title', '')),
+        (4, mi.get('senderTime', int(time.time()))),
+        (5, mi.get('receiveId', 0)),
+        (6, mi.get('readTime', 0)),
+        (7, mi.get('context', '')),
+        (8, mi.get('mailState', 0)),
+        (9, mi.get('sortTime', int(time.time()))),
+        (10, items_dict if items_dict else None),
+        (11, mi.get('expireday', 7))
+    ])
+
 def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, override_pos=None):
     if picked_char and picked_char.get('hp', 0) <= 0:
         stats = get_character_stats(picked_char)
@@ -2729,7 +2826,9 @@ def serve_resource_http(conn, initial_data):
 
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
-    global server_session_counter
+    global server_session_counter, ALL_CONNECTIONS
+    conn_id = id(conn)
+    ALL_CONNECTIONS[conn_id] = None  # Register connection, update when char picked
     send_lock = threading.Lock()
 
     def send_rpc_push(tag, data):
@@ -2904,6 +3003,7 @@ def client_handler(conn, addr):
             elif msg == 105: # character_pick
                 char_id = get_val_int(body, 0)
                 picked_char = next((c for c in get_account_chars(all_accounts_chars, cur_areaId, acc_id) if c['id'] == char_id), None)
+                ALL_CONNECTIONS[conn_id] = picked_char  # Track online character
                 resp = encode_sproto([(0, 1 if picked_char else 0)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -2993,45 +3093,18 @@ def client_handler(conn, addr):
                     # 538: syn_friend_info - sync friend list on login
                     init_social_data(picked_char)
                     for fi in picked_char.get('friends', []):
-                        fi_bytes = encode_sproto([
-                            (0, fi.get('characterId', 0)),
-                            (1, fi.get('friendId', 0)),
-                            (2, fi.get('name', '')),
-                            (3, fi.get('level', 1)),
-                            (4, fi.get('profession', 0)),
-                            (5, fi.get('combValue', 0)),
-                            (6, fi.get('state', 1)),
-                            (7, fi.get('timeInfo', int(time.time()))),
-                            (8, fi.get('friendType', 0)),
-                            (9, fi.get('guildId', 0)),
-                            (10, fi.get('guildName', '')),
-                            (11, fi.get('friendScore', 0))
-                        ])
+                        fi_bytes = encode_friend_info(fi)
+                        # syn_friend_info: tag 0 = friend_info object
                         send_rpc_push(538, encode_sproto([(0, fi_bytes)]))
+
+                    # 538: syn_friend_info - sync enemy list on login
+                    for ei in picked_char.get('enemies', []):
+                        ei_bytes = encode_friend_info(ei, is_enemy=True)
+                        send_rpc_push(538, encode_sproto([(0, ei_bytes)]))
 
                     # 531: mail_update - sync mail list on login
                     for mi in picked_char.get('mails', []):
-                        items_list = []
-                        for it in mi.get('items', []):
-                            item_bytes = encode_sproto([
-                                (0, it.get('itemId', 0)),
-                                (1, it.get('count', 1)),
-                                (2, it.get('quality', 0))
-                            ])
-                            items_list.append(item_bytes)
-                        mi_bytes = encode_sproto([
-                            (0, mi.get('mailId', 0)),
-                            (1, mi.get('sendertype', 0)),
-                            (3, mi.get('title', '')),
-                            (4, mi.get('senderTime', int(time.time()))),
-                            (5, mi.get('receiveId', 0)),
-                            (6, mi.get('readTime', 0)),
-                            (7, mi.get('context', '')),
-                            (8, mi.get('mailState', 0)),
-                            (9, mi.get('sortTime', int(time.time()))),
-                            (10, items_list if items_list else None),
-                            (11, mi.get('expireday', 7))
-                        ])
+                        mi_bytes = build_mail_update(mi)
                         send_rpc_push(531, mi_bytes)
 
                     # TAG 503: enter_map
@@ -4413,28 +4486,15 @@ def client_handler(conn, addr):
                                 'combValue': picked_char.get('combat', 0),
                                 'state': 1,
                                 'timeInfo': int(time.time()),
-                                'friendType': 1,
+                                'friendType': 6,
                                 'guildId': 0,
                                 'guildName': '',
                                 'friendScore': 0
                             }
                             picked_char['enemies'].append(enemy_info)
                             save_chars(all_accounts_chars)
-                            fi_bytes = encode_sproto([
-                                (0, enemy_info['characterId']),
-                                (1, enemy_info['friendId']),
-                                (2, enemy_info['name']),
-                                (3, enemy_info['level']),
-                                (4, enemy_info['profession']),
-                                (5, enemy_info['combValue']),
-                                (6, enemy_info['state']),
-                                (7, enemy_info['timeInfo']),
-                                (8, enemy_info['friendType']),
-                                (9, enemy_info['guildId']),
-                                (10, enemy_info['guildName']),
-                                (11, enemy_info['friendScore'])
-                            ])
-                            send_rpc_push(538, encode_sproto([(0, fi_bytes)]))
+                            # syn_friend_info: tag 0 = friend_info object (swap fields for enemy)
+                            send_rpc_push(538, encode_sproto([(0, encode_friend_info(enemy_info, is_enemy=True))]))
                     else: # friend request
                         if 'friend_requests_sent' not in picked_char:
                             picked_char['friend_requests_sent'] = []
@@ -4447,21 +4507,22 @@ def client_handler(conn, addr):
                             picked_char['friend_requests_sent'].append(target_id)
                             save_chars(all_accounts_chars)
                             # Send ret_add_friend with state=0 (pending)
-                            fi_bytes = encode_sproto([
-                                (0, my_id),
-                                (1, target_id),
-                                (2, f'Player{target_id}'),
-                                (3, picked_char.get('level', 1)),
-                                (4, picked_char.get('prof', 0)),
-                                (5, picked_char.get('combat', 0)),
-                                (6, 0),
-                                (7, int(time.time())),
-                                (8, 0),
-                                (9, 0),
-                                (10, ''),
-                                (11, 0)
-                            ])
-                            send_rpc_push(533, encode_sproto([(0, fi_bytes)]))
+                            pending_friend = {
+                                'characterId': my_id,
+                                'friendId': target_id,
+                                'name': f'Player{target_id}',
+                                'level': picked_char.get('level', 1),
+                                'profession': picked_char.get('prof', 0),
+                                'combValue': picked_char.get('combat', 0),
+                                'state': 0,
+                                'timeInfo': int(time.time()),
+                                'friendType': 0,
+                                'guildId': 0,
+                                'guildName': '',
+                                'friendScore': 0
+                            }
+                            # ret_add_friend: tag 0 = friend_info object
+                            send_rpc_push(533, encode_sproto([(0, encode_friend_info(pending_friend))]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4491,44 +4552,22 @@ def client_handler(conn, addr):
                     req_type = get_val_int(body, 1)
                     my_id = picked_char.get('id', 0)
                     print(f"[FRIEND] request_update_friend_useinfo target={target_id} type={req_type}")
-                    # Return friend list based on type
-                    friend_list = []
+                    # Return friend list as Dictionary<long, friend_info>
+                    friend_dict = {}
                     if req_type == 0: # friends
                         for fi in picked_char.get('friends', []):
-                            fi_bytes = encode_sproto([
-                                (0, fi.get('characterId', 0)),
-                                (1, fi.get('friendId', 0)),
-                                (2, fi.get('name', '')),
-                                (3, fi.get('level', 1)),
-                                (4, fi.get('profession', 0)),
-                                (5, fi.get('combValue', 0)),
-                                (6, fi.get('state', 1)),
-                                (7, fi.get('timeInfo', int(time.time()))),
-                                (8, fi.get('friendType', 0)),
-                                (9, fi.get('guildId', 0)),
-                                (10, fi.get('guildName', '')),
-                                (11, fi.get('friendScore', 0))
-                            ])
-                            friend_list.append(fi_bytes)
+                            fi_bytes = encode_friend_info(fi)
+                            friend_dict[fi.get('friendId', 0)] = fi_bytes
                     elif req_type == 1: # enemies
                         for ei in picked_char.get('enemies', []):
-                            ei_bytes = encode_sproto([
-                                (0, ei.get('characterId', 0)),
-                                (1, ei.get('friendId', 0)),
-                                (2, ei.get('name', '')),
-                                (3, ei.get('level', 1)),
-                                (4, ei.get('profession', 0)),
-                                (5, ei.get('combValue', 0)),
-                                (6, ei.get('state', 1)),
-                                (7, ei.get('timeInfo', int(time.time()))),
-                                (8, ei.get('friendType', 1)),
-                                (9, ei.get('guildId', 0)),
-                                (10, ei.get('guildName', '')),
-                                (11, ei.get('friendScore', 0))
-                            ])
-                            friend_list.append(ei_bytes)
+                            # Ensure friendType is 6 for enemies (required by client FilterEnemy)
+                            ei_copy = dict(ei)
+                            ei_copy['friendType'] = 6
+                            ei_bytes = encode_friend_info(ei_copy, is_enemy=True)
+                            friend_dict[ei.get('friendId', 0)] = ei_bytes
+                    # ret_request_update_friend_useinfo: tag 0 = Dictionary, tag 1 = type
                     resp_data = encode_sproto([
-                        (0, friend_list),
+                        (0, friend_dict),
                         (1, req_type)
                     ])
                     send_rpc_push(534, resp_data)
@@ -4553,7 +4592,7 @@ def client_handler(conn, addr):
                         # Add to friends list
                         if 'friends' not in picked_char:
                             picked_char['friends'] = []
-                        friend_info = {
+                        new_friend = {
                             'characterId': my_id,
                             'friendId': target_id,
                             'name': f'Player{target_id}',
@@ -4567,26 +4606,12 @@ def client_handler(conn, addr):
                             'guildName': '',
                             'friendScore': 0
                         }
-                        picked_char['friends'].append(friend_info)
+                        picked_char['friends'].append(new_friend)
                         save_chars(all_accounts_chars)
-                        # Send syn_friend_info to update client
-                        fi_bytes = encode_sproto([
-                            (0, friend_info['characterId']),
-                            (1, friend_info['friendId']),
-                            (2, friend_info['name']),
-                            (3, friend_info['level']),
-                            (4, friend_info['profession']),
-                            (5, friend_info['combValue']),
-                            (6, friend_info['state']),
-                            (7, friend_info['timeInfo']),
-                            (8, friend_info['friendType']),
-                            (9, friend_info['guildId']),
-                            (10, friend_info['guildName']),
-                            (11, friend_info['friendScore'])
-                        ])
-                        send_rpc_push(538, encode_sproto([(0, fi_bytes)]))
-                        # Send notice_add_friend
-                        send_rpc_push(536, encode_sproto([(0, fi_bytes)]))
+                        # syn_friend_info: tag 0 = friend_info object
+                        send_rpc_push(538, encode_sproto([(0, encode_friend_info(new_friend))]))
+                        # notice_add_friend: tag 0 = friend_info object
+                        send_rpc_push(536, encode_sproto([(0, encode_friend_info(new_friend))]))
                     else:
                         if 'friend_requests_received' not in picked_char:
                             picked_char['friend_requests_received'] = []
@@ -4631,21 +4656,130 @@ def client_handler(conn, addr):
                     picked_char['mails'].append(mail_entry)
                     save_chars(all_accounts_chars)
                     # Push mail_update to client
-                    mi_bytes = encode_sproto([
-                        (0, mail_id),
-                        (1, 0),
-                        (3, subject),
-                        (4, int(time.time())),
-                        (5, picked_char.get('id', 0)),
-                        (6, 0),
-                        (7, context),
-                        (8, 0),
-                        (9, int(time.time())),
-                        (10, None),
-                        (11, 7)
-                    ])
+                    mi_bytes = build_mail_update(mail_entry)
                     send_rpc_push(531, mi_bytes)
                     print(f"[MAIL] send_mail_box id={mail_id} subject={subject}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 159: # req_random_online_character_list
+                # Client sends no body data; return random online characters
+                if picked_char:
+                    online_chars = get_online_characters()
+                    friend_list = []
+                    for oc in online_chars:
+                        if oc.get('id', 0) != picked_char.get('id', 0):
+                            fi = {
+                                'characterId': oc.get('id', 0),
+                                'friendId': oc.get('id', 0),
+                                'name': oc.get('name', f'Player{oc.get("id", 0)}'),
+                                'level': oc.get('level', 1),
+                                'profession': oc.get('prof', 0),
+                                'combValue': oc.get('combat', 0),
+                                'state': 1,
+                                'timeInfo': int(time.time()),
+                                'friendType': 0,
+                                'guildId': 0,
+                                'guildName': '',
+                                'friendScore': 0
+                            }
+                            friend_list.append(encode_friend_info(fi))
+                    # ret_random_online_character_list: tag 0 = List<friend_info>
+                    resp_data = encode_sproto([(0, friend_list)])
+                    send_rpc_push(570, resp_data)
+                    print(f"[FRIEND] req_random_online_character_list returned {len(friend_list)} chars")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 160: # search_online_character_by_name
+                if picked_char:
+                    search_name = get_val_str(body, 0)
+                    friend_list = []
+                    if search_name:
+                        online_chars = get_online_characters()
+                        for oc in online_chars:
+                            oc_name = oc.get('name', '')
+                            if oc_name and search_name.lower() in oc_name.lower():
+                                if oc.get('id', 0) != picked_char.get('id', 0):
+                                    fi = {
+                                        'characterId': oc.get('id', 0),
+                                        'friendId': oc.get('id', 0),
+                                        'name': oc_name,
+                                        'level': oc.get('level', 1),
+                                        'profession': oc.get('prof', 0),
+                                        'combValue': oc.get('combat', 0),
+                                        'state': 1,
+                                        'timeInfo': int(time.time()),
+                                        'friendType': 0,
+                                        'guildId': 0,
+                                        'guildName': '',
+                                        'friendScore': 0
+                                    }
+                                    friend_list.append(encode_friend_info(fi))
+                    # ret_search_online_character_by_name: tag 0 = List<friend_info>
+                    resp_data = encode_sproto([(0, friend_list)])
+                    send_rpc_push(571, resp_data)
+                    print(f"[FRIEND] search_online_character_by_name name={search_name} found={len(friend_list)}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 321: # gather_other_player (warp to another player)
+                if picked_char:
+                    target_id = get_val_int(body, 0)
+                    # Find target player and warp to their location
+                    target_conn = None
+                    target_char = None
+                    for c, ch in list(ALL_CONNECTIONS.items()):
+                        if ch and ch.get('id', 0) == target_id:
+                            target_conn = c
+                            target_char = ch
+                            break
+                    if target_char and 'pos' in target_char:
+                        target_pos = target_char['pos']
+                        target_map = target_char.get('map_id', '11')
+                        print(f"[GATHER] Warping player {picked_char.get('id', 0)} to player {target_id} at map={target_map} pos={target_pos}")
+                        picked_char['pos'] = list(target_pos)
+                        start_map_transition(conn, picked_char, target_map, send_rpc_push, override_pos=list(target_pos))
+                    else:
+                        print(f"[GATHER] Target player {target_id} not found online")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 324: # update_player_map_info (RPC - get enemy location for revenge)
+                if picked_char:
+                    target_id = get_val_int(body, 0)
+                    # Find target player and return their map info
+                    target_char = None
+                    for c, ch in list(ALL_CONNECTIONS.items()):
+                        if ch and ch.get('id', 0) == target_id:
+                            target_char = ch
+                            break
+                    if target_char:
+                        pos = target_char.get('pos', [0, 0, 0, 0])
+                        pos_obj = encode_sproto([
+                            (0, pos[0] if len(pos) > 0 else 0),
+                            (1, pos[1] if len(pos) > 1 else 0),
+                            (2, pos[2] if len(pos) > 2 else 0),
+                            (3, pos[3] if len(pos) > 3 else 0)
+                        ])
+                        # update_player_map_info.response: tag 0=state, 1=mapid, 2=pos
+                        resp_data = encode_sproto([
+                            (0, 1),
+                            (1, target_char.get('map_id', '11')),
+                            (2, pos_obj)
+                        ])
+                        # RPC response uses msg 324
+                        send_rpc_push(324, resp_data)
+                        print(f"[RPC] update_player_map_info target={target_id} map={target_char.get('map_id', '11')}")
+                    else:
+                        # Target not online
+                        resp_data = encode_sproto([(0, 0)])
+                        send_rpc_push(324, resp_data)
+                        print(f"[RPC] update_player_map_info target={target_id} not found")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4659,10 +4793,10 @@ def client_handler(conn, addr):
         traceback.print_exc()
     finally:
         try:
-            conn_id = id(conn)
             if conn_id in NPC_SPAWNED_MAPS:
                 del NPC_SPAWNED_MAPS[conn_id]
             RANDOM_NAME_CALLED.discard(conn_id)
+            ALL_CONNECTIONS.pop(conn_id, None)  # Remove from online tracking
             conn.close()
         except Exception:
             pass
