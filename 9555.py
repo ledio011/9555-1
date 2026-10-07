@@ -4741,7 +4741,7 @@ def client_handler(conn, addr):
                                         break
                             # Send ret_add_friend with state=0 (pending) to sender
                             pending_friend = {
-                                'characterId': my_id,
+                                'characterId': target_id,
                                 'friendId': target_id,
                                 'name': tgt_name,
                                 'level': tgt_level,
