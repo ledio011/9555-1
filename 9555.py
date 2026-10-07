@@ -645,7 +645,7 @@ try:
                         'need_show': int(parts[36]) if parts[36].isdigit() else 0,
                         'is_motor': is_motor,
                         'model_id': parts[15] if len(parts) > 15 else '',
-                        'gta_link_car_id': parts[38] if len(parts) > 38 else ''
+                        'gta_link_car_id': parts[38] if len(parts) > 38 and parts[38] else parts[1]
                     }
         garage_count = sum(1 for v in MOUNT_CONFIG.values() if v.get('need_show') == 1)
         motor_count = sum(1 for v in MOUNT_CONFIG.values() if v.get('is_motor') == 1)
