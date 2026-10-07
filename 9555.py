@@ -4036,10 +4036,40 @@ def client_handler(conn, addr):
             elif msg in [118, 218, 145, 202, 210, 225, 242, 252, 253, 254, 255, 257, 258, 261, 266, 278, 296, 299, 313, 319]:
                 resp_data = encode_sproto([])
                 if msg == 118:
-                    # ret_request_activity_info expects Dictionary<string, activity_info> at tag 0
-                    # activity_info: ID(string), CurNum(long), Type(long), State(long), Parm(long), Parmstr(string), sign(long), time(long), next(long)
-                    activity_map = {}
-                    resp_data = encode_sproto([(0, activity_map)])
+                    # Check if this is a random name request (body has field 0 = type)
+                    # request_random_name.request: field 0 = type (0=male, 1=female)
+                    # After character_pick, the client is on the creation screen and sends
+                    # msg 118 to get a random name. Before that (in-game), it's activity info.
+                    req_type = body.get(0, -1)
+                    if isinstance(req_type, int) and req_type in [0, 1]:
+                        # Random name request from character creation screen
+                        names = [
+                            "Alex", "Jordan", "Taylor", "Morgan", "Casey", "Riley", "Cameron", "Quinn", "Avery", "Reese",
+                            "Blake", "Dakota", "Drew", "Emery", "Finley", "Harper", "Jamie", "Kendall", "Logan", "Peyton",
+                            "Sage", "Skyler", "Toby", "Val", "Ari", "Charlie", "Dana", "Ellis", "Frankie", "Gray",
+                            "Indigo", "Jules", "Kit", "Lane", "Marlow", "Nico", "Oakley", "Parker", "River", "Shiloh",
+                            "Summer", "Topher", "Winter", "Zion", "Adam", "Brett", "Caleb", "Dylan", "Ethan", "Finn",
+                            "Gavin", "Hunter", "Isaac", "Jake", "Kyle", "Liam", "Nathan", "Owen", "Patrick", "Quentin",
+                            "Robert", "Sean", "Tyler", "Ulrich", "Vincent", "Wyatt", "Xander", "Yusuf", "Zach", "Aaron",
+                            "Brandon", "Chase", "Devin", "Evan", "Gabriel", "Harrison", "Ian", "Jeremiah", "Kai", "Leo",
+                            "Mason", "Noah", "Oliver", "Peter", "Quincy", "Rowan", "Samuel", "Theodore", "Ulysses", "Vance",
+                            "Will", "Xavier", "Yael", "Zane", "Abigail", "Bella", "Clara", "Daisy", "Eliza", "Faith",
+                            "Grace", "Hannah", "Isla", "Julia", "Katie", "Lily", "Monica", "Nora", "Opal", "Paige",
+                            "Rachel", "Stella", "Tessa", "Uma", "Vera", "Willa", "Xena", "Yara", "Zara", "Aria",
+                            "Brooke", "Cindy", "Diana", "Ella", "Fiona", "Gemma", "Holly", "Ivy", "Jade", "Kira",
+                            "Luna", "Mia", "Nina", "Olivia", "Penny", "Ruby", "Sophie", "Tara", "Violet", "Wendy",
+                            "Xia", "Yuki", "Zoe", "Alice", "Beth", "Cora", "Daphne", "Elena", "Freya", "Gwen",
+                            "Hazel", "Iris", "Jasmine", "Karen", "Lena", "Maya", "Nell", "Olive", "Piper", "Rose",
+                            "Sara", "Tina", "Vivian", "Wren", "Zelda", "Amy", "Blair", "Cleo", "Eve", "Faye",
+                            "Gina", "Hope", "Iona", "Jill", "Kara", "Lola", "Mona", "Nia", "Ora", "Pam", "Rita",
+                            "Sue", "Tess", "Willa", "Yvonne",
+                        ]
+                        name = f"{random.choice(names)}_{random.randint(100, 999)}"
+                        resp_data = encode_sproto([(0, name)])
+                    else:
+                        # Activity info request (in-game)
+                        activity_map = {}
+                        resp_data = encode_sproto([(0, activity_map)])
                 elif msg == 218: resp_data = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp_data)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
