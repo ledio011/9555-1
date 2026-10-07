@@ -3086,6 +3086,43 @@ def client_handler(conn, addr):
                         # syn_friend_info: tag 0 = friend_info object
                         send_rpc_push(538, encode_sproto([(0, fi_bytes)]))
 
+                    # BUG FIX: Push pending friend requests on login so they appear in Request tab
+                    for req_id in picked_char.get('friend_requests_received', []):
+                        # Check if the requester is still in friend_requests_sent (request still valid)
+                        # Find the requester's character data to get their name
+                        requester_name = f'Player{req_id}'
+                        requester_level = 1
+                        requester_prof = 0
+                        requester_combat = 0
+                        for area_key, area_chars in all_accounts_chars.items():
+                            for acc_key, char_list in area_chars.items():
+                                for ch in char_list:
+                                    if ch.get('id', 0) == req_id:
+                                        requester_name = ch.get('name', f'Player{req_id}')
+                                        requester_level = ch.get('level', 1)
+                                        requester_prof = ch.get('prof', 0)
+                                        requester_combat = ch.get('combat', 0)
+                                        break
+                            else:
+                                continue
+                            break
+                        sender_friend_info = {
+                            'characterId': req_id,
+                            'friendId': req_id,
+                            'name': requester_name,
+                            'level': requester_level,
+                            'profession': requester_prof,
+                            'combValue': requester_combat,
+                            'state': 1,
+                            'timeInfo': int(time.time()),
+                            'friendType': 2,
+                            'guildId': 0,
+                            'guildName': '',
+                            'friendScore': 0
+                        }
+                        notice_data = encode_sproto([(0, encode_friend_info(sender_friend_info))])
+                        send_rpc_push(536, notice_data)
+
                     # Enemies are NOT synced via syn_friend_info on login because
                     # the client handler routes ALL syn_friend_info to UpdateFriendInfo
                     # (friends dict), not the enemies dict. Enemies load correctly
@@ -4390,7 +4427,7 @@ def client_handler(conn, addr):
                     mail_id = int(time.time() * 1000) % 1000000
                     mail_entry = {
                         'mailId': mail_id,
-                        'sendertype': 1,
+                        'sendertype': 4,  # USER type (client MailSenderType.USER=4)
                         'title': 'Player Mail',
                         'senderTime': int(time.time()),
                         'receiveId': receive_id,
@@ -4401,11 +4438,32 @@ def client_handler(conn, addr):
                         'items': [],
                         'expireday': 7
                     }
-                    if 'mails' not in picked_char:
-                        picked_char['mails'] = []
-                    picked_char['mails'].append(mail_entry)
-                    save_chars(all_accounts_chars)
-                    print(f"[MAIL] send_mail to={receive_id} id={mail_id}")
+                    # BUG FIX: Store mail in RECEIVER's mailbox, not sender's
+                    # Find and update the target character's data
+                    for area_key, area_chars in all_accounts_chars.items():
+                        for acc_key, char_list in area_chars.items():
+                            for ch in char_list:
+                                if ch.get('id', 0) == receive_id:
+                                    if 'mails' not in ch:
+                                        ch['mails'] = []
+                                    ch['mails'].append(mail_entry)
+                                    save_chars(all_accounts_chars)
+                                    # If target is online, push mail_update to them
+                                    for t_conn, t_char in list(ALL_CONNECTIONS.items()):
+                                        if t_char and t_char.get('id', 0) == receive_id:
+                                            try:
+                                                mi_bytes = build_mail_update(mail_entry)
+                                                ph_p = encode_sproto([(0, 531)])
+                                                pf_p = sproto_pack(ph_p + mi_bytes)
+                                                t_conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+                                                print(f"[MAIL] mail_update pushed to receiver={receive_id}")
+                                            except Exception:
+                                                print(f"[MAIL] Failed to push mail_update to receiver={receive_id}")
+                                            break
+                                    break
+                            if ch.get('id', 0) == receive_id:
+                                break
+                    print(f"[MAIL] send_mail from={picked_char.get('id', 0)} to={receive_id} id={mail_id}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4572,7 +4630,10 @@ def client_handler(conn, addr):
                         enemies = picked_char.get('enemies', [])
                         picked_char['enemies'] = [e for e in enemies if e.get('friendId') != target_id]
                         save_chars(all_accounts_chars)
-                        send_rpc_push(537, encode_sproto([(0, target_id)]))
+                        # BUG FIX: Client be_deleted_friend_handler calls RemoveFriend (wrong dict)
+                        # Use ret_del_friend (535) instead — client calls RemoveFriend which works
+                        # because the client already called RemoveEnemy locally in EnemyItemLogic
+                        send_rpc_push(535, encode_sproto([(0, target_id)]))
                     else: # friend
                         friends = picked_char.get('friends', [])
                         picked_char['friends'] = [f for f in friends if f.get('friendId') != target_id]
@@ -4589,17 +4650,23 @@ def client_handler(conn, addr):
                     my_id = picked_char.get('id', 0)
                     print(f"[FRIEND] request_update_friend_useinfo target={target_id} type={req_type}")
                     # Return friend list as Dictionary<long, friend_info>
+                    # BUG FIX: Client reads dict as value-only array, extracts key from value's friendId
+                    # The dict key in Python is ignored by encode_sproto (value-only wire format)
+                    # The client extracts the key from each decoded friend_info.friendId
                     friend_dict = {}
                     if req_type == 0: # friends
                         for fi in picked_char.get('friends', []):
-                            fi_bytes = encode_friend_info(fi)
+                            fi_copy = dict(fi)
+                            fi_copy['friendType'] = 1  # Client FilterFriend: friendType=1 -> MainPlayerFriendDic
+                            fi_bytes = encode_friend_info(fi_copy)
                             friend_dict[fi.get('friendId', 0)] = fi_bytes
                     elif req_type == 1: # enemies
                         for ei in picked_char.get('enemies', []):
-                            # Ensure friendType is 6 for enemies (required by client FilterEnemy)
                             ei_copy = dict(ei)
-                            ei_copy['friendType'] = 6
+                            ei_copy['friendType'] = 6  # Required by client FilterEnemy
                             ei_bytes = encode_friend_info(ei_copy, is_enemy=True)
+                            # For enemies, after swap the client reads friendId from timeInfo position
+                            # The dict key must match what the client extracts after the swap
                             friend_dict[ei.get('friendId', 0)] = ei_bytes
                     # ret_request_update_friend_useinfo: tag 0 = Dictionary, tag 1 = type
                     resp_data = encode_sproto([
@@ -4625,7 +4692,7 @@ def client_handler(conn, addr):
                             r for r in picked_char.get('friend_requests_received', [])
                             if r != target_id
                         ]
-                        # Add to friends list
+                        # Add to friends list (acceptor gets requester as friend)
                         if 'friends' not in picked_char:
                             picked_char['friends'] = []
                         new_friend = {
@@ -4637,7 +4704,7 @@ def client_handler(conn, addr):
                             'combValue': picked_char.get('combat', 0),
                             'state': 1,
                             'timeInfo': int(time.time()),
-                            'friendType': 0,
+                            'friendType': 1,
                             'guildId': 0,
                             'guildName': '',
                             'friendScore': 0
@@ -4646,8 +4713,55 @@ def client_handler(conn, addr):
                         save_chars(all_accounts_chars)
                         # syn_friend_info: tag 0 = friend_info object
                         send_rpc_push(538, encode_sproto([(0, encode_friend_info(new_friend))]))
-                        # notice_add_friend: tag 0 = friend_info object
-                        send_rpc_push(536, encode_sproto([(0, encode_friend_info(new_friend))]))
+                        # BUG FIX: Also add acceptor as friend to the requester's list (mutual friendship)
+                        # Find and update the requester's character data
+                        for area_key, area_chars in all_accounts_chars.items():
+                            for acc_key, char_list in area_chars.items():
+                                for ch in char_list:
+                                    if ch.get('id', 0) == target_id:
+                                        if 'friends' not in ch:
+                                            ch['friends'] = []
+                                        # Check if already friends
+                                        already_friend = False
+                                        for existing in ch['friends']:
+                                            if existing.get('friendId') == my_id:
+                                                already_friend = True
+                                                break
+                                        if not already_friend:
+                                            mutual_friend = {
+                                                'characterId': target_id,
+                                                'friendId': my_id,
+                                                'name': picked_char.get('name', f'Player{my_id}'),
+                                                'level': picked_char.get('level', 1),
+                                                'profession': picked_char.get('prof', 0),
+                                                'combValue': picked_char.get('combat', 0),
+                                                'state': 1,
+                                                'timeInfo': int(time.time()),
+                                                'friendType': 1,
+                                                'guildId': 0,
+                                                'guildName': '',
+                                                'friendScore': 0
+                                            }
+                                            ch['friends'].append(mutual_friend)
+                                            # If requester is online, push syn_friend_info to them
+                                            for t_conn, t_char in list(ALL_CONNECTIONS.items()):
+                                                if t_char and t_char.get('id', 0) == target_id:
+                                                    try:
+                                                        fi_bytes = encode_friend_info(mutual_friend)
+                                                        ph_p = encode_sproto([(0, 538)])
+                                                        pf_p = sproto_pack(ph_p + encode_sproto([(0, fi_bytes)]))
+                                                        t_conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+                                                        print(f"[FRIEND] syn_friend_info pushed to requester={target_id}")
+                                                    except Exception:
+                                                        print(f"[FRIEND] Failed to push syn_friend_info to requester={target_id}")
+                                                    break
+                                        # Remove from friend_requests_sent
+                                        if 'friend_requests_sent' in ch:
+                                            ch['friend_requests_sent'] = [r for r in ch['friend_requests_sent'] if r != my_id]
+                                        save_chars(all_accounts_chars)
+                                        break
+                                if ch.get('id', 0) == target_id:
+                                    break
                     else:
                         if 'friend_requests_received' not in picked_char:
                             picked_char['friend_requests_received'] = []
