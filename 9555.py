@@ -3908,6 +3908,7 @@ def client_handler(conn, addr):
 
                     # Sync items and finalize client state
                     send_rpc_push(611, sync_inventory_data(picked_char))
+
                     send_rpc_push(654, encode_sproto([(0, 1)])) # start_enter_game state=1
                     print(f"[REWARD] Expansion finalized and rewards granted for player {picked_char['id']}")
                 elif picked_char:
