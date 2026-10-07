@@ -1038,24 +1038,14 @@ def encode_sproto(fields, fn=None):
                         items.append(struct.pack("<I", len(item)) + item)
                     v = b"".join(items)
             elif isinstance(val, dict):
-                # Sproto map encoded as array of elements
-                # Support dict with bytes values (sproto objects) for Dictionary<long, friend_info>
-                # and dict with simple values for Dictionary<string, item>
+                # Sproto map: client reads as array of length-prefixed values only.
+                # Keys are extracted from each value using a callback, not encoded on wire.
+                # Format: len(val1)+val1+len(val2)+val2+...
                 items = []
                 for k, item in val.items():
-                    # Encode key
-                    if isinstance(k, int):
-                        # Integer key (long) - encode as 8-byte integer
-                        key_data = struct.pack("<q", k)
-                    elif isinstance(k, str):
-                        key_data = k.encode('utf-8')
-                    else:
-                        key_data = str(k).encode('utf-8')
-                    # Encode value
                     if isinstance(item, (bytes, bytearray)):
                         val_data = item
                     elif isinstance(item, dict):
-                        # Nested dict as sproto object
                         val_data = encode_sproto(list(item.items()))
                     elif isinstance(item, bool):
                         val_data = b'\x01' if item else b'\x00'
@@ -1065,7 +1055,6 @@ def encode_sproto(fields, fn=None):
                         val_data = item.encode('utf-8')
                     else:
                         val_data = b''
-                    items.append(struct.pack("<I", len(key_data)) + key_data)
                     items.append(struct.pack("<I", len(val_data)) + val_data)
                 v = b"".join(items)
             else:
