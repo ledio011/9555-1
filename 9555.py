@@ -2552,6 +2552,19 @@ def init_character_fields(c):
     if 'hp' not in c or c.get('hp', 0) <= 0:
         c['hp'] = stats['hp_max']
 
+def init_social_data(c):
+    """Initialize social data (friends, enemies, mails) for a character."""
+    if 'friends' not in c:
+        c['friends'] = []
+    if 'enemies' not in c:
+        c['enemies'] = []
+    if 'mails' not in c:
+        c['mails'] = []
+    if 'friend_requests_sent' not in c:
+        c['friend_requests_sent'] = []
+    if 'friend_requests_received' not in c:
+        c['friend_requests_received'] = []
+
 def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, override_pos=None):
     if picked_char and picked_char.get('hp', 0) <= 0:
         stats = get_character_stats(picked_char)
@@ -2976,6 +2989,50 @@ def client_handler(conn, addr):
 
                     # 519: mission_sync
                     send_rpc_push(519, sync_mission_data(picked_char))
+
+                    # 538: syn_friend_info - sync friend list on login
+                    init_social_data(picked_char)
+                    for fi in picked_char.get('friends', []):
+                        fi_bytes = encode_sproto([
+                            (0, fi.get('characterId', 0)),
+                            (1, fi.get('friendId', 0)),
+                            (2, fi.get('name', '')),
+                            (3, fi.get('level', 1)),
+                            (4, fi.get('profession', 0)),
+                            (5, fi.get('combValue', 0)),
+                            (6, fi.get('state', 1)),
+                            (7, fi.get('timeInfo', int(time.time()))),
+                            (8, fi.get('friendType', 0)),
+                            (9, fi.get('guildId', 0)),
+                            (10, fi.get('guildName', '')),
+                            (11, fi.get('friendScore', 0))
+                        ])
+                        send_rpc_push(538, encode_sproto([(0, fi_bytes)]))
+
+                    # 531: mail_update - sync mail list on login
+                    for mi in picked_char.get('mails', []):
+                        items_list = []
+                        for it in mi.get('items', []):
+                            item_bytes = encode_sproto([
+                                (0, it.get('itemId', 0)),
+                                (1, it.get('count', 1)),
+                                (2, it.get('quality', 0))
+                            ])
+                            items_list.append(item_bytes)
+                        mi_bytes = encode_sproto([
+                            (0, mi.get('mailId', 0)),
+                            (1, mi.get('sendertype', 0)),
+                            (3, mi.get('title', '')),
+                            (4, mi.get('senderTime', int(time.time()))),
+                            (5, mi.get('receiveId', 0)),
+                            (6, mi.get('readTime', 0)),
+                            (7, mi.get('context', '')),
+                            (8, mi.get('mailState', 0)),
+                            (9, mi.get('sortTime', int(time.time()))),
+                            (10, items_list if items_list else None),
+                            (11, mi.get('expireday', 7))
+                        ])
+                        send_rpc_push(531, mi_bytes)
 
                     # TAG 503: enter_map
                     mid = str(picked_char.get('map_id', '11'))
@@ -4254,6 +4311,341 @@ def client_handler(conn, addr):
                         picked_char['pre_arena_pos'] = None
                     start_map_transition(conn, picked_char, "11", send_rpc_push, override_pos=saved_pos)
                     save_chars(all_accounts_chars)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            # === SOCIAL UI HANDLERS ===
+
+            elif msg == 122: # send_mail
+                if picked_char:
+                    receive_id = get_val_int(body, 0)
+                    context_raw = body.get(1, b"")
+                    if isinstance(context_raw, bytes):
+                        context = context_raw.decode('utf-8', errors='ignore')
+                    else:
+                        context = str(context_raw)
+                    mail_id = int(time.time() * 1000) % 1000000
+                    mail_entry = {
+                        'mailId': mail_id,
+                        'sendertype': 1,
+                        'title': 'Player Mail',
+                        'senderTime': int(time.time()),
+                        'receiveId': receive_id,
+                        'readTime': 0,
+                        'context': context,
+                        'mailState': 0,
+                        'sortTime': int(time.time()),
+                        'items': [],
+                        'expireday': 7
+                    }
+                    if 'mails' not in picked_char:
+                        picked_char['mails'] = []
+                    picked_char['mails'].append(mail_entry)
+                    save_chars(all_accounts_chars)
+                    print(f"[MAIL] send_mail to={receive_id} id={mail_id}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 123: # mail_operation
+                if picked_char:
+                    mail_id = get_val_int(body, 0)
+                    operation = get_val_int(body, 1)
+                    print(f"[MAIL] operation={operation} mailId={mail_id}")
+                    if operation == 0: # read
+                        for mi in picked_char.get('mails', []):
+                            if mi.get('mailId') == mail_id:
+                                mi['mailState'] = 1
+                                mi['readTime'] = int(time.time())
+                                break
+                        save_chars(all_accounts_chars)
+                    elif operation == 1: # delete
+                        mails = picked_char.get('mails', [])
+                        picked_char['mails'] = [m for m in mails if m.get('mailId') != mail_id]
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(532, encode_sproto([(0, mail_id)]))
+                    elif operation == 2: # get items
+                        for mi in picked_char.get('mails', []):
+                            if mi.get('mailId') == mail_id:
+                                mi['mailState'] = 2
+                                for it in mi.get('items', []):
+                                    add_to_inventory(picked_char, str(it.get('itemId', 0)), it.get('count', 1))
+                                send_rpc_push(611, sync_inventory_data(picked_char))
+                                break
+                        save_chars(all_accounts_chars)
+                    elif operation == 3: # get all items
+                        for mi in picked_char.get('mails', []):
+                            if mi.get('mailState', 0) != 2:
+                                mi['mailState'] = 2
+                                for it in mi.get('items', []):
+                                    add_to_inventory(picked_char, str(it.get('itemId', 0)), it.get('count', 1))
+                        send_rpc_push(611, sync_inventory_data(picked_char))
+                        save_chars(all_accounts_chars)
+                    elif operation == 4: # delete all
+                        picked_char['mails'] = []
+                        save_chars(all_accounts_chars)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 124: # add_friend (type 0=friend, 1=enemy/foe)
+                if picked_char:
+                    target_id = get_val_int(body, 0)
+                    add_type = get_val_int(body, 1)
+                    my_id = picked_char.get('id', 0)
+                    print(f"[FRIEND] add_friend target={target_id} type={add_type}")
+                    if add_type == 1: # enemy/foe
+                        if 'enemies' not in picked_char:
+                            picked_char['enemies'] = []
+                        already = False
+                        for ei in picked_char['enemies']:
+                            if ei.get('friendId') == target_id:
+                                already = True
+                                break
+                        if not already:
+                            enemy_info = {
+                                'characterId': my_id,
+                                'friendId': target_id,
+                                'name': f'Player{target_id}',
+                                'level': picked_char.get('level', 1),
+                                'profession': picked_char.get('prof', 0),
+                                'combValue': picked_char.get('combat', 0),
+                                'state': 1,
+                                'timeInfo': int(time.time()),
+                                'friendType': 1,
+                                'guildId': 0,
+                                'guildName': '',
+                                'friendScore': 0
+                            }
+                            picked_char['enemies'].append(enemy_info)
+                            save_chars(all_accounts_chars)
+                            fi_bytes = encode_sproto([
+                                (0, enemy_info['characterId']),
+                                (1, enemy_info['friendId']),
+                                (2, enemy_info['name']),
+                                (3, enemy_info['level']),
+                                (4, enemy_info['profession']),
+                                (5, enemy_info['combValue']),
+                                (6, enemy_info['state']),
+                                (7, enemy_info['timeInfo']),
+                                (8, enemy_info['friendType']),
+                                (9, enemy_info['guildId']),
+                                (10, enemy_info['guildName']),
+                                (11, enemy_info['friendScore'])
+                            ])
+                            send_rpc_push(538, encode_sproto([(0, fi_bytes)]))
+                    else: # friend request
+                        if 'friend_requests_sent' not in picked_char:
+                            picked_char['friend_requests_sent'] = []
+                        already = False
+                        for fr in picked_char['friend_requests_sent']:
+                            if fr == target_id:
+                                already = True
+                                break
+                        if not already:
+                            picked_char['friend_requests_sent'].append(target_id)
+                            save_chars(all_accounts_chars)
+                            # Send ret_add_friend with state=0 (pending)
+                            fi_bytes = encode_sproto([
+                                (0, my_id),
+                                (1, target_id),
+                                (2, f'Player{target_id}'),
+                                (3, picked_char.get('level', 1)),
+                                (4, picked_char.get('prof', 0)),
+                                (5, picked_char.get('combat', 0)),
+                                (6, 0),
+                                (7, int(time.time())),
+                                (8, 0),
+                                (9, 0),
+                                (10, ''),
+                                (11, 0)
+                            ])
+                            send_rpc_push(533, encode_sproto([(0, fi_bytes)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 125: # del_friend (type 0=friend, 1=enemy/foe)
+                if picked_char:
+                    target_id = get_val_int(body, 0)
+                    del_type = get_val_int(body, 1)
+                    print(f"[FRIEND] del_friend target={target_id} type={del_type}")
+                    if del_type == 1: # enemy/foe
+                        enemies = picked_char.get('enemies', [])
+                        picked_char['enemies'] = [e for e in enemies if e.get('friendId') != target_id]
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(537, encode_sproto([(0, target_id)]))
+                    else: # friend
+                        friends = picked_char.get('friends', [])
+                        picked_char['friends'] = [f for f in friends if f.get('friendId') != target_id]
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(535, encode_sproto([(0, target_id)]))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 126: # request_update_friend_useinfo
+                if picked_char:
+                    target_id = get_val_int(body, 0)
+                    req_type = get_val_int(body, 1)
+                    my_id = picked_char.get('id', 0)
+                    print(f"[FRIEND] request_update_friend_useinfo target={target_id} type={req_type}")
+                    # Return friend list based on type
+                    friend_list = []
+                    if req_type == 0: # friends
+                        for fi in picked_char.get('friends', []):
+                            fi_bytes = encode_sproto([
+                                (0, fi.get('characterId', 0)),
+                                (1, fi.get('friendId', 0)),
+                                (2, fi.get('name', '')),
+                                (3, fi.get('level', 1)),
+                                (4, fi.get('profession', 0)),
+                                (5, fi.get('combValue', 0)),
+                                (6, fi.get('state', 1)),
+                                (7, fi.get('timeInfo', int(time.time()))),
+                                (8, fi.get('friendType', 0)),
+                                (9, fi.get('guildId', 0)),
+                                (10, fi.get('guildName', '')),
+                                (11, fi.get('friendScore', 0))
+                            ])
+                            friend_list.append(fi_bytes)
+                    elif req_type == 1: # enemies
+                        for ei in picked_char.get('enemies', []):
+                            ei_bytes = encode_sproto([
+                                (0, ei.get('characterId', 0)),
+                                (1, ei.get('friendId', 0)),
+                                (2, ei.get('name', '')),
+                                (3, ei.get('level', 1)),
+                                (4, ei.get('profession', 0)),
+                                (5, ei.get('combValue', 0)),
+                                (6, ei.get('state', 1)),
+                                (7, ei.get('timeInfo', int(time.time()))),
+                                (8, ei.get('friendType', 1)),
+                                (9, ei.get('guildId', 0)),
+                                (10, ei.get('guildName', '')),
+                                (11, ei.get('friendScore', 0))
+                            ])
+                            friend_list.append(ei_bytes)
+                    resp_data = encode_sproto([
+                        (0, friend_list),
+                        (1, req_type)
+                    ])
+                    send_rpc_push(534, resp_data)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 158: # approve_resverve_friend
+                if picked_char:
+                    target_id = get_val_int(body, 0)
+                    is_agree = get_val_int(body, 1)
+                    my_id = picked_char.get('id', 0)
+                    print(f"[FRIEND] approve_resverve_friend target={target_id} agree={is_agree}")
+                    if is_agree == 1:
+                        # Remove from pending requests
+                        if 'friend_requests_received' not in picked_char:
+                            picked_char['friend_requests_received'] = []
+                        picked_char['friend_requests_received'] = [
+                            r for r in picked_char.get('friend_requests_received', [])
+                            if r != target_id
+                        ]
+                        # Add to friends list
+                        if 'friends' not in picked_char:
+                            picked_char['friends'] = []
+                        friend_info = {
+                            'characterId': my_id,
+                            'friendId': target_id,
+                            'name': f'Player{target_id}',
+                            'level': picked_char.get('level', 1),
+                            'profession': picked_char.get('prof', 0),
+                            'combValue': picked_char.get('combat', 0),
+                            'state': 1,
+                            'timeInfo': int(time.time()),
+                            'friendType': 0,
+                            'guildId': 0,
+                            'guildName': '',
+                            'friendScore': 0
+                        }
+                        picked_char['friends'].append(friend_info)
+                        save_chars(all_accounts_chars)
+                        # Send syn_friend_info to update client
+                        fi_bytes = encode_sproto([
+                            (0, friend_info['characterId']),
+                            (1, friend_info['friendId']),
+                            (2, friend_info['name']),
+                            (3, friend_info['level']),
+                            (4, friend_info['profession']),
+                            (5, friend_info['combValue']),
+                            (6, friend_info['state']),
+                            (7, friend_info['timeInfo']),
+                            (8, friend_info['friendType']),
+                            (9, friend_info['guildId']),
+                            (10, friend_info['guildName']),
+                            (11, friend_info['friendScore'])
+                        ])
+                        send_rpc_push(538, encode_sproto([(0, fi_bytes)]))
+                        # Send notice_add_friend
+                        send_rpc_push(536, encode_sproto([(0, fi_bytes)]))
+                    else:
+                        if 'friend_requests_received' not in picked_char:
+                            picked_char['friend_requests_received'] = []
+                        picked_char['friend_requests_received'] = [
+                            r for r in picked_char.get('friend_requests_received', [])
+                            if r != target_id
+                        ]
+                        save_chars(all_accounts_chars)
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 284: # send_mail_box (system mail)
+                if picked_char:
+                    subject_raw = body.get(0, b"")
+                    context_raw = body.get(1, b"")
+                    email_raw = body.get(2, b"")
+                    if isinstance(subject_raw, bytes):
+                        subject = subject_raw.decode('utf-8', errors='ignore')
+                    else:
+                        subject = str(subject_raw)
+                    if isinstance(context_raw, bytes):
+                        context = context_raw.decode('utf-8', errors='ignore')
+                    else:
+                        context = str(context_raw)
+                    mail_id = int(time.time() * 1000) % 1000000
+                    mail_entry = {
+                        'mailId': mail_id,
+                        'sendertype': 0,
+                        'title': subject,
+                        'senderTime': int(time.time()),
+                        'receiveId': picked_char.get('id', 0),
+                        'readTime': 0,
+                        'context': context,
+                        'mailState': 0,
+                        'sortTime': int(time.time()),
+                        'items': [],
+                        'expireday': 7
+                    }
+                    if 'mails' not in picked_char:
+                        picked_char['mails'] = []
+                    picked_char['mails'].append(mail_entry)
+                    save_chars(all_accounts_chars)
+                    # Push mail_update to client
+                    mi_bytes = encode_sproto([
+                        (0, mail_id),
+                        (1, 0),
+                        (3, subject),
+                        (4, int(time.time())),
+                        (5, picked_char.get('id', 0)),
+                        (6, 0),
+                        (7, context),
+                        (8, 0),
+                        (9, int(time.time())),
+                        (10, None),
+                        (11, 7)
+                    ])
+                    send_rpc_push(531, mi_bytes)
+                    print(f"[MAIL] send_mail_box id={mail_id} subject={subject}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
