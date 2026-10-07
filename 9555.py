@@ -2652,7 +2652,9 @@ def build_mail_update(mi):
     ])
 
 def broadcast_aoi_add(target_conn, target_char, sender_conn=None, sender_char=None):
-    """Broadcast aoi_add (msg 505) for a player to all other players on the same map."""
+    """Broadcast aoi_add (msg 505) for a player to all other players on the same map.
+    target_conn is the socket to send TO (when called from map transition for existing players).
+    When called for the new player, target_conn is ignored and we broadcast to all others."""
     if not target_char:
         return
     target_map = str(target_char.get('map_id', '11'))
@@ -2660,49 +2662,57 @@ def broadcast_aoi_add(target_conn, target_char, sender_conn=None, sender_char=No
     pos = target_char.get('pos', [0, 0, 0, 0])
     # Build character_aoi for the target player
     # character_aoi: id(0), visual(1), general(2), attribute_other(3), movement(5), runtime(6)
-    visual_bytes = get_visual(target_char.get('name', 'Hero'), target_char.get('prof', 0))
-    gen_bytes = get_general(target_char)
-    stats = get_character_stats(target_char)
-    attr_oth = encode_sproto([
-        (0, target_char.get('hp', stats['hp_max'])),
-        (1, stats['exp']),
-        (2, stats['lv']),
-        (3, stats['power']),
-        (15, 1)
-    ])
-    mv_bytes = get_movement(pos[0], pos[1], pos[2], pos[3])
-    char_aoi = encode_sproto([
-        (0, target_id),
-        (1, visual_bytes),
-        (2, gen_bytes),
-        (3, attr_oth),
-        (5, mv_bytes)
-    ])
-    aoi_data = encode_sproto([(0, char_aoi)])
-    # Send to all other connections that have a character on the same map
-    for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-        if ch and ch.get('id', 0) != target_id and str(ch.get('map_id', '11')) == target_map:
-            try:
-                ph_p = encode_sproto([(0, 505)])
-                pf_p = sproto_pack(ph_p + aoi_data)
-                c.sendall(struct.pack(">H", len(pf_p)) + pf_p)
-                print(f"[AOI] Broadcast aoi_add id={target_id} to {ch.get('id', 0)} map={target_map}")
-            except Exception:
-                pass
+    try:
+        visual_bytes = get_visual(target_char.get('name', 'Hero'), target_char.get('prof', 0))
+        gen_bytes = get_general(target_char)
+        stats = get_character_stats(target_char)
+        attr_oth = encode_sproto([
+            (0, target_char.get('hp', stats['hp_max'])),
+            (1, stats['exp']),
+            (2, stats['lv']),
+            (3, stats['power']),
+            (15, 1)
+        ])
+        mv_bytes = get_movement(pos[0], pos[1], pos[2], pos[3])
+        char_aoi = encode_sproto([
+            (0, target_id),
+            (1, visual_bytes),
+            (2, gen_bytes),
+            (3, attr_oth),
+            (5, mv_bytes)
+        ])
+        aoi_data = encode_sproto([(0, char_aoi)])
+        ph_p = encode_sproto([(0, 505)])
+        pf_p = sproto_pack(ph_p + aoi_data)
+        pkt = struct.pack(">H", len(pf_p)) + pf_p
+        # Send to all other connections that have a character on the same map
+        for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
+            if ch and ch.get('id', 0) != target_id and str(ch.get('map_id', '11')) == target_map:
+                try:
+                    c.sendall(pkt)
+                    print(f"[AOI] Broadcast aoi_add id={target_id} to {ch.get('id', 0)} map={target_map}")
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[AOI] Failed to build aoi_add for id={target_id}: {e}")
 
 def broadcast_aoi_remove(char_id, map_id):
     """Broadcast aoi_remove (msg 506) when a player leaves a map."""
     map_id = str(map_id)
-    aoi_data = encode_sproto([(0, char_id)])
-    for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-        if ch and str(ch.get('map_id', '11')) == map_id:
-            try:
-                ph_p = encode_sproto([(0, 506)])
-                pf_p = sproto_pack(ph_p + aoi_data)
-                c.sendall(struct.pack(">H", len(pf_p)) + pf_p)
-                print(f"[AOI] Broadcast aoi_remove id={char_id} to {ch.get('id', 0)} map={map_id}")
-            except Exception:
-                pass
+    try:
+        aoi_data = encode_sproto([(0, char_id)])
+        ph_p = encode_sproto([(0, 506)])
+        pf_p = sproto_pack(ph_p + aoi_data)
+        pkt = struct.pack(">H", len(pf_p)) + pf_p
+        for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
+            if ch and str(ch.get('map_id', '11')) == map_id:
+                try:
+                    c.sendall(pkt)
+                    print(f"[AOI] Broadcast aoi_remove id={char_id} to {ch.get('id', 0)} map={map_id}")
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[AOI] Failed to build aoi_remove for id={char_id}: {e}")
 
 def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, override_pos=None):
     if picked_char and picked_char.get('hp', 0) <= 0:
@@ -2776,12 +2786,42 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         # TAG 505: aoi_add (NPCs)
         spawn_map_npcs(conn, target_map_id, picked_char)
 
-        # Broadcast this player to all other players on the same map
+        # Broadcast this new player to all other players on the same map
         broadcast_aoi_add(conn, picked_char)
         # Send existing players on this map to the new player
         for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
             if ch and ch.get('id', 0) != picked_char.get('id', 0) and str(ch.get('map_id', '11')) == target_map_id:
-                broadcast_aoi_add(c, ch, conn, picked_char)
+                # Send this existing player's aoi_add to the new player (conn)
+                try:
+                    target_map_ex = str(ch.get('map_id', '11'))
+                    target_id_ex = ch.get('id', 0)
+                    pos_ex = ch.get('pos', [0, 0, 0, 0])
+                    visual_bytes_ex = get_visual(ch.get('name', 'Hero'), ch.get('prof', 0))
+                    gen_bytes_ex = get_general(ch)
+                    stats_ex = get_character_stats(ch)
+                    attr_oth_ex = encode_sproto([
+                        (0, ch.get('hp', stats_ex['hp_max'])),
+                        (1, stats_ex['exp']),
+                        (2, stats_ex['lv']),
+                        (3, stats_ex['power']),
+                        (15, 1)
+                    ])
+                    mv_bytes_ex = get_movement(pos_ex[0], pos_ex[1], pos_ex[2], pos_ex[3])
+                    char_aoi_ex = encode_sproto([
+                        (0, target_id_ex),
+                        (1, visual_bytes_ex),
+                        (2, gen_bytes_ex),
+                        (3, attr_oth_ex),
+                        (5, mv_bytes_ex)
+                    ])
+                    aoi_data_ex = encode_sproto([(0, char_aoi_ex)])
+                    ph_p_ex = encode_sproto([(0, 505)])
+                    pf_p_ex = sproto_pack(ph_p_ex + aoi_data_ex)
+                    pkt_ex = struct.pack(">H", len(pf_p_ex)) + pf_p_ex
+                    conn.sendall(pkt_ex)
+                    print(f"[AOI] Send existing player id={target_id_ex} to new player {picked_char.get('id', 0)} map={target_map_id}")
+                except Exception as e:
+                    print(f"[AOI] Failed to send existing player {ch.get('id', 0)} to new player: {e}")
 
         # BOSS SPAWN for Dominance Map 502
         if target_map_id == "502":
@@ -4745,8 +4785,11 @@ def client_handler(conn, addr):
                                     try:
                                         ph_p = encode_sproto([(0, 536)])
                                         pf_p = sproto_pack(ph_p + notice_data)
-                                        t_conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
-                                        print(f"[FRIEND] notice_add_friend sent to target={target_id} from={my_id}")
+                                        notice_pkt = struct.pack(">H", len(pf_p)) + pf_p
+                                        t_conn.sendall(notice_pkt)
+                                        print(f"[FRIEND] notice_add_friend sent to target={target_id} from={my_id} size={len(notice_pkt)}")
+                                    except BrokenPipeError:
+                                        print(f"[FRIEND] Target {target_id} connection broken, skipping notice")
                                     except Exception as e:
                                         print(f"[FRIEND] Failed to send notice_add_friend to target={target_id}: {e}")
                                     break
