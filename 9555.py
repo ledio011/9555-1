@@ -1648,7 +1648,7 @@ def get_full_char(c):
         (15, download_state)
     ])
 
-def sync_char_attrs_rpc(conn, picked_char):
+def sync_char_attrs_rpc(conn, picked_char, conn_id=None):
     """Sends TAG 510 (aoi_update_attribute) to sync all stats."""
     stats = get_character_stats(picked_char)
     hp_cur = picked_char.get('hp', stats['hp_max'])
@@ -1679,7 +1679,17 @@ def sync_char_attrs_rpc(conn, picked_char):
     try:
         ph_p = encode_sproto([(0, 510)])
         pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_attr)]))
-        conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+        pkt = struct.pack(">H", len(pf_p)) + pf_p
+        # Use connection lock to prevent packet framing issues
+        if conn_id is not None:
+            c_lock = CONNECTION_LOCKS.get(conn_id)
+            if c_lock:
+                with c_lock:
+                    conn.sendall(pkt)
+            else:
+                conn.sendall(pkt)
+        else:
+            conn.sendall(pkt)
     except: pass
 
 def get_npc_attr(nid, player_level=1):
@@ -1794,14 +1804,16 @@ def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
     except: pass
 
-def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_area=False, pvp_scale=1.0):
+def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_area=False, pvp_scale=1.0, effinfo_id=None):
     """Original Damage calculation reproduced from CharacterAttributeData.cs"""
     prefix = "[AREA DAMAGE]" if is_area else "[COMBAT]"
 
     # 1. Get Skill Multipliers from EffInfoData
-    skill_cfg = SKILL_CONFIG.get(skill_id, {})
-    eff_id = skill_cfg.get('eff0', "10000") # Default to NormalAttack if not found
-    eff_cfg = EFF_CONFIG.get(eff_id, {
+    # Use the actual effinfo_id from TAG 111 if provided, otherwise fall back to eff0
+    if effinfo_id is None:
+        skill_cfg = SKILL_CONFIG.get(skill_id, {})
+        effinfo_id = skill_cfg.get('eff0', "10000")
+    eff_cfg = EFF_CONFIG.get(effinfo_id, {
         'dmg_fixed': 0, 'dmg_fixed_add': 0, 'dmg_multi': 10000, 'dmg_multi_add': 0, 'adds': {}
     })
 
@@ -4038,10 +4050,10 @@ def client_handler(conn, addr):
 
                         if target_char is not None:
                             # === PvP: target is an online player ===
-                            # Server-authoritative damage calculation
+                            # Server-authoritative damage calculation using actual effinfo_id from client
                             target_stats = get_character_stats(target_char)
                             skill_lv = picked_char.get('skill_levels', {}).get(skill_id, 1)
-                            server_dmg, hit, calc_cri = get_combat_damage(attacker_stats, target_stats, skill_id, skill_lv, pvp_scale=1.0)
+                            server_dmg, hit, calc_cri = get_combat_damage(attacker_stats, target_stats, skill_id, skill_lv, pvp_scale=1.0, effinfo_id=effinfo_id)
                             if not hit:
                                 server_dmg = 0
                                 calc_cri = False
@@ -4057,6 +4069,9 @@ def client_handler(conn, addr):
                             # Broadcast victim's updated HP to all other players on the map
                             broadcast_aoi_attribute(target_char)
 
+                            # Save HP state so it persists after reconnect
+                            save_chars(all_accounts_chars)
+
                             # Build TAG 511 damage board with actual skill/eff IDs
                             dmg_item = encode_sproto([
                                 (0, target_id),
@@ -4067,9 +4082,21 @@ def client_handler(conn, addr):
                             ])
                             dmg_board = encode_sproto([(0, [dmg_item])])
 
-                            # Send TAG 511 (show_damage_board) to attacker only
-                            # The victim's client already creates damage visuals locally from the hit
+                            # Send TAG 511 (show_damage_board) to attacker
                             send_rpc_push(511, dmg_board)
+                            # Send TAG 511 to victim so they see damage numbers on themselves
+                            try:
+                                t_ph = encode_sproto([(0, 511)])
+                                t_pf = sproto_pack(t_ph + dmg_board)
+                                t_pkt = struct.pack(">H", len(t_pf)) + t_pf
+                                t_lock = CONNECTION_LOCKS.get(target_cid)
+                                if t_lock:
+                                    with t_lock:
+                                        target_conn.sendall(t_pkt)
+                                else:
+                                    target_conn.sendall(t_pkt)
+                            except Exception:
+                                pass
 
                             # Build TAG 514 hit_action with actual effinfoId
                             hit_action = encode_sproto([
@@ -4078,9 +4105,21 @@ def client_handler(conn, addr):
                                 (2, effinfo_id)
                             ])
 
-                            # Send TAG 514 (hit_action) to attacker only
-                            # The victim's client already shows hit effects locally
+                            # Send TAG 514 (hit_action) to attacker
                             send_rpc_push(514, hit_action)
+                            # Send TAG 514 to victim so they see hit effects on themselves
+                            try:
+                                t_ph = encode_sproto([(0, 514)])
+                                t_pf = sproto_pack(t_ph + hit_action)
+                                t_pkt = struct.pack(">H", len(t_pf)) + t_pf
+                                t_lock = CONNECTION_LOCKS.get(target_cid)
+                                if t_lock:
+                                    with t_lock:
+                                        target_conn.sendall(t_pkt)
+                                else:
+                                    target_conn.sendall(t_pkt)
+                            except Exception:
+                                pass
 
                             # Check if victim died
                             if new_hp == 0:
@@ -4413,6 +4452,9 @@ def client_handler(conn, addr):
                     else:
                         print(f"[STREET RACE] denied id={copy_id}; daily attempts exhausted")
                 elif picked_char:
+                    if picked_char.get('pre_copy_pos') is None:
+                        picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                    picked_char['active_copy_id'] = copy_id
                     advance_missions(picked_char, send_rpc_push, 'dungeon', target_id=copy_id)
                     start_map_transition(conn, picked_char, copy_id, send_rpc_push)
                 if session is not None:
@@ -4611,6 +4653,9 @@ def client_handler(conn, addr):
                 mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
                 print(f"[RX] Scene Entry: {mid} (MSG={msg})")
                 if picked_char:
+                    if picked_char.get('pre_copy_pos') is None:
+                        picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                    picked_char['active_copy_id'] = mid
                     start_map_transition(conn, picked_char, mid, send_rpc_push)
                     if msg == 201: # world_boss
                         advance_missions(picked_char, send_rpc_push, 'world_boss')
