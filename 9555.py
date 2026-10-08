@@ -1638,7 +1638,8 @@ def get_character_stats(c):
         'power': power, 'lv': lv, 'exp': c.get('exp', 0),
         'defa': ld['defa'], 'dgea': ld['dgea'], 'resa': ld['resa'],
         'hita': ld['hita'], 'cria': ld['cria'],
-        'exd': ld['exd'][prof], 'exr': ld['exr'][prof], 'crd': ld['crd'][prof], 'crr': ld['crr'][prof]
+        'exd': ld['exd'][prof], 'exr': ld['exr'][prof], 'crd': ld['crd'][prof], 'crr': ld['crr'][prof],
+        'satp': 0, 'satm': 0, 'satc': 0
     }
 
 def get_char_ov(c, sort_index=None):
@@ -1841,7 +1842,8 @@ def get_npc_attr(nid, player_level=1):
         'hit': hit, 'eva': eva, 'cri': cri, 'res': res,
         'lv': lvl, 'defa': defa, 'dgea': dgea, 'resa': resa, 'hita': hita, 'cria': cria,
         'exd': exd, 'exr': exr, 'crd': crd, 'crr': crr,
-        'power': power
+        'power': power,
+        'satp': 0, 'satm': 0, 'satc': 0
     }
 
 def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
@@ -1921,6 +1923,14 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     scaled_damage = skill_damage * pvp_mult
     scaled_scale = skill_scale * pvp_mult
 
+    # Add SATP/SATM/SATC contribution based on defender type (CharacterAttributeData.cs lines 983-1008)
+    # SATC for cars, SATM for NPCs (FunctionType != 10), SATP for other targets (players, zombies)
+    # Server doesn't track defender obj_type precisely, so use SATM for NPC targets, SATP for PvP
+    sat_type = attacker_stats.get('sat_type', 'satm')  # 'satm' for NPC attacks, 'satp' for player/zombie
+    sat_value = attacker_stats.get(sat_type, 0)
+    scaled_scale += sat_value / 10000.0 if sat_value else 0
+    scaled_damage += sat_value
+
     base_dmg = attacker_stats['atk'] * scaled_scale + scaled_damage
     def_red = min((defender_stats['def'] + 1.0) / (defender_stats['def'] + attacker_stats['defa']), 0.5)
 
@@ -1941,7 +1951,8 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     if is_area:
         print(f"{prefix} RESULT: HIT dmg={int(final_dmg)} base={base_dmg:.1f} red={def_red:.3f} crit={crit_mult:.2f} exd={exd_factor:.2f} var={rand_var:.3f}")
 
-    return int(max(1, final_dmg)), True, is_cri
+    # Client uses Mathf.CeilToInt(num5) - use ceiling, not truncation
+    return int(math.ceil(max(1, final_dmg))), True, is_cri
 
 def spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state, exp_cfg, send_npc_func):
     subwave = (exp_state['cur_group'] - 1) * 4 + exp_state['cur_wave']
@@ -4136,7 +4147,19 @@ def client_handler(conn, addr):
                             server_dmg = 0
                             calc_cri = False
                             print(f"[AREA BOSS ATTACK] No boss_inst_id found, damage rejected")
-                    # else: server_dmg stays 0 for non-arena Tag 128
+                    # For non-arena Tag 128, still calculate server-authoritative damage
+                    # The client sends Tag 128 for any single-copy scene, not just Domin map 502
+                    if not is_area and picked_char:
+                        # Generic NPC attack on player - use basic NPC stats
+                        attacker_npc_id = str(target_id) if target_id != picked_char['id'] else "100"
+                        npc_stats = get_npc_attr(attacker_npc_id, picked_char.get('level', 1))
+                        player_stats = get_character_stats(picked_char)
+                        server_dmg, hit, calc_cri = get_combat_damage(
+                            npc_stats, player_stats, "101", 1, effinfo_id=effinfo_id
+                        )
+                        if not hit:
+                            server_dmg = 0
+                            calc_cri = False
 
                     new_hp = picked_char.get('hp', 0) - server_dmg
                     picked_char['hp'] = max(0, new_hp)
