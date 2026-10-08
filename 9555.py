@@ -3204,6 +3204,7 @@ def client_handler(conn, addr):
                         requester_combat = 0
                         requester_guildId = 0
                         requester_guildName = ''
+                        requester_state = 0  # Default offline
                         # Check online players first
                         for r_cid, (r_conn, ch) in list(ALL_CONNECTIONS.items()):
                             if ch and ch.get('id', 0) == req_id:
@@ -3213,6 +3214,7 @@ def client_handler(conn, addr):
                                 requester_combat = get_character_stats(ch)['power']
                                 requester_guildId = ch.get('guildId', 0)
                                 requester_guildName = ch.get('guildName', '')
+                                requester_state = 1  # Online
                                 break
                         else:
                             # Look up from character database
@@ -3237,7 +3239,7 @@ def client_handler(conn, addr):
                             'level': requester_level,
                             'profession': requester_prof,
                             'combValue': requester_combat,
-                            'state': 1,
+                            'state': requester_state,
                             'timeInfo': int(time.time()),
                             'friendType': 2,
                             'guildId': requester_guildId,
@@ -4754,7 +4756,9 @@ def client_handler(conn, addr):
                             # client to crash (AddFriend -> RefreshUI chain with friendType=2).
                             # The server-side persistence (friend_requests_sent) is sufficient.
                             # Notify the target player about the incoming friend request
-                            # Find target player's connection and send notice_add_friend (msg 536)
+                            # Send notice_add_friend (msg 536) in a separate thread to avoid
+                            # blocking the sender's connection thread, which caused the sender
+                            # to disconnect when the receiver's socket was slow or blocked.
                             sender_stats = get_character_stats(picked_char)
                             sender_friend_info = {
                                 'characterId': my_id,
@@ -4771,27 +4775,29 @@ def client_handler(conn, addr):
                                 'friendScore': 0
                             }
                             notice_data = encode_sproto([(0, encode_friend_info(sender_friend_info))])
-                            # Send to target player if they are online
-                            target_found = False
+                            # Find target player's connection and send in background thread
+                            target_conn_ref = None
                             print(f"[FRIEND] Looking for target={target_id} in ALL_CONNECTIONS (count={len(ALL_CONNECTIONS)})")
                             for t_cid, (t_conn, t_char) in list(ALL_CONNECTIONS.items()):
                                 if t_char:
                                     print(f"[FRIEND] Checking connection: id={t_char.get('id', 0)} name={t_char.get('name', '')}")
                                 if t_char and t_char.get('id', 0) == target_id:
-                                    target_found = True
+                                    target_conn_ref = t_conn
+                                    break
+                            if target_conn_ref is not None:
+                                def send_notice_async():
                                     try:
                                         ph_p = encode_sproto([(0, 536)])
                                         pf_p = sproto_pack(ph_p + notice_data)
                                         notice_pkt = struct.pack(">H", len(pf_p)) + pf_p
-                                        t_conn.sendall(notice_pkt)
+                                        target_conn_ref.sendall(notice_pkt)
                                         print(f"[FRIEND] notice_add_friend sent to target={target_id} from={my_id} size={len(notice_pkt)}")
                                     except BrokenPipeError:
                                         print(f"[FRIEND] Target {target_id} connection broken, skipping notice")
                                     except Exception as e:
                                         print(f"[FRIEND] Failed to send notice_add_friend to target={target_id}: {e}")
-                                    break
-                            if not target_found:
-                                print(f"[FRIEND] Target={target_id} NOT FOUND online - request persisted for next login")
+                                t = threading.Thread(target=send_notice_async, daemon=True)
+                                t.start()
                             # Also add sender to target's friend_requests_received for persistence
                             # Load and update target character data
                             target_updated = False
@@ -5024,18 +5030,27 @@ def client_handler(conn, addr):
                                                 'friendScore': 0
                                             }
                                             ch['friends'].append(mutual_friend)
-                                            # If requester is online, push syn_friend_info to them
+                                            # If requester is online, push syn_friend_info to them asynchronously
+                                            # to avoid blocking the acceptor's connection thread, which caused
+                                            # the sender (requester) to disconnect when the acceptor accepted.
+                                            requester_conn_ref = None
                                             for t_cid, (t_conn, t_char) in list(ALL_CONNECTIONS.items()):
                                                 if t_char and t_char.get('id', 0) == target_id:
+                                                    requester_conn_ref = t_conn
+                                                    break
+                                            if requester_conn_ref is not None:
+                                                mutual_friend_copy = dict(mutual_friend)
+                                                def send_syn_friend_async():
                                                     try:
-                                                        fi_bytes = encode_friend_info(mutual_friend)
+                                                        fi_bytes = encode_friend_info(mutual_friend_copy)
                                                         ph_p = encode_sproto([(0, 538)])
                                                         pf_p = sproto_pack(ph_p + encode_sproto([(0, fi_bytes)]))
-                                                        t_conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+                                                        requester_conn_ref.sendall(struct.pack(">H", len(pf_p)) + pf_p)
                                                         print(f"[FRIEND] syn_friend_info pushed to requester={target_id}")
                                                     except Exception:
                                                         print(f"[FRIEND] Failed to push syn_friend_info to requester={target_id}")
-                                                    break
+                                                t = threading.Thread(target=send_syn_friend_async, daemon=True)
+                                                t.start()
                                         # Remove from friend_requests_sent
                                         if 'friend_requests_sent' in ch:
                                             ch['friend_requests_sent'] = [r for r in ch['friend_requests_sent'] if r != my_id]
