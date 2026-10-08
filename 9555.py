@@ -15,7 +15,7 @@ DEAD_NPC_SET = set() # duplicate death/reward prevention set
 RANDOM_NAME_CALLED = set()  # connection identities that have had their first random name request
 ALL_CONNECTIONS = {}  # char_id -> (conn, picked_char) for tracking online players
 CONNECTION_LOCKS = {}  # char_id -> threading.Lock() for per-connection send protection
-MAIL_ID_COUNTER = 1000000  # Persistent unique mail ID counter
+MAIL_ID_COUNTER = 1000000  # Will be initialized from max existing mailId on startup
 
 # Load Mission Data
 missions_data = {}
@@ -960,6 +960,16 @@ def save_chars(data):
         print(f"[ERROR] Failed atomic save_chars: {e}")
 
 all_accounts_chars = load_chars()
+
+# Initialize MAIL_ID_COUNTER from max existing mailId to avoid collisions after restart
+for area_key, area_chars in all_accounts_chars.items():
+    for acc_key, char_list in area_chars.items():
+        for ch in char_list:
+            for mail in ch.get('mails', []):
+                mid = mail.get('mailId', 0)
+                if mid >= MAIL_ID_COUNTER:
+                    MAIL_ID_COUNTER = mid + 1
+print(f"[MAIL] MAIL_ID_COUNTER initialized to {MAIL_ID_COUNTER}")
 
 def generate_unique_char_id():
     return int(time.time() * 1000) % 1000000000
@@ -2934,71 +2944,55 @@ def serve_resource_http(conn, initial_data):
 def _sync_friend_online_state(char_id, state):
     """Update the online state of a character in all other players' friend/enemy lists.
     state=1 for login, state=0 for logout.
-    Pushes syn_friend_info to online friends/enemies who have this player."""
-    # Look up the character's real name
-    char_name = f'Player{char_id}'
-    for cid, (c, conn_ch) in list(ALL_CONNECTIONS.items()):
-        if conn_ch and conn_ch.get('id', 0) == char_id:
-            char_name = conn_ch.get('name', char_name)
-            break
-    else:
-        # Not online, look up from character database
-        for area_key, area_chars in all_accounts_chars.items():
-            for acc_key, char_list in area_chars.items():
-                for ch in char_list:
-                    if ch.get('id', 0) == char_id:
-                        char_name = ch.get('name', char_name)
-                        break
-            else:
-                continue
-            break
-
+    Pushes syn_friend_info to online friends/enemies who have this player.
+    Uses the EXISTING stored friend record, only updating the state field."""
     for area_key, area_chars in all_accounts_chars.items():
         for acc_key, char_list in area_chars.items():
             for ch in char_list:
                 if ch.get('id', 0) == char_id:
                     continue
-                updated = False
-                # Check friends
+                updated_friends = []
+                updated_enemies = []
+                # Check friends - update state in place and collect for push
                 for fi in ch.get('friends', []):
                     if fi.get('friendId') == char_id:
                         fi['state'] = state
-                        updated = True
-                # Check enemies
+                        updated_friends.append(fi)
+                # Check enemies - update state in place and collect for push
                 for ei in ch.get('enemies', []):
                     if ei.get('friendId') == char_id:
                         ei['state'] = state
-                        updated = True
-                if updated:
+                        updated_enemies.append(ei)
+                if updated_friends or updated_enemies:
                     # Push syn_friend_info to this player if they're online
                     for cid, (c, conn_ch) in list(ALL_CONNECTIONS.items()):
                         if conn_ch and conn_ch.get('id', 0) == ch.get('id', 0):
                             try:
-                                fi_data = {
-                                    'characterId': char_id,
-                                    'friendId': char_id,
-                                    'name': char_name,
-                                    'level': 1,
-                                    'profession': 0,
-                                    'combValue': 0,
-                                    'state': state,
-                                    'timeInfo': 0,
-                                    'friendType': 0,
-                                    'guildId': 0,
-                                    'guildName': '',
-                                    'friendScore': 0
-                                }
-                                fi_bytes = encode_friend_info(fi_data)
-                                ph_p = encode_sproto([(0, 538)])
-                                pf_p = sproto_pack(ph_p + encode_sproto([(0, fi_bytes)]))
-                                syn_pkt = struct.pack(">H", len(pf_p)) + pf_p
-                                c_lock = CONNECTION_LOCKS.get(cid)
-                                if c_lock:
-                                    with c_lock:
+                                # Use the existing stored friend record, not a fake one
+                                for fi in updated_friends:
+                                    fi_bytes = encode_friend_info(dict(fi))
+                                    ph_p = encode_sproto([(0, 538)])
+                                    pf_p = sproto_pack(ph_p + encode_sproto([(0, fi_bytes)]))
+                                    syn_pkt = struct.pack(">H", len(pf_p)) + pf_p
+                                    c_lock = CONNECTION_LOCKS.get(cid)
+                                    if c_lock:
+                                        with c_lock:
+                                            c.sendall(syn_pkt)
+                                    else:
                                         c.sendall(syn_pkt)
-                                else:
-                                    c.sendall(syn_pkt)
-                                print(f"[FRIEND] Online state sync: {char_id} state={state} to {ch.get('id', 0)}")
+                                    print(f"[FRIEND] Online state sync: {char_id} state={state} to {ch.get('id', 0)} (friend)")
+                                for ei in updated_enemies:
+                                    ei_bytes = encode_friend_info(dict(ei), is_enemy=True)
+                                    ph_p = encode_sproto([(0, 538)])
+                                    pf_p = sproto_pack(ph_p + encode_sproto([(0, ei_bytes)]))
+                                    syn_pkt = struct.pack(">H", len(pf_p)) + pf_p
+                                    c_lock = CONNECTION_LOCKS.get(cid)
+                                    if c_lock:
+                                        with c_lock:
+                                            c.sendall(syn_pkt)
+                                    else:
+                                        c.sendall(syn_pkt)
+                                    print(f"[FRIEND] Online state sync: {char_id} state={state} to {ch.get('id', 0)} (enemy)")
                             except Exception:
                                 pass
                     break
@@ -4746,6 +4740,31 @@ def client_handler(conn, addr):
                     add_type = get_val_int(body, 1)
                     my_id = picked_char.get('id', 0)
                     print(f"[FRIEND] add_friend target={target_id} type={add_type}")
+                    # Reject self-add
+                    if target_id == my_id:
+                        print(f"[FRIEND] Rejected self-add: target={target_id} == my_id={my_id}")
+                        if session is not None:
+                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                            conn.sendall(struct.pack(">H", len(pf)) + pf)
+                        continue
+                    # Verify target character exists in the database
+                    target_exists = False
+                    for area_key, area_chars in all_accounts_chars.items():
+                        for acc_key, char_list in area_chars.items():
+                            for ch in char_list:
+                                if ch.get('id', 0) == target_id:
+                                    target_exists = True
+                                    break
+                            if target_exists:
+                                break
+                        if target_exists:
+                            break
+                    if not target_exists:
+                        print(f"[FRIEND] Rejected add_friend: target={target_id} does not exist")
+                        if session is not None:
+                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                            conn.sendall(struct.pack(">H", len(pf)) + pf)
+                        continue
                     if add_type == 1: # enemy/foe
                         if 'enemies' not in picked_char:
                             picked_char['enemies'] = []
@@ -4859,9 +4878,10 @@ def client_handler(conn, addr):
                             # client to crash (AddFriend -> RefreshUI chain with friendType=2).
                             # The server-side persistence (friend_requests_sent) is sufficient.
                             # Notify the target player about the incoming friend request
-                            # Send notice_add_friend (msg 536) in a separate thread to avoid
-                            # blocking the sender's connection thread, which caused the sender
-                            # to disconnect when the receiver's socket was slow or blocked.
+                            # Send notice_add_friend (msg 536) in a background daemon thread to avoid
+                            # blocking the sender's connection thread. If the target's socket is slow
+                            # or stale, a synchronous sendall() would block the sender's handler,
+                            # stopping heartbeat (218) processing and causing the sender to disconnect.
                             sender_stats = get_character_stats(picked_char)
                             sender_friend_info = {
                                 'characterId': my_id,
@@ -4878,35 +4898,39 @@ def client_handler(conn, addr):
                                 'friendScore': 0
                             }
                             notice_data = encode_sproto([(0, encode_friend_info(sender_friend_info))])
-                            # Find target player's connection and send notice_add_friend (msg 536)
-                            # Use send_lock on the target's connection to avoid corrupting its socket
-                            target_found = False
-                            print(f"[FRIEND] Looking for target={target_id} in ALL_CONNECTIONS (count={len(ALL_CONNECTIONS)})")
-                            for t_cid, (t_conn, t_char) in list(ALL_CONNECTIONS.items()):
-                                if t_char:
-                                    print(f"[FRIEND] Checking connection: id={t_char.get('id', 0)} name={t_char.get('name', '')}")
-                                if t_char and t_char.get('id', 0) == target_id:
-                                    target_found = True
-                                    try:
-                                        ph_p = encode_sproto([(0, 536)])
-                                        pf_p = sproto_pack(ph_p + notice_data)
-                                        notice_pkt = struct.pack(">H", len(pf_p)) + pf_p
-                                        # Use the target's connection lock to prevent packet interleaving
-                                        t_lock = CONNECTION_LOCKS.get(target_id)
-                                        if t_lock:
-                                            with t_lock:
+
+                            def _send_notice_add_friend_async():
+                                """Send notice_add_friend to target in a background thread."""
+                                ph_p = encode_sproto([(0, 536)])
+                                pf_p = sproto_pack(ph_p + notice_data)
+                                notice_pkt = struct.pack(">H", len(pf_p)) + pf_p
+                                target_found = False
+                                print(f"[FRIEND] Looking for target={target_id} in ALL_CONNECTIONS (count={len(ALL_CONNECTIONS)})")
+                                for t_cid, (t_conn, t_char) in list(ALL_CONNECTIONS.items()):
+                                    if t_char:
+                                        print(f"[FRIEND] Checking connection: id={t_char.get('id', 0)} name={t_char.get('name', '')}")
+                                    if t_char and t_char.get('id', 0) == target_id:
+                                        target_found = True
+                                        try:
+                                            # Use the target's connection lock to prevent packet interleaving
+                                            t_lock = CONNECTION_LOCKS.get(t_cid)
+                                            if t_lock:
+                                                with t_lock:
+                                                    t_conn.sendall(notice_pkt)
+                                            else:
                                                 t_conn.sendall(notice_pkt)
-                                        else:
-                                            t_conn.sendall(notice_pkt)
-                                        print(f"[FRIEND] notice_add_friend sent to target={target_id} from={my_id} size={len(notice_pkt)}")
-                                    except BrokenPipeError:
-                                        print(f"[FRIEND] Target {target_id} connection broken, skipping notice")
-                                    except Exception as e:
-                                        print(f"[FRIEND] Failed to send notice_add_friend to target={target_id}: {e}")
-                                    break
-                            if not target_found:
-                                print(f"[FRIEND] Target={target_id} NOT FOUND online - request persisted for next login")
-                            print(f"[FRIEND] add_friend notice phase completed for target={target_id}")
+                                            print(f"[FRIEND] notice_add_friend sent to target={target_id} from={my_id} size={len(notice_pkt)}")
+                                        except BrokenPipeError:
+                                            print(f"[FRIEND] Target {target_id} connection broken, skipping notice")
+                                        except Exception as e:
+                                            print(f"[FRIEND] Failed to send notice_add_friend to target={target_id}: {e}")
+                                        break
+                                if not target_found:
+                                    print(f"[FRIEND] Target={target_id} NOT FOUND online - request persisted for next login")
+                                print(f"[FRIEND] add_friend notice phase completed for target={target_id}")
+
+                            notice_thread = threading.Thread(target=_send_notice_add_friend_async, daemon=True)
+                            notice_thread.start()
                             # Also add sender to target's friend_requests_received for persistence
                             # Load and update target character data
                             target_updated = False
@@ -5096,6 +5120,21 @@ def client_handler(conn, addr):
                                 else:
                                     continue
                                 break
+                        # Check if already friends to avoid duplicates
+                        already_friend = False
+                        for existing in picked_char.get('friends', []):
+                            if existing.get('friendId') == target_id:
+                                already_friend = True
+                                break
+                        if already_friend:
+                            print(f"[FRIEND] Accept skipped: {my_id} already has {target_id} as friend")
+                            save_chars(all_accounts_chars)
+                            if session is not None:
+                                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                                conn.sendall(struct.pack(">H", len(pf)) + pf)
+                            continue
+                        # Use actual online state for the requester
+                        req_state = 1 if target_id in ALL_CONNECTIONS else 0
                         new_friend = {
                             'characterId': target_id,
                             'friendId': target_id,
@@ -5103,7 +5142,7 @@ def client_handler(conn, addr):
                             'level': req_level,
                             'profession': req_prof,
                             'combValue': req_combat,
-                            'state': 1,
+                            'state': req_state,
                             'timeInfo': int(time.time()),
                             'friendType': 0,
                             'guildId': req_guildId,
@@ -5129,6 +5168,8 @@ def client_handler(conn, addr):
                                                 already_friend = True
                                                 break
                                         if not already_friend:
+                                            # Use actual online state for the acceptor
+                                            acc_state = 1 if my_id in ALL_CONNECTIONS else 0
                                             mutual_friend = {
                                                 'characterId': my_id,
                                                 'friendId': my_id,
@@ -5136,7 +5177,7 @@ def client_handler(conn, addr):
                                                 'level': picked_char.get('level', 1),
                                                 'profession': picked_char.get('prof', 0),
                                                 'combValue': get_character_stats(picked_char)['power'],
-                                                'state': 1,
+                                                'state': acc_state,
                                                 'timeInfo': int(time.time()),
                                                 'friendType': 0,
                                                 'guildId': picked_char.get('guildId', 0),
@@ -5145,24 +5186,31 @@ def client_handler(conn, addr):
                                             }
                                             ch['friends'].append(mutual_friend)
                                             # Push syn_friend_info to the requester so they see the mutual friend immediately.
-                                            # Use CONNECTION_LOCKS to safely send to another player's socket.
-                                            for r_cid, (r_conn, r_char) in list(ALL_CONNECTIONS.items()):
-                                                if r_char and r_char.get('id', 0) == target_id:
-                                                    try:
-                                                        fi_bytes = encode_friend_info(mutual_friend)
-                                                        ph_p = encode_sproto([(0, 538)])
-                                                        pf_p = sproto_pack(ph_p + encode_sproto([(0, fi_bytes)]))
-                                                        syn_pkt = struct.pack(">H", len(pf_p)) + pf_p
-                                                        r_lock = CONNECTION_LOCKS.get(r_cid)
-                                                        if r_lock:
-                                                            with r_lock:
+                                            # Send in a background daemon thread to avoid blocking the accepter's
+                                            # connection thread. If the requester's socket is slow or stale,
+                                            # a synchronous sendall() would block the accepter's handler,
+                                            # stopping heartbeat (218) processing and causing the accepter to disconnect.
+                                            mutual_friend_copy = dict(mutual_friend)
+                                            def _send_syn_friend_info_async():
+                                                for r_cid, (r_conn, r_char) in list(ALL_CONNECTIONS.items()):
+                                                    if r_char and r_char.get('id', 0) == target_id:
+                                                        try:
+                                                            fi_bytes = encode_friend_info(mutual_friend_copy)
+                                                            ph_p = encode_sproto([(0, 538)])
+                                                            pf_p = sproto_pack(ph_p + encode_sproto([(0, fi_bytes)]))
+                                                            syn_pkt = struct.pack(">H", len(pf_p)) + pf_p
+                                                            r_lock = CONNECTION_LOCKS.get(r_cid)
+                                                            if r_lock:
+                                                                with r_lock:
+                                                                    r_conn.sendall(syn_pkt)
+                                                            else:
                                                                 r_conn.sendall(syn_pkt)
-                                                        else:
-                                                            r_conn.sendall(syn_pkt)
-                                                        print(f"[FRIEND] syn_friend_info pushed to requester={target_id}")
-                                                    except Exception:
-                                                        print(f"[FRIEND] Failed to push syn_friend_info to requester={target_id}")
-                                                    break
+                                                            print(f"[FRIEND] syn_friend_info pushed to requester={target_id}")
+                                                        except Exception:
+                                                            print(f"[FRIEND] Failed to push syn_friend_info to requester={target_id}")
+                                                        break
+                                            syn_thread = threading.Thread(target=_send_syn_friend_info_async, daemon=True)
+                                            syn_thread.start()
                                             print(f"[FRIEND] Mutual friendship saved for requester={target_id}")
                                         # Remove from friend_requests_sent
                                         if 'friend_requests_sent' in ch:
@@ -5256,8 +5304,8 @@ def client_handler(conn, addr):
                                 'state': 1,
                                 'timeInfo': int(time.time()),
                                 'friendType': 0,
-                                'guildId': 0,
-                                'guildName': '',
+                                'guildId': oc.get('guildId', 0),
+                                'guildName': oc.get('guildName', ''),
                                 'friendScore': 0
                             }
                             friend_list.append(encode_friend_info(fi))
@@ -5289,8 +5337,8 @@ def client_handler(conn, addr):
                                         'state': 1,
                                         'timeInfo': int(time.time()),
                                         'friendType': 0,
-                                        'guildId': 0,
-                                        'guildName': '',
+                                        'guildId': oc.get('guildId', 0),
+                                        'guildName': oc.get('guildName', ''),
                                         'friendScore': 0
                                     }
                                     friend_list.append(encode_friend_info(fi))
