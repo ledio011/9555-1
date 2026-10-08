@@ -4452,8 +4452,12 @@ def client_handler(conn, addr):
                     else:
                         print(f"[STREET RACE] denied id={copy_id}; daily attempts exhausted")
                 elif picked_char:
-                    if picked_char.get('pre_copy_pos') is None:
-                        picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                    # Skip position saving for world maps (type 1) which have their own spawn positions
+                    target_map = copy_id
+                    map_cfg = MAP_CONFIG.get(str(target_map))
+                    if map_cfg and map_cfg.get('type') != 1:
+                        if picked_char.get('pre_copy_pos') is None:
+                            picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
                     picked_char['active_copy_id'] = copy_id
                     advance_missions(picked_char, send_rpc_push, 'dungeon', target_id=copy_id)
                     start_map_transition(conn, picked_char, copy_id, send_rpc_push)
@@ -4653,8 +4657,11 @@ def client_handler(conn, addr):
                 mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
                 print(f"[RX] Scene Entry: {mid} (MSG={msg})")
                 if picked_char:
-                    if picked_char.get('pre_copy_pos') is None:
-                        picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                    # Skip position saving for world maps (type 1) which have their own spawn positions
+                    map_cfg = MAP_CONFIG.get(str(mid))
+                    if map_cfg and map_cfg.get('type') != 1:
+                        if picked_char.get('pre_copy_pos') is None:
+                            picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
                     picked_char['active_copy_id'] = mid
                     start_map_transition(conn, picked_char, mid, send_rpc_push)
                     if msg == 201: # world_boss
