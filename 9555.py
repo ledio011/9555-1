@@ -1374,6 +1374,10 @@ def build_aoi_add_packet(char):
         print(f"[AOI] Failed to build aoi_add packet for id={char_id}: {e}")
         return None
 
+def is_single_player_map(map_id):
+    """Return True if the map should not have player-to-player AOI (e.g., Map 11)."""
+    return str(map_id) == "11"
+
 def broadcast_aoi_move(char):
     """Broadcast TAG 507 (aoi_update_move) to all other players on the same map.
     Client expects: request field 0 -> character_aoi_move -> id(0), movement(1), walk(2)"""
@@ -1381,6 +1385,8 @@ def broadcast_aoi_move(char):
         return
     char_id = char.get('id', 0)
     map_id = str(char.get('map_id', '11'))
+    if is_single_player_map(map_id):
+        return
     pos = char.get('pos', [0, 0, 0, 0])
     try:
         mv_bytes = get_movement(pos[0], pos[1], pos[2], pos[3])
@@ -1418,6 +1424,8 @@ def broadcast_aoi_stop_move(char):
         return
     char_id = char.get('id', 0)
     map_id = str(char.get('map_id', '11'))
+    if is_single_player_map(map_id):
+        return
     pos = char.get('pos', [0, 0, 0, 0])
     try:
         mv_bytes = get_movement(pos[0], pos[1], pos[2], pos[3])
@@ -1455,6 +1463,8 @@ def broadcast_aoi_attribute(char):
         return
     char_id = char.get('id', 0)
     map_id = str(char.get('map_id', '11'))
+    if is_single_player_map(map_id):
+        return
     stats = get_character_stats(char)
     hp_cur = char.get('hp', stats['hp_max'])
     try:
@@ -1934,13 +1944,13 @@ def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
             death_count = picked_char.get('death_count', 0) + 1
             picked_char['death_count'] = death_count
             relife_cfg = get_relife_config(death_count)
+            # Tag 618: notice_relife_player schema: type(0), cost(1), itemId(2), characterid(3), name(4)
             relife_req = encode_sproto([
-                (0, relife_cfg['id']),
-                (1, 0),
-                (2, "9202"), # typically 9202 is the rebirth item
+                (0, relife_cfg.get('id', 1)),
+                (1, relife_cfg.get('use_count', 1)),  # cost field - item cost
+                (2, "9202"),
                 (3, picked_char['id']),
-                (4, picked_char['name']),
-                (5, relife_cfg['use_count'])
+                (4, picked_char['name'])
             ])
             send_rpc_push(618, relife_req)
 
@@ -2856,6 +2866,9 @@ def broadcast_aoi_add(target_conn, target_char, sender_conn=None, sender_char=No
     pkt = build_aoi_add_packet(target_char)
     if pkt is None:
         return
+    # Skip player-to-player AOI on single-player maps (e.g., Map 11)
+    if is_single_player_map(target_map):
+        return
     # Send to all other connections that have a character on the same map
     for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
         if ch and ch.get('id', 0) != target_id and str(ch.get('map_id', '11')) == target_map:
@@ -2873,6 +2886,9 @@ def broadcast_aoi_add(target_conn, target_char, sender_conn=None, sender_char=No
 def broadcast_aoi_remove(char_id, map_id):
     """Broadcast aoi_remove (msg 506) when a player leaves a map."""
     map_id = str(map_id)
+    # Skip player-to-player AOI on single-player maps (e.g., Map 11)
+    if is_single_player_map(map_id):
+        return
     try:
         aoi_data = encode_sproto([(0, char_id)])
         ph_p = encode_sproto([(0, 506)])
@@ -2966,15 +2982,17 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         spawn_map_npcs(conn, target_map_id, picked_char)
 
         # Broadcast this new player to all other players on the same map
-        broadcast_aoi_add(conn, picked_char)
-        # Send existing players on this map to the new player
-        for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-            if ch and ch.get('id', 0) != picked_char.get('id', 0) and str(ch.get('map_id', '11')) == target_map_id:
-                # Send this existing player's aoi_add to the new player (conn)
-                pkt_ex = build_aoi_add_packet(ch)
-                if pkt_ex:
-                    conn.sendall(pkt_ex)
-                    print(f"[AOI] Send existing player id={ch.get('id', 0)} to new player {picked_char.get('id', 0)} map={target_map_id}")
+        # Skip player-to-player AOI on single-player maps (e.g., Map 11)
+        if not is_single_player_map(target_map_id):
+            broadcast_aoi_add(conn, picked_char)
+            # Send existing players on this map to the new player
+            for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
+                if ch and ch.get('id', 0) != picked_char.get('id', 0) and str(ch.get('map_id', '11')) == target_map_id:
+                    # Send this existing player's aoi_add to the new player (conn)
+                    pkt_ex = build_aoi_add_packet(ch)
+                    if pkt_ex:
+                        conn.sendall(pkt_ex)
+                        print(f"[AOI] Send existing player id={ch.get('id', 0)} to new player {picked_char.get('id', 0)} map={target_map_id}")
 
         # BOSS SPAWN for Dominance Map 502
         if target_map_id == "502":
@@ -3496,14 +3514,16 @@ def client_handler(conn, addr):
                         spawn_map_npcs(conn, mid, picked_char)
 
                         # MULTIPLAYER AOI SYNC - Broadcast this new player to existing players
-                        broadcast_aoi_add(conn, picked_char)
-                        # Send existing players on this map to the new player
-                        for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-                            if ch and ch.get('id', 0) != picked_char.get('id', 0) and str(ch.get('map_id', '11')) == mid:
-                                pkt_ex = build_aoi_add_packet(ch)
-                                if pkt_ex:
-                                    conn.sendall(pkt_ex)
-                                    print(f"[AOI] Initial login: Send existing player id={ch.get('id', 0)} to new player {picked_char.get('id', 0)} map={mid}")
+                        # Skip player-to-player AOI on single-player maps (e.g., Map 11)
+                        if not is_single_player_map(mid):
+                            broadcast_aoi_add(conn, picked_char)
+                            # Send existing players on this map to the new player
+                            for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
+                                if ch and ch.get('id', 0) != picked_char.get('id', 0) and str(ch.get('map_id', '11')) == mid:
+                                    pkt_ex = build_aoi_add_packet(ch)
+                                    if pkt_ex:
+                                        conn.sendall(pkt_ex)
+                                        print(f"[AOI] Initial login: Send existing player id={ch.get('id', 0)} to new player {picked_char.get('id', 0)} map={mid}")
 
                     except Exception:
                         print("[!] FAILED TO SEND INITIAL MAP ENTER")
@@ -4093,10 +4113,13 @@ def client_handler(conn, addr):
                                 death_count = target_char.get('death_count', 0) + 1
                                 target_char['death_count'] = death_count
                                 relife_cfg = get_relife_config(death_count)
+                                # Tag 618: notice_relife_player schema: type(0), cost(1), itemId(2), characterid(3), name(4)
                                 relife_req = encode_sproto([
-                                    (0, relife_cfg['id']), (1, 0), (2, "9202"),
-                                    (3, target_char['id']), (4, target_char['name']),
-                                    (5, relife_cfg['use_count'])
+                                    (0, relife_cfg.get('id', 1)),
+                                    (1, relife_cfg.get('use_count', 1)),  # cost field - item cost
+                                    (2, "9202"),
+                                    (3, target_char['id']),
+                                    (4, target_char['name'])
                                 ])
                                 try:
                                     t_ph = encode_sproto([(0, 618)])
@@ -4124,10 +4147,13 @@ def client_handler(conn, addr):
                                     death_count = picked_char.get('death_count', 0) + 1
                                     picked_char['death_count'] = death_count
                                     relife_cfg = get_relife_config(death_count)
+                                    # Tag 618: notice_relife_player schema: type(0), cost(1), itemId(2), characterid(3), name(4)
                                     relife_req = encode_sproto([
-                                        (0, relife_cfg['id']), (1, 0), (2, "9202"),
-                                        (3, picked_char['id']), (4, picked_char['name']),
-                                        (5, relife_cfg['use_count'])
+                                        (0, relife_cfg.get('id', 1)),
+                                        (1, relife_cfg.get('use_count', 1)),  # cost field - item cost
+                                        (2, "9202"),
+                                        (3, picked_char['id']),
+                                        (4, picked_char['name'])
                                     ])
                                     send_rpc_push(618, relife_req)
 
@@ -4493,21 +4519,62 @@ def client_handler(conn, addr):
 
             elif msg == 132: # relife_player (Revive player)
                 if picked_char:
+                    # Read isInplace from client request: field 0 = bool
+                    try:
+                        body_raw = body.get(0, b"")
+                        relife_req = decode_sproto(body_raw) if body_raw else {}
+                        is_inplace = bool(relife_req.get(0, False))
+                    except Exception:
+                        is_inplace = False
+
                     p_stats = get_character_stats(picked_char)
                     picked_char['hp'] = p_stats['hp_max']
                     sync_char_attrs_rpc(conn, picked_char)
 
-                    # Send Sproto Tag 512 (aoi_relife_player)
+                    # Determine revive position based on isInplace
+                    pos = picked_char.get('pos', [0, 100, 0, 0])
+                    if not is_inplace:
+                        # Return to city - use birth position of current map or default city
+                        mid = str(picked_char.get('map_id', '11'))
+                        if mid in MAP_CONFIG and MAP_CONFIG[mid].get('birth'):
+                            birth = MAP_CONFIG[mid]['birth'].split('#')
+                            if len(birth) >= 3:
+                                pos = [int(birth[0]), int(birth[1]) if int(birth[1]) > 0 else 100, int(birth[2]), int(birth[3]) if len(birth) > 3 else 0]
+
+                    picked_char['pos'] = pos
+
+                    # Consume revive item from inventory
+                    # The revive item ID is "9202" (from Tag 618)
+                    revive_item_id = "9202"
+                    inventory = picked_char.get('inventory', {})
+                    if revive_item_id in inventory:
+                        item_count = inventory[revive_item_id]
+                        if isinstance(item_count, dict):
+                            item_count = item_count.get('count', 1)
+                        inventory[revive_item_id] = max(0, item_count - 1)
+                        if inventory[revive_item_id] <= 0:
+                            del inventory[revive_item_id]
+                        picked_char['inventory'] = inventory
+                        print(f"[REVIVE] Consumed revive item {revive_item_id}")
+
+                    # Build Tag 512 (aoi_relife_player) with correct nested structure
+                    # character_relife: id(0), attribute_other(1), movement(2)
+                    attr_oth = encode_sproto([
+                        (0, p_stats['hp_max']),
+                        (1, p_stats['exp']),
+                        (2, p_stats['lv']),
+                        (3, p_stats['power']),
+                        (15, 1)
+                    ])
+                    mv_bytes = get_movement(pos[0], pos[1], pos[2], pos[3])
                     relife_char = encode_sproto([
                         (0, picked_char['id']),
-                        (1, p_stats['hp_max']),
-                        (2, int(picked_char['pos'][0])),
-                        (3, int(picked_char['pos'][1])),
-                        (4, int(picked_char['pos'][2]))
+                        (1, attr_oth),
+                        (2, mv_bytes)
                     ])
                     send_rpc_push(512, encode_sproto([(0, relife_char)]))
                     save_chars(all_accounts_chars)
-                    print(f"[REVIVE] Player {picked_char['id']} revived with HP={p_stats['hp_max']}")
+                    print(f"[REVIVE] Player {picked_char['id']} revived with HP={p_stats['hp_max']} isInplace={is_inplace} pos={pos}")
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
