@@ -1943,10 +1943,12 @@ def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
             advance_missions(picked_char, send_rpc_push, 'dungeon', target_id='105')
             advance_missions(picked_char, send_rpc_push, 'level')
             saved_pos = picked_char.get('pre_copy_pos')
+            saved_map = picked_char.get('pre_copy_map', '11')
             picked_char['pre_copy_pos'] = None
+            picked_char['pre_copy_map'] = None
 
             def leave_exp_copy():
-                start_map_transition(conn, picked_char, "11", send_rpc_push, override_pos=saved_pos)
+                start_map_transition(conn, picked_char, saved_map, send_rpc_push, override_pos=saved_pos)
 
             timer = threading.Timer(5.0, leave_exp_copy)
             timer.daemon = True
@@ -2776,9 +2778,11 @@ def init_character_fields(c):
         'daily_copy_state': {},
         'active_copy_id': None,
         'pre_copy_pos': None,
+        'pre_copy_map': None,
         'active_domin_id': None,
         'boss_inst_id': None,
         'pre_arena_pos': None,
+        'pre_arena_map': None,
         'completed_tutorials': [],
         'createtime': int(time.time())
     }
@@ -3195,6 +3199,7 @@ def client_handler(conn, addr):
                 timer.start()
                 return
 
+            return_map = picked_char.get('pre_arena_map', '11')
             return_pos = picked_char.get('pre_arena_pos')
             if picked_char.pop('domin_return_restore_hp', False):
                 # A map transition recreates the main player with this value.
@@ -3203,12 +3208,13 @@ def client_handler(conn, addr):
             picked_char['boss_inst_id'] = None
             picked_char['active_domin_id'] = None
             picked_char['pre_arena_pos'] = None
+            picked_char['pre_arena_map'] = None
             picked_char['domin_return_scheduled'] = False
             # The APK has no dedicated "close arena timer" packet. Its
             # notify_copy_start_info handler closes the timer immediately for
             # an elapsed end_time, before the map transition begins.
             send_rpc_push(629, encode_sproto([(0, int(time.time())), (1, 2)]))
-            start_map_transition(conn, picked_char, '11', send_rpc_push, override_pos=return_pos)
+            start_map_transition(conn, picked_char, return_map, send_rpc_push, override_pos=return_pos)
             print('[M1003 DEBUG] Arena exit countdown finished; returned to saved city position')
 
         leave_after_notice(5)
@@ -3241,12 +3247,14 @@ def client_handler(conn, addr):
                 return
 
             return_pos = picked_char.get('pre_copy_pos')
+            return_map = picked_char.get('pre_copy_map', '11')
             picked_char['pre_copy_pos'] = None
+            picked_char['pre_copy_map'] = None
             picked_char['active_copy_id'] = None
             picked_char['street_race_return_scheduled'] = False
             save_chars(all_accounts_chars)
-            start_map_transition(conn, picked_char, '11', send_rpc_push, override_pos=return_pos)
-            print(f"[STREET RACE] exit countdown finished; returned after copy={copy_id}")
+            start_map_transition(conn, picked_char, return_map, send_rpc_push, override_pos=return_pos)
+            print(f"[STREET RACE] exit countdown finished; returned to map {return_map} after copy={copy_id}")
 
         leave_after_notice(delay)
 
@@ -4386,10 +4394,11 @@ def client_handler(conn, addr):
                 if picked_char:
                     # RESET HP TO MAX FOR AREA DUEL
                     picked_char['hp'] = get_character_stats(picked_char)['hp_max']
-                    # SAVE LATEST POSITION EXACTLY (Ensure list copy)
+                    # SAVE LATEST POSITION AND MAP EXACTLY (Ensure list copy)
                     latest_pos = picked_char.get('pos', [34611, 100, -49480, 8632])
                     picked_char['pre_arena_pos'] = list(latest_pos)
-                    print(f"[M1003 DEBUG] Saved pre-arena pos: {picked_char['pre_arena_pos']}")
+                    picked_char['pre_arena_map'] = str(picked_char.get('map_id', '11'))
+                    print(f"[M1003 DEBUG] Saved pre-arena pos: {picked_char['pre_arena_pos']}, map: {picked_char['pre_arena_map']}")
                     picked_char['active_domin_id'] = did
                     start_map_transition(conn, picked_char, "502", send_rpc_push)
                 if session is not None:
@@ -4425,6 +4434,7 @@ def client_handler(conn, addr):
                     if remaining > 0:
                         if picked_char.get('pre_copy_pos') is None:
                             picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                            picked_char['pre_copy_map'] = str(picked_char.get('map_id', '11'))
                         state = ensure_daily_copy_state(picked_char)
                         state['remaining'][copy_id] = remaining - 1
                         picked_char['active_copy_id'] = copy_id
@@ -4440,6 +4450,7 @@ def client_handler(conn, addr):
                     if remaining > 0:
                         if picked_char.get('pre_copy_pos') is None:
                             picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                            picked_char['pre_copy_map'] = str(picked_char.get('map_id', '11'))
                         state = ensure_daily_copy_state(picked_char)
                         state['remaining'][copy_id] = remaining - 1
                         picked_char['active_copy_id'] = copy_id
@@ -4452,12 +4463,10 @@ def client_handler(conn, addr):
                     else:
                         print(f"[STREET RACE] denied id={copy_id}; daily attempts exhausted")
                 elif picked_char:
-                    # Skip position saving for world maps (type 1) which have their own spawn positions
-                    target_map = copy_id
-                    map_cfg = MAP_CONFIG.get(str(target_map))
-                    if map_cfg and map_cfg.get('type') != 1:
-                        if picked_char.get('pre_copy_pos') is None:
-                            picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                    # Save current map and position before entering any copy scene
+                    if picked_char.get('pre_copy_pos') is None:
+                        picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                        picked_char['pre_copy_map'] = str(picked_char.get('map_id', '11'))
                     picked_char['active_copy_id'] = copy_id
                     advance_missions(picked_char, send_rpc_push, 'dungeon', target_id=copy_id)
                     start_map_transition(conn, picked_char, copy_id, send_rpc_push)
@@ -4657,11 +4666,10 @@ def client_handler(conn, addr):
                 mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
                 print(f"[RX] Scene Entry: {mid} (MSG={msg})")
                 if picked_char:
-                    # Skip position saving for world maps (type 1) which have their own spawn positions
-                    map_cfg = MAP_CONFIG.get(str(mid))
-                    if map_cfg and map_cfg.get('type') != 1:
-                        if picked_char.get('pre_copy_pos') is None:
-                            picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                    # Save current map and position before entering any scene/dungeon
+                    if picked_char.get('pre_copy_pos') is None:
+                        picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                        picked_char['pre_copy_map'] = str(picked_char.get('map_id', '11'))
                     picked_char['active_copy_id'] = mid
                     start_map_transition(conn, picked_char, mid, send_rpc_push)
                     if msg == 201: # world_boss
@@ -5048,13 +5056,17 @@ def client_handler(conn, addr):
                 if picked_char:
                     if picked_char.get('active_copy_id'):
                         saved_pos = picked_char.get('pre_copy_pos')
+                        saved_map = picked_char.get('pre_copy_map', '11')
                         picked_char['pre_copy_pos'] = None
+                        picked_char['pre_copy_map'] = None
                         picked_char['active_copy_id'] = None
                         picked_char['street_race_return_scheduled'] = False
                     else:
                         saved_pos = picked_char.get('pre_arena_pos')
+                        saved_map = picked_char.get('pre_arena_map', '11')
                         picked_char['pre_arena_pos'] = None
-                    start_map_transition(conn, picked_char, "11", send_rpc_push, override_pos=saved_pos)
+                        picked_char['pre_arena_map'] = None
+                    start_map_transition(conn, picked_char, saved_map, send_rpc_push, override_pos=saved_pos)
                     save_chars(all_accounts_chars)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
