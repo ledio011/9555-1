@@ -4104,7 +4104,8 @@ def client_handler(conn, addr):
                         client_dmg = get_val_int(d, 1)
                         # acceptdamge schema: id(0), damage(1), skillId(2), effinfoId(3), cri(4), parm(5-8)
                         skill_id = str(d.get(2, "50001"))
-                        effinfo_id = str(d.get(3, "50001"))
+                        # effinfo_id is NOT trusted from client - will be derived server-side from skill_id
+                        effinfo_id = None
                         is_cri = get_val_int(d, 4, 0) == 1
 
                         print(f"[COMBAT] accept_damge target={target_id} client_dmg={client_dmg} skill={skill_id} eff={effinfo_id} cri={is_cri}")
