@@ -382,11 +382,14 @@ try:
         '9920': {'name': 'Fight Dog', 'model': 'NPC_Dog', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
         '9921': {'name': 'Civilian', 'model': 'NPC_Nv_004', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
         '9922': {'name': 'Civilian', 'model': 'NPC_Nv_005', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        # Map 11 gang territory NPCs
-        '1105': {'name': 'Gang NPC', 'model': 'XD_A', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '1106': {'name': 'Gang NPC', 'model': 'XD_A', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '1107': {'name': 'Gang NPC', 'model': 'XD_A', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '1108': {'name': 'Gang NPC', 'model': 'XD_A', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
+        # Map 11 gang territory NPCs — percentage-based, scaled by player level (original NpcData)
+        # Model: XD_A_WQ;XD_A_T;XD_A_S;XD_A_X, Size: 100, Group: 5
+        # Level 9999 signals get_npc_attr() to use the player's level for stat scaling
+        # All coefficients are 10000 (100%), stats scale via BaseLvData/AdaptData
+        '1105': {'name': '街区占领NPC', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
+        '1106': {'name': '街区占领NPC', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
+        '1107': {'name': '街区占领NPC', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
+        '1108': {'name': '街区占领NPC', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
         # Map 11 additional civilians (1501-1512)
         '1501': {'name': 'William', 'model': 'NPC_Nan_008', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
         '1502': {'name': 'White', 'model': 'NPC_Nan_012', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
@@ -403,8 +406,11 @@ try:
     }
     for _nid, _override in _map11_monsters.items():
         if _nid in NPC_CONFIG:
-            NPC_CONFIG[_nid].update(_override)
-            NPC_CONFIG[_nid]['is_abs'] = True
+            # Only override if the NPC is not already configured as percentage-based
+            if _override.get('is_abs', True):
+                NPC_CONFIG[_nid].update(_override)
+                NPC_CONFIG[_nid]['is_abs'] = True
+            # If is_abs is False (percentage-based), keep the NpcData-loaded config
         else:
             NPC_CONFIG[_nid] = {
                 'name': _override['name'],
@@ -1830,11 +1836,13 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     hit_p = min((attacker_stats['hit'] + 1.0) / (attacker_stats['hita'] + attacker_stats['hit'] + 1.0), 1.0)
     dge_p = min((defender_stats['eva'] + 1.0) / (defender_stats['dgea'] + defender_stats['eva'] + 1.0), 0.5)
 
-    hit_prob = 1.0
-    roll_hit = random.random()
+    # Client formula: 1 + hit_p - dge_p + skill_shit >= random/100
+    # Where random is 0-99, so random/100 is 0.00 to 0.99
+    hit_prob = 1.0 + hit_p - dge_p + skill_shit
+    roll_hit = random.random()  # 0.0 to 1.0
 
     if is_area:
-        print(f"{prefix} HIT CHECK: roll={roll_hit:.3f} prob={hit_prob:.3f} (hit_p={hit_p:.3f}, dge_p={dge_p:.3f}, skill={skill_shit:.3f})")
+        print(f"{prefix} HIT CHECK: hit_prob={hit_prob:.3f} (hit_p={hit_p:.3f}, dge_p={dge_p:.3f}, skill={skill_shit:.3f}) roll={roll_hit:.3f}")
         print(f"{prefix} STATS: AtkHIT={attacker_stats['hit']} AtkHITA={attacker_stats['hita']} DefEVA={defender_stats['eva']} DefDGEA={defender_stats['dgea']}")
 
     if roll_hit > hit_prob:
@@ -1861,7 +1869,7 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     if is_cri:
         crit_mult = max(1.0, min(1.0 + (attacker_stats['crd'] - defender_stats['crr']) / 10000.0, 2.0))
 
-    # 6. Final Formula with Random Variance [0.95, 1.05]
+    # 6. Final Formula with Random Variance [0.95, 1.95]
     rand_var = random.randint(0, 1000) / 1000.0 + 0.95
 
     skill_sexd = eff_cfg['adds'].get(3003, 0) / 10000.0
