@@ -14,6 +14,8 @@ NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 DEAD_NPC_SET = set() # duplicate death/reward prevention set
 RANDOM_NAME_CALLED = set()  # connection identities that have had their first random name request
 ALL_CONNECTIONS = {}  # char_id -> (conn, picked_char) for tracking online players
+CONNECTION_LOCKS = {}  # char_id -> threading.Lock() for per-connection send protection
+MAIL_ID_COUNTER = 1000000  # Persistent unique mail ID counter
 
 # Load Mission Data
 missions_data = {}
@@ -2695,7 +2697,12 @@ def broadcast_aoi_add(target_conn, target_char, sender_conn=None, sender_char=No
         for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
             if ch and ch.get('id', 0) != target_id and str(ch.get('map_id', '11')) == target_map:
                 try:
-                    c.sendall(pkt)
+                    c_lock = CONNECTION_LOCKS.get(cid)
+                    if c_lock:
+                        with c_lock:
+                            c.sendall(pkt)
+                    else:
+                        c.sendall(pkt)
                     print(f"[AOI] Broadcast aoi_add id={target_id} to {ch.get('id', 0)} map={target_map}")
                 except Exception:
                     pass
@@ -2713,7 +2720,12 @@ def broadcast_aoi_remove(char_id, map_id):
         for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
             if ch and str(ch.get('map_id', '11')) == map_id:
                 try:
-                    c.sendall(pkt)
+                    c_lock = CONNECTION_LOCKS.get(cid)
+                    if c_lock:
+                        with c_lock:
+                            c.sendall(pkt)
+                    else:
+                        c.sendall(pkt)
                     print(f"[AOI] Broadcast aoi_remove id={char_id} to {ch.get('id', 0)} map={map_id}")
                 except Exception:
                     pass
@@ -2919,9 +2931,83 @@ def serve_resource_http(conn, initial_data):
         except Exception:
             pass
 
+def _sync_friend_online_state(char_id, state):
+    """Update the online state of a character in all other players' friend/enemy lists.
+    state=1 for login, state=0 for logout.
+    Pushes syn_friend_info to online friends/enemies who have this player."""
+    # Look up the character's real name
+    char_name = f'Player{char_id}'
+    for cid, (c, conn_ch) in list(ALL_CONNECTIONS.items()):
+        if conn_ch and conn_ch.get('id', 0) == char_id:
+            char_name = conn_ch.get('name', char_name)
+            break
+    else:
+        # Not online, look up from character database
+        for area_key, area_chars in all_accounts_chars.items():
+            for acc_key, char_list in area_chars.items():
+                for ch in char_list:
+                    if ch.get('id', 0) == char_id:
+                        char_name = ch.get('name', char_name)
+                        break
+            else:
+                continue
+            break
+
+    for area_key, area_chars in all_accounts_chars.items():
+        for acc_key, char_list in area_chars.items():
+            for ch in char_list:
+                if ch.get('id', 0) == char_id:
+                    continue
+                updated = False
+                # Check friends
+                for fi in ch.get('friends', []):
+                    if fi.get('friendId') == char_id:
+                        fi['state'] = state
+                        updated = True
+                # Check enemies
+                for ei in ch.get('enemies', []):
+                    if ei.get('friendId') == char_id:
+                        ei['state'] = state
+                        updated = True
+                if updated:
+                    # Push syn_friend_info to this player if they're online
+                    for cid, (c, conn_ch) in list(ALL_CONNECTIONS.items()):
+                        if conn_ch and conn_ch.get('id', 0) == ch.get('id', 0):
+                            try:
+                                fi_data = {
+                                    'characterId': char_id,
+                                    'friendId': char_id,
+                                    'name': char_name,
+                                    'level': 1,
+                                    'profession': 0,
+                                    'combValue': 0,
+                                    'state': state,
+                                    'timeInfo': 0,
+                                    'friendType': 0,
+                                    'guildId': 0,
+                                    'guildName': '',
+                                    'friendScore': 0
+                                }
+                                fi_bytes = encode_friend_info(fi_data)
+                                ph_p = encode_sproto([(0, 538)])
+                                pf_p = sproto_pack(ph_p + encode_sproto([(0, fi_bytes)]))
+                                syn_pkt = struct.pack(">H", len(pf_p)) + pf_p
+                                c_lock = CONNECTION_LOCKS.get(cid)
+                                if c_lock:
+                                    with c_lock:
+                                        c.sendall(syn_pkt)
+                                else:
+                                    c.sendall(syn_pkt)
+                                print(f"[FRIEND] Online state sync: {char_id} state={state} to {ch.get('id', 0)}")
+                            except Exception:
+                                pass
+                    break
+    # Save updated friend/enemy state
+    save_chars(all_accounts_chars)
+
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
-    global server_session_counter, ALL_CONNECTIONS
+    global server_session_counter, ALL_CONNECTIONS, MAIL_ID_COUNTER
     conn_id = id(conn)
     # ALL_CONNECTIONS will be updated when character is picked
     send_lock = threading.Lock()
@@ -3098,7 +3184,11 @@ def client_handler(conn, addr):
             elif msg == 105: # character_pick
                 char_id = get_val_int(body, 0)
                 picked_char = next((c for c in get_account_chars(all_accounts_chars, cur_areaId, acc_id) if c['id'] == char_id), None)
-                ALL_CONNECTIONS[picked_char.get('id', 0)] = (conn, picked_char)  # Track online character
+                char_id = picked_char.get('id', 0)
+                ALL_CONNECTIONS[char_id] = (conn, picked_char)  # Track online character
+                CONNECTION_LOCKS[char_id] = threading.Lock()  # Create per-connection lock
+                # Update online state for all friends/enemies who have this player in their list
+                _sync_friend_online_state(char_id, 1)
                 resp = encode_sproto([(0, 1 if picked_char else 0)])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4549,11 +4639,13 @@ def client_handler(conn, addr):
                         context = context_raw.decode('utf-8', errors='ignore')
                     else:
                         context = str(context_raw)
-                    mail_id = int(time.time() * 1000) % 1000000
+                    mail_id = MAIL_ID_COUNTER
+                    MAIL_ID_COUNTER += 1
+                    sender_name = picked_char.get('name', 'Player')
                     mail_entry = {
                         'mailId': mail_id,
                         'sendertype': 4,  # USER type (client MailSenderType.USER=4)
-                        'title': 'Player Mail',
+                        'title': f'{sender_name}',
                         'senderTime': int(time.time()),
                         'receiveId': receive_id,
                         'readTime': 0,
@@ -4580,7 +4672,13 @@ def client_handler(conn, addr):
                                                 mi_bytes = build_mail_update(mail_entry)
                                                 ph_p = encode_sproto([(0, 531)])
                                                 pf_p = sproto_pack(ph_p + mi_bytes)
-                                                t_conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+                                                mail_pkt = struct.pack(">H", len(pf_p)) + pf_p
+                                                t_lock = CONNECTION_LOCKS.get(t_cid)
+                                                if t_lock:
+                                                    with t_lock:
+                                                        t_conn.sendall(mail_pkt)
+                                                else:
+                                                    t_conn.sendall(mail_pkt)
                                                 print(f"[MAIL] mail_update pushed to receiver={receive_id}")
                                             except Exception:
                                                 print(f"[MAIL] Failed to push mail_update to receiver={receive_id}")
@@ -4613,18 +4711,24 @@ def client_handler(conn, addr):
                     elif operation == 2: # get items
                         for mi in picked_char.get('mails', []):
                             if mi.get('mailId') == mail_id:
-                                mi['mailState'] = 2
+                                mi['mailState'] = 3  # GETITEM - client IsGetItem() checks mailstate==3
                                 for it in mi.get('items', []):
                                     add_to_inventory(picked_char, str(it.get('itemId', 0)), it.get('count', 1))
                                 send_rpc_push(611, sync_inventory_data(picked_char))
+                                # Send updated mail_update (531) so client knows the mail state changed
+                                mi_bytes = build_mail_update(mi)
+                                send_rpc_push(531, mi_bytes)
                                 break
                         save_chars(all_accounts_chars)
                     elif operation == 3: # get all items
                         for mi in picked_char.get('mails', []):
-                            if mi.get('mailState', 0) != 2:
-                                mi['mailState'] = 2
+                            if mi.get('mailState', 0) != 3:  # Skip already claimed
+                                mi['mailState'] = 3  # GETITEM - client IsGetItem() checks mailstate==3
                                 for it in mi.get('items', []):
                                     add_to_inventory(picked_char, str(it.get('itemId', 0)), it.get('count', 1))
+                                # Send updated mail_update (531) for each claimed mail
+                                mi_bytes = build_mail_update(mi)
+                                send_rpc_push(531, mi_bytes)
                         send_rpc_push(611, sync_inventory_data(picked_char))
                         save_chars(all_accounts_chars)
                     elif operation == 4: # delete all
@@ -4787,7 +4891,13 @@ def client_handler(conn, addr):
                                         ph_p = encode_sproto([(0, 536)])
                                         pf_p = sproto_pack(ph_p + notice_data)
                                         notice_pkt = struct.pack(">H", len(pf_p)) + pf_p
-                                        t_conn.sendall(notice_pkt)
+                                        # Use the target's connection lock to prevent packet interleaving
+                                        t_lock = CONNECTION_LOCKS.get(target_id)
+                                        if t_lock:
+                                            with t_lock:
+                                                t_conn.sendall(notice_pkt)
+                                        else:
+                                            t_conn.sendall(notice_pkt)
                                         print(f"[FRIEND] notice_add_friend sent to target={target_id} from={my_id} size={len(notice_pkt)}")
                                     except BrokenPipeError:
                                         print(f"[FRIEND] Target {target_id} connection broken, skipping notice")
@@ -5034,13 +5144,26 @@ def client_handler(conn, addr):
                                                 'friendScore': 0
                                             }
                                             ch['friends'].append(mutual_friend)
-                                            # Do NOT push syn_friend_info to the requester (sender).
-                                            # Sending it via direct sendall() from a background thread corrupts
-                                            # the TCP socket when the sender's main thread is also reading/writing,
-                                            # causing the sender's client to crash and disconnect.
-                                            # The sender will receive the mutual friend when they open the
-                                            # Social UI via request_update_friend_useinfo (msg 126).
-                                            print(f"[FRIEND] Mutual friendship saved for requester={target_id} (will appear on next UI open)")
+                                            # Push syn_friend_info to the requester so they see the mutual friend immediately.
+                                            # Use CONNECTION_LOCKS to safely send to another player's socket.
+                                            for r_cid, (r_conn, r_char) in list(ALL_CONNECTIONS.items()):
+                                                if r_char and r_char.get('id', 0) == target_id:
+                                                    try:
+                                                        fi_bytes = encode_friend_info(mutual_friend)
+                                                        ph_p = encode_sproto([(0, 538)])
+                                                        pf_p = sproto_pack(ph_p + encode_sproto([(0, fi_bytes)]))
+                                                        syn_pkt = struct.pack(">H", len(pf_p)) + pf_p
+                                                        r_lock = CONNECTION_LOCKS.get(r_cid)
+                                                        if r_lock:
+                                                            with r_lock:
+                                                                r_conn.sendall(syn_pkt)
+                                                        else:
+                                                            r_conn.sendall(syn_pkt)
+                                                        print(f"[FRIEND] syn_friend_info pushed to requester={target_id}")
+                                                    except Exception:
+                                                        print(f"[FRIEND] Failed to push syn_friend_info to requester={target_id}")
+                                                    break
+                                            print(f"[FRIEND] Mutual friendship saved for requester={target_id}")
                                         # Remove from friend_requests_sent
                                         if 'friend_requests_sent' in ch:
                                             ch['friend_requests_sent'] = [r for r in ch['friend_requests_sent'] if r != my_id]
@@ -5049,13 +5172,29 @@ def client_handler(conn, addr):
                                 if ch.get('id', 0) == target_id:
                                     break
                     else:
+                        # Reject: remove from receiver's friend_requests_received
                         if 'friend_requests_received' not in picked_char:
                             picked_char['friend_requests_received'] = []
                         picked_char['friend_requests_received'] = [
                             r for r in picked_char.get('friend_requests_received', [])
                             if r != target_id
                         ]
-                        save_chars(all_accounts_chars)
+                        # Also remove receiver from sender's friend_requests_sent
+                        # so the sender can send another request in the future
+                        for area_key, area_chars in all_accounts_chars.items():
+                            for acc_key, char_list in area_chars.items():
+                                for ch in char_list:
+                                    if ch.get('id', 0) == target_id:
+                                        if 'friend_requests_sent' in ch:
+                                            ch['friend_requests_sent'] = [
+                                                r for r in ch['friend_requests_sent'] if r != my_id
+                                            ]
+                                        save_chars(all_accounts_chars)
+                                        break
+                                else:
+                                    continue
+                                break
+                        print(f"[FRIEND] Friend request rejected by {my_id} to {target_id}, cleaned up sender's friend_requests_sent")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -5073,7 +5212,8 @@ def client_handler(conn, addr):
                         context = context_raw.decode('utf-8', errors='ignore')
                     else:
                         context = str(context_raw)
-                    mail_id = int(time.time() * 1000) % 1000000
+                    mail_id = MAIL_ID_COUNTER
+                    MAIL_ID_COUNTER += 1
                     mail_entry = {
                         'mailId': mail_id,
                         'sendertype': 0,
@@ -5243,6 +5383,9 @@ def client_handler(conn, addr):
             if picked_char:
                 char_id = picked_char.get('id', 0)
                 ALL_CONNECTIONS.pop(char_id, None)  # Remove from online tracking
+                CONNECTION_LOCKS.pop(char_id, None)  # Remove connection lock
+                # Update offline state for all friends/enemies who have this player
+                _sync_friend_online_state(char_id, 0)
             conn.close()
         except Exception:
             pass
