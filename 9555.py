@@ -4775,8 +4775,7 @@ def client_handler(conn, addr):
                             }
                             notice_data = encode_sproto([(0, encode_friend_info(sender_friend_info))])
                             # Find target player's connection and send notice_add_friend (msg 536)
-                            # Send synchronously from the sender's thread to avoid TCP socket corruption
-                            # that occurs when a background thread writes to another player's socket
+                            # Use send_lock on the target's connection to avoid corrupting its socket
                             target_found = False
                             print(f"[FRIEND] Looking for target={target_id} in ALL_CONNECTIONS (count={len(ALL_CONNECTIONS)})")
                             for t_cid, (t_conn, t_char) in list(ALL_CONNECTIONS.items()):
@@ -4797,6 +4796,7 @@ def client_handler(conn, addr):
                                     break
                             if not target_found:
                                 print(f"[FRIEND] Target={target_id} NOT FOUND online - request persisted for next login")
+                            print(f"[FRIEND] add_friend notice phase completed for target={target_id}")
                             # Also add sender to target's friend_requests_received for persistence
                             # Load and update target character data
                             target_updated = False
@@ -4820,9 +4820,12 @@ def client_handler(conn, addr):
                     print(f"[FRIEND] ERROR in add_friend handler: {e}")
                     import traceback
                     traceback.print_exc()
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+                # Do NOT send session acknowledgment for add_friend (msg 124).
+                # The client sends it with session=None (fire-and-forget) and does not expect any response.
+                # Sending an unexpected packet can cause the client to crash.
+                # if session is not None:
+                #     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                #     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 125: # del_friend (type 0=friend, 1=enemy/foe)
                 if picked_char:
@@ -4877,6 +4880,7 @@ def client_handler(conn, addr):
                             req_combat = 0
                             req_guildId = 0
                             req_guildName = ''
+                            req_state = 0  # Default offline
                             for r_cid, (r_conn, ch) in list(ALL_CONNECTIONS.items()):
                                 if ch and ch.get('id', 0) == req_id:
                                     req_name = ch.get('name', f'Player{req_id}')
@@ -4885,6 +4889,7 @@ def client_handler(conn, addr):
                                     req_combat = get_character_stats(ch)['power']
                                     req_guildId = ch.get('guildId', 0)
                                     req_guildName = ch.get('guildName', '')
+                                    req_state = 1  # Online
                                     break
                             else:
                                 for area_key, area_chars in all_accounts_chars.items():
@@ -4908,7 +4913,7 @@ def client_handler(conn, addr):
                                 'level': req_level,
                                 'profession': req_prof,
                                 'combValue': req_combat,
-                                'state': 0,
+                                'state': req_state,
                                 'timeInfo': int(time.time()),
                                 'friendType': 2,
                                 'guildId': req_guildId,
