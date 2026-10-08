@@ -966,9 +966,10 @@ for area_key, area_chars in all_accounts_chars.items():
     for acc_key, char_list in area_chars.items():
         for ch in char_list:
             for mail in ch.get('mails', []):
-                mid = mail.get('mailId', 0)
-                if mid >= MAIL_ID_COUNTER:
-                    MAIL_ID_COUNTER = mid + 1
+                if isinstance(mail, dict):
+                    mid = mail.get('mailId', 0)
+                    if mid >= MAIL_ID_COUNTER:
+                        MAIL_ID_COUNTER = mid + 1
 print(f"[MAIL] MAIL_ID_COUNTER initialized to {MAIL_ID_COUNTER}")
 
 def generate_unique_char_id():
