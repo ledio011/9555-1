@@ -1222,18 +1222,20 @@ def sync_main_player_visual(picked_char, send_rpc_push):
     ])
     send_rpc_push(510, encode_sproto([(0, character)]))
 
-def get_boss_char(inst_id, did):
+def get_boss_char(inst_id, did, player_level=1):
     # Domin 1 boss stats and visual (XD profession)
     # These names are server placeholders, not names supplied by the APK data.
     name = "Ash Viper"
     prof = 0
 
-    # VERIFIED ORIGINAL BOSS DATA: Level 3
-    lv = 3
-    hp_max = 9560
-    power = 6000
-    atk = 660
-    df = 60
+    # Use get_npc_attr("1105") with player level for consistent stats
+    # This ensures boss HP bar, stats, and actual server HP all agree
+    boss_stats = get_npc_attr("1105", player_level)
+    lv = boss_stats['lv']
+    hp_max = boss_stats['hp_max']
+    power = boss_stats['power']
+    atk = boss_stats['atk']
+    df = boss_stats['def']
 
     # Visual
     v = get_visual(name, prof)
@@ -1257,19 +1259,18 @@ def get_boss_char(inst_id, did):
         "105": 1, "106": 1, "107": 1,
         "108": 1, "109": 1, "110": 1,
     }
-    skills_map = build_skills_map(prof, 25, boss_skill_levels)
+    skills_map = build_skills_map(prof, player_level, boss_skill_levels)
 
     # Runtime: attribute(6), attribute_all(7)
     attr_run = encode_sproto([(0, hp_max), (2, atk), (3, df)])
 
-    # Load level 3 coefficients for Boss
-    ld = LEVEL_DATA.get(3, LEVEL_DATA.get(1))
+    # Use boss_stats for all attributes to ensure consistency
     attr_all_data = [
         (0, hp_max), (2, atk), (3, df),
-        (4, ld['hit'][0]), (5, ld['eva'][0]), (6, ld['cri'][0]), (7, ld['res'][0]),
-        (8, ld['exd'][0]), (9, ld['exr'][0]), (10, ld['crd'][0]), (11, ld['crr'][0]),
-        (12, ld['defa']), (13, 700), (14, 100),
-        (17, ld['dgea']), (18, ld['resa']), (19, ld['hita']), (20, ld['cria'])
+        (4, boss_stats['hit']), (5, boss_stats['eva']), (6, boss_stats['cri']), (7, boss_stats['res']),
+        (8, boss_stats['exd']), (9, boss_stats['exr']), (10, boss_stats['crd']), (11, boss_stats['crr']),
+        (12, boss_stats['defa']), (13, 700), (14, 100),
+        (17, boss_stats['dgea']), (18, boss_stats['resa']), (19, boss_stats['hita']), (20, boss_stats['cria'])
     ]
     attr_all = encode_sproto(attr_all_data)
     run = encode_sproto([(6, attr_run), (7, attr_all)])
@@ -1315,7 +1316,8 @@ def get_skill_upgrade_cost(lv):
 
 def build_skills_map(prof, char_level, skill_levels=None):
     """Build the skill dictionary sent to the client via sync_skill_info (tag 540).
-    Only sends starter skills: 3 basic attacks + 1 dodge + 1 active skill.
+    Sends starter skills: 3 basic attacks + 1 dodge + 1 active skill.
+    If skill_levels contains additional skills (e.g., boss skills), include them too.
     Additional active skills are granted by weapon skins (LabelID system), not by level."""
     prof = int(prof)
     if skill_levels is None: skill_levels = {}
@@ -1340,6 +1342,23 @@ def build_skills_map(prof, char_level, skill_levels=None):
         (4, 2),       # indexPos2 - skill bar position
         (5, False)    # disable - not disabled
     ])
+
+    # Include any additional skills specified in skill_levels (e.g., boss skills 106-110)
+    # This ensures the boss has the complete combat skill set
+    for sid, slv in skill_levels.items():
+        if sid not in smap:
+            # Determine skill index based on skill ID pattern
+            # Active skills start at index 4
+            skill_idx = 4 + len([s for s in smap if s.startswith(sid[0]) and s != sid])
+            smap[sid] = encode_sproto([
+                (0, sid),
+                (1, slv),
+                (2, skill_idx),   # indexPos
+                (3, 1),           # unlockLevel
+                (4, skill_idx),   # indexPos2
+                (5, False)        # disable
+            ])
+
     return smap
 
 def get_general(c):
@@ -1899,7 +1918,7 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
 
     # 6. Final Formula with Random Variance [0.95, 1.049]
     # Client: GetRandom() returns 0-99, then /1000 + 0.95 = 0.95 to 1.049
-    rand_var = random.randint(0, 99) / 100.0 + 0.95
+    rand_var = random.randint(0, 99) / 1000.0 + 0.95
 
     skill_sexd = eff_cfg['adds'].get(3003, 0) / 10000.0
     exd_factor = 1.0 + (attacker_stats['exd'] - defender_stats['exr']) / 10000.0 + skill_sexd
@@ -3053,7 +3072,9 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
             picked_char['boss_inst_id'] = boss_inst_id
             picked_char['boss_pos'] = [400, 120, 0, -9000]
 
-            boss_stats = get_npc_attr("1105")
+            # Use player level for consistent boss stats
+            player_level = picked_char.get('level', 1)
+            boss_stats = get_npc_attr("1105", player_level)
             NPC_HP_MAP[boss_inst_id] = boss_stats['hp_max']
             NPC_INST_MAP[boss_inst_id] = "BOSS_" + did
             # The APK cannot create the zombie player (or the VS panel) until
@@ -3617,9 +3638,10 @@ def client_handler(conn, addr):
                         boss_id = picked_char.get('boss_inst_id')
                         if boss_id and picked_char.pop('boss_waiting_for_map_ready', False):
                             did = picked_char.get('active_domin_id', '1')
-                            boss_stats = get_npc_attr("1105")
+                            player_level = picked_char.get('level', 1)
+                            boss_stats = get_npc_attr("1105", player_level)
                             # Tag 544 creates ObjZombiePlayer and opens the VS UI.
-                            send_rpc_push(544, encode_sproto([(0, get_boss_char(boss_id, did))]))
+                            send_rpc_push(544, encode_sproto([(0, get_boss_char(boss_id, did, player_level))]))
                             sync_npc_attrs_rpc(conn, boss_id, boss_stats, NPC_HP_MAP.get(boss_id, boss_stats['hp_max']))
                             print(f"[M1003 DEBUG] Spawned Boss did={did} inst={boss_id} after map_ready")
 
@@ -4092,9 +4114,27 @@ def client_handler(conn, addr):
 
                         if target_char is not None:
                             # === PvP: target is an online player ===
-                            # Server-authoritative damage calculation using actual effinfo_id from client
+                            # Server-authoritative damage calculation
                             target_stats = get_character_stats(target_char)
-                            skill_lv = picked_char.get('skill_levels', {}).get(skill_id, 1)
+
+                            # Verify the attacker actually has this skill learned
+                            char_skill_levels = picked_char.get('skill_levels', {})
+                            if skill_id not in char_skill_levels:
+                                # Skill not learned by player, reject and use default basic attack
+                                skill_id = "50001"
+                                effinfo_id = None
+                            skill_lv = char_skill_levels.get(skill_id, 1)
+                            if skill_lv < 1:
+                                # Skill level invalid, use default
+                                skill_id = "50001"
+                                skill_lv = 1
+                                effinfo_id = None
+
+                            # Server-authoritative effinfo_id: derive from skill_id, not from client
+                            if effinfo_id is None:
+                                skill_cfg = SKILL_CONFIG.get(skill_id, {})
+                                effinfo_id = skill_cfg.get('eff0', "10000")
+
                             server_dmg, hit, calc_cri = get_combat_damage(attacker_stats, target_stats, skill_id, skill_lv, pvp_scale=1.0, effinfo_id=effinfo_id)
                             if not hit:
                                 server_dmg = 0
@@ -4280,12 +4320,24 @@ def client_handler(conn, addr):
 
                             # Server-authoritative NPC damage calculation
                             # Verify the attacker actually has this skill learned
-                            skill_lv = picked_char.get('skill_levels', {}).get(skill_id, 1)
+                            char_skill_levels = picked_char.get('skill_levels', {})
+                            if skill_id not in char_skill_levels:
+                                # Skill not learned by player, reject and use default basic attack
+                                skill_id = "50001"
+                                effinfo_id = None
+                            skill_lv = char_skill_levels.get(skill_id, 1)
                             if skill_lv < 1:
-                                # Skill not learned, use default
+                                # Skill level invalid, use default
                                 skill_id = "50001"
                                 skill_lv = 1
                                 effinfo_id = None
+
+                            # Server-authoritative effinfo_id: derive from skill_id, not from client
+                            # This prevents the client from influencing which damage configuration is used
+                            if effinfo_id is None:
+                                skill_cfg = SKILL_CONFIG.get(skill_id, {})
+                                effinfo_id = skill_cfg.get('eff0', "10000")
+
                             server_dmg, hit, calc_cri = get_combat_damage(
                                 attacker_stats, defender_stats, skill_id, skill_lv, effinfo_id=effinfo_id
                             )
@@ -4460,6 +4512,33 @@ def client_handler(conn, addr):
                 did = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
                 print(f"[M1003 DEBUG] RX 311 domin_id={did}")
                 if picked_char:
+                    # Validate Domin ID against active capture missions
+                    # Only allow entering the Domin territory that matches the current mission
+                    valid_domin = False
+                    valid_domin_id = None
+                    for act_m, act_mdata in picked_char.get('active_missions', {}).items():
+                        cap_cfg = missions_data.get(act_m, {})
+                        if cap_cfg.get('logic_type') == 25:
+                            # Mission 1003: logic_type 25 (capture), logic_id 1, target 1105
+                            # The Domin ID should match the logic_id from the mission
+                            mission_logic_id = cap_cfg.get('logic_id', '')
+                            if mission_logic_id == did:
+                                valid_domin = True
+                                valid_domin_id = did
+                                break
+                    # If no active capture mission found, default to Domin ID 1 (Mission 1003)
+                    if not valid_domin:
+                        if did == '1':
+                            valid_domin = True
+                            valid_domin_id = '1'
+                        else:
+                            print(f"[M1003 DEBUG] RX 311 rejected: invalid domin_id={did}, expected 1")
+                            # Reject the request - send empty response
+                            if session is not None:
+                                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                                conn.sendall(struct.pack(">H", len(pf)) + pf)
+                            continue
+
                     # RESET HP TO MAX FOR AREA DUEL
                     picked_char['hp'] = get_character_stats(picked_char)['hp_max']
                     # SAVE LATEST POSITION AND MAP EXACTLY (Ensure list copy)
@@ -4467,7 +4546,7 @@ def client_handler(conn, addr):
                     picked_char['pre_arena_pos'] = list(latest_pos)
                     picked_char['pre_arena_map'] = str(picked_char.get('map_id', '11'))
                     print(f"[M1003 DEBUG] Saved pre-arena pos: {picked_char['pre_arena_pos']}, map: {picked_char['pre_arena_map']}")
-                    picked_char['active_domin_id'] = did
+                    picked_char['active_domin_id'] = valid_domin_id
                     start_map_transition(conn, picked_char, "502", send_rpc_push)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
