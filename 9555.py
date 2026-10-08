@@ -2682,10 +2682,7 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                 if spawn_key in KILL_TARGET_SPAWNS:
                     for s in KILL_TARGET_SPAWNS[spawn_key]:
                         spawn_nids.add(str(s['nid']))
-                if target in ("9901", "1001") or target_value in ("9901", "1001"):
-                    matched = target_value in ("9901", "1001")
-                else:
-                    matched = target == target_value or target_value in spawn_nids
+                matched = target == target_value or target_value in spawn_nids
         elif logic_type == 19 and event == 'car':
             # The client sends type 2 for a normal car robbery without an
             # NPC/car id, so its event type is the authoritative discriminator.
@@ -4199,9 +4196,8 @@ def client_handler(conn, addr):
                         else:
                             # === NPC/Monster/Boss damage ===
                             # Map 11 NPCs are fully client-side - skip all server-side HP/death handling
+                            # Do NOT advance missions on damage — only on actual death (tag 307)
                             if picked_char and str(picked_char.get('map_id')) == '11':
-                                target_nid = NPC_INST_MAP.get(target_id, str(target_id))
-                                advance_missions(picked_char, send_rpc_push, 'kill', target_id=target_nid)
                                 # Still send damage feedback to attacker
                                 dmg_item = encode_sproto([
                                     (0, target_id),
@@ -4343,7 +4339,27 @@ def client_handler(conn, addr):
                     if die_type in [2, 6]:
                         advance_missions(picked_char, send_rpc_push, 'car', die_type=die_type)
 
-                    on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid)
+                    # Map 11 NPCs are fully client-side — do not run server NPC kill rewards
+                    # Instead, resolve the actual NPC ID from KillTargetMissionData and advance missions only
+                    cur_map = str(picked_char.get('map_id', '11'))
+                    if cur_map == '11':
+                        # For client-local map 11 NPCs, the inst_id is a client-generated ID.
+                        # The client sends the npcid directly in field 0 of tag 307.
+                        # Try to resolve the actual NPC type from KILL_TARGET_SPAWNS.
+                        actual_npcid = npcid
+                        if inst_id:
+                            # Check if this instance was server-spawned
+                            if inst_id in NPC_INST_MAP:
+                                actual_npcid = NPC_INST_MAP[inst_id]
+                            else:
+                                # Client-local NPC — npcid from the packet is the NPC type ID
+                                # For mission 1001, the client sends npcid=9901 directly
+                                pass
+
+                        # Advance kill missions for map 11 without running on_npc_killed rewards
+                        advance_missions(picked_char, send_rpc_push, 'kill', target_id=actual_npcid)
+                    else:
+                        on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid)
 
                     if die_type == 3:
                         advance_missions(picked_char, send_rpc_push, 'impact', target_id=npcid)
