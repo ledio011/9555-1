@@ -1350,12 +1350,18 @@ def build_skills_map(prof, char_level, skill_levels=None):
     ])
 
     # Include any additional skills specified in skill_levels (e.g., boss skills 106-110)
-    # This ensures the boss has the complete combat skill set
+    # The client's ObjZombiePlayer.UpdateSkillList() only accepts indexPos 4, 5, 6
+    # (line 114: index > 3 && index < 7), so only 3 active skills can be used by zombie AI.
+    # Assign sequential indexPos starting from 4 for the first 3 extra skills.
+    extra_skill_idx = 0
     for sid, slv in skill_levels.items():
         if sid not in smap:
-            # Determine skill index based on skill ID pattern
-            # Active skills start at index 4
-            skill_idx = 4 + len([s for s in smap if s.startswith(sid[0]) and s != sid])
+            # Only assign indexPos 4-6 for the first 3 extra skills (zombie AI limit)
+            # Skills beyond index 6 will be added but won't be in mEnableSkillIDList
+            if extra_skill_idx < 3:
+                skill_idx = 4 + extra_skill_idx  # 4, 5, 6
+            else:
+                skill_idx = 7 + extra_skill_idx  # 7, 8, ... (won't be used by zombie AI)
             smap[sid] = encode_sproto([
                 (0, sid),
                 (1, slv),
@@ -1364,6 +1370,7 @@ def build_skills_map(prof, char_level, skill_levels=None):
                 (4, skill_idx),   # indexPos2
                 (5, False)        # disable
             ])
+            extra_skill_idx += 1
 
     return smap
 
@@ -4082,6 +4089,10 @@ def client_handler(conn, addr):
                 client_dmg = get_val_int(body, 1)
                 effinfo_id = body.get(2, b"").decode('utf-8') if isinstance(body.get(2), bytes) else str(body.get(2, ''))
 
+                # Initialize server_dmg to 0 to handle malformed packets safely
+                server_dmg = 0
+                calc_cri = False
+
                 if picked_char and target_id == picked_char['id']:
                     is_area = (picked_char.get('map_id') == "502")
                     if is_area:
@@ -4094,11 +4105,21 @@ def client_handler(conn, addr):
 
                             # Use client-sent effinfo_id to determine which boss skill was used
                             # The client sends effinfoId from the skill's effect data (SkillLogic.cs line 781)
-                            # Reverse-lookup the skill_id from the effinfo_id
-                            if effinfo_id and effinfo_id in EFF_TO_SKILL:
+                            # Reverse-lookup the skill_id from the effinfo_id, but ONLY allow
+                            # effects that belong to the boss's actual skill set (105-110).
+                            # This prevents the client from mapping an arbitrary effect to an unrelated skill.
+                            boss_allowed_effects = set()
+                            for boss_sid in ('101', '105', '106', '107', '108', '109', '110'):
+                                bcfg = SKILL_CONFIG.get(boss_sid, {})
+                                for eff_key in ('eff0', 'eff1', 'eff2'):
+                                    eff = bcfg.get(eff_key, '')
+                                    if eff:
+                                        boss_allowed_effects.add(eff)
+
+                            if effinfo_id and effinfo_id in boss_allowed_effects and effinfo_id in EFF_TO_SKILL:
                                 boss_skill_id = EFF_TO_SKILL[effinfo_id]
                             else:
-                                # Fallback: if effinfo_id not recognized, use basic attack
+                                # Fallback: if effinfo_id not recognized or not a boss effect, use basic attack
                                 boss_skill_id = "101"
                                 skill_cfg = SKILL_CONFIG.get(boss_skill_id, {})
                                 effinfo_id = skill_cfg.get('eff0', "10000")
@@ -4115,9 +4136,7 @@ def client_handler(conn, addr):
                             server_dmg = 0
                             calc_cri = False
                             print(f"[AREA BOSS ATTACK] No boss_inst_id found, damage rejected")
-                    else:
-                        server_dmg = 0
-                        calc_cri = False
+                    # else: server_dmg stays 0 for non-arena Tag 128
 
                     new_hp = picked_char.get('hp', 0) - server_dmg
                     picked_char['hp'] = max(0, new_hp)
@@ -4348,6 +4367,12 @@ def client_handler(conn, addr):
                                 ]))
                                 continue
 
+                            # Check if NPC is already dead (Tag 137 may have killed it first)
+                            # This prevents processing damage after the boss is already dead
+                            if target_id in DEAD_NPC_SET:
+                                print(f"[COMBAT] Tag 111 rejected: NPC {target_id} already dead")
+                                continue
+
                             target_nid = NPC_INST_MAP.get(target_id, str(target_id))
                             NPC_INST_MAP[target_id] = target_nid
 
@@ -4406,8 +4431,6 @@ def client_handler(conn, addr):
                             ]))
 
                             if NPC_HP_MAP[target_id] <= 0:
-                                if target_id in DEAD_NPC_SET:
-                                    continue
                                 DEAD_NPC_SET.add(target_id)
 
                                 send_rpc_push(506, encode_sproto([(0, target_id)]))
