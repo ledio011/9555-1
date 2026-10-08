@@ -4073,15 +4073,41 @@ def client_handler(conn, addr):
 
             elif msg == 128: # local_character_attack (Boss counter-attack)
                 target_id = get_val_int(body, 0)
-                dmg = get_val_int(body, 1)
-                eff_id = body.get(2, b"").decode('utf-8') if isinstance(body.get(2), bytes) else str(body.get(2, ''))
+                client_dmg = get_val_int(body, 1)
+                effinfo_id = body.get(2, b"").decode('utf-8') if isinstance(body.get(2), bytes) else str(body.get(2, ''))
 
                 if picked_char and target_id == picked_char['id']:
                     is_area = (picked_char.get('map_id') == "502")
                     if is_area:
-                        print(f"[AREA BOSS ATTACK] dmg={dmg} eff={eff_id}")
+                        # Server-authoritative boss->player damage calculation
+                        boss_id = picked_char.get('boss_inst_id')
+                        if boss_id:
+                            player_level = picked_char.get('level', 1)
+                            boss_stats = get_npc_attr("1105", player_level)
+                            player_stats = get_character_stats(picked_char)
 
-                    new_hp = picked_char.get('hp', 0) - dmg
+                            # Derive effinfo_id server-side from the boss's skill
+                            boss_skill_id = "101"
+                            skill_cfg = SKILL_CONFIG.get(boss_skill_id, {})
+                            effinfo_id = skill_cfg.get('eff0', "10000")
+
+                            server_dmg, hit, calc_cri = get_combat_damage(
+                                boss_stats, player_stats, boss_skill_id, 1, effinfo_id=effinfo_id
+                            )
+                            if not hit:
+                                server_dmg = 0
+                                calc_cri = False
+
+                            print(f"[AREA BOSS ATTACK] server_dmg={server_dmg} cri={calc_cri} eff={effinfo_id}")
+                        else:
+                            server_dmg = 0
+                            calc_cri = False
+                            print(f"[AREA BOSS ATTACK] No boss_inst_id found, damage rejected")
+                    else:
+                        server_dmg = 0
+                        calc_cri = False
+
+                    new_hp = picked_char.get('hp', 0) - server_dmg
                     picked_char['hp'] = max(0, new_hp)
                     sync_char_attrs_rpc(conn, picked_char)
                     if picked_char['hp'] == 0 and picked_char.get('map_id') == '502':
@@ -4527,18 +4553,14 @@ def client_handler(conn, addr):
                                 valid_domin = True
                                 valid_domin_id = did
                                 break
-                    # If no active capture mission found, default to Domin ID 1 (Mission 1003)
+                    # Reject if no active capture mission matches the requested Domin ID
                     if not valid_domin:
-                        if did == '1':
-                            valid_domin = True
-                            valid_domin_id = '1'
-                        else:
-                            print(f"[M1003 DEBUG] RX 311 rejected: invalid domin_id={did}, expected 1")
-                            # Reject the request - send empty response
-                            if session is not None:
-                                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                                conn.sendall(struct.pack(">H", len(pf)) + pf)
-                            continue
+                        print(f"[M1003 DEBUG] RX 311 rejected: no active capture mission for domin_id={did}")
+                        # Reject the request - send empty response
+                        if session is not None:
+                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                            conn.sendall(struct.pack(">H", len(pf)) + pf)
+                        continue
 
                     # RESET HP TO MAX FOR AREA DUEL
                     picked_char['hp'] = get_character_stats(picked_char)['hp_max']
