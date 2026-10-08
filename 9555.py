@@ -406,32 +406,60 @@ try:
     }
     for _nid, _override in _map11_monsters.items():
         if _nid in NPC_CONFIG:
-            # Only override if the NPC is not already configured as percentage-based
+            # Always apply the override to ensure correct configuration
+            # For percentage-based NPCs (is_abs=False), override the coefficients and level
+            # For absolute NPCs (is_abs=True), override the absolute values
             if _override.get('is_abs', True):
                 NPC_CONFIG[_nid].update(_override)
                 NPC_CONFIG[_nid]['is_abs'] = True
-            # If is_abs is False (percentage-based), keep the NpcData-loaded config
+            else:
+                # Percentage-based: apply coefficient overrides and level
+                for key in ['name', 'model', 'level', 'type', 'is_abs', 'skill_group']:
+                    if key in _override:
+                        NPC_CONFIG[_nid][key] = _override[key]
+                for key in ['atk_coe', 'hp_coe', 'def_coe', 'hit_coe', 'eva_coe', 'cri_coe',
+                            'res_coe', 'exd_coe', 'exr_coe', 'crd_coe', 'crr_coe',
+                            'anti_stun_coe', 'anti_knock_down_coe', 'defa_coe', 'dgea_coe',
+                            'resa_coe', 'hita_coe', 'cria_coe']:
+                    if key in _override:
+                        NPC_CONFIG[_nid][key] = _override[key]
         else:
+            # Fallback: NpcData didn't load this NPC, create config from override
             NPC_CONFIG[_nid] = {
-                'name': _override['name'],
-                'model': _override['model'],
-                'level': _override['level'],
+                'name': _override.get('name', f'NPC_{_nid}'),
+                'model': _override.get('model', 'NPC_Default'),
+                'level': _override.get('level', 1),
                 'type': 0,
-                'is_abs': True,
-                'skill_group': '50001',
-                'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000,
-                'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000,
-                'exd_coe': 10000, 'exr_coe': 10000, 'crd_coe': 10000, 'crr_coe': 10000,
-                'anti_stun_coe': 10000, 'anti_knock_down_coe': 10000,
-                'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000,
-                'atk_abs': _override['atk_abs'], 'hp_abs': _override['hp_abs'], 'def_abs': _override['def_abs'],
-                'hit_abs': _override['hit_abs'], 'eva_abs': _override['eva_abs'], 'cri_abs': _override['cri_abs'],
-                'res_abs': _override['res_abs'], 'exd_abs': _override['exd_abs'], 'exr_abs': _override['exr_abs'],
-                'crd_abs': _override['crd_abs'], 'crr_abs': _override['crr_abs'],
-                'anti_stun_abs': _override['anti_stun_abs'], 'anti_knock_down_abs': _override['anti_knock_down_abs'],
-                'defa_abs': _override['defa_abs'], 'dgea_abs': _override['dgea_abs'],
-                'resa_abs': _override['resa_abs'], 'hita_abs': _override['hita_abs'], 'cria_abs': _override['cria_abs'],
+                'is_abs': _override.get('is_abs', True),
+                'skill_group': _override.get('skill_group', '50001'),
             }
+            if NPC_CONFIG[_nid]['is_abs']:
+                # Absolute stats fallback
+                NPC_CONFIG[_nid].update({
+                    'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000,
+                    'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000,
+                    'exd_coe': 10000, 'exr_coe': 10000, 'crd_coe': 10000, 'crr_coe': 10000,
+                    'anti_stun_coe': 10000, 'anti_knock_down_coe': 10000,
+                    'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000,
+                    'atk_abs': _override.get('atk_abs', 40), 'hp_abs': _override.get('hp_abs', 1000),
+                    'def_abs': _override.get('def_abs', 100), 'hit_abs': _override.get('hit_abs', 2844),
+                    'eva_abs': _override.get('eva_abs', 129), 'cri_abs': _override.get('cri_abs', 351),
+                    'res_abs': _override.get('res_abs', 0), 'exd_abs': _override.get('exd_abs', 0),
+                    'exr_abs': _override.get('exr_abs', 0), 'crd_abs': _override.get('crd_abs', 15000),
+                    'crr_abs': _override.get('crr_abs', 0),
+                    'anti_stun_abs': _override.get('anti_stun_abs', 0),
+                    'anti_knock_down_abs': _override.get('anti_knock_down_abs', 0),
+                    'defa_abs': _override.get('defa_abs', 3158), 'dgea_abs': _override.get('dgea_abs', 6317),
+                    'resa_abs': _override.get('resa_abs', 3158), 'hita_abs': _override.get('hita_abs', 316),
+                    'cria_abs': _override.get('cria_abs', 3158),
+                })
+            else:
+                # Percentage-based fallback: use coefficients from override
+                for key in ['atk_coe', 'hp_coe', 'def_coe', 'hit_coe', 'eva_coe', 'cri_coe',
+                            'res_coe', 'exd_coe', 'exr_coe', 'crd_coe', 'crr_coe',
+                            'anti_stun_coe', 'anti_knock_down_coe', 'defa_coe', 'dgea_coe',
+                            'resa_coe', 'hita_coe', 'cria_coe']:
+                    NPC_CONFIG[_nid][key] = _override.get(key, 10000)
     print(f"[MAP11 MONSTER OVERRIDES APPLIED] NPCs={list(_map11_monsters.keys())}")
 
     # Load MonsterData (and split into Monster vs Static NPC)
@@ -1869,8 +1897,9 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     if is_cri:
         crit_mult = max(1.0, min(1.0 + (attacker_stats['crd'] - defender_stats['crr']) / 10000.0, 2.0))
 
-    # 6. Final Formula with Random Variance [0.95, 1.95]
-    rand_var = random.randint(0, 1000) / 1000.0 + 0.95
+    # 6. Final Formula with Random Variance [0.95, 1.049]
+    # Client: GetRandom() returns 0-99, then /1000 + 0.95 = 0.95 to 1.049
+    rand_var = random.randint(0, 99) / 100.0 + 0.95
 
     skill_sexd = eff_cfg['adds'].get(3003, 0) / 10000.0
     exd_factor = 1.0 + (attacker_stats['exd'] - defender_stats['exr']) / 10000.0 + skill_sexd
@@ -4249,18 +4278,33 @@ def client_handler(conn, addr):
                             if target_id not in NPC_HP_MAP:
                                 NPC_HP_MAP[target_id] = defender_stats['hp_max']
 
-                            NPC_HP_MAP[target_id] -= client_dmg
+                            # Server-authoritative NPC damage calculation
+                            # Verify the attacker actually has this skill learned
+                            skill_lv = picked_char.get('skill_levels', {}).get(skill_id, 1)
+                            if skill_lv < 1:
+                                # Skill not learned, use default
+                                skill_id = "50001"
+                                skill_lv = 1
+                                effinfo_id = None
+                            server_dmg, hit, calc_cri = get_combat_damage(
+                                attacker_stats, defender_stats, skill_id, skill_lv, effinfo_id=effinfo_id
+                            )
+                            if not hit:
+                                server_dmg = 0
+                                calc_cri = False
+
+                            NPC_HP_MAP[target_id] -= server_dmg
 
                             # Synchronization of target HP to ensure bar update (Tag 510)
                             sync_npc_attrs_rpc(conn, target_id, defender_stats, max(0, NPC_HP_MAP[target_id]))
 
-                            # TAG 511: show_damage_board with actual skill/eff IDs
+                            # TAG 511: show_damage_board with server-calculated damage
                             dmg_item = encode_sproto([
                                 (0, target_id),
-                                (1, client_dmg),
+                                (1, server_dmg),
                                 (2, skill_id),
                                 (3, effinfo_id),
-                                (4, is_cri)
+                                (4, calc_cri)
                             ])
                             send_rpc_push(511, encode_sproto([(0, [dmg_item])]))
                             # TAG 514: hit_action with actual effinfoId
