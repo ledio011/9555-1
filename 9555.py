@@ -4053,7 +4053,7 @@ def client_handler(conn, addr):
                             try:
                                 t_ph = encode_sproto([(0, 511)])
                                 t_pf = sproto_pack(t_ph + dmg_board)
-                                t_pkt = struct.pack(">H", len(t_pf)) + t_pkt
+                                t_pkt = struct.pack(">H", len(t_pf)) + t_pf
                                 t_lock = CONNECTION_LOCKS.get(target_cid)
                                 if t_lock:
                                     with t_lock:
@@ -4076,7 +4076,7 @@ def client_handler(conn, addr):
                             try:
                                 t_ph = encode_sproto([(0, 514)])
                                 t_pf = sproto_pack(t_ph + hit_action)
-                                t_pkt = struct.pack(">H", len(t_pf)) + t_pkt
+                                t_pkt = struct.pack(">H", len(t_pf)) + t_pf
                                 t_lock = CONNECTION_LOCKS.get(target_cid)
                                 if t_lock:
                                     with t_lock:
@@ -4101,7 +4101,7 @@ def client_handler(conn, addr):
                                 try:
                                     t_ph = encode_sproto([(0, 618)])
                                     t_pf = sproto_pack(t_ph + relife_req)
-                                    t_pkt = struct.pack(">H", len(t_pf)) + t_pkt
+                                    t_pkt = struct.pack(">H", len(t_pf)) + t_pf
                                     t_lock = CONNECTION_LOCKS.get(target_cid)
                                     if t_lock:
                                         with t_lock:
