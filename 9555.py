@@ -1924,9 +1924,15 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     scaled_scale = skill_scale * pvp_mult
 
     # Add SATP/SATM/SATC contribution based on defender type (CharacterAttributeData.cs lines 983-1008)
-    # SATC for cars, SATM for NPCs (FunctionType != 10), SATP for other targets (players, zombies)
-    # Server doesn't track defender obj_type precisely, so use SATM for NPC targets, SATP for PvP
-    sat_type = attacker_stats.get('sat_type', 'satm')  # 'satm' for NPC attacks, 'satp' for player/zombie
+    # The client checks attacker ObjType first: only player/zombie/zombie_ragdoll add SAT.
+    # Then it checks defender ObjType:
+    #   - OBJ_NPC_CAR / OBJ_PLAYER_CAR  → SATC
+    #   - OBJ_NPC with FunctionType==10 → SATC
+    #   - OBJ_NPC (other)               → SATM
+    #   - else (player, etc.)           → SATP
+    # Server uses sat_type parameter to indicate the defender type context:
+    #   'satp' = player/zombie target, 'satm' = NPC target, 'satc' = car target
+    sat_type = attacker_stats.get('sat_type', 'satp')  # default 'satp' for player targets
     sat_value = attacker_stats.get(sat_type, 0)
     scaled_scale += sat_value / 10000.0 if sat_value else 0
     scaled_damage += sat_value
@@ -4147,19 +4153,11 @@ def client_handler(conn, addr):
                             server_dmg = 0
                             calc_cri = False
                             print(f"[AREA BOSS ATTACK] No boss_inst_id found, damage rejected")
-                    # For non-arena Tag 128, still calculate server-authoritative damage
-                    # The client sends Tag 128 for any single-copy scene, not just Domin map 502
-                    if not is_area and picked_char:
-                        # Generic NPC attack on player - use basic NPC stats
-                        attacker_npc_id = str(target_id) if target_id != picked_char['id'] else "100"
-                        npc_stats = get_npc_attr(attacker_npc_id, picked_char.get('level', 1))
-                        player_stats = get_character_stats(picked_char)
-                        server_dmg, hit, calc_cri = get_combat_damage(
-                            npc_stats, player_stats, "101", 1, effinfo_id=effinfo_id
-                        )
-                        if not hit:
-                            server_dmg = 0
-                            calc_cri = False
+                    # For non-arena Tag 128, the attacker is a local NPC/zombie in a single-copy scene.
+                    # The client sends Tag 128 with characterId = player's ServerId (the target),
+                    # not the attacker's ID. Without knowing which NPC attacked, the server cannot
+                    # look up the correct attacker stats. Reject the damage safely.
+                    # (The original game trusted client-authoritative damage for this path.)
 
                     new_hp = picked_char.get('hp', 0) - server_dmg
                     picked_char['hp'] = max(0, new_hp)
