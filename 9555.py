@@ -1375,7 +1375,8 @@ def build_aoi_add_packet(char):
         return None
 
 def broadcast_aoi_move(char):
-    """Broadcast TAG 507 (aoi_update_move) to all other players on the same map."""
+    """Broadcast TAG 507 (aoi_update_move) to all other players on the same map.
+    Client expects: request field 0 -> character_aoi_move -> id(0), movement(1), walk(2)"""
     if not char:
         return
     char_id = char.get('id', 0)
@@ -1383,9 +1384,15 @@ def broadcast_aoi_move(char):
     pos = char.get('pos', [0, 0, 0, 0])
     try:
         mv_bytes = get_movement(pos[0], pos[1], pos[2], pos[3])
-        aoi_move = encode_sproto([
+        # Build character_aoi_move object: id(0), movement(1), walk(2)
+        char_aoi_move = encode_sproto([
             (0, char_id),
-            (1, mv_bytes)
+            (1, mv_bytes),
+            (2, False)  # walk = false (running)
+        ])
+        # Wrap in request field 0
+        aoi_move = encode_sproto([
+            (0, char_aoi_move)
         ])
         ph_p = encode_sproto([(0, 507)])
         pf_p = sproto_pack(ph_p + aoi_move)
@@ -1403,6 +1410,91 @@ def broadcast_aoi_move(char):
                     pass
     except Exception as e:
         print(f"[AOI] Failed to broadcast aoi_move for id={char_id}: {e}")
+
+def broadcast_aoi_stop_move(char):
+    """Broadcast TAG 513 (aoi_stop_move) to all other players on the same map.
+    Client expects: request field 0 -> character_aoi_move -> id(0), movement(1), walk(2)"""
+    if not char:
+        return
+    char_id = char.get('id', 0)
+    map_id = str(char.get('map_id', '11'))
+    pos = char.get('pos', [0, 0, 0, 0])
+    try:
+        mv_bytes = get_movement(pos[0], pos[1], pos[2], pos[3])
+        # Build character_aoi_move object: id(0), movement(1), walk(2)
+        char_aoi_move = encode_sproto([
+            (0, char_id),
+            (1, mv_bytes),
+            (2, False)
+        ])
+        # Wrap in request field 0
+        aoi_stop = encode_sproto([
+            (0, char_aoi_move)
+        ])
+        ph_p = encode_sproto([(0, 513)])
+        pf_p = sproto_pack(ph_p + aoi_stop)
+        pkt = struct.pack(">H", len(pf_p)) + pf_p
+        for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
+            if ch and ch.get('id', 0) != char_id and str(ch.get('map_id', '11')) == map_id:
+                try:
+                    c_lock = CONNECTION_LOCKS.get(cid)
+                    if c_lock:
+                        with c_lock:
+                            c.sendall(pkt)
+                    else:
+                        c.sendall(pkt)
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[AOI] Failed to broadcast aoi_stop_move for id={char_id}: {e}")
+
+def broadcast_aoi_attribute(char):
+    """Broadcast TAG 510 (aoi_update_attribute) to all other players on the same map.
+    Used to sync a player's HP/stats after PvP damage."""
+    if not char:
+        return
+    char_id = char.get('id', 0)
+    map_id = str(char.get('map_id', '11'))
+    stats = get_character_stats(char)
+    hp_cur = char.get('hp', stats['hp_max'])
+    try:
+        attr_oth = encode_sproto([
+            (0, hp_cur), (1, stats['exp']), (2, stats['lv']), (3, stats['power']), (15, 1)
+        ])
+        attr_base = encode_sproto([(0, stats['hp_max']), (2, stats['atk']), (3, stats['def'])])
+        attr_all = encode_sproto([
+            (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
+            (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
+            (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
+            (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
+        ])
+        prop = encode_sproto([(13, char.get('cash', 0))])
+        aoi_attr = encode_sproto([
+            (0, char_id), (1, attr_oth), (2, attr_base), (3, attr_all), (5, prop)
+        ])
+        ph_p = encode_sproto([(0, 510)])
+        pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_attr)]))
+        pkt = struct.pack(">H", len(pf_p)) + pf_p
+        for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
+            if ch and ch.get('id', 0) != char_id and str(ch.get('map_id', '11')) == map_id:
+                try:
+                    c_lock = CONNECTION_LOCKS.get(cid)
+                    if c_lock:
+                        with c_lock:
+                            c.sendall(pkt)
+                    else:
+                        c.sendall(pkt)
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[AOI] Failed to broadcast aoi_attribute for id={char_id}: {e}")
+
+def find_player_connection(target_id):
+    """Find the connection and character dict for an online player by ID."""
+    for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
+        if ch and ch.get('id', 0) == target_id:
+            return cid, c, ch
+    return None, None, None
 
 def get_level_data(level):
     """Return a valid BaseLvData row, even if a saved character has a bad level."""
@@ -3677,7 +3769,42 @@ def client_handler(conn, addr):
                     else:
                         # Do not echo Tag 508 back to the casting player.
                         # The casting player executes skill effects locally on client.
-                        pass
+                        # Broadcast TAG 508 (ret_skill_use) to other players on the same map
+                        attacker_id = picked_char.get('id', 0)
+                        attacker_map = str(picked_char.get('map_id', '11'))
+                        try:
+                            # Build attack_list from client-provided alist
+                            attack_list_data = []
+                            if isinstance(alist, list):
+                                for atk in alist:
+                                    if isinstance(atk, (int, str)):
+                                        attack_list_data.append(atk)
+                                    elif isinstance(atk, bytes):
+                                        attack_list_data.append(atk)
+                            # ret_skill_use: senderId(0), targetId(1), skillId(2), attack_list(3)
+                            skill_resp = encode_sproto([
+                                (0, attacker_id),
+                                (1, tid),
+                                (2, sid),
+                                (3, attack_list_data)
+                            ])
+                            ph_p = encode_sproto([(0, 508)])
+                            pf_p = sproto_pack(ph_p + skill_resp)
+                            skill_pkt = struct.pack(">H", len(pf_p)) + pf_p
+                            for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
+                                if ch and ch.get('id', 0) != attacker_id and str(ch.get('map_id', '11')) == attacker_map:
+                                    try:
+                                        c_lock = CONNECTION_LOCKS.get(cid)
+                                        if c_lock:
+                                            with c_lock:
+                                                c.sendall(skill_pkt)
+                                        else:
+                                            c.sendall(skill_pkt)
+                                    except Exception:
+                                        pass
+                            print(f"[SKILL] Broadcast 508 skill={sid} target={tid} from={attacker_id} map={attacker_map}")
+                        except Exception as e:
+                            print(f"[SKILL] Failed to broadcast 508: {e}")
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -3874,36 +4001,119 @@ def client_handler(conn, addr):
                     dlist_raw = body.get(0, b"")
                     dlist = decode_sproto_list(dlist_raw)
                     print(f"[COMBAT] RX 111 count={len(dlist)}")
+                    attacker_stats = get_character_stats(picked_char)
                     for d_bytes in dlist:
                         d = decode_sproto(d_bytes)
                         target_id = get_val_int(d, 0)
-                        dmg = get_val_int(d, 1)
-                        # Tag 4 is bool cri. Sproto bool is encoded as int in header.
+                        client_dmg = get_val_int(d, 1)
+                        # acceptdamge schema: id(0), damage(1), skillId(2), effinfoId(3), cri(4), parm(5-8)
+                        skill_id = str(d.get(2, "50001"))
+                        effinfo_id = str(d.get(3, "50001"))
                         is_cri = get_val_int(d, 4, 0) == 1
 
-                        print(f"[COMBAT] accept_damge target={target_id} dmg={dmg} cri={is_cri}")
+                        print(f"[COMBAT] accept_damge target={target_id} client_dmg={client_dmg} skill={skill_id} eff={effinfo_id} cri={is_cri}")
 
-                        # TAG 511: show_damage_board - damage number popups
-                        # acceptdamge schema: id(0), damage(1), skillId(2), effinfoId(3), cri(4), parm(5-8)
-                        dmg_item = encode_sproto([
-                            (0, target_id),
-                            (1, dmg),
-                            (2, "50001"),  # skillId
-                            (3, "50001"),  # effinfoId
-                            (4, is_cri)     # cri (bool)
-                        ])
-                        send_rpc_push(511, encode_sproto([(0, [dmg_item])]))
+                        # --- Check if target is an online player (PvP) ---
+                        target_cid, target_conn, target_char = find_player_connection(target_id)
 
-                        # TAG 514: hit_action - hit animation effect
-                        send_rpc_push(514, encode_sproto([
-                            (0, target_id),
-                            (1, picked_char['id']),
-                            (2, "50001")  # effinfoId for default hit effect
-                        ]))
+                        if target_char is not None:
+                            # === PvP: target is an online player ===
+                            # Server-authoritative damage calculation
+                            target_stats = get_character_stats(target_char)
+                            skill_lv = picked_char.get('skill_levels', {}).get(skill_id, 1)
+                            server_dmg, hit, calc_cri = get_combat_damage(attacker_stats, target_stats, skill_id, skill_lv, pvp_scale=1.0)
+                            if not hit:
+                                server_dmg = 0
+                                calc_cri = False
+                            print(f"[PvP] Server calc dmg={server_dmg} cri={calc_cri} target={target_id}")
 
-                        if target_id == picked_char['id']:
-                            # Damage to player
-                            new_hp = picked_char.get('hp', 0) - dmg
+                            # Apply damage to victim
+                            old_hp = target_char.get('hp', target_stats['hp_max'])
+                            new_hp = max(0, old_hp - server_dmg)
+                            target_char['hp'] = new_hp
+
+                            # Sync victim's HP to victim's own client (TAG 510)
+                            sync_char_attrs_rpc(target_conn, target_char)
+                            # Broadcast victim's updated HP to all other players on the map
+                            broadcast_aoi_attribute(target_char)
+
+                            # Build TAG 511 damage board with actual skill/eff IDs
+                            dmg_item = encode_sproto([
+                                (0, target_id),
+                                (1, server_dmg),
+                                (2, skill_id),
+                                (3, effinfo_id),
+                                (4, calc_cri)
+                            ])
+                            dmg_board = encode_sproto([(0, [dmg_item])])
+
+                            # Send TAG 511 to attacker
+                            send_rpc_push(511, dmg_board)
+                            # Send TAG 511 to victim too
+                            try:
+                                t_ph = encode_sproto([(0, 511)])
+                                t_pf = sproto_pack(t_ph + dmg_board)
+                                t_pkt = struct.pack(">H", len(t_pf)) + t_pkt
+                                t_lock = CONNECTION_LOCKS.get(target_cid)
+                                if t_lock:
+                                    with t_lock:
+                                        target_conn.sendall(t_pkt)
+                                else:
+                                    target_conn.sendall(t_pkt)
+                            except Exception:
+                                pass
+
+                            # Build TAG 514 hit_action with actual effinfoId
+                            hit_action = encode_sproto([
+                                (0, target_id),
+                                (1, picked_char['id']),
+                                (2, effinfo_id)
+                            ])
+
+                            # Send TAG 514 to attacker
+                            send_rpc_push(514, hit_action)
+                            # Send TAG 514 to victim too
+                            try:
+                                t_ph = encode_sproto([(0, 514)])
+                                t_pf = sproto_pack(t_ph + hit_action)
+                                t_pkt = struct.pack(">H", len(t_pf)) + t_pkt
+                                t_lock = CONNECTION_LOCKS.get(target_cid)
+                                if t_lock:
+                                    with t_lock:
+                                        target_conn.sendall(t_pkt)
+                                else:
+                                    target_conn.sendall(t_pkt)
+                            except Exception:
+                                pass
+
+                            # Check if victim died
+                            if new_hp == 0:
+                                print(f"[PvP] Player {target_id} killed by {picked_char['id']}")
+                                # Send relife request to victim
+                                death_count = target_char.get('death_count', 0) + 1
+                                target_char['death_count'] = death_count
+                                relife_cfg = get_relife_config(death_count)
+                                relife_req = encode_sproto([
+                                    (0, relife_cfg['id']), (1, 0), (2, "9202"),
+                                    (3, target_char['id']), (4, target_char['name']),
+                                    (5, relife_cfg['use_count'])
+                                ])
+                                try:
+                                    t_ph = encode_sproto([(0, 618)])
+                                    t_pf = sproto_pack(t_ph + relife_req)
+                                    t_pkt = struct.pack(">H", len(t_pf)) + t_pkt
+                                    t_lock = CONNECTION_LOCKS.get(target_cid)
+                                    if t_lock:
+                                        with t_lock:
+                                            target_conn.sendall(t_pkt)
+                                    else:
+                                        target_conn.sendall(t_pkt)
+                                except Exception:
+                                    pass
+
+                        elif target_id == picked_char['id']:
+                            # Self-damage (rare edge case)
+                            new_hp = picked_char.get('hp', 0) - client_dmg
                             picked_char['hp'] = max(0, new_hp)
                             sync_char_attrs_rpc(conn, picked_char)
                             if picked_char['hp'] == 0:
@@ -3920,15 +4130,63 @@ def client_handler(conn, addr):
                                         (5, relife_cfg['use_count'])
                                     ])
                                     send_rpc_push(618, relife_req)
-                        elif target_id in NPC_HP_MAP or (picked_char and target_id != picked_char['id']):
+
+                            # TAG 511: show_damage_board
+                            dmg_item = encode_sproto([
+                                (0, target_id),
+                                (1, client_dmg),
+                                (2, skill_id),
+                                (3, effinfo_id),
+                                (4, is_cri)
+                            ])
+                            send_rpc_push(511, encode_sproto([(0, [dmg_item])]))
+                            # TAG 514: hit_action
+                            send_rpc_push(514, encode_sproto([
+                                (0, target_id),
+                                (1, picked_char['id']),
+                                (2, effinfo_id)
+                            ]))
+
+                        else:
+                            # === NPC/Monster/Boss damage ===
                             # Map 11 NPCs are fully client-side - skip all server-side HP/death handling
                             if picked_char and str(picked_char.get('map_id')) == '11':
-                                # Only advance missions for Map 11 kills, don't manage NPC stats
                                 target_nid = NPC_INST_MAP.get(target_id, str(target_id))
                                 advance_missions(picked_char, send_rpc_push, 'kill', target_id=target_nid)
+                                # Still send damage feedback to attacker
+                                dmg_item = encode_sproto([
+                                    (0, target_id),
+                                    (1, client_dmg),
+                                    (2, skill_id),
+                                    (3, effinfo_id),
+                                    (4, is_cri)
+                                ])
+                                send_rpc_push(511, encode_sproto([(0, [dmg_item])]))
+                                send_rpc_push(514, encode_sproto([
+                                    (0, target_id),
+                                    (1, picked_char['id']),
+                                    (2, effinfo_id)
+                                ]))
                                 continue
 
-                            # Damage to NPC/Monster/Boss (server-spawned only)
+                            # Only process server-spawned NPCs (in NPC_HP_MAP or NPC_INST_MAP)
+                            if target_id not in NPC_HP_MAP and target_id not in NPC_INST_MAP:
+                                # Unknown target, skip but still send feedback
+                                dmg_item = encode_sproto([
+                                    (0, target_id),
+                                    (1, client_dmg),
+                                    (2, skill_id),
+                                    (3, effinfo_id),
+                                    (4, is_cri)
+                                ])
+                                send_rpc_push(511, encode_sproto([(0, [dmg_item])]))
+                                send_rpc_push(514, encode_sproto([
+                                    (0, target_id),
+                                    (1, picked_char['id']),
+                                    (2, effinfo_id)
+                                ]))
+                                continue
+
                             target_nid = NPC_INST_MAP.get(target_id, str(target_id))
                             NPC_INST_MAP[target_id] = target_nid
 
@@ -3938,13 +4196,28 @@ def client_handler(conn, addr):
                             if target_id not in NPC_HP_MAP:
                                 NPC_HP_MAP[target_id] = defender_stats['hp_max']
 
-                            NPC_HP_MAP[target_id] -= dmg
+                            NPC_HP_MAP[target_id] -= client_dmg
 
                             # Synchronization of target HP to ensure bar update (Tag 510)
                             sync_npc_attrs_rpc(conn, target_id, defender_stats, max(0, NPC_HP_MAP[target_id]))
 
+                            # TAG 511: show_damage_board with actual skill/eff IDs
+                            dmg_item = encode_sproto([
+                                (0, target_id),
+                                (1, client_dmg),
+                                (2, skill_id),
+                                (3, effinfo_id),
+                                (4, is_cri)
+                            ])
+                            send_rpc_push(511, encode_sproto([(0, [dmg_item])]))
+                            # TAG 514: hit_action with actual effinfoId
+                            send_rpc_push(514, encode_sproto([
+                                (0, target_id),
+                                (1, picked_char['id']),
+                                (2, effinfo_id)
+                            ]))
+
                             if NPC_HP_MAP[target_id] <= 0:
-                                # Ensure death is processed exactly once
                                 if target_id in DEAD_NPC_SET:
                                     continue
                                 DEAD_NPC_SET.add(target_id)
@@ -3953,7 +4226,6 @@ def client_handler(conn, addr):
 
                                 # BOSS DEATH HANDLING
                                 if target_id == picked_char.get('boss_inst_id'):
-                                    # Send final HP=0 sync before ending scene to trigger client animation
                                     if defender_stats:
                                         a_oth_fields = [(0, 0), (2, defender_stats['lv'])]
                                         if NPC_INST_MAP.get(target_id, '').startswith('BOSS_'):
@@ -3964,7 +4236,6 @@ def client_handler(conn, addr):
 
                                     did = picked_char.get('active_domin_id', '1')
                                     print(f"[M1003 DEBUG] Boss {target_id} killed by client dmg. Winning did={did}")
-                                    # Find the active capture mission and use its target_id
                                     cap_target = did
                                     for act_m, act_mdata in list(picked_char.get('active_missions', {}).items()):
                                         cap_cfg = missions_data.get(act_m, {})
