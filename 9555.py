@@ -4156,12 +4156,21 @@ def client_handler(conn, addr):
                     # For non-arena Tag 128, the attacker is a local NPC/zombie in a single-copy scene.
                     # The client sends Tag 128 with characterId = player's ServerId (the target),
                     # not the attacker's ID. Without knowing which NPC attacked, the server cannot
-                    # look up the correct attacker stats for server-authoritative calculation.
-                    # The original game trusted client-authoritative damage for this path, so use
-                    # the client-supplied damage value as a fallback.
+                    # look up the correct attacker stats for exact server-authoritative calculation.
+                    # However, we should NOT trust client_dmg directly as it allows damage manipulation.
+                    # Use a reasonable default NPC attacker stats for server-authoritative calculation.
                     if not is_area and picked_char:
-                        server_dmg = client_dmg
-                        calc_cri = False
+                        # Use a generic NPC attacker with basic stats for non-arena single-copy scenes
+                        # The original game trusted client-authoritative damage, but server-side validation
+                        # prevents extreme manipulation while still allowing the attack to deal damage.
+                        generic_npc_stats = get_npc_attr("100", picked_char.get('level', 1))
+                        player_stats = get_character_stats(picked_char)
+                        server_dmg, hit, calc_cri = get_combat_damage(
+                            generic_npc_stats, player_stats, "101", 1, effinfo_id=effinfo_id
+                        )
+                        if not hit:
+                            server_dmg = 0
+                            calc_cri = False
 
                     new_hp = picked_char.get('hp', 0) - server_dmg
                     picked_char['hp'] = max(0, new_hp)
