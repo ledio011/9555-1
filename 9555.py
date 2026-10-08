@@ -4734,6 +4734,11 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 124: # add_friend (type 0=friend, 1=enemy/foe)
+                # CRITICAL: Do NOT block this connection thread with database operations.
+                # The client sends heartbeat (218) every 15 seconds and times out after 12 seconds.
+                # If this thread blocks for save_chars() or database scans, the heartbeat stops
+                # being processed, causing the sender to disconnect.
+                # All database work is dispatched to a background thread.
                 try:
                     if not picked_char:
                         raise ValueError("No picked_char")
@@ -4741,167 +4746,128 @@ def client_handler(conn, addr):
                     add_type = get_val_int(body, 1)
                     my_id = picked_char.get('id', 0)
                     print(f"[FRIEND] add_friend target={target_id} type={add_type}")
-                    # Reject self-add
+                    # Reject self-add (fast, in-memory check)
                     if target_id == my_id:
                         print(f"[FRIEND] Rejected self-add: target={target_id} == my_id={my_id}")
-                        if session is not None:
-                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                            conn.sendall(struct.pack(">H", len(pf)) + pf)
                         continue
-                    # Verify target character exists in the database
-                    target_exists = False
-                    for area_key, area_chars in all_accounts_chars.items():
-                        for acc_key, char_list in area_chars.items():
-                            for ch in char_list:
-                                if ch.get('id', 0) == target_id:
-                                    target_exists = True
-                                    break
-                            if target_exists:
-                                break
-                        if target_exists:
+                    # Quick in-memory check: is target already in friend_requests_sent?
+                    already_sent = False
+                    for fr in picked_char.get('friend_requests_sent', []):
+                        if fr == target_id:
+                            already_sent = True
                             break
-                    if not target_exists:
-                        print(f"[FRIEND] Rejected add_friend: target={target_id} does not exist")
-                        if session is not None:
-                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                            conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    if already_sent:
+                        print(f"[FRIEND] add_friend skipped: already sent request to {target_id}")
                         continue
-                    if add_type == 1: # enemy/foe
-                        if 'enemies' not in picked_char:
-                            picked_char['enemies'] = []
-                        already = False
-                        for ei in picked_char['enemies']:
+                    # Quick in-memory check: is target already in enemies?
+                    if add_type == 1:
+                        already_enemy = False
+                        for ei in picked_char.get('enemies', []):
                             if ei.get('friendId') == target_id:
-                                already = True
+                                already_enemy = True
                                 break
-                        if not already:
-                            # Look up actual target player info for real name/level/profession
-                            target_name = f'Player{target_id}'
-                            target_level = 1
-                            target_prof = 0
-                            target_combat = 0
-                            target_state = 0
-                            target_guildId = 0
-                            target_guildName = ''
-                            for t_cid, (t_conn, ch) in list(ALL_CONNECTIONS.items()):
-                                if ch and ch.get('id', 0) == target_id:
-                                    target_name = ch.get('name', f'Player{target_id}')
-                                    target_level = ch.get('level', 1)
-                                    target_prof = ch.get('prof', 0)
-                                    target_combat = get_character_stats(ch)['power']
-                                    target_state = ch.get('state', 1)
-                                    target_guildId = ch.get('guildId', 0)
-                                    target_guildName = ch.get('guildName', '')
-                                    break
-                            else:
-                                # Target offline - look up from character database
-                                for area_key, area_chars in all_accounts_chars.items():
-                                    for acc_key, char_list in area_chars.items():
-                                        for ch in char_list:
-                                            if ch.get('id', 0) == target_id:
-                                                target_name = ch.get('name', f'Player{target_id}')
-                                                target_level = ch.get('level', 1)
-                                                target_prof = ch.get('prof', 0)
-                                                target_combat = get_character_stats(ch)['power']
-                                                target_state = 0
-                                                target_guildId = ch.get('guildId', 0)
-                                                target_guildName = ch.get('guildName', '')
-                                                break
-                                    else:
-                                        continue
-                                    break
-                            enemy_info = {
-                                'characterId': target_id,
-                                'friendId': target_id,
-                                'name': target_name,
-                                'level': target_level,
-                                'profession': target_prof,
-                                'combValue': target_combat,
-                                'state': target_state,
-                                'timeInfo': int(time.time()),
-                                'friendType': 6,
-                                'guildId': target_guildId,
-                                'guildName': target_guildName,
-                                'friendScore': 0
-                            }
-                            picked_char['enemies'].append(enemy_info)
-                            save_chars(all_accounts_chars)
-                            # Do NOT send syn_friend_info for enemies — the client handler
-                            # routes all syn_friend_info to UpdateFriendInfo (friends dict).
-                            # Enemies will load correctly via request_update_friend_useinfo.
-                    else: # friend request
-                        if 'friend_requests_sent' not in picked_char:
-                            picked_char['friend_requests_sent'] = []
-                        already = False
-                        for fr in picked_char['friend_requests_sent']:
-                            if fr == target_id:
-                                already = True
-                                break
-                        if not already:
-                            picked_char['friend_requests_sent'].append(target_id)
-                            save_chars(all_accounts_chars)
-                            # Look up target player info for real name
-                            tgt_name = f'Player{target_id}'
-                            tgt_level = 1
-                            tgt_prof = 0
-                            tgt_combat = 0
-                            tgt_guildId = 0
-                            tgt_guildName = ''
-                            for t_cid, (t_conn, ch) in list(ALL_CONNECTIONS.items()):
-                                if ch and ch.get('id', 0) == target_id:
-                                    tgt_name = ch.get('name', f'Player{target_id}')
-                                    tgt_level = ch.get('level', 1)
-                                    tgt_prof = ch.get('prof', 0)
-                                    tgt_stats = get_character_stats(ch)
-                                    tgt_combat = tgt_stats['power']
-                                    tgt_guildId = ch.get('guildId', 0)
-                                    tgt_guildName = ch.get('guildName', '')
-                                    break
-                            else:
-                                for area_key, area_chars in all_accounts_chars.items():
-                                    for acc_key, char_list in area_chars.items():
-                                        for ch in char_list:
-                                            if ch.get('id', 0) == target_id:
-                                                tgt_name = ch.get('name', f'Player{target_id}')
-                                                tgt_level = ch.get('level', 1)
-                                                tgt_prof = ch.get('prof', 0)
-                                                tgt_stats = get_character_stats(ch)
-                                                tgt_combat = tgt_stats['power']
-                                                tgt_guildId = ch.get('guildId', 0)
-                                                tgt_guildName = ch.get('guildName', '')
-                                                break
-                                        else:
-                                            continue
-                                        break
-                            # Do NOT send ret_add_friend for friend requests (type=0).
-                            # The client removes the entry from its list immediately after sending
-                            # and does not expect a ret_add_friend push. Sending it causes the
-                            # client to crash (AddFriend -> RefreshUI chain with friendType=2).
-                            # The server-side persistence (friend_requests_sent) is sufficient.
-                            # Notify the target player about the incoming friend request
-                            # Send notice_add_friend (msg 536) in a background daemon thread to avoid
-                            # blocking the sender's connection thread. If the target's socket is slow
-                            # or stale, a synchronous sendall() would block the sender's handler,
-                            # stopping heartbeat (218) processing and causing the sender to disconnect.
-                            sender_stats = get_character_stats(picked_char)
-                            sender_friend_info = {
-                                'characterId': my_id,
-                                'friendId': my_id,
-                                'name': picked_char.get('name', f'Player{my_id}'),
-                                'level': picked_char.get('level', 1),
-                                'profession': picked_char.get('prof', 0),
-                                'combValue': sender_stats['power'],
-                                'state': 1,
-                                'timeInfo': int(time.time()),
-                                'friendType': 2,
-                                'guildId': picked_char.get('guildId', 0),
-                                'guildName': picked_char.get('guildName', ''),
-                                'friendScore': 0
-                            }
-                            notice_data = encode_sproto([(0, encode_friend_info(sender_friend_info))])
+                        if already_enemy:
+                            print(f"[FRIEND] add_friend enemy skipped: already enemy {target_id}")
+                            continue
+                    # Dispatch all database work to a background thread
+                    # Capture all needed data for the background thread
+                    sender_name = picked_char.get('name', f'Player{my_id}')
+                    sender_level = picked_char.get('level', 1)
+                    sender_prof = picked_char.get('prof', 0)
+                    sender_stats = get_character_stats(picked_char)
+                    sender_combat = sender_stats['power']
+                    sender_guildId = picked_char.get('guildId', 0)
+                    sender_guildName = picked_char.get('guildName', '')
 
-                            def _send_notice_add_friend_async():
-                                """Send notice_add_friend to target in a background thread."""
+                    def _add_friend_async():
+                        """Handle all database operations for add_friend in a background thread."""
+                        try:
+                            # Verify target character exists in the database
+                            target_exists = False
+                            target_char_data = None
+                            for area_key, area_chars in all_accounts_chars.items():
+                                for acc_key, char_list in area_chars.items():
+                                    for ch in char_list:
+                                        if ch.get('id', 0) == target_id:
+                                            target_exists = True
+                                            target_char_data = ch
+                                            break
+                                    if target_exists:
+                                        break
+                                if target_exists:
+                                    break
+                            if not target_exists:
+                                print(f"[FRIEND] Rejected add_friend: target={target_id} does not exist")
+                                return
+
+                            if add_type == 1: # enemy/foe
+                                if 'enemies' not in picked_char:
+                                    picked_char['enemies'] = []
+                                # Look up actual target player info
+                                target_name = f'Player{target_id}'
+                                target_level = 1
+                                target_prof = 0
+                                target_combat = 0
+                                target_state = 0
+                                target_guildId = 0
+                                target_guildName = ''
+                                for t_cid, (t_conn, ch) in list(ALL_CONNECTIONS.items()):
+                                    if ch and ch.get('id', 0) == target_id:
+                                        target_name = ch.get('name', f'Player{target_id}')
+                                        target_level = ch.get('level', 1)
+                                        target_prof = ch.get('prof', 0)
+                                        target_combat = get_character_stats(ch)['power']
+                                        target_state = ch.get('state', 1)
+                                        target_guildId = ch.get('guildId', 0)
+                                        target_guildName = ch.get('guildName', '')
+                                        break
+                                else:
+                                    if target_char_data:
+                                        target_name = target_char_data.get('name', f'Player{target_id}')
+                                        target_level = target_char_data.get('level', 1)
+                                        target_prof = target_char_data.get('prof', 0)
+                                        target_combat = get_character_stats(target_char_data)['power']
+                                        target_state = 0
+                                        target_guildId = target_char_data.get('guildId', 0)
+                                        target_guildName = target_char_data.get('guildName', '')
+                                enemy_info = {
+                                    'characterId': target_id,
+                                    'friendId': target_id,
+                                    'name': target_name,
+                                    'level': target_level,
+                                    'profession': target_prof,
+                                    'combValue': target_combat,
+                                    'state': target_state,
+                                    'timeInfo': int(time.time()),
+                                    'friendType': 6,
+                                    'guildId': target_guildId,
+                                    'guildName': target_guildName,
+                                    'friendScore': 0
+                                }
+                                picked_char['enemies'].append(enemy_info)
+                                save_chars(all_accounts_chars)
+                                print(f"[FRIEND] Enemy added: {target_id} by {my_id}")
+                            else: # friend request
+                                if 'friend_requests_sent' not in picked_char:
+                                    picked_char['friend_requests_sent'] = []
+                                picked_char['friend_requests_sent'].append(target_id)
+                                save_chars(all_accounts_chars)
+                                # Send notice_add_friend (msg 536) to target if online
+                                sender_friend_info = {
+                                    'characterId': my_id,
+                                    'friendId': my_id,
+                                    'name': sender_name,
+                                    'level': sender_level,
+                                    'profession': sender_prof,
+                                    'combValue': sender_combat,
+                                    'state': 1,
+                                    'timeInfo': int(time.time()),
+                                    'friendType': 2,
+                                    'guildId': sender_guildId,
+                                    'guildName': sender_guildName,
+                                    'friendScore': 0
+                                }
+                                notice_data = encode_sproto([(0, encode_friend_info(sender_friend_info))])
                                 ph_p = encode_sproto([(0, 536)])
                                 pf_p = sproto_pack(ph_p + notice_data)
                                 notice_pkt = struct.pack(">H", len(pf_p)) + pf_p
@@ -4913,7 +4879,6 @@ def client_handler(conn, addr):
                                     if t_char and t_char.get('id', 0) == target_id:
                                         target_found = True
                                         try:
-                                            # Use the target's connection lock to prevent packet interleaving
                                             t_lock = CONNECTION_LOCKS.get(t_cid)
                                             if t_lock:
                                                 with t_lock:
@@ -4928,29 +4893,29 @@ def client_handler(conn, addr):
                                         break
                                 if not target_found:
                                     print(f"[FRIEND] Target={target_id} NOT FOUND online - request persisted for next login")
-                                print(f"[FRIEND] add_friend notice phase completed for target={target_id}")
-
-                            notice_thread = threading.Thread(target=_send_notice_add_friend_async, daemon=True)
-                            notice_thread.start()
-                            # Also add sender to target's friend_requests_received for persistence
-                            # Load and update target character data
-                            target_updated = False
-                            for area_key, area_chars in all_accounts_chars.items():
-                                for acc_key, char_list in area_chars.items():
-                                    for ch in char_list:
-                                        if ch.get('id', 0) == target_id:
-                                            if 'friend_requests_received' not in ch:
-                                                ch['friend_requests_received'] = []
-                                            if my_id not in ch['friend_requests_received']:
-                                                ch['friend_requests_received'].append(my_id)
-                                            save_chars(all_accounts_chars)
-                                            target_updated = True
-                                            break
-                                if target_updated:
+                                # Add sender to target's friend_requests_received for persistence
+                                for area_key, area_chars in all_accounts_chars.items():
+                                    for acc_key, char_list in area_chars.items():
+                                        for ch in char_list:
+                                            if ch.get('id', 0) == target_id:
+                                                if 'friend_requests_received' not in ch:
+                                                    ch['friend_requests_received'] = []
+                                                if my_id not in ch['friend_requests_received']:
+                                                    ch['friend_requests_received'].append(my_id)
+                                                save_chars(all_accounts_chars)
+                                                print(f"[FRIEND] add_friend persistence completed for target={target_id}")
+                                                break
+                                    else:
+                                        continue
                                     break
-                            if target_updated:
-                                break
-                    print(f"[FRIEND] add_friend handler completed successfully for target={target_id}")
+                        except Exception as e:
+                            print(f"[FRIEND] ERROR in add_friend async: {e}")
+                            import traceback
+                            traceback.print_exc()
+
+                    async_thread = threading.Thread(target=_add_friend_async, daemon=True)
+                    async_thread.start()
+                    print(f"[FRIEND] add_friend dispatched to async thread for target={target_id}")
                 except Exception as e:
                     print(f"[FRIEND] ERROR in add_friend handler: {e}")
                     import traceback
@@ -4958,9 +4923,6 @@ def client_handler(conn, addr):
                 # Do NOT send session acknowledgment for add_friend (msg 124).
                 # The client sends it with session=None (fire-and-forget) and does not expect any response.
                 # Sending an unexpected packet can cause the client to crash.
-                # if session is not None:
-                #     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                #     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 125: # del_friend (type 0=friend, 1=enemy/foe)
                 if picked_char:
