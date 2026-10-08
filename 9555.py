@@ -34,6 +34,7 @@ MOVE_TARGET_DATA = {}   # logicId -> dict
 SURVEY_DATA = {}        # logicId -> dict
 EFF_CONFIG = {}   # effId -> effect info template
 SKILL_CONFIG = {} # skillId -> skill info template
+EFF_TO_SKILL = {} # effId -> skillId (reverse lookup for Tag 128)
 MOUNT_CONFIG = {} # garage vehicle id -> client MountData definition
 COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
 SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
@@ -204,6 +205,11 @@ try:
                         'eff1': parts[26] if len(parts) > 26 else "",
                         'eff2': parts[28] if len(parts) > 28 else ""
                     }
+                    # Build reverse lookup: effId -> skillId
+                    for eff_key in ('eff0', 'eff1', 'eff2'):
+                        eff_id = SKILL_CONFIG[sid][eff_key]
+                        if eff_id and eff_id not in EFF_TO_SKILL:
+                            EFF_TO_SKILL[eff_id] = sid
         print(f"[SKILL CONFIG LOADED] count={len(SKILL_CONFIG)}")
 
     # Load BaseLvData for EXP requirements and stats
@@ -4086,10 +4092,16 @@ def client_handler(conn, addr):
                             boss_stats = get_npc_attr("1105", player_level)
                             player_stats = get_character_stats(picked_char)
 
-                            # Derive effinfo_id server-side from the boss's skill
-                            boss_skill_id = "101"
-                            skill_cfg = SKILL_CONFIG.get(boss_skill_id, {})
-                            effinfo_id = skill_cfg.get('eff0', "10000")
+                            # Use client-sent effinfo_id to determine which boss skill was used
+                            # The client sends effinfoId from the skill's effect data (SkillLogic.cs line 781)
+                            # Reverse-lookup the skill_id from the effinfo_id
+                            if effinfo_id and effinfo_id in EFF_TO_SKILL:
+                                boss_skill_id = EFF_TO_SKILL[effinfo_id]
+                            else:
+                                # Fallback: if effinfo_id not recognized, use basic attack
+                                boss_skill_id = "101"
+                                skill_cfg = SKILL_CONFIG.get(boss_skill_id, {})
+                                effinfo_id = skill_cfg.get('eff0', "10000")
 
                             server_dmg, hit, calc_cri = get_combat_damage(
                                 boss_stats, player_stats, boss_skill_id, 1, effinfo_id=effinfo_id
@@ -4515,7 +4527,8 @@ def client_handler(conn, addr):
                     boss_id = picked_char.get('boss_inst_id')
                     if boss_id and boss_id in NPC_HP_MAP and NPC_HP_MAP[boss_id] > 0:
                         NPC_HP_MAP[boss_id] = 0
-                        boss_stats = get_npc_attr('1105')
+                        player_level = picked_char.get('level', 1)
+                        boss_stats = get_npc_attr('1105', player_level)
                         sync_npc_attrs_rpc(conn, boss_id, boss_stats, 0)
                         did = picked_char.get('active_domin_id', '1')
                         print(f"[M1003 DEBUG] RX 137 zombie died; winning did={did}")
