@@ -4067,21 +4067,9 @@ def client_handler(conn, addr):
                             ])
                             dmg_board = encode_sproto([(0, [dmg_item])])
 
-                            # Send TAG 511 to attacker
+                            # Send TAG 511 (show_damage_board) to attacker only
+                            # The victim's client already creates damage visuals locally from the hit
                             send_rpc_push(511, dmg_board)
-                            # Send TAG 511 to victim too
-                            try:
-                                t_ph = encode_sproto([(0, 511)])
-                                t_pf = sproto_pack(t_ph + dmg_board)
-                                t_pkt = struct.pack(">H", len(t_pf)) + t_pf
-                                t_lock = CONNECTION_LOCKS.get(target_cid)
-                                if t_lock:
-                                    with t_lock:
-                                        target_conn.sendall(t_pkt)
-                                else:
-                                    target_conn.sendall(t_pkt)
-                            except Exception:
-                                pass
 
                             # Build TAG 514 hit_action with actual effinfoId
                             hit_action = encode_sproto([
@@ -4090,21 +4078,9 @@ def client_handler(conn, addr):
                                 (2, effinfo_id)
                             ])
 
-                            # Send TAG 514 to attacker
+                            # Send TAG 514 (hit_action) to attacker only
+                            # The victim's client already shows hit effects locally
                             send_rpc_push(514, hit_action)
-                            # Send TAG 514 to victim too
-                            try:
-                                t_ph = encode_sproto([(0, 514)])
-                                t_pf = sproto_pack(t_ph + hit_action)
-                                t_pkt = struct.pack(">H", len(t_pf)) + t_pf
-                                t_lock = CONNECTION_LOCKS.get(target_cid)
-                                if t_lock:
-                                    with t_lock:
-                                        target_conn.sendall(t_pkt)
-                                else:
-                                    target_conn.sendall(t_pkt)
-                            except Exception:
-                                pass
 
                             # Check if victim died
                             if new_hp == 0:
@@ -4572,7 +4548,33 @@ def client_handler(conn, addr):
                         (1, attr_oth),
                         (2, mv_bytes)
                     ])
-                    send_rpc_push(512, encode_sproto([(0, relife_char)]))
+                    # Build the Tag 512 packet for broadcasting
+                    relife_pkt = build_aoi_add_packet(picked_char)  # not used for 512, build manually below
+                    relife_frame_data = encode_sproto([(0, relife_char)])
+                    
+                    # Send Tag 512 to the revived player's own client first
+                    send_rpc_push(512, relife_frame_data)
+                    
+                    # Broadcast Tag 512 to all other players on the same map
+                    # so they see the player revive instead of staying dead/ghost
+                    map_id = str(picked_char.get('map_id', '11'))
+                    if not is_single_player_map(map_id):
+                        try:
+                            r_ph = encode_sproto([(0, 512)])
+                            r_pf = sproto_pack(r_ph + relife_frame_data)
+                            r_pkt = struct.pack(">H", len(r_pf)) + r_pf
+                            for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
+                                if ch and ch.get('id', 0) != picked_char.get('id', 0) and str(ch.get('map_id', '11')) == map_id:
+                                    c_lock = CONNECTION_LOCKS.get(cid)
+                                    if c_lock:
+                                        with c_lock:
+                                            c.sendall(r_pkt)
+                                    else:
+                                        c.sendall(r_pkt)
+                                    print(f"[REVIVE] Broadcast Tag 512 to player id={ch.get('id', 0)} map={map_id}")
+                        except Exception as e:
+                            print(f"[REVIVE] Failed to broadcast Tag 512: {e}")
+                    
                     save_chars(all_accounts_chars)
                     print(f"[REVIVE] Player {picked_char['id']} revived with HP={p_stats['hp_max']} isInplace={is_inplace} pos={pos}")
 
