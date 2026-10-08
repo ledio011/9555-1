@@ -1322,6 +1322,88 @@ def get_movement(x, y, z, o=0):
     pos = encode_sproto([(0, x), (1, y), (2, z), (3, o)])
     return encode_sproto([(0, pos), (1, pos)])
 
+def get_runtime_aoi(c):
+    """Build the runtime field (character_aoi field 6) for aoi_add packets.
+    Matches the client's ObjInitPlayerData.InitData expectation:
+    runtime.attribute (tag 6) and runtime.attribute_all (tag 7)."""
+    stats = get_character_stats(c)
+    attr_run = encode_sproto([(0, stats['hp_max']), (2, stats['atk']), (3, stats['def'])])
+    attr_all_data = [
+        (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
+        (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
+        (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
+        (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
+    ]
+    attr_all = encode_sproto(attr_all_data)
+    return encode_sproto([(6, attr_run), (7, attr_all)])
+
+def build_aoi_add_packet(char):
+    """Build a complete TAG 505 aoi_add packet for a player character.
+    character_aoi: id(0), visual(1), general(2), attribute_other(3), movement(5), runtime(6)
+    Returns the full framed packet ready to send."""
+    if not char:
+        return None
+    char_id = char.get('id', 0)
+    pos = char.get('pos', [0, 0, 0, 0])
+    try:
+        visual_bytes = get_visual(char.get('name', 'Hero'), char.get('prof', 0))
+        gen_bytes = get_general(char)
+        stats = get_character_stats(char)
+        attr_oth = encode_sproto([
+            (0, char.get('hp', stats['hp_max'])),
+            (1, stats['exp']),
+            (2, stats['lv']),
+            (3, stats['power']),
+            (15, 1)
+        ])
+        mv_bytes = get_movement(pos[0], pos[1], pos[2], pos[3])
+        runtime_bytes = get_runtime_aoi(char)
+        char_aoi = encode_sproto([
+            (0, char_id),
+            (1, visual_bytes),
+            (2, gen_bytes),
+            (3, attr_oth),
+            (5, mv_bytes),
+            (6, runtime_bytes)
+        ])
+        aoi_data = encode_sproto([(0, char_aoi)])
+        ph_p = encode_sproto([(0, 505)])
+        pf_p = sproto_pack(ph_p + aoi_data)
+        return struct.pack(">H", len(pf_p)) + pf_p
+    except Exception as e:
+        print(f"[AOI] Failed to build aoi_add packet for id={char_id}: {e}")
+        return None
+
+def broadcast_aoi_move(char):
+    """Broadcast TAG 507 (aoi_update_move) to all other players on the same map."""
+    if not char:
+        return
+    char_id = char.get('id', 0)
+    map_id = str(char.get('map_id', '11'))
+    pos = char.get('pos', [0, 0, 0, 0])
+    try:
+        mv_bytes = get_movement(pos[0], pos[1], pos[2], pos[3])
+        aoi_move = encode_sproto([
+            (0, char_id),
+            (1, mv_bytes)
+        ])
+        ph_p = encode_sproto([(0, 507)])
+        pf_p = sproto_pack(ph_p + aoi_move)
+        pkt = struct.pack(">H", len(pf_p)) + pf_p
+        for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
+            if ch and ch.get('id', 0) != char_id and str(ch.get('map_id', '11')) == map_id:
+                try:
+                    c_lock = CONNECTION_LOCKS.get(cid)
+                    if c_lock:
+                        with c_lock:
+                            c.sendall(pkt)
+                    else:
+                        c.sendall(pkt)
+                except Exception:
+                    pass
+    except Exception as e:
+        print(f"[AOI] Failed to broadcast aoi_move for id={char_id}: {e}")
+
 def get_level_data(level):
     """Return a valid BaseLvData row, even if a saved character has a bad level."""
     try:
@@ -2678,47 +2760,23 @@ def broadcast_aoi_add(target_conn, target_char, sender_conn=None, sender_char=No
         return
     target_map = str(target_char.get('map_id', '11'))
     target_id = target_char.get('id', 0)
-    pos = target_char.get('pos', [0, 0, 0, 0])
-    # Build character_aoi for the target player
-    # character_aoi: id(0), visual(1), general(2), attribute_other(3), movement(5), runtime(6)
-    try:
-        visual_bytes = get_visual(target_char.get('name', 'Hero'), target_char.get('prof', 0))
-        gen_bytes = get_general(target_char)
-        stats = get_character_stats(target_char)
-        attr_oth = encode_sproto([
-            (0, target_char.get('hp', stats['hp_max'])),
-            (1, stats['exp']),
-            (2, stats['lv']),
-            (3, stats['power']),
-            (15, 1)
-        ])
-        mv_bytes = get_movement(pos[0], pos[1], pos[2], pos[3])
-        char_aoi = encode_sproto([
-            (0, target_id),
-            (1, visual_bytes),
-            (2, gen_bytes),
-            (3, attr_oth),
-            (5, mv_bytes)
-        ])
-        aoi_data = encode_sproto([(0, char_aoi)])
-        ph_p = encode_sproto([(0, 505)])
-        pf_p = sproto_pack(ph_p + aoi_data)
-        pkt = struct.pack(">H", len(pf_p)) + pf_p
-        # Send to all other connections that have a character on the same map
-        for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-            if ch and ch.get('id', 0) != target_id and str(ch.get('map_id', '11')) == target_map:
-                try:
-                    c_lock = CONNECTION_LOCKS.get(cid)
-                    if c_lock:
-                        with c_lock:
-                            c.sendall(pkt)
-                    else:
+    # Build character_aoi with runtime(6) included
+    pkt = build_aoi_add_packet(target_char)
+    if pkt is None:
+        return
+    # Send to all other connections that have a character on the same map
+    for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
+        if ch and ch.get('id', 0) != target_id and str(ch.get('map_id', '11')) == target_map:
+            try:
+                c_lock = CONNECTION_LOCKS.get(cid)
+                if c_lock:
+                    with c_lock:
                         c.sendall(pkt)
-                    print(f"[AOI] Broadcast aoi_add id={target_id} to {ch.get('id', 0)} map={target_map}")
-                except Exception:
-                    pass
-    except Exception as e:
-        print(f"[AOI] Failed to build aoi_add for id={target_id}: {e}")
+                else:
+                    c.sendall(pkt)
+                print(f"[AOI] Broadcast aoi_add id={target_id} to {ch.get('id', 0)} map={target_map}")
+            except Exception:
+                pass
 
 def broadcast_aoi_remove(char_id, map_id):
     """Broadcast aoi_remove (msg 506) when a player leaves a map."""
@@ -2821,36 +2879,10 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
             if ch and ch.get('id', 0) != picked_char.get('id', 0) and str(ch.get('map_id', '11')) == target_map_id:
                 # Send this existing player's aoi_add to the new player (conn)
-                try:
-                    target_map_ex = str(ch.get('map_id', '11'))
-                    target_id_ex = ch.get('id', 0)
-                    pos_ex = ch.get('pos', [0, 0, 0, 0])
-                    visual_bytes_ex = get_visual(ch.get('name', 'Hero'), ch.get('prof', 0))
-                    gen_bytes_ex = get_general(ch)
-                    stats_ex = get_character_stats(ch)
-                    attr_oth_ex = encode_sproto([
-                        (0, ch.get('hp', stats_ex['hp_max'])),
-                        (1, stats_ex['exp']),
-                        (2, stats_ex['lv']),
-                        (3, stats_ex['power']),
-                        (15, 1)
-                    ])
-                    mv_bytes_ex = get_movement(pos_ex[0], pos_ex[1], pos_ex[2], pos_ex[3])
-                    char_aoi_ex = encode_sproto([
-                        (0, target_id_ex),
-                        (1, visual_bytes_ex),
-                        (2, gen_bytes_ex),
-                        (3, attr_oth_ex),
-                        (5, mv_bytes_ex)
-                    ])
-                    aoi_data_ex = encode_sproto([(0, char_aoi_ex)])
-                    ph_p_ex = encode_sproto([(0, 505)])
-                    pf_p_ex = sproto_pack(ph_p_ex + aoi_data_ex)
-                    pkt_ex = struct.pack(">H", len(pf_p_ex)) + pf_p_ex
+                pkt_ex = build_aoi_add_packet(ch)
+                if pkt_ex:
                     conn.sendall(pkt_ex)
-                    print(f"[AOI] Send existing player id={target_id_ex} to new player {picked_char.get('id', 0)} map={target_map_id}")
-                except Exception as e:
-                    print(f"[AOI] Failed to send existing player {ch.get('id', 0)} to new player: {e}")
+                    print(f"[AOI] Send existing player id={ch.get('id', 0)} to new player {picked_char.get('id', 0)} map={target_map_id}")
 
         # BOSS SPAWN for Dominance Map 502
         if target_map_id == "502":
@@ -3371,6 +3403,16 @@ def client_handler(conn, addr):
                         # TAG 505: aoi_add (NPCs)
                         spawn_map_npcs(conn, mid, picked_char)
 
+                        # MULTIPLAYER AOI SYNC - Broadcast this new player to existing players
+                        broadcast_aoi_add(conn, picked_char)
+                        # Send existing players on this map to the new player
+                        for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
+                            if ch and ch.get('id', 0) != picked_char.get('id', 0) and str(ch.get('map_id', '11')) == mid:
+                                pkt_ex = build_aoi_add_packet(ch)
+                                if pkt_ex:
+                                    conn.sendall(pkt_ex)
+                                    print(f"[AOI] Initial login: Send existing player id={ch.get('id', 0)} to new player {picked_char.get('id', 0)} map={mid}")
+
                     except Exception:
                         print("[!] FAILED TO SEND INITIAL MAP ENTER")
                         traceback.print_exc()
@@ -3436,6 +3478,8 @@ def client_handler(conn, addr):
                     picked_char['pos'] = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
                     # Persistent save for safety
                     save_chars(all_accounts_chars)
+                    # Broadcast movement to other players on the same map (TAG 507)
+                    broadcast_aoi_move(picked_char)
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, p_raw)]))
@@ -5422,4 +5466,3 @@ def start_server():
 
 if __name__ == "__main__":
     start_server()
-    
