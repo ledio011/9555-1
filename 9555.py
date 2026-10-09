@@ -393,7 +393,10 @@ try:
         # Model: XD_A_WQ;XD_A_T;XD_A_S;XD_A_X, Size: 100, Group: 5
         # Level 9999 signals get_npc_attr() to use the player's level for stat scaling
         # All coefficients are 10000 (100%), stats scale via BaseLvData/AdaptData
-        '1105': {'name': '街区占领NPC', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
+        # Arena boss (mission 1003) - fixed level 21 with ~61,515 power
+        # Uses XD profession skills: 101-103 (attacks), 104 (dodge), 110/105/106 (active skills)
+        # AdaptData level 21: atk=467, hp=7082, def=541, hit=9252, eva=420, cri=1142, res=0
+        '1105': {'name': '街区占领NPC', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 21, 'type': 0, 'is_abs': True, 'skill_group': '50001', 'atk_abs': 467, 'hp_abs': 7082, 'def_abs': 541, 'hit_abs': 9252, 'eva_abs': 420, 'cri_abs': 1142, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 10281, 'dgea_abs': 20563, 'resa_abs': 10281, 'hita_abs': 1028, 'cria_abs': 10281},
         '1106': {'name': '街区占领NPC', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
         '1107': {'name': '街区占领NPC', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
         '1108': {'name': '街区占领NPC', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
@@ -1231,13 +1234,15 @@ def sync_main_player_visual(picked_char, send_rpc_push):
 
 def get_boss_char(inst_id, did, player_level=1):
     # Domin 1 boss stats and visual (XD profession)
-    # These names are server placeholders, not names supplied by the APK data.
+    # Boss is a fixed-level enemy (level 21) with ~61,515 power, matching the arena challenge.
+    # NpcData 1105 has actions XD_A_WQ;XD_A_T;XD_A_S;XD_A_X (XD profession model).
+    # The boss uses XD profession skills: 3 basic attacks, dodge, and 3 active skills.
     name = "Ash Viper"
     prof = 0
 
-    # Use get_npc_attr("1105") with player level for consistent stats
-    # This ensures boss HP bar, stats, and actual server HP all agree
-    boss_stats = get_npc_attr("1105", player_level)
+    # Boss uses fixed level 21 stats from AdaptData for consistent difficulty.
+    # Level 21: atk=467, hp=7082, def=541 → power = (467*16 + 7082 + 541*11) * 3 = 61,515
+    boss_stats = get_npc_attr("1105", 21)
     lv = boss_stats['lv']
     hp_max = boss_stats['hp_max']
     power = boss_stats['power']
@@ -1258,32 +1263,31 @@ def get_boss_char(inst_id, did, player_level=1):
     pos_data = encode_sproto([(0, 400), (1, 120), (2, 0), (3, -9000)])
     mv = encode_sproto([(0, pos_data), (1, pos_data)])
 
-    # Use the NPC's original skill_group from NpcData for authentic enemy behavior.
-    # NPC 1105 has skill_group '50001' (Monster ranged attack).
-    # The ObjZombiePlayer AI uses skills with indexPos 4-6 for auto-combat,
-    # sorted by PriorityAutoCombat descending. Skill 50001 has priority 0,
-    # but the XD starter skill 105 has priority 4, so 105 would be used first.
-    # To make the boss use its original monster skill, we build a custom skills map
-    # with only the monster skill at indexPos 4 (highest priority auto-fight slot).
-    npc_attr = get_npc_attr("1105", player_level)
-    boss_skill_group = npc_attr.get('skill_group', '50001')
-    # Build a minimal skills map with only the original monster skill
-    # The boss needs basic attacks for combo chain and the monster skill for auto-fight
+    # Boss uses XD profession skills for authentic arena enemy behavior.
+    # ObjZombiePlayer AI uses skills with indexPos 4-6 for auto-combat,
+    # sorted by PriorityAutoCombat descending:
+    #   110 (斗志, priority 5) -> used first
+    #   105 (旋风斩, priority 4) -> used second
+    #   106 (棒球, priority 3) -> used third
+    # Dodge (104) at indexPos 3 is available for evasion.
     skills_map = {}
     # Basic attack combo chain (required for combo attacks)
     atk_skills = ["101", "102", "103"]
     for sid in atk_skills:
         skills_map[sid] = encode_sproto([(0, sid), (1, 0), (2, 0), (3, 1), (4, 0), (5, False)])
-    # Dodge skill
+    # Dodge skill at indexPos 3
     skills_map["104"] = encode_sproto([(0, "104"), (1, 0), (2, 3), (3, 1), (4, 1), (5, False)])
-    # Original monster skill at indexPos 4 (primary auto-fight skill)
-    skills_map[boss_skill_group] = encode_sproto([
-        (0, boss_skill_group),
-        (1, 1),
-        (2, 4),       # indexPos - primary auto-fight slot
-        (3, 1),       # unlockLevel
-        (4, 2),       # indexPos2 - skill bar position
-        (5, False)    # disable
+    # Active skill 1: 110 (斗志) at indexPos 4 - highest priority auto-fight
+    skills_map["110"] = encode_sproto([
+        (0, "110"), (1, 1), (2, 4), (3, 1), (4, 2), (5, False)
+    ])
+    # Active skill 2: 105 (旋风斩) at indexPos 5
+    skills_map["105"] = encode_sproto([
+        (0, "105"), (1, 1), (2, 5), (3, 1), (4, 3), (5, False)
+    ])
+    # Active skill 3: 106 (棒球) at indexPos 6
+    skills_map["106"] = encode_sproto([
+        (0, "106"), (1, 1), (2, 6), (3, 1), (4, 4), (5, False)
     ])
 
     # Runtime: attribute(6), attribute_all(7)
