@@ -4498,6 +4498,35 @@ def client_handler(conn, addr):
                                             cap_target = str(cap_cfg.get('target_id', did))
                                             break
                                     advance_missions(picked_char, send_rpc_push, 'capture', target_id=cap_target)
+                                    # Grant NPC kill rewards (EXP/cash) and spawn drop for the boss
+                                    player_level = picked_char.get('level', 1)
+                                    boss_stats = get_npc_attr('1105', player_level)
+                                    boss_lv = boss_stats.get('lv', 1)
+                                    exp_kill, cash_kill = calculate_npc_kill_rewards(player_level, boss_lv)
+                                    kill_rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
+                                    grant_item_rewards(picked_char, kill_rewards, conn, send_rpc_push)
+                                    send_rpc_push(638, encode_sproto([(0, [
+                                        encode_sproto([(0, "2001"), (1, exp_kill), (3, 0)]),
+                                        encode_sproto([(0, "1001"), (1, cash_kill), (3, 0)])
+                                    ])]))
+                                    # Spawn drop item on the ground
+                                    player_pos = picked_char.get('pos', [0, 100, 0, 0])
+                                    drop_x = player_pos[0] + random.randint(-500, 500)
+                                    drop_z = player_pos[2] + random.randint(-500, 500)
+                                    drop_inst_id = int(time.time() * 1000) % 1000000000
+                                    drop_item = encode_sproto([
+                                        (0, "1001"),
+                                        (1, cash_kill),
+                                        (3, 0)
+                                    ])
+                                    send_rpc_push(527, encode_sproto([
+                                        (0, drop_inst_id),
+                                        (1, drop_x),
+                                        (2, drop_z),
+                                        (3, 0),
+                                        (4, drop_item),
+                                        (7, picked_char['id'])
+                                    ]))
                                     picked_char['boss_inst_id'] = None
                                 else:
                                     on_npc_killed(conn, send_rpc_push, picked_char, target_id, target_nid)
@@ -4607,6 +4636,35 @@ def client_handler(conn, addr):
                                 cap_target = str(cap_cfg.get('target_id', did))
                                 break
                         advance_missions(picked_char, send_rpc_push, 'capture', target_id=cap_target)
+                        # Grant NPC kill rewards (EXP/cash) and spawn drop for the boss
+                        player_level = picked_char.get('level', 1)
+                        boss_stats_137 = get_npc_attr('1105', player_level)
+                        boss_lv_137 = boss_stats_137.get('lv', 1)
+                        exp_kill_137, cash_kill_137 = calculate_npc_kill_rewards(player_level, boss_lv_137)
+                        kill_rewards_137 = [("2001", 0, exp_kill_137), ("1001", 0, cash_kill_137)]
+                        grant_item_rewards(picked_char, kill_rewards_137, conn, send_rpc_push)
+                        send_rpc_push(638, encode_sproto([(0, [
+                            encode_sproto([(0, "2001"), (1, exp_kill_137), (3, 0)]),
+                            encode_sproto([(0, "1001"), (1, cash_kill_137), (3, 0)])
+                        ])]))
+                        # Spawn drop item on the ground
+                        player_pos_137 = picked_char.get('pos', [0, 100, 0, 0])
+                        drop_x_137 = player_pos_137[0] + random.randint(-500, 500)
+                        drop_z_137 = player_pos_137[2] + random.randint(-500, 500)
+                        drop_inst_id_137 = int(time.time() * 1000 + random.randint(0, 999)) % 1000000000
+                        drop_item_137 = encode_sproto([
+                            (0, "1001"),
+                            (1, cash_kill_137),
+                            (3, 0)
+                        ])
+                        send_rpc_push(527, encode_sproto([
+                            (0, drop_inst_id_137),
+                            (1, drop_x_137),
+                            (2, drop_z_137),
+                            (3, 0),
+                            (4, drop_item_137),
+                            (7, picked_char['id'])
+                        ]))
                         picked_char['boss_inst_id'] = None
                         DEAD_NPC_SET.add(boss_id)
                     else:
