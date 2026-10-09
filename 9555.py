@@ -1949,7 +1949,7 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
         print(f"{prefix} HIT CHECK: hit_prob={hit_prob:.3f} (hit_p={hit_p:.3f}, dge_p={dge_p:.3f}, skill={skill_shit:.3f}) roll={roll_hit:.3f}")
         print(f"{prefix} STATS: AtkHIT={attacker_stats['hit']} AtkHITA={attacker_stats['hita']} DefEVA={defender_stats['eva']} DefDGEA={defender_stats['dgea']}")
 
-    if roll_hit >= hit_prob:
+    if roll_hit > hit_prob:
         if is_area: print(f"{prefix} RESULT: MISS")
         return 0, False, False # MISS
 
@@ -1977,10 +1977,25 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     if sat_type is None:
         sat_type = attacker_stats.get('sat_type', 'satp')
     sat_value = attacker_stats.get(sat_type, 0)
-    # Client only adds CurSATM/SATP/SATC to skillDamge (fixed damage).
-    # The scale add comes from effinfo's AddType fields via GetSkillTypeValue,
-    # which returns 0 for OBJ_NPC attacker types. Do NOT double-count.
+    # Client adds CurSATM/SATP/SATC to skillDamge (fixed damage).
+    # The scale add comes from effinfo's AddType fields via GetSkillTypeValue.
+    # GetSkillTypeValue returns 0 for OBJ_NPC attackers, but for player attackers
+    # it sums effinfo AddType1-4 matching the SKILL_ADD_TYPE and divides by 10000.
     scaled_damage += sat_value
+    # Add effect-based SAT scale bonus (client: skillScale += GetSkillTypeValue(..., SATM))
+    # This applies to player attackers; for NPC attackers GetSkillTypeValue returns 0.
+    if sat_type == 'satm':
+        satm_eff = eff_cfg['adds'].get(3005, 0)
+        if satm_eff:
+            scaled_scale += satm_eff / 10000.0
+    elif sat_type == 'satp':
+        satp_eff = eff_cfg['adds'].get(3007, 0)
+        if satp_eff:
+            scaled_scale += satp_eff / 10000.0
+    elif sat_type == 'satc':
+        satc_eff = eff_cfg['adds'].get(3006, 0)
+        if satc_eff:
+            scaled_scale += satc_eff / 10000.0
 
     base_dmg = attacker_stats['atk'] * scaled_scale + scaled_damage
     def_red = min((defender_stats['def'] + 1.0) / (defender_stats['def'] + attacker_stats['defa']), 0.5)
