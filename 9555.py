@@ -1941,14 +1941,15 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
 
     # Client formula: 1 + hit_p - dge_p + skill_shit >= random/100
     # Where random is 0-99, so random/100 is 0.00 to 0.99
+    # Client uses >=, so server uses >= with same range
     hit_prob = 1.0 + hit_p - dge_p + skill_shit
-    roll_hit = random.random()  # 0.0 to 1.0
+    roll_hit = random.randint(0, 99) / 100.0  # 0.00 to 0.99, matches client
 
     if is_area:
         print(f"{prefix} HIT CHECK: hit_prob={hit_prob:.3f} (hit_p={hit_p:.3f}, dge_p={dge_p:.3f}, skill={skill_shit:.3f}) roll={roll_hit:.3f}")
         print(f"{prefix} STATS: AtkHIT={attacker_stats['hit']} AtkHITA={attacker_stats['hita']} DefEVA={defender_stats['eva']} DefDGEA={defender_stats['dgea']}")
 
-    if roll_hit > hit_prob:
+    if roll_hit >= hit_prob:
         if is_area: print(f"{prefix} RESULT: MISS")
         return 0, False, False # MISS
 
@@ -1958,7 +1959,8 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     res_p = min((defender_stats['res'] + 1.0) / (defender_stats['res'] + defender_stats['resa'] + 1.0), 0.8)
 
     cri_prob = cri_p - res_p + skill_scri
-    is_cri = random.random() < cri_prob
+    # Client: cri_prob >= random(0-99)/100  (CharacterAttributeData.cs line 1076)
+    is_cri = cri_prob >= random.randint(0, 99) / 100.0
 
     # 4. Calculate Damage
     scaled_damage = skill_damage * pvp_mult
@@ -1975,7 +1977,9 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     if sat_type is None:
         sat_type = attacker_stats.get('sat_type', 'satp')
     sat_value = attacker_stats.get(sat_type, 0)
-    scaled_scale += sat_value / 10000.0 if sat_value else 0
+    # Client only adds CurSATM/SATP/SATC to skillDamge (fixed damage).
+    # The scale add comes from effinfo's AddType fields via GetSkillTypeValue,
+    # which returns 0 for OBJ_NPC attacker types. Do NOT double-count.
     scaled_damage += sat_value
 
     base_dmg = attacker_stats['atk'] * scaled_scale + scaled_damage
