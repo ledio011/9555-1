@@ -4393,24 +4393,6 @@ def client_handler(conn, addr):
                                 ]))
                                 continue
 
-                            # Only process server-spawned NPCs (in NPC_HP_MAP or NPC_INST_MAP)
-                            if target_id not in NPC_HP_MAP and target_id not in NPC_INST_MAP:
-                                # Unknown target, skip but still send feedback
-                                dmg_item = encode_sproto([
-                                    (0, target_id),
-                                    (1, client_dmg),
-                                    (2, skill_id),
-                                    (3, effinfo_id),
-                                    (4, is_cri)
-                                ])
-                                send_rpc_push(511, encode_sproto([(0, [dmg_item])]))
-                                send_rpc_push(514, encode_sproto([
-                                    (0, target_id),
-                                    (1, picked_char['id']),
-                                    (2, effinfo_id)
-                                ]))
-                                continue
-
                             # Check if NPC is already dead (Tag 137 may have killed it first)
                             # This prevents processing damage after the boss is already dead
                             if target_id in DEAD_NPC_SET:
