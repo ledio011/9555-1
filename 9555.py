@@ -4537,6 +4537,7 @@ def client_handler(conn, addr):
 
                     # Map 11 NPCs are fully client-side — resolve NPC ID and grant kill rewards
                     cur_map = str(picked_char.get('map_id', '11'))
+                    print(f"[MAP11 REWARD DEBUG] RX 307 npcid={npcid} inst_id={inst_id} die_type={die_type} cur_map={cur_map}")
                     if cur_map == '11':
                         # For client-local map 11 NPCs, the inst_id is a client-generated ID.
                         # The client sends the npcid directly in field 0 of tag 307.
@@ -4551,11 +4552,13 @@ def client_handler(conn, addr):
                                 # For mission 1001, the client sends npcid=9901 directly
                                 pass
 
+                        print(f"[MAP11 REWARD DEBUG] actual_npcid={actual_npcid} will_grant={actual_npcid and actual_npcid != 'None'}")
                         # Advance kill missions
                         advance_missions(picked_char, send_rpc_push, 'kill', target_id=actual_npcid)
 
                         # Grant NPC kill rewards (EXP/cash) for map 11 — same as other maps
                         if actual_npcid and actual_npcid != "None":
+                            print(f"[MAP11 REWARD DEBUG] Granting rewards for NPC {actual_npcid}")
                             npc_stats_m11 = get_npc_attr(actual_npcid, picked_char.get('level', 1))
                             npc_lv_m11 = npc_stats_m11.get('lv', 1)
                             char_lv_m11 = picked_char.get('level', 1)
