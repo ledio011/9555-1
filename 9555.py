@@ -393,10 +393,11 @@ try:
         # Model: XD_A_WQ;XD_A_T;XD_A_S;XD_A_X, Size: 100, Group: 5
         # Level 9999 signals get_npc_attr() to use the player's level for stat scaling
         # All coefficients are 10000 (100%), stats scale via BaseLvData/AdaptData
-        # Arena boss (mission 1003) - fixed level 21 with ~61,515 power
-        # Uses XD profession skills: 101-103 (attacks), 104 (dodge), 110/105/106 (active skills)
-        # AdaptData level 21: atk=467, hp=7082, def=541, hit=9252, eva=420, cri=1142, res=0
-        '1105': {'name': '街区占领NPC', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 21, 'type': 0, 'is_abs': True, 'skill_group': '50001', 'atk_abs': 467, 'hp_abs': 7082, 'def_abs': 541, 'hit_abs': 9252, 'eva_abs': 420, 'cri_abs': 1142, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 10281, 'dgea_abs': 20563, 'resa_abs': 10281, 'hita_abs': 1028, 'cria_abs': 10281},
+        # Arena boss (mission 1003) - percentage-based, scales to player level
+        # Original NpcData: 百分比 (percentage-based), level empty (defaults to 1), all coefficients 10000 (100%)
+        # Level 9999 signals get_npc_attr() to use the player's level for stat scaling
+        # This ensures the arena boss is always challenging regardless of player level
+        '1105': {'name': '街区占领NPC', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
         '1106': {'name': '街区占领NPC', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
         '1107': {'name': '街区占领NPC', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
         '1108': {'name': '街区占领NPC', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
@@ -1234,15 +1235,17 @@ def sync_main_player_visual(picked_char, send_rpc_push):
 
 def get_boss_char(inst_id, did, player_level=1):
     # Domin 1 boss stats and visual (XD profession)
-    # Boss is a fixed-level enemy (level 21) with ~61,515 power, matching the arena challenge.
-    # NpcData 1105 has actions XD_A_WQ;XD_A_T;XD_A_S;XD_A_X (XD profession model).
+    # Boss scales to player level — the arena challenge adapts to the player's strength.
+    # NpcData 1105: percentage-based (百分比), all coefficients 100%, skill group defaults to 50001.
+    # Model: XD_A_WQ;XD_A_T;XD_A_S;XD_A_X (XD profession actions).
     # The boss uses XD profession skills: 3 basic attacks, dodge, and 3 active skills.
     name = "Ash Viper"
     prof = 0
 
-    # Boss uses fixed level 21 stats from AdaptData for consistent difficulty.
-    # Level 21: atk=467, hp=7082, def=541 → power = (467*16 + 7082 + 541*11) * 3 = 61,515
-    boss_stats = get_npc_attr("1105", 21)
+    # Boss scales to player level for consistent arena challenge.
+    # NPC 1105 is percentage-based with level 9999, so get_npc_attr uses the player's level.
+    # At player level 21: atk=467, hp=7082, def=541 → power = 61,515
+    boss_stats = get_npc_attr("1105", player_level)
     lv = boss_stats['lv']
     hp_max = boss_stats['hp_max']
     power = boss_stats['power']
