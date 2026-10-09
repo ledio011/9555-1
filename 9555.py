@@ -1258,15 +1258,33 @@ def get_boss_char(inst_id, did, player_level=1):
     pos_data = encode_sproto([(0, 400), (1, 120), (2, 0), (3, -9000)])
     mv = encode_sproto([(0, pos_data), (1, pos_data)])
 
-    # ObjZombiePlayer removes a skill from its automatic list after using it.
-    # Supplying the complete XD combat set gives it valid fallbacks to chase
-    # and attack instead of becoming idle when the first skill is unavailable.
-    boss_skill_levels = {
-        "101": 1,
-        "105": 1, "106": 1, "107": 1,
-        "108": 1, "109": 1, "110": 1,
-    }
-    skills_map = build_skills_map(prof, player_level, boss_skill_levels)
+    # Use the NPC's original skill_group from NpcData for authentic enemy behavior.
+    # NPC 1105 has skill_group '50001' (Monster ranged attack).
+    # The ObjZombiePlayer AI uses skills with indexPos 4-6 for auto-combat,
+    # sorted by PriorityAutoCombat descending. Skill 50001 has priority 0,
+    # but the XD starter skill 105 has priority 4, so 105 would be used first.
+    # To make the boss use its original monster skill, we build a custom skills map
+    # with only the monster skill at indexPos 4 (highest priority auto-fight slot).
+    npc_attr = get_npc_attr("1105", player_level)
+    boss_skill_group = npc_attr.get('skill_group', '50001')
+    # Build a minimal skills map with only the original monster skill
+    # The boss needs basic attacks for combo chain and the monster skill for auto-fight
+    skills_map = {}
+    # Basic attack combo chain (required for combo attacks)
+    atk_skills = ["101", "102", "103"]
+    for sid in atk_skills:
+        skills_map[sid] = encode_sproto([(0, sid), (1, 0), (2, 0), (3, 1), (4, 0), (5, False)])
+    # Dodge skill
+    skills_map["104"] = encode_sproto([(0, "104"), (1, 0), (2, 3), (3, 1), (4, 1), (5, False)])
+    # Original monster skill at indexPos 4 (primary auto-fight skill)
+    skills_map[boss_skill_group] = encode_sproto([
+        (0, boss_skill_group),
+        (1, 1),
+        (2, 4),       # indexPos - primary auto-fight slot
+        (3, 1),       # unlockLevel
+        (4, 2),       # indexPos2 - skill bar position
+        (5, False)    # disable
+    ])
 
     # Runtime: attribute(6), attribute_all(7)
     attr_run = encode_sproto([(0, hp_max), (2, atk), (3, df)])
