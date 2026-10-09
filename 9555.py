@@ -1301,7 +1301,7 @@ def get_boss_char(inst_id, did, player_level=1):
         (0, hp_max), (2, atk), (3, df),
         (4, boss_stats['hit']), (5, boss_stats['eva']), (6, boss_stats['cri']), (7, boss_stats['res']),
         (8, boss_stats['exd']), (9, boss_stats['exr']), (10, boss_stats['crd']), (11, boss_stats['crr']),
-        (12, boss_stats['defa']), (13, 700), (14, 100),
+        (12, boss_stats['defa']), (13, 500), (14, 100),
         (17, boss_stats['dgea']), (18, boss_stats['resa']), (19, boss_stats['hita']), (20, boss_stats['cria'])
     ]
     attr_all = encode_sproto(attr_all_data)
@@ -1476,8 +1476,10 @@ def build_aoi_add_packet(char):
         return None
 
 def is_single_player_map(map_id):
-    """Return True if the map should not have player-to-player AOI (e.g., Map 11)."""
-    return str(map_id) == "11"
+    """Return True if the map should not have player-to-player AOI.
+    Map 11 = city (client-side NPCs only).
+    Map 502 = Domin arena (instanced, one player per fight)."""
+    return str(map_id) in ("11", "502")
 
 def broadcast_aoi_move(char):
     """Broadcast TAG 507 (aoi_update_move) to all other players on the same map.
@@ -1907,7 +1909,7 @@ def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
     except: pass
 
-def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_area=False, pvp_scale=1.0, effinfo_id=None):
+def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_area=False, pvp_scale=1.0, effinfo_id=None, sat_type=None):
     """Original Damage calculation reproduced from CharacterAttributeData.cs"""
     prefix = "[AREA DAMAGE]" if is_area else "[COMBAT]"
 
@@ -1924,9 +1926,13 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     skill_scale = (eff_cfg['dmg_multi'] + (eff_cfg['dmg_multi_add'] or 0) * skill_lv) / 10000.0
 
     # PvP Scale handling (num3 in CharacterAttributeData.cs)
+    # Only applies when BOTH attacker and defender are player/zombie/zombie_ragdoll types.
+    # For NPC targets, pvp_scale stays at 1.0 (no PvP multiplier).
     pvp_mult = pvp_scale
-    if attacker_stats.get('power', 0) > defender_stats.get('power', 0):
-        pvp_mult += 0.05
+    if pvp_scale > 1.0:
+        # PvP context — check combo value condition from client
+        if attacker_stats.get('power', 0) > defender_stats.get('power', 0):
+            pvp_mult += 0.05
 
     # 2. Check Hit/Dodge
     skill_shit = eff_cfg['adds'].get(3001, 0) / 10000.0
@@ -1965,9 +1971,9 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     #   - OBJ_NPC with FunctionType==10 → SATC
     #   - OBJ_NPC (other)               → SATM
     #   - else (player, etc.)           → SATP
-    # Server uses sat_type parameter to indicate the defender type context:
-    #   'satp' = player/zombie target, 'satm' = NPC target, 'satc' = car target
-    sat_type = attacker_stats.get('sat_type', 'satp')  # default 'satp' for player targets
+    # sat_type parameter overrides: 'satp' (default for PvP), 'satm' (NPC), 'satc' (car)
+    if sat_type is None:
+        sat_type = attacker_stats.get('sat_type', 'satp')
     sat_value = attacker_stats.get(sat_type, 0)
     scaled_scale += sat_value / 10000.0 if sat_value else 0
     scaled_damage += sat_value
@@ -3302,6 +3308,9 @@ def client_handler(conn, addr):
         """Return after the Capture mission's APK-localized five-second exit notice."""
         if not picked_char or picked_char.get('domin_return_scheduled'):
             return
+        # Cancel the arena timeout timer so it doesn't fire after we've already exited.
+        if 'arena_timer' in picked_char:
+            picked_char['arena_timer'].cancel()
         picked_char['domin_return_scheduled'] = True
         picked_char['domin_return_restore_hp'] = restore_hp
 
@@ -3689,16 +3698,24 @@ def client_handler(conn, addr):
                             print(f"[EXP STAGE] map_ready sent 629 & 683 updates for copy={mid}")
                     if mid == "502":
                         # Map 502 exposes its match timer only through this APK tag.
+                        # Cancel any previous arena timer to prevent stale timers from
+                        # repeated map_ready events affecting a new arena run.
+                        if 'arena_timer' in picked_char:
+                            picked_char['arena_timer'].cancel()
                         send_rpc_push(629, encode_sproto([(0, int(time.time()) + 60), (1, 0)]))
 
                         def arena_timeout():
                             if picked_char and picked_char.get('map_id') == '502':
-                                print('[M1003 DEBUG] Arena 60s timeout reached; returning')
-                                schedule_domin_return(restore_hp=True)
+                                boss_id = picked_char.get('boss_inst_id')
+                                # Only timeout if boss is still alive (not already won/lost)
+                                if boss_id and NPC_HP_MAP.get(boss_id, 0) > 0:
+                                    print('[M1003 DEBUG] Arena 60s timeout reached; returning')
+                                    schedule_domin_return(restore_hp=True)
 
                         t = threading.Timer(60.0, arena_timeout)
                         t.daemon = True
                         t.start()
+                        picked_char['arena_timer'] = t
 
                         boss_id = picked_char.get('boss_inst_id')
                         if boss_id and picked_char.pop('boss_waiting_for_map_ready', False):
@@ -3885,7 +3902,12 @@ def client_handler(conn, addr):
                 mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
                 idx = get_val_int(body, 1); val = get_val_int(body, 2)
                 if picked_char and mid in picked_char.get('active_missions', {}):
-                    if 0 < idx <= 8:
+                    # Reject param changes for capture missions (logic_type 25) —
+                    # the server advances progress authoritatively via advance_missions.
+                    m_cfg_524 = missions_data.get(mid, {})
+                    if m_cfg_524.get('logic_type') == 25:
+                        print(f"[MISSION SECURITY] MSG 524 rejected for capture mission {mid}")
+                    elif 0 < idx <= 8:
                         picked_char['active_missions'][mid]['parm'][idx-1] = val
                         save_chars(all_accounts_chars)
                     if session is not None:
@@ -3897,6 +3919,18 @@ def client_handler(conn, addr):
                 mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
                 state = get_val_int(body, 1)
                 if picked_char and mid in picked_char.get('active_missions', {}):
+                    cur_state = picked_char['active_missions'][mid].get('state', 1)
+                    # Only allow 1→2 (active→completed) if the server already set it to 2 via advance_missions.
+                    # This prevents a client from forging mission completion.
+                    if state == 2 and cur_state != 2:
+                        # Client is trying to set state=2 without server confirmation — reject.
+                        m_cfg_523 = missions_data.get(mid, {})
+                        if m_cfg_523.get('logic_type') == 25:
+                            print(f"[MISSION SECURITY] MSG 523 rejected: cannot forge capture mission {mid} completion")
+                            if session is not None:
+                                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                                conn.sendall(struct.pack(">H", len(pf)) + pf)
+                            return
                     picked_char['active_missions'][mid]['state'] = state
                     save_chars(all_accounts_chars)
                     if session is not None:
@@ -4155,13 +4189,11 @@ def client_handler(conn, addr):
                             boss_stats = get_npc_attr("1105", player_level)
                             player_stats = get_character_stats(picked_char)
 
-                            # Use client-sent effinfo_id to determine which boss skill was used
-                            # The client sends effinfoId from the skill's effect data (SkillLogic.cs line 781)
-                            # Reverse-lookup the skill_id from the effinfo_id, but ONLY allow
-                            # effects that belong to the boss's actual skill set (105-110).
-                            # This prevents the client from mapping an arbitrary effect to an unrelated skill.
+                            # Use client-sent effinfo_id to determine which boss skill was used.
+                            # Only allow effects belonging to the boss's actual skill map:
+                            # 101-103 (basic attacks), 104 (dodge), 105, 106, 110 (active skills).
                             boss_allowed_effects = set()
-                            for boss_sid in ('101', '105', '106', '107', '108', '109', '110'):
+                            for boss_sid in ('101', '102', '103', '104', '105', '106', '110'):
                                 bcfg = SKILL_CONFIG.get(boss_sid, {})
                                 for eff_key in ('eff0', 'eff1', 'eff2'):
                                     eff = bcfg.get(eff_key, '')
@@ -4244,17 +4276,23 @@ def client_handler(conn, addr):
                             # Server-authoritative damage calculation
                             target_stats = get_character_stats(target_char)
 
-                            # Verify the attacker actually has this skill learned
+                            # Verify the attacker actually has this skill learned.
+                            # Starter skills (101-105 for XD, 201-205 for QJ, 301-305 for NQS)
+                            # are always available at level 0, even if not in skill_levels.
                             char_skill_levels = picked_char.get('skill_levels', {})
-                            if skill_id not in char_skill_levels:
-                                # Skill not learned by player, reject and use default basic attack
+                            prof = picked_char.get('prof', 0)
+                            starter_skills = PROF_SKILLS.get(prof, PROF_SKILLS[0])
+                            always_available = set(starter_skills.get('atk', []))
+                            always_available.add(starter_skills.get('dodge', ''))
+                            always_available.add(starter_skills.get('starter_active', ''))
+                            if skill_id not in char_skill_levels and skill_id not in always_available:
+                                # Skill not learned by player and not a starter skill, reject
                                 skill_id = "50001"
                                 effinfo_id = None
-                            skill_lv = char_skill_levels.get(skill_id, 1)
-                            if skill_lv < 1:
-                                # Skill level invalid, use default
+                            skill_lv = char_skill_levels.get(skill_id, 0)
+                            if skill_lv < 0:
                                 skill_id = "50001"
-                                skill_lv = 1
+                                skill_lv = 0
                                 effinfo_id = None
 
                             # Server-authoritative effinfo_id: derive from skill_id, not from client
@@ -4417,27 +4455,32 @@ def client_handler(conn, addr):
                                 NPC_HP_MAP[target_id] = defender_stats['hp_max']
 
                             # Server-authoritative NPC damage calculation
-                            # Verify the attacker actually has this skill learned
+                            # Verify the attacker actually has this skill learned.
+                            # Starter skills (101-105 for XD, 201-205 for QJ, 301-305 for NQS)
+                            # are always available at level 0, even if not in skill_levels.
                             char_skill_levels = picked_char.get('skill_levels', {})
-                            if skill_id not in char_skill_levels:
-                                # Skill not learned by player, reject and use default basic attack
+                            prof = picked_char.get('prof', 0)
+                            starter_skills = PROF_SKILLS.get(prof, PROF_SKILLS[0])
+                            always_available = set(starter_skills.get('atk', []))
+                            always_available.add(starter_skills.get('dodge', ''))
+                            always_available.add(starter_skills.get('starter_active', ''))
+                            if skill_id not in char_skill_levels and skill_id not in always_available:
+                                # Skill not learned by player and not a starter skill, reject
                                 skill_id = "50001"
                                 effinfo_id = None
-                            skill_lv = char_skill_levels.get(skill_id, 1)
-                            if skill_lv < 1:
-                                # Skill level invalid, use default
+                            skill_lv = char_skill_levels.get(skill_id, 0)
+                            if skill_lv < 0:
                                 skill_id = "50001"
-                                skill_lv = 1
+                                skill_lv = 0
                                 effinfo_id = None
 
                             # Server-authoritative effinfo_id: derive from skill_id, not from client
-                            # This prevents the client from influencing which damage configuration is used
                             if effinfo_id is None:
                                 skill_cfg = SKILL_CONFIG.get(skill_id, {})
                                 effinfo_id = skill_cfg.get('eff0', "10000")
 
                             server_dmg, hit, calc_cri = get_combat_damage(
-                                attacker_stats, defender_stats, skill_id, skill_lv, effinfo_id=effinfo_id
+                                attacker_stats, defender_stats, skill_id, skill_lv, effinfo_id=effinfo_id, sat_type='satm'
                             )
                             if not hit:
                                 server_dmg = 0
@@ -4562,7 +4605,6 @@ def client_handler(conn, addr):
 
                     # Map 11 NPCs are fully client-side — resolve NPC ID and grant kill rewards
                     cur_map = str(picked_char.get('map_id', '11'))
-                    print(f"[MAP11 REWARD DEBUG] RX 307 npcid={npcid} inst_id={inst_id} die_type={die_type} cur_map={cur_map}")
                     if cur_map == '11':
                         # For client-local map 11 NPCs, the inst_id is a client-generated ID.
                         # The client sends the npcid directly in field 0 of tag 307.
@@ -4577,13 +4619,11 @@ def client_handler(conn, addr):
                                 # For mission 1001, the client sends npcid=9901 directly
                                 pass
 
-                        print(f"[MAP11 REWARD DEBUG] actual_npcid={actual_npcid} will_grant={actual_npcid and actual_npcid != 'None'}")
                         # Advance kill missions
                         advance_missions(picked_char, send_rpc_push, 'kill', target_id=actual_npcid)
 
                         # Grant NPC kill rewards (EXP/cash) for map 11 — same as other maps
                         if actual_npcid and actual_npcid != "None":
-                            print(f"[MAP11 REWARD DEBUG] Granting rewards for NPC {actual_npcid}")
                             npc_stats_m11 = get_npc_attr(actual_npcid, picked_char.get('level', 1))
                             npc_lv_m11 = npc_stats_m11.get('lv', 1)
                             char_lv_m11 = picked_char.get('level', 1)
@@ -4636,60 +4676,12 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 137: # rank_pvp_other_player_die
-                # RankPVPLocalSceneManager sends this after the APK's zombie
-                # opponent has died locally. Treat it as an idempotent arena
-                # win fallback; normal damage processing may already have
-                # completed the same battle.
+                # DominSceneManager.SuccessMission() is EMPTY — the client does NOT
+                # send MSG 137 for the Domin flow. Only RankPVPLocalSceneManager
+                # sends this, which is a different scene type (not map 502).
+                # Ignore MSG 137 for map 502 to prevent forged victory claims.
                 if picked_char and picked_char.get('map_id') == '502':
-                    boss_id = picked_char.get('boss_inst_id')
-                    if boss_id and boss_id in NPC_HP_MAP and NPC_HP_MAP[boss_id] > 0:
-                        NPC_HP_MAP[boss_id] = 0
-                        player_level = picked_char.get('level', 1)
-                        boss_stats = get_npc_attr('1105', player_level)
-                        sync_npc_attrs_rpc(conn, boss_id, boss_stats, 0)
-                        did = picked_char.get('active_domin_id', '1')
-                        print(f"[M1003 DEBUG] RX 137 zombie died; winning did={did}")
-                        # Capture wins update mission progress, not copy_scene_result (552).
-                        cap_target = did
-                        for act_m, act_mdata in list(picked_char.get('active_missions', {}).items()):
-                            cap_cfg = missions_data.get(act_m, {})
-                            if cap_cfg.get('logic_type') == 25:
-                                cap_target = str(cap_cfg.get('target_id', did))
-                                break
-                        advance_missions(picked_char, send_rpc_push, 'capture', target_id=cap_target)
-                        # Grant NPC kill rewards (EXP/cash) and spawn drop for the boss
-                        player_level = picked_char.get('level', 1)
-                        boss_stats_137 = get_npc_attr('1105', player_level)
-                        boss_lv_137 = boss_stats_137.get('lv', 1)
-                        exp_kill_137, cash_kill_137 = calculate_npc_kill_rewards(player_level, boss_lv_137)
-                        kill_rewards_137 = [("2001", 0, exp_kill_137), ("1001", 0, cash_kill_137)]
-                        grant_item_rewards(picked_char, kill_rewards_137, conn, send_rpc_push)
-                        send_rpc_push(638, encode_sproto([(0, [
-                            encode_sproto([(0, "2001"), (1, exp_kill_137), (3, 0)]),
-                            encode_sproto([(0, "1001"), (1, cash_kill_137), (3, 0)])
-                        ])]))
-                        # Spawn drop item on the ground
-                        player_pos_137 = picked_char.get('pos', [0, 100, 0, 0])
-                        drop_x_137 = player_pos_137[0] + random.randint(-500, 500)
-                        drop_z_137 = player_pos_137[2] + random.randint(-500, 500)
-                        drop_inst_id_137 = int(time.time() * 1000 + random.randint(0, 999)) % 1000000000
-                        drop_item_137 = encode_sproto([
-                            (0, "1001"),
-                            (1, cash_kill_137),
-                            (3, 0)
-                        ])
-                        send_rpc_push(527, encode_sproto([
-                            (0, drop_inst_id_137),
-                            (1, drop_x_137),
-                            (2, drop_z_137),
-                            (3, 0),
-                            (4, drop_item_137),
-                            (7, picked_char['id'])
-                        ]))
-                        picked_char['boss_inst_id'] = None
-                        DEAD_NPC_SET.add(boss_id)
-                    else:
-                        print('[M1003 DEBUG] RX 137 ignored; arena win was already processed')
+                    print('[M1003 SECURITY] MSG 137 ignored for Domin arena — DominSceneManager.SuccessMission() is empty')
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -5298,11 +5290,14 @@ def client_handler(conn, addr):
                     send_rpc_push(674, encode_sproto([(0, {})]))
 
             elif msg == 310:  # request_domin_info
-                print("[M1003 DEBUG] RX 310 request_domin_info")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+                # DominData row 1: matchpower=6000, LevelMin=1, MapID=502
+                # The character_look (ao_p) fields are read by CitySimController
+                # to display the VS panel before entering the arena.
+                # Using DominData values: DominantMin=1200, DominantMax=2600, Lossspeed=5
                 v_p = encode_sproto([
                     (0, "Ash Viper"),
                     (1, "100"),
@@ -5321,8 +5316,6 @@ def client_handler(conn, addr):
                 ao_p = encode_sproto([
                     (2, 1),
                     (3, 6000),
-                    # CitySimController creates the Dominance zombie from
-                    # ret_domin_info.character_look and reads title_level.
                     (4, 1),
                     (15, 5)
                 ])
@@ -5345,7 +5338,6 @@ def client_handler(conn, addr):
                     (1, [cl_p])
                 ])
 
-                print("[M1003 DEBUG] TX 684 ret_domin_info domin_id=1 state=0")
                 send_rpc_push(684, resp_p)
 
             elif msg == 178: # update_misison_parm
