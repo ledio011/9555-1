@@ -4535,8 +4535,7 @@ def client_handler(conn, addr):
                     if die_type in [2, 6]:
                         advance_missions(picked_char, send_rpc_push, 'car', die_type=die_type)
 
-                    # Map 11 NPCs are fully client-side — do not run server NPC kill rewards
-                    # Instead, resolve the actual NPC ID from KillTargetMissionData and advance missions only
+                    # Map 11 NPCs are fully client-side — resolve NPC ID and grant kill rewards
                     cur_map = str(picked_char.get('map_id', '11'))
                     if cur_map == '11':
                         # For client-local map 11 NPCs, the inst_id is a client-generated ID.
@@ -4552,8 +4551,45 @@ def client_handler(conn, addr):
                                 # For mission 1001, the client sends npcid=9901 directly
                                 pass
 
-                        # Advance kill missions for map 11 without running on_npc_killed rewards
+                        # Advance kill missions
                         advance_missions(picked_char, send_rpc_push, 'kill', target_id=actual_npcid)
+
+                        # Grant NPC kill rewards (EXP/cash) for map 11 — same as other maps
+                        if actual_npcid and actual_npcid != "None":
+                            npc_stats_m11 = get_npc_attr(actual_npcid, picked_char.get('level', 1))
+                            npc_lv_m11 = npc_stats_m11.get('lv', 1)
+                            char_lv_m11 = picked_char.get('level', 1)
+
+                            exp_kill_m11, cash_kill_m11 = calculate_npc_kill_rewards(char_lv_m11, npc_lv_m11)
+                            kill_rewards_m11 = [("2001", 0, exp_kill_m11), ("1001", 0, cash_kill_m11)]
+                            grant_item_rewards(picked_char, kill_rewards_m11, conn, send_rpc_push)
+
+                            # TAG 638: floating reward popup
+                            send_rpc_push(638, encode_sproto([(0, [
+                                encode_sproto([(0, "2001"), (1, exp_kill_m11), (3, 0)]),
+                                encode_sproto([(0, "1001"), (1, cash_kill_m11), (3, 0)])
+                            ])]))
+
+                            # TAG 527: drop_item_info - spawn a dropped item on the ground
+                            player_pos_m11 = picked_char.get('pos', [0, 100, 0, 0])
+                            drop_x_m11 = player_pos_m11[0] + random.randint(-500, 500)
+                            drop_z_m11 = player_pos_m11[2] + random.randint(-500, 500)
+                            global GLOBAL_INST_COUNTER
+                            GLOBAL_INST_COUNTER += 1
+                            drop_inst_id_m11 = GLOBAL_INST_COUNTER
+                            drop_item_m11 = encode_sproto([
+                                (0, "1001"),
+                                (1, cash_kill_m11),
+                                (3, 0)
+                            ])
+                            send_rpc_push(527, encode_sproto([
+                                (0, drop_inst_id_m11),
+                                (1, drop_x_m11),
+                                (2, drop_z_m11),
+                                (3, 0),
+                                (4, drop_item_m11),
+                                (7, picked_char['id'])
+                            ]))
                     else:
                         on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid)
 
