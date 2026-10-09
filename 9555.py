@@ -203,7 +203,8 @@ try:
                     SKILL_CONFIG[sid] = {
                         'eff0': parts[24],
                         'eff1': parts[26] if len(parts) > 26 else "",
-                        'eff2': parts[28] if len(parts) > 28 else ""
+                        'eff2': parts[28] if len(parts) > 28 else "",
+                        'priority': int(parts[29]) if len(parts) > 29 and parts[29].isdigit() else 0
                     }
                     # Build reverse lookup: effId -> skillId
                     for eff_key in ('eff0', 'eff1', 'eff2'):
@@ -1352,25 +1353,34 @@ def build_skills_map(prof, char_level, skill_levels=None):
     # Include any additional skills specified in skill_levels (e.g., boss skills 106-110)
     # The client's ObjZombiePlayer.UpdateSkillList() only accepts indexPos 4, 5, 6
     # (line 114: index > 3 && index < 7), so only 3 active skills can be used by zombie AI.
-    # Assign sequential indexPos starting from 4 for the first 3 extra skills.
-    extra_skill_idx = 0
+    # The client then sorts mEnableSkillIDList by PriorityAutoCombat (descending):
+    #   110(priority=5) -> used first
+    #   105(priority=4) -> used second
+    #   106(priority=3) -> used third
+    #   107/108/109(priority=2) -> not in mEnableSkillIDList if >3 skills
+    # We need to assign indexPos 4-6 to the skills with the highest PriorityAutoCombat.
+    # Collect all extra skills and sort by PriorityAutoCombat descending.
+    extra_skills = []
     for sid, slv in skill_levels.items():
         if sid not in smap:
-            # Only assign indexPos 4-6 for the first 3 extra skills (zombie AI limit)
-            # Skills beyond index 6 will be added but won't be in mEnableSkillIDList
-            if extra_skill_idx < 3:
-                skill_idx = 4 + extra_skill_idx  # 4, 5, 6
-            else:
-                skill_idx = 7 + extra_skill_idx  # 7, 8, ... (won't be used by zombie AI)
-            smap[sid] = encode_sproto([
-                (0, sid),
-                (1, slv),
-                (2, skill_idx),   # indexPos
-                (3, 1),           # unlockLevel
-                (4, skill_idx),   # indexPos2
-                (5, False)        # disable
-            ])
-            extra_skill_idx += 1
+            skill_cfg = SKILL_CONFIG.get(sid, {})
+            priority = int(skill_cfg.get('priority', 0))
+            extra_skills.append((sid, slv, priority))
+    # Sort by priority descending so highest priority gets indexPos 4
+    extra_skills.sort(key=lambda x: x[2], reverse=True)
+    for idx, (sid, slv, priority) in enumerate(extra_skills):
+        if idx < 3:
+            skill_idx = 4 + idx  # 4, 5, 6 (zombie AI usable)
+        else:
+            skill_idx = 7 + idx  # 7, 8, ... (won't be used by zombie AI)
+        smap[sid] = encode_sproto([
+            (0, sid),
+            (1, slv),
+            (2, skill_idx),   # indexPos
+            (3, 1),           # unlockLevel
+            (4, skill_idx),   # indexPos2
+            (5, False)        # disable
+        ])
 
     return smap
 
