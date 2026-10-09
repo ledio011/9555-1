@@ -4266,8 +4266,7 @@ def client_handler(conn, addr):
                             ])
                             dmg_board = encode_sproto([(0, [dmg_item])])
 
-                            # Send TAG 511 (show_damage_board) to attacker
-                            send_rpc_push(511, dmg_board)
+                            # Do NOT echo TAG 511 back to the attacker; the client already displays damage locally.
                             # Send TAG 511 to victim so they see damage numbers on themselves
                             try:
                                 t_ph = encode_sproto([(0, 511)])
@@ -4356,15 +4355,7 @@ def client_handler(conn, addr):
                                     ])
                                     send_rpc_push(618, relife_req)
 
-                            # TAG 511: show_damage_board
-                            dmg_item = encode_sproto([
-                                (0, target_id),
-                                (1, client_dmg),
-                                (2, skill_id),
-                                (3, effinfo_id),
-                                (4, is_cri)
-                            ])
-                            send_rpc_push(511, encode_sproto([(0, [dmg_item])]))
+                            # Do NOT echo TAG 511 back to the attacker; the client already displays damage locally.
                             # TAG 514: hit_action
                             send_rpc_push(514, encode_sproto([
                                 (0, target_id),
@@ -4377,15 +4368,7 @@ def client_handler(conn, addr):
                             # Map 11 NPCs are fully client-side - skip all server-side HP/death handling
                             # Do NOT advance missions on damage — only on actual death (tag 307)
                             if picked_char and str(picked_char.get('map_id')) == '11':
-                                # Still send damage feedback to attacker
-                                dmg_item = encode_sproto([
-                                    (0, target_id),
-                                    (1, client_dmg),
-                                    (2, skill_id),
-                                    (3, effinfo_id),
-                                    (4, is_cri)
-                                ])
-                                send_rpc_push(511, encode_sproto([(0, [dmg_item])]))
+                                # Do NOT echo TAG 511 back to the attacker; the client already displays damage locally.
                                 send_rpc_push(514, encode_sproto([
                                     (0, target_id),
                                     (1, picked_char['id']),
@@ -4440,15 +4423,7 @@ def client_handler(conn, addr):
                             # Synchronization of target HP to ensure bar update (Tag 510)
                             sync_npc_attrs_rpc(conn, target_id, defender_stats, max(0, NPC_HP_MAP[target_id]))
 
-                            # TAG 511: show_damage_board with server-calculated damage
-                            dmg_item = encode_sproto([
-                                (0, target_id),
-                                (1, server_dmg),
-                                (2, skill_id),
-                                (3, effinfo_id),
-                                (4, calc_cri)
-                            ])
-                            send_rpc_push(511, encode_sproto([(0, [dmg_item])]))
+                            # Do NOT echo TAG 511 back to the attacker; the client already displays damage locally.
                             # TAG 514: hit_action with actual effinfoId
                             send_rpc_push(514, encode_sproto([
                                 (0, target_id),
