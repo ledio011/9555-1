@@ -3131,8 +3131,8 @@ def init_character_fields(c):
     if 'hp' not in c or c.get('hp', 0) <= 0:
         c['hp'] = stats['hp_max']
 
-    # Ensure map_id is never None — if saved as None, default to city map "11"
-    if c.get('map_id') is None:
+    # Ensure map_id is never None or "None" string — default to city map "11"
+    if c.get('map_id') is None or str(c.get('map_id', '')) == 'None':
         c['map_id'] = "11"
 
 def init_social_data(c):
@@ -3853,6 +3853,9 @@ def client_handler(conn, addr):
 
                     # TAG 503: enter_map
                     mid = str(picked_char.get('map_id') or '11')
+                    if mid == 'None':
+                        mid = '11'
+                        picked_char['map_id'] = '11'
                     scene_name = "Unknown"
                     if mid in MAP_CONFIG:
                         scene_name = MAP_CONFIG[mid]['scene']
