@@ -3935,9 +3935,9 @@ def client_handler(conn, addr):
                     # The position is still saved on important events: dungeon entry/exit,
                     # map transition, disconnect, mission completion, etc.
                     last_pos_save = picked_char.get('_last_pos_save', 0)
-                    if int(_time.time()) - last_pos_save >= 30:
+                    if int(time.time()) - last_pos_save >= 30:
                         save_chars(all_accounts_chars)
-                        picked_char['_last_pos_save'] = int(_time.time())
+                        picked_char['_last_pos_save'] = int(time.time())
                     # Broadcast movement to other players on the same map (TAG 507)
                     broadcast_aoi_move(picked_char)
 
