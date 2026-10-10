@@ -2377,7 +2377,9 @@ def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid):
                 exp_state['total_kills'] += 1
                 print(f"[EXP KILL] COUNTED wave_kills={exp_state['wave_kills']} total_kills={exp_state['total_kills']} wave={exp_state['cur_wave']} group={exp_state['cur_group']}")
                 # Issue 99/100: Track unique NPC IDs for batch mission advancement
-                exp_state.get('kill_tracker', set()).add(npcid)
+                kt = exp_state.get('kill_tracker', [])
+                if npcid not in kt:
+                    kt.append(npcid)
             else:
                 print(f"[EXP KILL] SKIPPED counting — invalid npcid={npcid}")
 
@@ -2420,13 +2422,13 @@ def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid):
                 # will save once at dungeon completion in finish_exp_stage
                 picked_char['_skip_mission_save'] = True
                 # Batch-advance kill missions for all unique NPC types killed this wave
-                kill_tracker = exp_state.get('kill_tracker', set())
+                kill_tracker = exp_state.get('kill_tracker', [])
                 for unique_nid in kill_tracker:
                     advance_missions(picked_char, send_rpc_push, 'kill', target_id=unique_nid)
                 advance_missions(picked_char, send_rpc_push, 'level')
                 picked_char['_skip_mission_save'] = False
                 # Clear the tracker for the next wave
-                exp_state['kill_tracker'] = set()
+                exp_state['kill_tracker'] = []
                 if exp_state['cur_wave'] < exp_cfg.get('wave_count', 4):
                     exp_state['cur_wave'] += 1
                     # Issue 23: Client EXPSceneManager.OpenBlock() is empty — skip TAG 515
@@ -2510,7 +2512,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             'active_monsters': [],
             'monster_pos': {},
             'ai_active': True,
-            'kill_tracker': set()  # Issue 99/100: Track unique NPC IDs killed this wave for batch mission advancement
+            'kill_tracker': []  # Issue 99/100: Track unique NPC IDs killed this wave for batch mission advancement (list for JSON serialization)
         }
         if picked_char:
             # Issue 69: Clean up old exp_stage_state before creating new one to prevent orphaned AI threads
@@ -2557,7 +2559,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 finish_exp_stage(c, sf, pc, es, win=False)
             should_continue = run_exp_monster_ai_shared(
                 exp_state, map_str, picked_char,
-                push_wrapper, send_rpc_push, conn, on_player_die_main
+                push_wrapper, push_wrapper, conn, on_player_die_main
             )
             if should_continue:
                 timer = threading.Timer(0.8, run_exp_monster_ai)
