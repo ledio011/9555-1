@@ -2125,8 +2125,11 @@ def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
                 (4, picked_char['name'])
             ])
             send_rpc_push(618, relife_req)
+            # Do NOT remove exp_stage_state on lose — keep it so relife can resume the dungeon
+            # The state will be removed when the player confirms relife or abandons
 
-        picked_char.pop('exp_stage_state', None)
+        if win:
+            picked_char.pop('exp_stage_state', None)
 
     print(f"[EXP STAGE] Finished copy={copy_id} win={win} total_kills={exp_state['total_kills']} exp={exp_reward} cash={cash_reward}")
 
@@ -2335,10 +2338,6 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             (0, map_str), (1, 0), (2, end_time), (3, 1), (4, 0), (5, 0)
         ]))
 
-        if picked_char:
-            advance_missions(picked_char, push_wrapper, 'dungeon', target_id='105')
-            push_wrapper(519, sync_mission_data(picked_char))
-
         def local_send_npc(nid, name, x, z, o):
             inst_id = send_npc_create(nid, name, x, z, o)
             if inst_id:
@@ -2431,6 +2430,17 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 timer = threading.Timer(0.8, run_exp_monster_ai)
                 timer.daemon = True
                 timer.start()
+
+        # Server-side timeout: auto-fail dungeon when time expires
+        timeout_seconds = exp_state['end_time'] - int(time.time())
+        def exp_stage_timeout():
+            if picked_char and picked_char.get('exp_stage_state') is exp_state and picked_char.get('map_id') == map_str:
+                print(f"[EXP STAGE TIMEOUT] Player {picked_char['id']} time expired in copy {copy_id}")
+                exp_state['ai_active'] = False
+                finish_exp_stage(conn, push_wrapper, picked_char, exp_state, win=False)
+        timeout_timer = threading.Timer(timeout_seconds, exp_stage_timeout)
+        timeout_timer.daemon = True
+        timeout_timer.start()
 
         ai_timer = threading.Timer(0.8, run_exp_monster_ai)
         ai_timer.daemon = True
@@ -4989,6 +4999,71 @@ def client_handler(conn, addr):
                                     print(f"[REVIVE] Broadcast Tag 512 to player id={ch.get('id', 0)} map={map_id}")
                         except Exception as e:
                             print(f"[REVIVE] Failed to broadcast Tag 512: {e}")
+
+                    # Handle EXP dungeon relife - resume monster AI if in EXP dungeon
+                    exp_state = picked_char.get('exp_stage_state')
+                    if exp_state and is_inplace:
+                        exp_state['ai_active'] = True
+                        print(f"[RELIFE] Player {picked_char['id']} respawned in EXP dungeon copy={exp_state['copy_id']}")
+                        # Restart the monster AI loop for EXP dungeon
+                        map_str = exp_state['copy_id']
+                        def run_relife_ai():
+                            if not picked_char or not exp_state.get('ai_active') or picked_char.get('map_id') != map_str:
+                                return
+                            if picked_char.get('hp', 0) <= 0:
+                                return
+                            player_pos = picked_char.get('pos', [0, 100, 0, 0])
+                            px = player_pos[0] / 100.0 if abs(player_pos[0]) > 200 else player_pos[0]
+                            pz = player_pos[2] / 100.0 if abs(player_pos[2]) > 200 else player_pos[2]
+                            player_stats_r = get_character_stats(picked_char)
+                            for inst_id in list(exp_state.get('active_monsters', [])):
+                                if NPC_HP_MAP.get(inst_id, 0) <= 0:
+                                    continue
+                                target_nid = NPC_INST_MAP.get(inst_id)
+                                if not target_nid:
+                                    continue
+                                m_pos = exp_state['monster_pos'].setdefault(inst_id, [6.94, -11.37])
+                                mx, mz = m_pos[0], m_pos[1]
+                                dx = px - mx
+                                dz = pz - mz
+                                dist = math.sqrt(dx * dx + dz * dz)
+                                if dist > 2.2:
+                                    step = min(4.5, dist - 1.5)
+                                    new_mx = mx + (dx / dist) * step
+                                    new_mz = mz + (dz / dist) * step
+                                    exp_state['monster_pos'][inst_id] = [new_mx, new_mz]
+                                    pos_obj = encode_sproto([(0, int(new_mx * 100)), (1, 0), (2, int(new_mz * 100)), (3, 0)])
+                                    m_move = encode_sproto([(0, pos_obj)])
+                                    char_move = encode_sproto([(0, inst_id), (1, m_move), (2, False)])
+                                    send_rpc_push(507, encode_sproto([(0, char_move)]))
+                                else:
+                                    pos_obj_stop = encode_sproto([(0, int(mx * 100)), (1, 0), (2, int(mz * 100)), (3, 0)])
+                                    m_move_stop = encode_sproto([(0, pos_obj_stop)])
+                                    char_move_stop = encode_sproto([(0, inst_id), (1, m_move_stop), (2, False)])
+                                    send_rpc_push(513, encode_sproto([(0, char_move_stop)]))
+                                    monster_cfg = NPC_CONFIG.get(target_nid, {})
+                                    monster_stats = get_npc_attr(target_nid)
+                                    monster_skill = monster_cfg.get('skill_group', '50001') or '50001'
+                                    dmg, is_hit, is_cri = get_combat_damage(monster_stats, player_stats_r, skill_id=monster_skill, skill_lv=1)
+                                    send_rpc_push(508, encode_sproto([(0, inst_id), (1, picked_char['id']), (2, monster_skill)]))
+                                    if is_hit and dmg > 0:
+                                        picked_char['hp'] = max(0, picked_char['hp'] - dmg)
+                                        send_rpc_push(128, encode_sproto([(0, picked_char['id']), (1, dmg), (2, monster_skill)]))
+                                        sync_char_attrs_rpc(conn, picked_char)
+                                        if picked_char['hp'] <= 0:
+                                            finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=False)
+                                            return
+                            if exp_state.get('ai_active') and picked_char.get('map_id') == map_str:
+                                t = threading.Timer(0.8, run_relife_ai)
+                                t.daemon = True
+                                t.start()
+                        ai_t = threading.Timer(0.8, run_relife_ai)
+                        ai_t.daemon = True
+                        ai_t.start()
+                    elif exp_state and not is_inplace:
+                        # Player chose to return to city - clean up EXP dungeon state
+                        picked_char.pop('exp_stage_state', None)
+                        print(f"[RELIFE] Player {picked_char['id']} returned to city from EXP dungeon")
 
                     save_chars(all_accounts_chars)
                     print(f"[REVIVE] Player {picked_char['id']} revived with HP={p_stats['hp_max']} isInplace={is_inplace} pos={pos}")
