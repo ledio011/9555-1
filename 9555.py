@@ -2076,7 +2076,7 @@ def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
     char_lv = picked_char.get('level', 1) if picked_char else 1
 
     full_exp = get_exp_stage_full_reward(char_lv)
-    total_max_kills = 350
+    total_max_kills = 140
     ratio = min(1.0, exp_state['total_kills'] / total_max_kills) if total_max_kills > 0 else 1.0
 
     exp_reward = int(full_exp * ratio) if win else int(full_exp * ratio * 0.5)
@@ -2118,11 +2118,9 @@ def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
             relife_cfg = get_relife_config(death_count)
             # Tag 618: notice_relife_player schema: type(0), cost(1), itemId(2), characterid(3), name(4)
             relife_req = encode_sproto([
-                (0, relife_cfg.get('id', 1)),
+                (0, 1),
                 (1, relife_cfg.get('use_count', 1)),  # cost field - item cost
-                (2, "9202"),
-                (3, picked_char['id']),
-                (4, picked_char['name'])
+                (2, "9202")
             ])
             send_rpc_push(618, relife_req)
             # Do NOT remove exp_stage_state on lose — keep it so relife can resume the dungeon
@@ -2177,9 +2175,25 @@ def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid):
                     elif "QJ_A" in final_nid: final_nid = "104"
                     elif "NQS_A" in final_nid: final_nid = "105"
 
+                hit = npc_stats.get('hit', 2844)
+                eva = npc_stats.get('eva', 100)
+                cri = npc_stats.get('cri', 351)
+                exd = npc_stats.get('exd', 0)
+                exr = npc_stats.get('exr', 0)
+                res = npc_stats.get('res', 0)
+                crd = npc_stats.get('crd', 15000)
+                crr = npc_stats.get('crr', 0)
+                defa = npc_stats.get('defa', 3158)
+                dgea = npc_stats.get('dgea', 6317)
+                resa = npc_stats.get('resa', 3158)
+                hita = npc_stats.get('hita', 316)
+                cria = npc_stats.get('cria', 3158)
+
                 attr = encode_sproto([
                     (0, i_id), (1, final_nid), (2, hp_cur), (3, hp_max), (4, atk), (5, df),
-                    (15, x), (16, z), (17, o), (18, lvl), (21, name)
+                    (6, hit), (7, eva), (8, cri), (9, exd), (10, exr), (11, res), (12, crd), (13, crr), (14, defa),
+                    (15, x), (16, z), (17, o), (18, lvl), (21, name),
+                    (24, dgea), (25, resa), (26, hita), (27, cria)
                 ])
                 ph = encode_sproto([(0, 509)])
                 pf = sproto_pack(ph + encode_sproto([(0, attr)]))
