@@ -5140,8 +5140,7 @@ def client_handler(conn, addr):
                         old_timeout = exp_state.get('timeout_timer')
                         if old_timeout is not None:
                             old_timeout.cancel()
-                        import time as _time
-                        _time.sleep(0.3)  # Wait for old AI tick to finish
+                        time.sleep(0.3)  # Wait for old AI tick to finish
                         exp_state['ai_active'] = True
                         # Issue 93: Reset deaths counter on relife so player can still earn "No deaths" star
                         # The star represents "completed this attempt without dying", not "never died in this dungeon session"
@@ -5925,7 +5924,6 @@ def client_handler(conn, addr):
                                     break
                         except Exception as e:
                             print(f"[FRIEND] ERROR in add_friend async: {e}")
-                            import traceback
                             traceback.print_exc()
 
                     async_thread = threading.Thread(target=_add_friend_async, daemon=True)
@@ -5933,7 +5931,6 @@ def client_handler(conn, addr):
                     print(f"[FRIEND] add_friend dispatched to async thread for target={target_id}")
                 except Exception as e:
                     print(f"[FRIEND] ERROR in add_friend handler: {e}")
-                    import traceback
                     traceback.print_exc()
                 # Do NOT send session acknowledgment for add_friend (msg 124).
                 # The client sends it with session=None (fire-and-forget) and does not expect any response.
