@@ -2069,6 +2069,7 @@ def build_npc_attr_sproto(nid, name, x, z, o):
     inst_id = GLOBAL_INST_COUNTER
     NPC_HP_MAP[inst_id] = hp_max
     NPC_INST_MAP[inst_id] = str(nid)
+    print(f"[EXP SPAWN] inst_id={inst_id} npcid={nid} hp_max={hp_max} atk={atk} def={df}")
 
     final_nid = str(nid)
     if ";" in final_nid:
@@ -2124,6 +2125,7 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
             if inst_id in DEAD_NPC_SET:
                 continue
             target_nid_for_death = NPC_INST_MAP.get(inst_id)
+            print(f"[EXP AI] Auto-death detected inst_id={inst_id} npcid={target_nid_for_death} hp={NPC_HP_MAP.get(inst_id, 0)}")
             if target_nid_for_death:
                 DEAD_NPC_SET.add(inst_id)
                 send_rpc_push_func(506, encode_sproto([(0, inst_id)]))
@@ -2362,16 +2364,22 @@ def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid):
     valid_kill = npcid and npcid != "None"
 
     exp_state = picked_char.get('exp_stage_state')
+    print(f"[EXP KILL] on_npc_killed inst_id={inst_id} npcid={npcid} valid={valid_kill} exp_state={exp_state is not None}")
     if exp_state and inst_id:
         active_monsters = exp_state.get('active_monsters', [])
+        print(f"[EXP KILL] active_monsters_before={len(active_monsters)} inst_id_in_list={inst_id in active_monsters}")
         if inst_id in active_monsters:
             active_monsters.remove(inst_id)
+            print(f"[EXP KILL] removed inst_id={inst_id} from active_monsters remaining={len(active_monsters)}")
             # Issue 95: Only increment kill counters for valid kills
             if valid_kill:
                 exp_state['wave_kills'] += 1
                 exp_state['total_kills'] += 1
+                print(f"[EXP KILL] COUNTED wave_kills={exp_state['wave_kills']} total_kills={exp_state['total_kills']} wave={exp_state['cur_wave']} group={exp_state['cur_group']}")
                 # Issue 99/100: Track unique NPC IDs for batch mission advancement
                 exp_state.get('kill_tracker', set()).add(npcid)
+            else:
+                print(f"[EXP KILL] SKIPPED counting — invalid npcid={npcid}")
 
             # Issue 183: Define exp_cfg and req_kills OUTSIDE if valid_kill block
             # so wave advancement check at line below doesn't crash with NameError
@@ -4628,6 +4636,9 @@ def client_handler(conn, addr):
 
                             target_nid = NPC_INST_MAP.get(target_id, str(target_id))
                             NPC_INST_MAP[target_id] = target_nid
+                            cur_map = str(picked_char.get('map_id', ''))
+                            is_exp = cur_map in ['223','224','225','226','227','228','229']
+                            print(f"[EXP MSG111] target_id={target_id} target_nid={target_nid} map={cur_map} is_exp={is_exp} client_dmg={client_dmg}")
 
                             nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
                             defender_stats = get_npc_attr(nid_str, picked_char.get('level', 1))
@@ -4677,6 +4688,7 @@ def client_handler(conn, addr):
 
                             if NPC_HP_MAP[target_id] <= 0:
                                 DEAD_NPC_SET.add(target_id)
+                                print(f"[EXP MSG111] NPC DEAD target_id={target_id} target_nid={target_nid} hp={NPC_HP_MAP[target_id]}")
 
                                 send_rpc_push(506, encode_sproto([(0, target_id)]))
 
