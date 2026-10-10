@@ -3131,6 +3131,10 @@ def init_character_fields(c):
     if 'hp' not in c or c.get('hp', 0) <= 0:
         c['hp'] = stats['hp_max']
 
+    # Ensure map_id is never None — if saved as None, default to city map "11"
+    if c.get('map_id') is None:
+        c['map_id'] = "11"
+
 def init_social_data(c):
     """Initialize social data (friends, enemies, mails) for a character."""
     if 'friends' not in c:
@@ -3267,8 +3271,8 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         stats = get_character_stats(picked_char)
         picked_char['hp'] = stats['hp_max']
 
-    src_map = picked_char.get('map_id', '11')
-    target_map_id = str(target_map_id)
+    src_map = str(picked_char.get('map_id') or '11')
+    target_map_id = str(target_map_id) or '11'
     picked_char['map_id'] = target_map_id
     scene_name = "Unknown"
 
@@ -3848,7 +3852,7 @@ def client_handler(conn, addr):
                         send_rpc_push(531, mi_bytes)
 
                     # TAG 503: enter_map
-                    mid = str(picked_char.get('map_id', '11'))
+                    mid = str(picked_char.get('map_id') or '11')
                     scene_name = "Unknown"
                     if mid in MAP_CONFIG:
                         scene_name = MAP_CONFIG[mid]['scene']
