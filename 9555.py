@@ -2878,8 +2878,6 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                 matched = target_id_str in ['102', '211', '212', '213', '214', '215', '216', '217', '飙车副本'] or event in ['car_copy', 'dungeon']
             else:
                 matched = logic_id_str == target_id_str
-            if mid == '1004':
-                print(f"[MISSION 1004 DEBUG] dungeon/car_copy event: logic_id={logic_id_str}, target_id={target_id_str}, matched={matched}, state={mdata.get('state')}")
         elif logic_type == 114 and event == 'world_boss':
             matched = True
         elif logic_type == 7 and event == 'map':
@@ -2887,9 +2885,6 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
 
         if not matched:
             continue
-
-        if mid == '1004':
-            print(f"[MISSION 1004 DEBUG] MATCHED! logic_type={logic_type}, event={event}")
 
         required = int(cfg.get('count') or cfg.get('require_num') or 1)
         logic_id = str(cfg.get('logic_id', ''))
@@ -2918,11 +2913,6 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
         if progress >= required:
             mdata['state'] = 2
             send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
-            if mid == '1004':
-                print(f"[MISSION 1004 DEBUG] COMPLETED! progress={progress}, required={required}, state={mdata['state']}")
-        else:
-            if mid == '1004':
-                print(f"[MISSION 1004 DEBUG] NOT YET COMPLETE: progress={progress}, required={required}")
         updated = True
 
     if updated:
@@ -3911,8 +3901,6 @@ def client_handler(conn, addr):
                                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                     else:
-                        if mid == '1004':
-                            print(f"[MISSION 1004 DEBUG] complete_mission REJECTED: state={m_entry['state'] if m_entry else 'N/A'} (expected 2)")
                         if session is not None:
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                             conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4876,8 +4864,6 @@ def client_handler(conn, addr):
                     if won:
                         # Fix: use 'dungeon' event with target_id='102' to match Mission 1004 (CAR_COPY, logic_type=102)
                         # Previously 'level' only matched logic_type=7 (LEVEL_UP), blocking mission completion
-                        print(f"[STREET RACE] Won! Calling advance_missions with event='dungeon', target_id='102'")
-                        print(f"[STREET RACE] Active missions: {list(picked_char.get('active_missions', {}).keys())}")
                         advance_missions(picked_char, send_rpc_push, 'dungeon', target_id='102')
                     send_rpc_push(555, sync_copy_scenes(picked_char))
                     schedule_street_race_return()
