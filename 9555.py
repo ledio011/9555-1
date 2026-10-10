@@ -986,6 +986,18 @@ def get_account_chars(all_chars, area_id, acc_id):
         return acc_dict.get(acc_id, [])
     return []
 
+def _json_default_handler(obj):
+    """Custom JSON default handler to skip non-serializable objects like Timer, set, lock."""
+    if isinstance(obj, threading.Timer):
+        return None  # Skip Timer objects — they are runtime-only
+    if isinstance(obj, set):
+        return list(obj)  # Convert sets to lists
+    if isinstance(obj, (threading.Lock, type(threading.Lock()))):
+        return None  # Skip lock objects
+    if hasattr(obj, '__dict__'):
+        return obj.__dict__  # Fallback: serialize object attributes
+    return str(obj)  # Last resort: convert to string
+
 def save_chars(data):
     """Crash-safe atomic writer to prevent character loss during kill -9."""
     if not isinstance(data, dict):
@@ -998,7 +1010,7 @@ def save_chars(data):
     try:
         # 1. Write new state to temporary file
         with open(TMP_DB, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=4)
+            json.dump(data, f, indent=4, default=_json_default_handler)
             f.flush()
             os.fsync(f.fileno())
 
@@ -2288,13 +2300,12 @@ def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
             gradeFlag |= 4
             grade += 1
     
-    # Tag 552: copy_scene_result (subType=12, id=copy_id, win=win, gradeFlag=bitmask, grade=stars, items=res_items)
-    send_rpc_push(552, encode_sproto([
-        (0, 12), (1, copy_id), (2, win), (3, gradeFlag), (4, grade), (5, res_items)
-    ]))
-
     if picked_char:
         if win:
+            # Tag 552: copy_scene_result (win case — send before cleanup)
+            send_rpc_push(552, encode_sproto([
+                (0, 12), (1, copy_id), (2, win), (3, gradeFlag), (4, grade), (5, res_items)
+            ]))
             # Bug 4: Save and sync missions once at dungeon completion
             # (wave completion skips save/sync via _skip_mission_save flag)
             advance_missions(picked_char, send_rpc_push, 'dungeon', target_id='105')
@@ -2351,6 +2362,10 @@ def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
                 (2, "9202")
             ])
             send_rpc_push(618, relife_req)
+            # Tag 552: copy_scene_result (lose case — send AFTER relife so fail screen appears after RebirthUI)
+            send_rpc_push(552, encode_sproto([
+                (0, 12), (1, copy_id), (2, win), (3, gradeFlag), (4, grade), (5, res_items)
+            ]))
             # Do NOT remove exp_stage_state on lose — keep it so relife can resume the dungeon
             # The state will be removed when the player confirms relife or abandons
 
