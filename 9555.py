@@ -121,6 +121,10 @@ try:
                             m_entry['map_id'] = str(mv.get('map_id', ''))
                         if 'story_id' in mv and not m_entry.get('story_id'):
                             m_entry['story_id'] = str(mv.get('story_id', ''))
+            # Ensure require_num is valid (at least 1) for all missions
+            for _mk, _mv in missions_data.items():
+                if int(_mv.get('require_num') or 0) <= 0:
+                    _mv['require_num'] = 1
             print(f"[MISSION JSON MERGED] count={len(missions_data)}")
             break
 
@@ -2865,13 +2869,17 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                 for s in KILL_TARGET_SPAWNS[spawn_key]:
                     spawn_nids.add(str(s['nid']))
             matched = not target or target == target_value or str(cfg.get('logic_id', '')) == target_value or target_value in spawn_nids
-        elif logic_type in [102, 103, 105, 106, 107, 108, 110, 113, 114, 117, 119, 120, 132] and event == 'dungeon':
-            # Dungeon/Guide entry missions advance on specific 'dungeon' events with matching logic_id
+        elif logic_type in [102, 103, 105, 106, 107, 108, 110, 113, 114, 117, 119, 120, 132] and event in ['dungeon', 'car_copy']:
+            # Dungeon/Guide entry missions advance on specific 'dungeon' or 'car_copy' events
             logic_id_str = str(cfg.get('logic_id'))
             target_id_str = str(target_id) if target_id is not None else ''
-            matched = logic_id_str == target_id_str
+            if logic_type == 102:
+                # LogicType 102 (CAR_COPY / 飙车副本) matches any car copy scene (211-217), logic_id "102", "飙车副本", or event "car_copy" / "dungeon"
+                matched = target_id_str in ['102', '211', '212', '213', '214', '215', '216', '217', '飙车副本'] or event in ['car_copy', 'dungeon']
+            else:
+                matched = logic_id_str == target_id_str
             if mid == '1004':
-                print(f"[MISSION 1004 DEBUG] dungeon event: logic_id={logic_id_str}, target_id={target_id_str}, matched={matched}, state={mdata.get('state')}")
+                print(f"[MISSION 1004 DEBUG] dungeon/car_copy event: logic_id={logic_id_str}, target_id={target_id_str}, matched={matched}, state={mdata.get('state')}")
         elif logic_type == 114 and event == 'world_boss':
             matched = True
         elif logic_type == 7 and event == 'map':
@@ -3000,7 +3008,7 @@ def build_mail_update(mi):
     Client wire tags: 0=mailId, 1=sendertype, 3=title, 4=senderTime, 5=receiveId,
                       6=readTime, 7=context, 8=mailState, 9=sortTime, 10=items, 11=expireday
     Note: Wire tag 2 is SKIPPED — title uses wire tag 3, not 2.
-    
+
     Items are encoded as Dictionary<string, item> where the key is item.id (string).
     Client's item SprotoType wire tags: 0=itemId(string), 1=itemCount(long),
     3=quality(long), 4=id(string), 5=count2(long). Note: wire tag 2 is SKIPPED.
@@ -3018,7 +3026,7 @@ def build_mail_update(mi):
             (4, item_key)                     # id as string (dictionary key)
         ])
         items_dict[item_key] = item_obj
-    
+
     return encode_sproto([
         (0, mi.get('mailId', 0)),
         (1, mi.get('sendertype', 0)),
@@ -4177,7 +4185,7 @@ def client_handler(conn, addr):
                                 send_rpc_push(555, sync_copy_scenes(picked_char))
                                 print(f"[TICKET] used item={item['id']} for subtype={subtype}")
                 send_rpc_push(526, encode_sproto([(0, success), (1, index_id)]))
-                
+
                 # TAG 525: update_item - notify client about individual item change
                 # update_item schema: containertype(0), indexId(1), gameitem(2)
                 # gameitem schema: indexId(0), itemId(1), bindflag(2), level(3), flags(4), stack(5), quality(6), parm(7), appraise(8)
@@ -4199,7 +4207,7 @@ def client_handler(conn, addr):
                             (1, index_id),
                             (2, gi)
                         ]))
-                
+
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -4972,10 +4980,10 @@ def client_handler(conn, addr):
                     # Build the Tag 512 packet for broadcasting
                     relife_pkt = build_aoi_add_packet(picked_char)  # not used for 512, build manually below
                     relife_frame_data = encode_sproto([(0, relife_char)])
-                    
+
                     # Send Tag 512 to the revived player's own client first
                     send_rpc_push(512, relife_frame_data)
-                    
+
                     # Broadcast Tag 512 to all other players on the same map
                     # so they see the player revive instead of staying dead/ghost
                     map_id = str(picked_char.get('map_id', '11'))
@@ -4995,7 +5003,7 @@ def client_handler(conn, addr):
                                     print(f"[REVIVE] Broadcast Tag 512 to player id={ch.get('id', 0)} map={map_id}")
                         except Exception as e:
                             print(f"[REVIVE] Failed to broadcast Tag 512: {e}")
-                    
+
                     save_chars(all_accounts_chars)
                     print(f"[REVIVE] Player {picked_char['id']} revived with HP={p_stats['hp_max']} isInplace={is_inplace} pos={pos}")
 
