@@ -2464,13 +2464,11 @@ def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
     char_lv = picked_char.get('level', 1) if picked_char else 1
 
     full_exp = get_exp_stage_full_reward(char_lv)
-    # Calculate total_max_kills: each subwave spawns 5 monsters.
-    # Total subwaves = wave_count * group_count (e.g., 4 * 7 = 28)
-    # Total monsters = 28 * 5 = 140
+    # Calculate total_max_kills based on exact monster spawn counts per group * group_count
     exp_cfg = DAILY_EXP_CONFIG.get(copy_id, {})
-    wave_count = exp_cfg.get('wave_count', 4)
     group_count = exp_cfg.get('group_count', 7)
-    total_max_kills = wave_count * group_count * 5
+    group_npc_count = exp_cfg.get('group_npc_count', [5, 10, 15, 20])
+    total_max_kills = sum(group_npc_count) * group_count
     ratio = min(1.0, exp_state['total_kills'] / total_max_kills) if total_max_kills > 0 else 1.0
 
     exp_reward = int(full_exp * ratio) if win else int(full_exp * ratio * 0.5)
@@ -2507,7 +2505,7 @@ def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
         if exp_state.get('deaths', 0) == 0:
             gradeFlag |= 4
             grade += 1
-    
+
     if picked_char:
         if win:
             # Fix: Use actual subtype from COPY_SCENE_CONFIG instead of hardcoded 12
@@ -2562,7 +2560,7 @@ def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
             # Timeout: no relife offered, just fail and return to city.
             # Death: offer relife via TAG 618.
             is_timeout = int(time.time()) >= exp_state.get('end_time', 0)
-            
+
             if is_timeout:
                 # Timeout: clean up and return to city, no relife
                 exp_state['deaths'] = exp_state.get('deaths', 0) + 1
@@ -3093,7 +3091,7 @@ def sync_copy_scenes(picked_char):
 
 def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None, save=True):
     """Grants EXP, Cash, and Inventory items, handles level-ups, and syncs attributes.
-    
+
     Args:
         save: If False, skip save_chars() to avoid excessive disk I/O (e.g., per-kill in EXP dungeon).
               Caller is responsible for saving at appropriate intervals.
@@ -5008,9 +5006,9 @@ def client_handler(conn, addr):
                                 actual_dmg = client_dmg if client_dmg > 0 else 0
                             else:
                                 actual_dmg = server_dmg
-                            
+
                             NPC_HP_MAP[target_id] -= actual_dmg
-                            
+
                             # Bug 6: Only send TAG 510 when actual_dmg > 0 to avoid wasting bandwidth on misses
                             if actual_dmg > 0:
                                 sync_npc_attrs_rpc(conn, target_id, defender_stats, max(0, NPC_HP_MAP[target_id]))
@@ -5025,9 +5023,9 @@ def client_handler(conn, addr):
                                 ])
                                 dmg_board = encode_sproto([(0, [dmg_entry])])
                                 send_rpc_push(511, dmg_board)
-                            
+
                             # Issue 213: TAG 514 (hit_action) client handler does nothing — skip sending
-                            
+
                             if NPC_HP_MAP[target_id] <= 0:
                                 # Fix: Only process death once - skip if already dead
                                 if target_id in DEAD_NPC_SET:
