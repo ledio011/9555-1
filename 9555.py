@@ -2661,11 +2661,9 @@ def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid):
         # so wave advancement check at line below doesn't crash with NameError
         exp_cfg = DAILY_EXP_CONFIG.get(exp_state['copy_id'], {})
 
-        # Fix: Send TAG 683 on EVERY kill so client UI updates in real-time.
-        # Without this, Wave Enemy shows 0/20 until all 5 monsters die, then jumps to 5/20.
-        # The client's ExpBattleInfoRootLogic.UpdateInfo() updates EnemyLabel/AllKillLabel
-        # from TAG 683. Sending it 140 times is necessary for smooth UI feedback.
-        _send_exp_tag683(send_rpc_push, exp_state, exp_cfg)
+        # Bug 10/14: Do NOT send TAG 683 on every kill — only on wave transition.
+        # Sending it 140 times per dungeon creates unnecessary network traffic.
+        # The _send_exp_tag683 function is called after wave/group advancement below.
 
         # Issue 91: send_npc_wrapper must use send_rpc_push, not conn directly,
         # so it works correctly when called from relife AI thread
@@ -5016,32 +5014,18 @@ def client_handler(conn, addr):
                             # Bug 6: Only send TAG 510 when actual_dmg > 0 to avoid wasting bandwidth on misses
                             if actual_dmg > 0:
                                 sync_npc_attrs_rpc(conn, target_id, defender_stats, max(0, NPC_HP_MAP[target_id]))
-                            # Fix: Send TAG 511 (show_damage_board) for ALL maps including exp stage.
-                            # Previously `if not is_exp` blocked damage numbers in exp stage,
-                            # so the player never saw damage values like -50 floating above enemies.
-                            if actual_dmg > 0:
+                            # For non-exp maps, send TAG 511 so client displays damage.
+                            if not is_exp:
                                 dmg_entry = encode_sproto([
                                     (0, target_id),
-                                    (1, actual_dmg),
+                                    (1, server_dmg),
                                     (2, skill_id),
                                     (3, effinfo_id),
                                     (4, calc_cri)
                                 ])
                                 dmg_board = encode_sproto([(0, [dmg_entry])])
                                 send_rpc_push(511, dmg_board)
-
-                                # Fix: Send TAG 508 (ret_skill_use) so client plays player attack animation on NPC.
-                                # ret_skill_use: senderId(0), targetId(1), skillId(2), attack_list(3)
-                                # attack_list: id(0), value(1) where value = damage dealt
-                                attack_list_entry = encode_sproto([(0, target_id), (1, actual_dmg)])
-                                ret_skill = encode_sproto([
-                                    (0, picked_char['id']),
-                                    (1, target_id),
-                                    (2, skill_id),
-                                    (3, [attack_list_entry])
-                                ])
-                                send_rpc_push(508, ret_skill)
-
+                            
                             # Issue 213: TAG 514 (hit_action) client handler does nothing — skip sending
                             
                             if NPC_HP_MAP[target_id] <= 0:
