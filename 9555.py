@@ -2221,15 +2221,18 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
         'lock_distance': 500, 'skill_cd_min': 1000, 'skill_cd_max': 3000,
         'around_min_distance': 100, 'around_max_distance': 200,
     })
-    # LockDistance from AIData: 500 / 100 = 5.0 world units (detection range)
-    lock_distance = ai_cfg['lock_distance'] / 100.0
+    # Verified from client: PatrolState.CheckState uses LockDistanceMeter for detection.
+    # AIData 1007: LockDistance=500, LockDistanceMeter = 500/100 = 5.0 world units.
+    # AttackState.ChooseTarget uses SqrtLockDistanceMeter = (500*500)/10000 = 25.0 (squared distance).
+    # Both resolve to 5.0 units as the detection/aggro range.
+    lock_distance = ai_cfg['lock_distance'] / 100.0  # 5.0 units, matches client PatrolState
     # Attack range: monsters stop at around distance (1-2 units) to attack
     around_min = ai_cfg['around_min_distance'] / 100.0  # 1.0 units
     around_max = ai_cfg['around_max_distance'] / 100.0  # 2.0 units
     attack_distance = (around_min + around_max) / 2.0  # 1.5 units average
-    # MoveSpeed from NpcData: 700 = 7.0 world units per second
+    # WalkSpeed from NpcData: 5 = 5.0 world units per second (monsters walk, not run)
     # AI loop runs every 0.2s (client UpdateSecond), step = speed * interval
-    move_speed_per_tick = 7.0 * 0.2  # 1.4 units per 0.2s tick
+    move_speed_per_tick = 5.0 * 0.2  # 1.0 units per 0.2s tick
 
     # Per-monster attack cooldown tracking
     if 'attack_cd' not in exp_state:
@@ -2291,11 +2294,16 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
             send_func(513, encode_sproto([(0, char_move_stop)]))
 
             # Fix: Per-monster attack cooldown from AIData SkillCD (1-3s random)
-            last_attack = exp_state['attack_cd'].get(inst_id, 0)
-            skill_cd = random.uniform(ai_cfg['skill_cd_min'], ai_cfg['skill_cd_max']) / 1000.0
-            if current_time - last_attack < skill_cd:
+            # Set cooldown once when monster first attacks, then reuse it
+            if inst_id not in exp_state['attack_cd']:
+                exp_state['attack_cd'][inst_id] = {
+                    'last_attack': 0,
+                    'skill_cd': random.uniform(ai_cfg['skill_cd_min'], ai_cfg['skill_cd_max']) / 1000.0
+                }
+            cd_info = exp_state['attack_cd'][inst_id]
+            if current_time - cd_info['last_attack'] < cd_info['skill_cd']:
                 continue  # Cooldown not ready, skip attack this tick
-            exp_state['attack_cd'][inst_id] = current_time
+            cd_info['last_attack'] = current_time
 
             monster_cfg = NPC_CONFIG.get(target_nid, {})
             monster_stats = get_npc_attr(target_nid)
@@ -2304,8 +2312,11 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
 
             if is_hit and dmg > 0:
                 picked_char['hp'] = max(0, picked_char['hp'] - dmg)
-                dmg_entry = encode_sproto([(0, picked_char['id']), (1, dmg), (2, monster_skill), (4, is_cri)])
-                send_func(511, encode_sproto([(0, [dmg_entry])]))
+                # Fix: Send TAG 511 (show_damage_board) so client displays damage numbers on player
+                # acceptdamge sproto: id(0), damage(1), skillId(2), effinfoId(3), cri(4)
+                dmg_entry = encode_sproto([(0, picked_char['id']), (1, dmg), (2, monster_skill), (3, "10000"), (4, is_cri)])
+                dmg_board = encode_sproto([(0, [dmg_entry])])
+                send_rpc_push_func(511, dmg_board)
                 sync_char_attrs_rpc(conn_for_sync, picked_char)
                 if picked_char['hp'] <= 0:
                     on_player_die(conn_for_sync, send_func, picked_char, exp_state)
@@ -3472,10 +3483,12 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
                 x_coord = int(parts[0])
                 z_coord = int(parts[2])
                 # Fix: Exp stage maps have birth=0#0#0#0 in MapInfoData, use a position
-                # near the monster spawn area so the player is in the battle zone
+                # near the center of all monster spawn areas so the player is in the battle zone
+                # MonsterData 2231-2294 positions: X ranges -970 to 1090, Z ranges -1137 to 1088
+                # Center ≈ (0, 0) in world units. Spawn slightly offset toward first wave.
                 if target_map_id in ["223", "224", "225", "226", "227", "228", "229"]:
-                    x_coord = 850   # Near center of monster spawn positions
-                    z_coord = -900  # Near center of monster spawn positions
+                    x_coord = 0     # Center of monster spawn area
+                    z_coord = 0     # Center of monster spawn area
                     y_coord = 100
 
                 landing_pos = [x_coord, y_coord, z_coord, int(parts[3]) if len(parts) > 3 else 0]
@@ -4874,13 +4887,25 @@ def client_handler(conn, addr):
                                 calc_cri = False
 
                             NPC_HP_MAP[target_id] -= server_dmg
-
+                            
                             # Bug 6: Only send TAG 510 when server_dmg > 0 to avoid wasting bandwidth on misses
                             if server_dmg > 0:
                                 sync_npc_attrs_rpc(conn, target_id, defender_stats, max(0, NPC_HP_MAP[target_id]))
-
+                                
+                            # Fix: Send TAG 511 (show_damage_board) so client displays damage numbers on NPCs
+                            # acceptdamge sproto: id(0), damage(1), skillId(2), effinfoId(3), cri(4)
+                            dmg_entry = encode_sproto([
+                                (0, target_id),
+                                (1, server_dmg),
+                                (2, skill_id),
+                                (3, effinfo_id),
+                                (4, calc_cri)
+                            ])
+                            dmg_board = encode_sproto([(0, [dmg_entry])])
+                            send_rpc_push(511, dmg_board)
+                            
                             # Issue 213: TAG 514 (hit_action) client handler does nothing — skip sending
-
+                            
                             if NPC_HP_MAP[target_id] <= 0:
                                 DEAD_NPC_SET.add(target_id)
                                 print(f"[EXP MSG111] NPC DEAD target_id={target_id} target_nid={target_nid} hp={NPC_HP_MAP[target_id]}")
