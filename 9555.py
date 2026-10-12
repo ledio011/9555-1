@@ -2366,39 +2366,12 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
 
 
 def _send_exp_tag683(send_rpc_push, exp_state, exp_cfg):
-    """Send TAG 683 (notice_copy_scene_info) to update client UI after wave transition.
-    Issue 126: Client UI doesn't update when a new wave starts — this sends the updated data.
-
-    Client ExpBattleInfoRootLogic.UpdateInfo() reads:
-        WaveLabel   = "{parm1}/{GroupCount}"                          (Group progress)
-        EnemyLabel  = "{parm2}/{GetWaveEnemyNum(index) * WaveCount}"  (Current wave kills)
-        AllKillLabel= "{parm3}/{GetWaveEnemyNum(index) * WaveCount * GroupCount}" (Total kills)
-
-    The client's DailyExpData.GetWaveEnemyNum(index) returns WaveNums[index] where
-    WaveNums is parsed from GroupNpcCount (e.g., "5#10#15#20").
-    
-    CRITICAL: The server spawns exactly 5 monsters per subwave, for 140 total monsters
-    (4 subwaves * 7 groups * 5 monsters = 140).  The client uses `index` to look up
-    the denominator for ALL three labels.  To keep the denominators consistent with
-    the actual monster count, index must always be 0, so the client uses WaveNums[0]=5:
-        EnemyLabel denominator  = 5 * 4  = 20  (per-group wave kills)
-        AllKillLabel denominator = 5 * 4 * 7 = 140  (total dungeon kills)
-
-    Sending index=1/2/3 would make the client use WaveNums[1]=10 / WaveNums[2]=15 /
-    WaveNums[3]=20, producing denominators of 40/280, 60/420, or 80/560 — all wrong
-    because the server never spawns 10/15/20 monsters per subwave.
-
-    So parm2 = wave_kills (accumulated kills in current group's wave cycle, resets per group)
-       parm3 = total_kills (total kill count across all groups)
-       index = 0 (always, so client uses WaveNums[0]=5 for denominators)
-    """
-    # Always send index=0 so client uses WaveNums[0]=5 for ALL denominators.
-    # This matches the actual spawn count: 5 monsters per subwave, 140 total.
-    wave_index = 0
+    """Send TAG 683 (notice_copy_scene_info) to update client UI after wave transition."""
+    wave_index = max(0, min(3, exp_state.get('cur_wave', 1) - 1))
     copy_id_str = str(exp_state['copy_id'])
     send_rpc_push(683, encode_sproto([
         (0, copy_id_str),             # id (string) — must match client's DailyExpData.ID
-        (1, wave_index),              # index  (always 0 — client uses WaveNums[0]=5 for denominators)
+        (1, wave_index),              # index  (cur_wave - 1)
         (2, exp_state['end_time']),   # time   (unix timestamp)
         (3, exp_state['cur_group']),  # parm1  (current group number, shown as "X/7")
         (4, exp_state['wave_kills']), # parm2  (accumulated kills in current wave cycle)
