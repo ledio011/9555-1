@@ -5288,7 +5288,7 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 107 or msg == 276: # enter_copy_scene or enter_single_exp_scene
+            elif msg == 107: # enter_copy_scene
                 copy_id = field_text(body, 0)
                 cfg = COPY_SCENE_CONFIG.get(copy_id)
                 if picked_char and copy_id in ["223", "224", "225", "226", "227", "228", "229"]:
@@ -6038,14 +6038,6 @@ def client_handler(conn, addr):
                 if session is not None:
                     resp = encode_sproto([(0, 0)])
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-
-            elif msg == 217: # ret_ask_confirm_multi_copy_scene
-                multi_session = get_val_int(body, 0)
-                confirm_state = get_val_int(body, 1) # 0 = confirm/ready, 1 = cancel/decline
-                print(f"[MULTI COPY CONFIRM] session={multi_session} state={confirm_state} player={picked_char.get('id') if picked_char else 'unknown'}")
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 108: # leave_copy_scene
