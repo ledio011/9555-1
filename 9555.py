@@ -1747,8 +1747,9 @@ def send_rpc_push_safe(c, tag, data):
         if lock:
             with lock: c.sendall(struct.pack(">H", len(pf_p)) + pf_p)
         else: c.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+        return True
     except:
-        pass
+        return False
 
 
 def send_push_to_char(char_id, tag, data):
@@ -1756,8 +1757,7 @@ def send_push_to_char(char_id, tag, data):
         conn, ch = ALL_CONNECTIONS.get(int(char_id), (None, None))
         if conn is None or ch is None:
             return False
-        send_rpc_push_safe(conn, tag, data)
-        return True
+        return bool(send_rpc_push_safe(conn, tag, data))
     except Exception:
         return False
 
@@ -1808,8 +1808,25 @@ def exp_sync_npc_attrs(state, inst_id, stats, hp):
 def is_exp_map(map_id):
     return str(map_id) in ('223','224','225','226','227','228','229')
 
+def is_active_copy_current(char):
+    """Check whether a saved copy marker still matches the character's map."""
+    if not char:
+        return False
+    active_copy_id = str(char.get('active_copy_id') or '')
+    current_map = str(char.get('map_id') or '11')
+    # Map 11 is the city/default map, never a copy instance. Older saves can
+    # contain active_copy_id=11 from code that confused the current map with
+    # the active copy marker.
+    if not active_copy_id or active_copy_id == '11' or current_map == '11':
+        return False
+    allowed_maps = {active_copy_id}
+    active_cfg = COPY_SCENE_CONFIG.get(active_copy_id, {})
+    if active_cfg.get('map_id'):
+        allowed_maps.add(str(active_cfg['map_id']))
+    return current_map in allowed_maps
+
 def reconcile_exp_stage_login(char):
-    """Restore a live EXP run on reconnect and discard orphaned entry markers."""
+    """Restore live EXP runs and discard copy markers that do not match the loaded map."""
     if not char:
         return False
     leave_timer = char.get('_exp_leave_timer')
@@ -1864,19 +1881,26 @@ def reconcile_exp_stage_login(char):
             char.pop('exp_stage_state', None)
 
     active_copy_id = str(char.get('active_copy_id') or '')
-    if is_exp_map(active_copy_id) and not is_exp_map(current_map):
-        # active_copy_id is saved, but the live run object is deliberately
-        # runtime-only. If the player is outside the EXP map and no live run
-        # can be restored, this marker must not lock them out of a new entry.
+    if active_copy_id and not is_active_copy_current(char):
+        # Copy state is runtime-only. A saved marker that does not match the
+        # loaded map is stale; clear it so city players can create/join teams
+        # and enter another copy. This also repairs legacy active_copy_id=11.
         char['active_copy_id'] = None
         char['exp_team_id'] = None
         char.pop('exp_members', None)
         char['exp_defer_start'] = False
         char.pop('pre_copy_pos', None)
         char.pop('pre_copy_map', None)
-        print(f"[EXP RECOVERY] cleared orphan entry marker copy={active_copy_id} player={char_id}")
+        print(f"[COPY RECOVERY] cleared stale marker copy={active_copy_id} map={current_map} player={char_id}")
         return True
     return False
+
+def is_character_available_for_team(char):
+    if not char:
+        return False
+    reconcile_exp_stage_login(char)
+    return (not char.get('exp_stage_state') and not char.get('_exp_leave_timer')
+        and not is_exp_map(char.get('map_id')) and not is_active_copy_current(char))
 
 def can_aoi_exchange(source, target):
     if not source or not target or source.get('id')==target.get('id') or str(source.get('map_id'))!=str(target.get('map_id')): return False
@@ -5717,16 +5741,14 @@ def client_handler(conn, addr):
                 copy_id = field_text(body, 0)
                 cfg = COPY_SCENE_CONFIG.get(copy_id)
                 if picked_char and copy_id in ["223", "224", "225", "226", "227", "228", "229"]:
+                    reconcile_exp_stage_login(picked_char)
                     exp_state = picked_char.get('exp_stage_state')
                     active_copy_id = str(picked_char.get('active_copy_id') or '')
                     current_map = str(picked_char.get('map_id') or '11')
-                    active_cfg = COPY_SCENE_CONFIG.get(active_copy_id, {})
-                    active_copy_maps = {active_copy_id}
-                    if active_cfg.get('map_id'):
-                        active_copy_maps.add(str(active_cfg['map_id']))
-                    active_copy_is_current = bool(active_copy_id and current_map in active_copy_maps)
+                    active_copy_is_current = is_active_copy_current(picked_char)
                     current_map_is_copy = any(
-                        not is_exp_map(other_id) and str(other_cfg.get('map_id') or '') == current_map
+                        current_map != '11' and not is_exp_map(other_id)
+                        and str(other_cfg.get('map_id') or '') == current_map
                         for other_id, other_cfg in COPY_SCENE_CONFIG.items()
                     )
                     # Only block when the character has a live EXP state, is
@@ -6230,7 +6252,7 @@ def client_handler(conn, addr):
                     target=get_val_int(body,0,-1)
                     if target==-1:
                         goal=get_val_str(body,1,''); team=get_team_for_char(cid); ok=False
-                        if team is None and not picked_char.get('active_copy_id') and not picked_char.get('exp_stage_state'):
+                        if team is None and is_character_available_for_team(picked_char):
                             goal_min,goal_max=team_goal_level_bounds(goal,get_val_int(body,2,1),get_val_int(body,3,80))
                             TEAM_ID_COUNTER+=1
                             team={'id':TEAM_ID_COUNTER,'leader_id':cid,'members':[],'goal_id':goal,
@@ -6250,35 +6272,52 @@ def client_handler(conn, addr):
                         send_rpc_push(517,encode_sproto([(0,1 if ok else 0),(1,cid)]))
                     else:
                         team=get_team_for_char(cid); target_conn,target_char=ALL_CONNECTIONS.get(target,(None,None))
-                        ok=bool(team and team.get('leader_id')==cid and not team.get('active_run') and target_conn and target_char and target not in team['members'] and len(team['members'])<4 and not target_char.get('exp_stage_state') and not target_char.get('active_copy_id'))
+                        ok=bool(team and team.get('leader_id')==cid and not team.get('active_run') and target_conn and target_char and target not in team['members'] and len(team['members'])<4 and get_team_for_char(target) is None and is_character_available_for_team(target_char))
                         if ok:
-                            TEAM_INVITES[target]={'team_id':team['id'],'inviter_id':cid,'expires_at':int(time.time())+60}
-                            send_push_to_char(target,516,encode_sproto([(0,int(team['id'])),(1,team_member_blob(picked_char,team['id'])),(2,str(team.get('goal_id','')))]))
+                            sent=send_push_to_char(target,516,encode_sproto([(0,int(team['id'])),(1,team_member_blob(picked_char,team['id'])),(2,str(team.get('goal_id','')))]))
+                            ok=bool(sent)
+                            if ok:
+                                TEAM_INVITES[target]={'team_id':team['id'],'inviter_id':cid,'expires_at':int(time.time())+60}
                         send_rpc_push(517,encode_sproto([(0,1 if ok else 0),(1,target)]))
                 elif picked_char and msg==110:
                     invite=TEAM_INVITES.get(cid); ok=get_val_int(body,0,0)==1
-                    inviter=get_val_int(body,1,0)
-                    valid=bool(invite and invite.get('expires_at',0)>=int(time.time()) and invite.get('inviter_id')==inviter)
-                    if invite and inviter:
+                    reply_id=get_val_int(body,1,0)
+                    valid=bool(invite and invite.get('expires_at',0)>=int(time.time()) and reply_id==cid)
+                    inviter=int(invite.get('inviter_id',0)) if invite else 0
+                    if inviter:
                         send_push_to_char(inviter,517,encode_sproto([(0,1 if ok and valid else 0),(1,cid)]))
                     if not ok or not valid: TEAM_INVITES.pop(cid,None)
                 elif picked_char and msg==161:
                     tid=get_val_int(body,0); team=TEAM_STATES.get(tid); inv=TEAM_INVITES.get(cid,{})
-                    invited=inv.get('team_id')==tid and inv.get('expires_at',0)>=int(time.time())
-                    if team and not team.get('active_run') and (invited or not team.get('verify')):
-                        if team_join_member(team,picked_char): TEAM_INVITES.pop(cid,None);send_team_update(tid)
-                    elif team and not team.get('active_run') and team.get('verify') and cid not in team['members']:
-                        team.setdefault('pending_apps',{})[cid]=picked_char
-                        send_push_to_char(team['leader_id'],572,encode_sproto([(0,team_member_blob(picked_char,tid))]))
+                    is_invite_accept=get_val_int(body,1,0)==1
+                    invited=bool(is_invite_accept and inv.get('team_id')==tid
+                        and inv.get('expires_at',0)>=int(time.time())
+                        and team and inv.get('inviter_id')==int(team.get('leader_id',0)))
+                    if team and not team.get('active_run') and is_invite_accept:
+                        if invited and team_join_member(team,picked_char):
+                            TEAM_INVITES.pop(cid,None)
+                            send_team_update(tid)
+                            print(f"[TEAM] invite accepted team={tid} member={cid}")
+                        else:
+                            if inv and inv.get('expires_at',0)<int(time.time()): TEAM_INVITES.pop(cid,None)
+                            print(f"[TEAM] invite join rejected team={tid} member={cid} valid={invited}")
+                    elif team and not team.get('active_run') and not is_invite_accept:
+                        if team.get('verify') and cid not in team['members']:
+                            team.setdefault('pending_apps',{})[cid]=picked_char
+                            sent=send_push_to_char(team['leader_id'],572,encode_sproto([(0,team_member_blob(picked_char,tid))]))
+                            print(f"[TEAM] join application team={tid} member={cid} leader_notified={sent}")
+                        elif not team.get('verify') and team_join_member(team,picked_char):
+                            send_team_update(tid)
+                            print(f"[TEAM] open join accepted team={tid} member={cid}")
                 elif picked_char and msg==162:
                     applicant=get_val_int(body,0); agree=get_val_int(body,1,0)==1
                     team=get_team_for_char(cid)
                     if team and team.get('leader_id')==cid:
                         ch=team.get('pending_apps',{}).pop(applicant,None)
                         if ch is not None:
-                            if agree: team_join_member(team,ch)
-                            send_push_to_char(applicant,576,encode_sproto([(0,int(team['id'])),(1,1 if agree else 0)]))
-                            if agree: send_team_update(team['id'])
+                            joined=bool(agree and team_join_member(team,ch))
+                            send_push_to_char(applicant,576,encode_sproto([(0,int(team['id'])),(1,1 if joined else 0)]))
+                            if joined: send_team_update(team['id'])
                 elif picked_char and msg==163:
                     team=get_team_for_char(cid)
                     if team and team.get('leader_id')==cid and not team.get('active_run') and not team.get('pending_run'):
@@ -6312,7 +6351,7 @@ def client_handler(conn, addr):
                     goal=get_val_str(body,0,''); goal_type=get_val_int(body,1,1)
                     if goal in DAILY_EXP_CONFIG:
                         team=get_team_for_char(cid)
-                        if team is None and not picked_char.get('active_copy_id') and not picked_char.get('exp_stage_state'):
+                        if team is None and is_character_available_for_team(picked_char):
                             cfg=COPY_SCENE_CONFIG.get(goal,{})
                             TEAM_ID_COUNTER+=1
                             team={'id':TEAM_ID_COUNTER,'leader_id':cid,'members':[],'goal_id':goal,
@@ -6320,7 +6359,7 @@ def client_handler(conn, addr):
                                 'verify':0,'recruit':0,'char_refs':{},'pending_apps':{}}
                             if team_join_member(team,picked_char): TEAM_STATES[team['id']]=team
                             else: team=None
-                        if team and team.get('leader_id')==cid and not team.get('active_run') and all(not ALL_CONNECTIONS.get(int(mid),(None,None))[1].get('active_copy_id') for mid in team.get('members',[]) if ALL_CONNECTIONS.get(int(mid),(None,None))[1]):
+                        if team and team.get('leader_id')==cid and not team.get('active_run') and all(is_character_available_for_team(ALL_CONNECTIONS.get(int(mid),(None,None))[1]) for mid in team.get('members',[])):
                             team['goal_id']=goal
                             team['min_level'],team['max_level']=team_goal_level_bounds(
                                 goal,team.get('min_level',1),team.get('max_level',80))
@@ -6340,7 +6379,7 @@ def client_handler(conn, addr):
                         ids=list(team['members']); minm=max(2,int(cfg.get('min_member',2)))
                         valid=minm<=len(ids)<=int(cfg.get('max_member',4)) and all(ALL_CONNECTIONS.get(x,(None,None))[0] is not None and ALL_CONNECTIONS.get(x,(None,None))[1] is not None for x in ids)
                         if valid:
-                            valid=all(not ALL_CONNECTIONS[x][1].get('exp_stage_state') and not ALL_CONNECTIONS[x][1].get('active_copy_id') and cfg['min_level']<=int(ALL_CONNECTIONS[x][1].get('level',1))<=cfg['max_level'] for x in ids)
+                            valid=all(is_character_available_for_team(ALL_CONNECTIONS[x][1]) and cfg['min_level']<=int(ALL_CONNECTIONS[x][1].get('level',1))<=cfg['max_level'] for x in ids)
                         if valid:
                             leader=ALL_CONNECTIONS.get(int(team['leader_id']),(None,None))[1]
                             valid=bool(leader and copy_attempts_remaining(leader,copy_id,cfg)>0)
@@ -7475,7 +7514,7 @@ def team_join_member(team, char):
     cid=int(char.get('id',0))
     if not team or len(team.get('members',[]))>=4 or cid in team.get('members',[]): return False
     if not int(team.get('min_level',1))<=int(char.get('level',1))<=int(team.get('max_level',80)): return False
-    if char.get('exp_stage_state') or char.get('active_copy_id') or (CHAR_TEAM.get(cid) not in (None, int(team.get('id', 0)))): return False
+    if not is_character_available_for_team(char) or (CHAR_TEAM.get(cid) not in (None, int(team.get('id', 0)))): return False
     team.setdefault('members',[]).append(cid); team.setdefault('char_refs',{})[cid]=char
     CHAR_TEAM[cid]=int(team['id']); char['team_goal_copy']=str(team.get('goal_id',''))
     return True
@@ -7603,7 +7642,8 @@ def start_team_exp_run(team, copy_id):
     players=[]
     for cid in ids:
         conn,ch=ALL_CONNECTIONS.get(cid,(None,None))
-        if conn is None or ch is None or ch.get('exp_stage_state') or ch.get('active_copy_id') or not cfg['min_level']<=int(ch.get('level',1))<=cfg['max_level']: return False
+        if conn is None or ch is None: return False
+        if not is_character_available_for_team(ch) or not cfg['min_level']<=int(ch.get('level',1))<=cfg['max_level']: return False
         players.append((cid,conn,ch))
     leader=next((ch for cid,_conn,ch in players if int(cid)==int(team.get('leader_id',0))),None)
     if leader is None or copy_attempts_remaining(leader,copy_id,cfg)<=0: return False
