@@ -1774,6 +1774,134 @@ def send_exp_result_to_char(char, result):
 def exp_member_ids(state):
     return list(dict.fromkeys(int(cid) for cid in (state.get('members') or [state.get('owner_id')]) if cid is not None))
 
+def update_exp_authoritative_position(char, state, requested_pos):
+    """Track EXP combat position with a server-side movement-speed bound.
+
+    Client movement still drives its normal visual replication, but EXP attack
+    range and monster targeting use this bounded position instead.
+    """
+    char_id = int(char.get('id', 0))
+    positions = state.setdefault('player_auth_pos', {})
+    timestamps = state.setdefault('player_auth_move_at', {})
+    current = positions.get(char_id)
+    if not isinstance(current, (list, tuple)) or len(current) < 4:
+        current = list(char.get('pos', requested_pos))
+        if len(current) < 4:
+            current = list(current) + [0] * (4 - len(current))
+        positions[char_id] = current
+        timestamps[char_id] = time.monotonic()
+
+    now = time.monotonic()
+    elapsed = max(0.02, min(now - float(timestamps.get(char_id, now)), 1.5))
+    # The APK receives movement speed 500 (5 m/s). Allow 3x for dashes,
+    # uneven packet timing, and motion interpolation while still limiting jumps.
+    max_step_cm = max(75.0, 500.0 * elapsed * 3.0)
+    dx = float(requested_pos[0]) - float(current[0])
+    dz = float(requested_pos[2]) - float(current[2])
+    distance = math.hypot(dx, dz)
+    if distance > max_step_cm and distance > 0:
+        scale = max_step_cm / distance
+        x = int(round(float(current[0]) + dx * scale))
+        z = int(round(float(current[2]) + dz * scale))
+    else:
+        x = int(requested_pos[0])
+        z = int(requested_pos[2])
+    tracked = [x, int(requested_pos[1]), z, int(requested_pos[3])]
+    positions[char_id] = tracked
+    timestamps[char_id] = now
+    return tracked
+
+def validate_exp_skill_hit(char, state, target_id, skill_id, requested_effinfo_id,
+                           effects_in_batch, targets_in_batch):
+    """Validate an EXP skill/effect, range, and replay window from server state."""
+    skill_id = str(skill_id)
+    skill_cfg = SKILL_CONFIG.get(skill_id)
+    if not skill_cfg:
+        print(f"[EXP HIT] rejected unknown skill={skill_id}")
+        return None
+
+    skill_levels = {str(key): value for key, value in (char.get('skill_levels') or {}).items()}
+    prof = char.get('prof', 0)
+    try:
+        prof = int(prof)
+    except (TypeError, ValueError):
+        prof = 0
+    starter_skills = PROF_SKILLS.get(prof, PROF_SKILLS[0])
+    always_available = {str(value) for value in starter_skills.get('atk', [])}
+    always_available.update(str(starter_skills.get(key, '')) for key in ('dodge', 'starter_active'))
+    always_available.discard('')
+    if skill_id not in skill_levels and skill_id not in always_available:
+        print(f"[EXP HIT] rejected unlearned skill={skill_id} attacker={char.get('id')}")
+        return None
+    try:
+        skill_lv = int(skill_levels.get(skill_id, 0))
+    except (TypeError, ValueError):
+        return None
+    if skill_lv < 0:
+        print(f"[EXP HIT] rejected invalid skill level={skill_lv} skill={skill_id}")
+        return None
+
+    allowed_effects = {str(skill_cfg.get(key) or '') for key in ('eff0', 'eff1', 'eff2')}
+    allowed_effects.discard('')
+    effinfo_id = str(requested_effinfo_id or '')
+    if effinfo_id not in allowed_effects:
+        print(f"[EXP HIT] rejected effect={effinfo_id!r} for skill={skill_id}")
+        return None
+
+    player_pos = state.get('player_auth_pos', {}).get(int(char.get('id', 0)), char.get('pos', [0, 100, 0, 0]))
+    monster_pos = state.get('monster_pos', {}).get(int(target_id))
+    if (not isinstance(player_pos, (list, tuple)) or len(player_pos) < 3
+            or not isinstance(monster_pos, (list, tuple)) or len(monster_pos) < 2):
+        print(f"[EXP HIT] rejected target without authoritative position target={target_id}")
+        return None
+
+    effect_cfg = EFF_CONFIG.get(effinfo_id, {})
+    params = effect_cfg.get('params', [0, 0, 0, 0, 0])
+    param1 = abs(int(params[0] if len(params) > 0 else 0)) / 100.0
+    param2 = abs(int(params[1] if len(params) > 1 else 0)) / 100.0
+    area_type = int(effect_cfg.get('area_type', 0))
+    trace_distance = max(0, int(skill_cfg.get('trace_distance_cm', 0))) / 100.0
+    if area_type == 1:
+        effect_reach = trace_distance + param1
+    elif area_type == 2:
+        effect_reach = math.hypot(param1, param2 / 2.0)
+    elif area_type in (3, 4, 5):
+        effect_reach = param1
+    else:
+        effect_reach = trace_distance
+    max_reach = max(trace_distance, effect_reach) + 3.0
+    player_x = float(player_pos[0]) / 100.0
+    player_z = float(player_pos[2]) / 100.0
+    if math.hypot(float(monster_pos[0]) - player_x, float(monster_pos[1]) - player_z) > max_reach:
+        print(f"[EXP HIT] rejected out-of-range target={target_id} skill={skill_id}")
+        return None
+
+    cooldown_s = max(0.05, int(skill_cfg.get('cooldown_ms', 0)) / 1000.0)
+    hit_lock = state.setdefault('_hit_lock', threading.RLock())
+    with hit_lock:
+        hit_cooldowns = state.setdefault('_hit_cooldowns', {})
+        cooldown_key = (int(char.get('id', 0)), skill_id, effinfo_id)
+        batch_target_key = (cooldown_key, int(target_id))
+        if batch_target_key in targets_in_batch:
+            print(f"[EXP HIT] rejected duplicate batch target={target_id} skill={skill_id} effect={effinfo_id}")
+            return None
+        targets_in_batch.add(batch_target_key)
+        if cooldown_key not in effects_in_batch:
+            now_mono = time.monotonic()
+            last_hit = hit_cooldowns.get(cooldown_key)
+            if last_hit is not None and now_mono - last_hit < cooldown_s:
+                print(f"[EXP HIT] rejected cooldown replay skill={skill_id} effect={effinfo_id}")
+                return None
+            hit_cooldowns[cooldown_key] = now_mono
+            effects_in_batch.add(cooldown_key)
+        if len(hit_cooldowns) > 2048:
+            now_mono = time.monotonic()
+            state['_hit_cooldowns'] = {
+                key: stamp for key, stamp in hit_cooldowns.items()
+                if now_mono - stamp < 30.0
+            }
+    return skill_id, skill_lv, effinfo_id
+
 def exp_send_push(state, tag, data, exclude=None):
     excluded = set(int(cid) for cid in (exclude or []))
     for cid in exp_member_ids(state):
@@ -2493,7 +2621,8 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
     # subwave to remain active until every spawned instance dies; the separate
     # CopySceneData exist_time timer ends the full run.
 
-    player_pos = picked_char.get('pos', [0, 100, 0, 0])
+    player_pos = exp_state.get('player_auth_pos', {}).get(
+        int(picked_char.get('id', 0)), picked_char.get('pos', [0, 100, 0, 0]))
     px = player_pos[0] / 100.0
     pz = player_pos[2] / 100.0
     player_stats = get_character_stats(picked_char)
@@ -2562,9 +2691,12 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
         if exp_state.get('team_id'):
             live_targets = exp_online_members(exp_state, alive=True)
             if not live_targets: continue
-            _tid, target_conn, target_char = min(live_targets, key=lambda item: (item[2].get('pos', [0,100,0,0])[0] / 100.0 - m_pos[0]) ** 2 + (item[2].get('pos', [0,100,0,0])[2] / 100.0 - m_pos[1]) ** 2)
+            _tid, target_conn, target_char = min(live_targets, key=lambda item: (
+                exp_state.get('player_auth_pos', {}).get(int(item[0]), item[2].get('pos', [0,100,0,0]))[0] / 100.0 - m_pos[0]) ** 2 + (
+                exp_state.get('player_auth_pos', {}).get(int(item[0]), item[2].get('pos', [0,100,0,0]))[2] / 100.0 - m_pos[1]) ** 2)
             conn_for_sync = target_conn; picked_char = target_char
-            target_pos = picked_char.get('pos', [0, 100, 0, 0])
+            target_pos = exp_state.get('player_auth_pos', {}).get(
+                int(picked_char.get('id', 0)), picked_char.get('pos', [0, 100, 0, 0]))
             px = target_pos[0] / 100.0; pz = target_pos[2] / 100.0
             player_stats = get_character_stats(picked_char)
         mx, mz = m_pos[0], m_pos[1]
@@ -3163,6 +3295,9 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 if member is not None: state['char_refs'][cid]=member; member['exp_stage_state']=state
             picked_char['exp_stage_state']=state
         state.setdefault('char_refs',{})[int(picked_char.get('id',0))]=picked_char
+        state.setdefault('player_auth_pos', {}).setdefault(
+            int(picked_char.get('id', 0)), list(picked_char.get('pos', [0, 100, 0, 0])))
+        state.setdefault('player_auth_move_at', {}).setdefault(int(picked_char.get('id', 0)), time.monotonic())
         def push(tag,data): exp_send_push(state,tag,data)
         push(629,encode_sproto([(0,state['end_time']),(1,2)])); _send_exp_tag683(push,state,cfg)
         if resuming:
@@ -4623,7 +4758,14 @@ def client_handler(conn, addr):
                 p_raw = body.get(0)
                 if p_raw and picked_char:
                     pd = decode_sproto(p_raw)
-                    picked_char['pos'] = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
+                    new_pos = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
+                    move_map = str(picked_char.get('map_id', ''))
+                    move_exp_state = picked_char.get('exp_stage_state') if is_exp_map(move_map) else None
+                    if (move_exp_state and str(move_exp_state.get('copy_id')) == move_map
+                            and not move_exp_state.get('_finish_handled')
+                            and int(picked_char.get('id', 0)) in exp_member_ids(move_exp_state)):
+                        update_exp_authoritative_position(picked_char, move_exp_state, new_pos)
+                    picked_char['pos'] = new_pos
                     # Issue 224: Throttle position saves to avoid excessive disk I/O.
                     # Save every 30 seconds instead of on every move packet (~10Hz).
                     # The position is still saved on important events: dungeon entry/exit,
@@ -4790,11 +4932,12 @@ def client_handler(conn, addr):
                 mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
                 idx = get_val_int(body, 1); val = get_val_int(body, 2)
                 if picked_char and mid in picked_char.get('active_missions', {}):
-                    # Reject param changes for capture missions (logic_type 25) —
-                    # the server advances progress authoritatively via advance_missions.
+                    # Reject client param changes for server-driven capture and
+                    # EXP-copy missions. EXP progress comes from the validated
+                    # stage-entry event, not client-written mission parameters.
                     m_cfg_524 = missions_data.get(mid, {})
-                    if m_cfg_524.get('logic_type') == 25:
-                        print(f"[MISSION SECURITY] MSG 524 rejected for capture mission {mid}")
+                    if m_cfg_524.get('logic_type') in (25, 105):
+                        print(f"[MISSION SECURITY] MSG 524 rejected for server-driven mission {mid}")
                     elif 0 < idx <= 8:
                         picked_char['active_missions'][mid]['parm'][idx-1] = val
                         save_chars(all_accounts_chars)
@@ -4808,11 +4951,20 @@ def client_handler(conn, addr):
                 state = get_val_int(body, 1)
                 if picked_char and mid in picked_char.get('active_missions', {}):
                     cur_state = picked_char['active_missions'][mid].get('state', 1)
+                    m_cfg_523 = missions_data.get(mid, {})
+                    if (m_cfg_523.get('logic_type') == 105
+                            and (state != 2 or cur_state != 2)):
+                        # Mission 1019 (EXP_COPY / logic type 105) may only
+                        # complete after the server records a valid EXP entry.
+                        print(f"[MISSION SECURITY] MSG 523 rejected: forged EXP mission state mid={mid} state={state} current={cur_state}")
+                        if session is not None:
+                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                            conn.sendall(struct.pack(">H", len(pf)) + pf)
+                        continue
                     # Only allow 1→2 (active→completed) if the server already set it to 2 via advance_missions.
                     # This prevents a client from forging mission completion.
                     if state == 2 and cur_state != 2:
                         # Client is trying to set state=2 without server confirmation — reject.
-                        m_cfg_523 = missions_data.get(mid, {})
                         if m_cfg_523.get('logic_type') == 25:
                             print(f"[MISSION SECURITY] MSG 523 rejected: cannot forge capture mission {mid} completion")
                             if session is not None:
@@ -5157,6 +5309,21 @@ def client_handler(conn, addr):
                         requested_effinfo_id = get_val_str(d, 3, "")
                         effinfo_id = None
                         is_cri = get_val_int(d, 4, 0) == 1
+                        is_exp = is_exp_map(picked_char.get('map_id'))
+                        exp_state_hit = picked_char.get('exp_stage_state') if is_exp else None
+                        current_conn, current_char = ALL_CONNECTIONS.get(int(picked_char.get('id', 0)), (None, None))
+
+                        # EXP damage is only valid for a live participant in
+                        # the same run. This also prevents stale/reconnected
+                        # characters from reusing a squad's shared run state.
+                        if is_exp and (
+                                not exp_state_hit
+                                or str(exp_state_hit.get('copy_id')) != str(picked_char.get('map_id'))
+                                or exp_state_hit.get('_finish_handled')
+                                or int(picked_char.get('id', 0)) not in exp_member_ids(exp_state_hit)
+                                or current_conn is not conn or current_char is not picked_char):
+                            print(f"[EXP HIT] rejected nonparticipant/stale attacker={picked_char.get('id')} map={picked_char.get('map_id')}")
+                            continue
 
                         print(f"[COMBAT] accept_damge target={target_id} client_dmg={client_dmg} skill={skill_id} eff={requested_effinfo_id} cri={is_cri}")
 
@@ -5164,6 +5331,9 @@ def client_handler(conn, addr):
                         target_cid, target_conn, target_char = find_player_connection(target_id)
 
                         if target_char is not None:
+                            if is_exp:
+                                print(f"[EXP HIT] rejected player target={target_id} attacker={picked_char.get('id')}")
+                                continue
                             # === PvP: target is an online player ===
                             # Server-authoritative damage calculation
                             target_stats = get_character_stats(target_char)
@@ -5177,9 +5347,6 @@ def client_handler(conn, addr):
                             always_available = set(starter_skills.get('atk', []))
                             always_available.add(starter_skills.get('dodge', ''))
                             always_available.add(starter_skills.get('starter_active', ''))
-                            if is_exp and (skill_id not in SKILL_CONFIG or (skill_id not in char_skill_levels and skill_id not in always_available)):
-                                print(f"[EXP HIT] rejected unknown/unlearned skill={skill_id} attacker={picked_char.get('id')}")
-                                continue
                             if not is_exp and skill_id not in char_skill_levels and skill_id not in always_available:
                                 # Skill not learned by player and not a starter skill, reject
                                 skill_id = "50001"
@@ -5191,65 +5358,7 @@ def client_handler(conn, addr):
                                 effinfo_id = None
 
                             skill_cfg = SKILL_CONFIG.get(skill_id, {})
-                            if is_exp:
-                                allowed_effects = {skill_cfg.get(key, "") for key in ('eff0', 'eff1', 'eff2')}
-                                allowed_effects.discard("")
-                                if requested_effinfo_id not in allowed_effects:
-                                    print(f"[EXP HIT] rejected effect={requested_effinfo_id!r} for skill={skill_id}")
-                                    continue
-                                effinfo_id = requested_effinfo_id
-                                # Enforce a generous server-side reach based on
-                                # the APK's trace distance and effect shape, so a
-                                # forged attack list cannot hit the whole wave.
-                                player_pos = picked_char.get('pos', [0, 100, 0, 0])
-                                monster_pos = exp_state_hit.get('monster_pos', {}).get(target_id)
-                                if not monster_pos:
-                                    print(f"[EXP HIT] rejected target without server position target={target_id}")
-                                    continue
-                                effect_cfg = EFF_CONFIG.get(effinfo_id, {})
-                                params = effect_cfg.get('params', [0, 0, 0, 0, 0])
-                                param1 = abs(int(params[0] if len(params) > 0 else 0)) / 100.0
-                                param2 = abs(int(params[1] if len(params) > 1 else 0)) / 100.0
-                                area_type = int(effect_cfg.get('area_type', 0))
-                                trace_distance = max(0, int(skill_cfg.get('trace_distance_cm', 0))) / 100.0
-                                if area_type == 1:
-                                    effect_reach = trace_distance + param1
-                                elif area_type == 2:
-                                    effect_reach = math.hypot(param1, param2 / 2.0)
-                                elif area_type in (3, 4, 5):
-                                    effect_reach = param1
-                                else:
-                                    effect_reach = trace_distance
-                                max_reach = max(trace_distance, effect_reach) + 3.0
-                                player_x = player_pos[0] / 100.0
-                                player_z = player_pos[2] / 100.0
-                                if math.hypot(monster_pos[0] - player_x, monster_pos[1] - player_z) > max_reach:
-                                    print(f"[EXP HIT] rejected out-of-range target={target_id} skill={skill_id}")
-                                    continue
-                                # Match the APK's per-skill cooldown and reject
-                                # replayed effects. One accepted effect may still
-                                # hit multiple targets in this same client batch.
-                                cooldown_s = max(0.05, int(skill_cfg.get('cooldown_ms', 0)) / 1000.0)
-                                hit_cooldowns = exp_state_hit.setdefault('_hit_cooldowns', {})
-                                cooldown_key = (int(picked_char.get('id', 0)), skill_id, effinfo_id)
-                                batch_target_key = (cooldown_key, target_id)
-                                if batch_target_key in exp_targets_in_batch:
-                                    print(f"[EXP HIT] rejected duplicate batch target={target_id} skill={skill_id} effect={effinfo_id}")
-                                    continue
-                                exp_targets_in_batch.add(batch_target_key)
-                                if cooldown_key not in exp_effects_in_batch:
-                                    now_mono = time.monotonic()
-                                    last_hit = hit_cooldowns.get(cooldown_key)
-                                    if last_hit is not None and now_mono - last_hit < cooldown_s:
-                                        print(f"[EXP HIT] rejected cooldown replay skill={skill_id} effect={effinfo_id}")
-                                        continue
-                                    hit_cooldowns[cooldown_key] = now_mono
-                                    exp_effects_in_batch.add(cooldown_key)
-                                if len(hit_cooldowns) > 2048:
-                                    now_mono = time.monotonic()
-                                    hit_cooldowns = {key: stamp for key, stamp in hit_cooldowns.items() if now_mono - stamp < 30.0}
-                                    exp_state_hit['_hit_cooldowns'] = hit_cooldowns
-                            elif effinfo_id is None:
+                            if effinfo_id is None:
                                 effinfo_id = skill_cfg.get('eff0', "10000")
 
                             server_dmg, hit, calc_cri = get_combat_damage(attacker_stats, target_stats, skill_id, skill_lv, pvp_scale=1.0, effinfo_id=effinfo_id)
@@ -5349,6 +5458,9 @@ def client_handler(conn, addr):
                                     pass
 
                         elif target_id == picked_char['id']:
+                            if is_exp:
+                                print(f"[EXP HIT] rejected self target attacker={picked_char.get('id')}")
+                                continue
                             # Self-damage (rare edge case)
                             new_hp = picked_char.get('hp', 0) - client_dmg
                             picked_char['hp'] = max(0, new_hp)
@@ -5390,7 +5502,10 @@ def client_handler(conn, addr):
                                 spawned_ids = exp_state_hit.get('spawned_npcs', set()) if exp_state_hit else set()
                                 if (not exp_state_hit or str(exp_state_hit.get('copy_id')) != cur_map
                                         or exp_state_hit.get('_finish_handled')
-                                        or target_id not in active_ids or target_id not in spawned_ids):
+                                        or int(picked_char.get('id', 0)) not in exp_member_ids(exp_state_hit)
+                                        or target_id not in active_ids or target_id not in spawned_ids
+                                        or target_id not in NPC_HP_MAP or target_id not in NPC_INST_MAP
+                                        or NPC_HP_MAP.get(target_id, 0) <= 0):
                                     print(f"[EXP HIT] rejected unowned/inactive target={target_id} map={cur_map}")
                                     continue
 
@@ -5412,29 +5527,38 @@ def client_handler(conn, addr):
                                 NPC_HP_MAP[target_id] = defender_stats['hp_max']
 
                             # Server-authoritative NPC damage calculation
-                            # Verify the attacker actually has this skill learned.
-                            # Starter skills (101-105 for XD, 201-205 for QJ, 301-305 for NQS)
-                            # are always available at level 0, even if not in skill_levels.
-                            char_skill_levels = picked_char.get('skill_levels', {})
-                            prof = picked_char.get('prof', 0)
-                            starter_skills = PROF_SKILLS.get(prof, PROF_SKILLS[0])
-                            always_available = set(starter_skills.get('atk', []))
-                            always_available.add(starter_skills.get('dodge', ''))
-                            always_available.add(starter_skills.get('starter_active', ''))
-                            if skill_id not in char_skill_levels and skill_id not in always_available:
-                                # Skill not learned by player and not a starter skill, reject
-                                skill_id = "50001"
-                                effinfo_id = None
-                            skill_lv = char_skill_levels.get(skill_id, 0)
-                            if skill_lv < 0:
-                                skill_id = "50001"
-                                skill_lv = 0
-                                effinfo_id = None
+                            if is_exp:
+                                validated_hit = validate_exp_skill_hit(
+                                    picked_char, exp_state_hit, target_id, skill_id,
+                                    requested_effinfo_id, exp_effects_in_batch,
+                                    exp_targets_in_batch)
+                                if validated_hit is None:
+                                    continue
+                                skill_id, skill_lv, effinfo_id = validated_hit
+                            else:
+                                # Verify the attacker actually has this skill learned.
+                                # Starter skills (101-105 for XD, 201-205 for QJ, 301-305 for NQS)
+                                # are always available at level 0, even if not in skill_levels.
+                                char_skill_levels = picked_char.get('skill_levels', {})
+                                prof = picked_char.get('prof', 0)
+                                starter_skills = PROF_SKILLS.get(prof, PROF_SKILLS[0])
+                                always_available = set(starter_skills.get('atk', []))
+                                always_available.add(starter_skills.get('dodge', ''))
+                                always_available.add(starter_skills.get('starter_active', ''))
+                                if skill_id not in char_skill_levels and skill_id not in always_available:
+                                    # Skill not learned by player and not a starter skill, reject
+                                    skill_id = "50001"
+                                    effinfo_id = None
+                                skill_lv = char_skill_levels.get(skill_id, 0)
+                                if skill_lv < 0:
+                                    skill_id = "50001"
+                                    skill_lv = 0
+                                    effinfo_id = None
 
-                            # Server-authoritative effinfo_id: derive from skill_id, not from client
-                            if effinfo_id is None:
-                                skill_cfg = SKILL_CONFIG.get(skill_id, {})
-                                effinfo_id = skill_cfg.get('eff0', "10000")
+                                # Server-authoritative effinfo_id: derive from skill_id, not from client
+                                if effinfo_id is None:
+                                    skill_cfg = SKILL_CONFIG.get(skill_id, {})
+                                    effinfo_id = skill_cfg.get('eff0', "10000")
 
                             server_dmg, hit, calc_cri = get_combat_damage(
                                 attacker_stats, defender_stats, skill_id, skill_lv, effinfo_id=effinfo_id, sat_type='satm'
@@ -5444,12 +5568,11 @@ def client_handler(conn, addr):
                                 calc_cri = False
 
                             if is_exp:
-                                max_dmg, possible_hit, _ = get_combat_damage(
-                                    attacker_stats, defender_stats, skill_id, skill_lv,
-                                    effinfo_id=effinfo_id, sat_type='satm',
-                                    forced_hit=True, forced_crit=is_cri, max_variance=True
-                                )
-                                actual_dmg = min(client_dmg, max_dmg) if client_dmg > 0 and possible_hit else 0
+                                # Keep the client packet as the hit-event signal,
+                                # but use the server's own hit/crit/variance roll
+                                # for HP. The previous ceiling calculation let
+                                # clients force criticals and max variance.
+                                actual_dmg = server_dmg if client_dmg > 0 else 0
                             else:
                                 actual_dmg = server_dmg
 
@@ -5462,7 +5585,7 @@ def client_handler(conn, addr):
                                 else:
                                     sync_npc_attrs_rpc(conn, target_id, defender_stats, max(0, NPC_HP_MAP[target_id]))
                             if exp_state_hit and exp_state_hit.get('team_id'):
-                                hit_entry = encode_sproto([(0, target_id), (1, actual_dmg), (2, skill_id), (3, effinfo_id or ''), (4, is_cri)])
+                                hit_entry = encode_sproto([(0, target_id), (1, actual_dmg), (2, skill_id), (3, effinfo_id or ''), (4, calc_cri)])
                                 exp_send_push(exp_state_hit, 511, encode_sproto([(0, [hit_entry])]), exclude=[picked_char.get('id', 0)])
                                 skill_hit = encode_sproto([(0, picked_char.get('id', 0)), (1, target_id), (2, skill_id), (3, [encode_sproto([(0, target_id), (1, actual_dmg)])])])
                                 exp_send_push(exp_state_hit, 508, skill_hit, exclude=[picked_char.get('id', 0)])
@@ -5820,7 +5943,10 @@ def client_handler(conn, addr):
                                 picked_char['exp_defer_start'] = False
                                 save_chars(all_accounts_chars)
                                 send_rpc_push(555, sync_copy_scenes(picked_char))
-                                advance_missions(picked_char, send_rpc_push, 'dungeon', target_id=copy_id)
+                                # Mission 1019 is logic type/ID 105 (EXP_COPY),
+                                # while the entered stage ID is 223-229.
+                                # Report the mission event, not the map ID.
+                                advance_missions(picked_char, send_rpc_push, 'dungeon', target_id='105')
                                 # Fix: Use copy_id as map_id (CopySceneData MapId equals the copy_id)
                                 start_map_transition(conn, picked_char, copy_id, send_rpc_push)
                                 print(f"[EXP STAGE] entered id={copy_id} remaining={max(0, remaining - 1)} extra_item={extra_item_used}")
@@ -6396,8 +6522,10 @@ def client_handler(conn, addr):
                         if valid:
                             valid=all(is_character_available_for_team(ALL_CONNECTIONS[x][1]) and cfg['min_level']<=int(ALL_CONNECTIONS[x][1].get('level',1))<=cfg['max_level'] for x in ids)
                         if valid:
-                            leader=ALL_CONNECTIONS.get(int(team['leader_id']),(None,None))[1]
-                            valid=bool(leader and copy_attempts_remaining(leader,copy_id,cfg)>0)
+                            # Every participant spends their own daily attempt;
+                            # do not let a ready squad carry exhausted members
+                            # into a run for free.
+                            valid=all(copy_attempts_remaining(ALL_CONNECTIONS[x][1],copy_id,cfg)>0 for x in ids)
                         if valid:
                             EXP_RUN_COUNTER+=1; session_id=EXP_RUN_COUNTER
                             team['pending_run']={'session':session_id,'copy_id':copy_id,'ready':{x:False for x in ids}}
@@ -7659,19 +7787,22 @@ def start_team_exp_run(team, copy_id):
         conn,ch=ALL_CONNECTIONS.get(cid,(None,None))
         if conn is None or ch is None: return False
         if not is_character_available_for_team(ch) or not cfg['min_level']<=int(ch.get('level',1))<=cfg['max_level']: return False
+        if copy_attempts_remaining(ch,copy_id,cfg)<=0: return False
         players.append((cid,conn,ch))
     leader=next((ch for cid,_conn,ch in players if int(cid)==int(team.get('leader_id',0))),None)
-    if leader is None or copy_attempts_remaining(leader,copy_id,cfg)<=0: return False
+    if leader is None: return False
     for cid,conn,ch in players:
         if ch.get('pre_copy_pos') is None:
             ch['pre_copy_pos']=list(ch.get('pos',[29860,100,-17005,0])); ch['pre_copy_map']=str(ch.get('map_id','11'))
         daily=ensure_daily_copy_state(ch)
         remaining=copy_attempts_remaining(ch,copy_id,cfg)
-        if remaining>0: daily['remaining'][copy_id]=remaining-1
+        daily['remaining'][copy_id]=remaining-1
         ch['active_copy_id']=copy_id; ch['exp_members']=ids; ch['exp_team_id']=int(team['id']); ch['exp_defer_start']=True
         ch['hp']=get_character_stats(ch)['hp_max']; sync_char_attrs_rpc(conn,ch)
         send_push_to_char(cid,555,sync_copy_scenes(ch))
-        advance_missions(ch,lambda tag,data,who=cid:send_push_to_char(who,tag,data),'dungeon',target_id=copy_id)
+        # Mission 1019 tracks EXP_COPY (logic ID 105), not a specific level
+        # bracket's map ID (223-229).
+        advance_missions(ch,lambda tag,data,who=cid:send_push_to_char(who,tag,data),'dungeon',target_id='105')
     # Instance IDs are monotonic; retain dead IDs so delayed duplicate damage
     # packets from another active run cannot revive/count an old monster.
     save_chars(all_accounts_chars)
