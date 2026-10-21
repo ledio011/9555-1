@@ -1735,15 +1735,20 @@ def get_level_data(level):
         raise RuntimeError("BaseLvData has no valid level rows")
     return LEVEL_DATA[min(valid_levels, key=lambda key: abs(key - level))]
 
+def get_connection_send_lock(c):
+    """Return the one writer lock registered for a live client socket."""
+    for cid, (active_conn, _ch) in list(ALL_CONNECTIONS.items()):
+        if active_conn is c:
+            return CONNECTION_LOCKS.get(cid)
+    return None
+
+
 def send_rpc_push_safe(c, tag, data):
     """Safe wrapper for sending TAG push — used by relife AI threads to avoid stale closures."""
     try:
         ph_p = encode_sproto([(0, tag)])
         pf_p = sproto_pack(ph_p + data)
-        lock = None
-        for cid, (active_conn, _ch) in list(ALL_CONNECTIONS.items()):
-            if active_conn is c:
-                lock = CONNECTION_LOCKS.get(cid); break
+        lock = get_connection_send_lock(c)
         if lock:
             with lock: c.sendall(struct.pack(">H", len(pf_p)) + pf_p)
         else: c.sendall(struct.pack(">H", len(pf_p)) + pf_p)
@@ -2270,13 +2275,13 @@ def sync_char_attrs_rpc(conn, picked_char, conn_id=None):
         ph_p = encode_sproto([(0, 510)])
         pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_attr)]))
         pkt = struct.pack(">H", len(pf_p)) + pf_p
-        # Use connection lock to prevent packet framing issues
-        if conn_id is not None:
-            c_lock = CONNECTION_LOCKS.get(conn_id)
-            if c_lock:
-                with c_lock:
-                    conn.sendall(pkt)
-            else:
+        # Use the socket's common writer lock, including callers that only
+        # have the socket and not its character ID (for example EXP AI ticks).
+        c_lock = CONNECTION_LOCKS.get(conn_id) if conn_id is not None else None
+        if c_lock is None:
+            c_lock = get_connection_send_lock(conn)
+        if c_lock:
+            with c_lock:
                 conn.sendall(pkt)
         else:
             conn.sendall(pkt)
@@ -2392,7 +2397,13 @@ def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
     try:
         ph_p = encode_sproto([(0, 510)])
         pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_attr)]))
-        conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+        packet = struct.pack(">H", len(pf_p)) + pf_p
+        lock = get_connection_send_lock(conn)
+        if lock:
+            with lock:
+                conn.sendall(packet)
+        else:
+            conn.sendall(packet)
     except: pass
 
 def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_area=False, pvp_scale=1.0, effinfo_id=None, sat_type=None, forced_hit=None, forced_crit=None, max_variance=False):
@@ -4495,7 +4506,10 @@ def client_handler(conn, addr):
                 picked_char = next((c for c in get_account_chars(all_accounts_chars, cur_areaId, acc_id) if c['id'] == char_id), None)
                 char_id = picked_char.get('id', 0)
                 ALL_CONNECTIONS[char_id] = (conn, picked_char)  # Track online character
-                CONNECTION_LOCKS[char_id] = threading.Lock()  # Create per-connection lock
+                # All push paths, including timer-driven EXP/AOI pushes and
+                # this handler's synchronous sends, must serialize complete
+                # length-prefixed packets through the same socket lock.
+                CONNECTION_LOCKS[char_id] = send_lock
                 # Update online state for all friends/enemies who have this player in their list
                 _sync_friend_online_state(char_id, 1)
                 resp = encode_sproto([(0, 1 if picked_char else 0)])
