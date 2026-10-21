@@ -2378,12 +2378,11 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     # Client uses Mathf.CeilToInt(num5) - use ceiling, not truncation
     return int(math.ceil(max(1, final_dmg))), True, is_cri
 
-def build_npc_attr_sproto(nid, name, x, z, o):
+def build_npc_attr_sproto(nid, name, x, z, o, existing_inst_id=None):
     """Build NPC attribute sproto for TAG 509 (npc_create).
     Bug 1/6: Shared function to eliminate code duplication between send_npc_create and send_npc_wrapper."""
     global GLOBAL_INST_COUNTER
     npc_stats = get_npc_attr(nid)
-    hp_cur = npc_stats['hp_max']
     hp_max = npc_stats['hp_max']
     atk = npc_stats['atk']
     df = npc_stats['def']
@@ -2402,11 +2401,19 @@ def build_npc_attr_sproto(nid, name, x, z, o):
     cria = npc_stats.get('cria', 3158)
     lvl = npc_stats['lv']
 
-    GLOBAL_INST_COUNTER += 1
-    inst_id = GLOBAL_INST_COUNTER
-    NPC_HP_MAP[inst_id] = hp_max
-    NPC_INST_MAP[inst_id] = str(nid)
-    print(f"[NPC SPAWN] inst_id={inst_id} npcid={nid} hp_max={hp_max} atk={atk} def={df}")
+    if existing_inst_id is None:
+        GLOBAL_INST_COUNTER += 1
+        inst_id = GLOBAL_INST_COUNTER
+        hp_cur = hp_max
+        NPC_HP_MAP[inst_id] = hp_max
+        NPC_INST_MAP[inst_id] = str(nid)
+        print(f"[NPC SPAWN] inst_id={inst_id} npcid={nid} hp_max={hp_max} atk={atk} def={df}")
+    else:
+        # Reconnects must recreate the current NPC at its live position and
+        # health without allocating a second server instance.
+        inst_id = int(existing_inst_id)
+        hp_cur = max(0, int(NPC_HP_MAP.get(inst_id, hp_max)))
+        NPC_INST_MAP[inst_id] = str(nid)
 
     final_nid = str(nid)
     if ";" in final_nid:
@@ -2435,6 +2442,7 @@ def _build_exp_npc_wrapper(send_rpc_push, exp_state):
         # Fix: Track monster position in exp_state so AI loop uses correct spawn position
         if exp_state and 'monster_pos' in exp_state:
             exp_state['monster_pos'][inst_id] = [x / 100.0, z / 100.0]
+            exp_state.setdefault('monster_heading', {})[inst_id] = int(o)
             exp_state.setdefault('spawned_npcs', set()).add(inst_id)
         return inst_id
     return send_npc_wrapper
@@ -2480,43 +2488,10 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
     elif picked_char.get('hp', 0) <= 0:
         return False
 
-    exp_cfg = DAILY_EXP_CONFIG.get(exp_state.get('copy_id', ''), {})
-    group_time = exp_cfg.get('group_time', 60)
-    group_start = exp_state.get('group_start_time', int(time.time()))
-    if int(time.time()) - group_start >= group_time:
-        run_lock = exp_state.setdefault('_kill_lock', threading.RLock())
-        with run_lock:
-            group_start = exp_state.get('group_start_time', int(time.time()))
-            if int(time.time()) - group_start >= group_time and exp_state.get('ai_active'):
-                print(f"[EXP STAGE] group timeout copy={exp_state.get('copy_id')} group={exp_state.get('cur_group')} wave={exp_state.get('cur_wave')} retiring={len(exp_state.get('active_monsters', []))}")
-                # Partial-wave kills still count toward kill missions even
-                # though the remaining live NPCs are retired for the next group.
-                flush_exp_kill_tracker(exp_state, conn_for_sync, picked_char, send_rpc_push_func)
-                for inst_id in list(exp_state.get('active_monsters', [])):
-                    if inst_id not in DEAD_NPC_SET:
-                        DEAD_NPC_SET.add(inst_id)
-                        send_rpc_push_func(506, encode_sproto([(0, inst_id)]))
-                        NPC_HP_MAP.pop(inst_id, None)
-                        NPC_INST_MAP.pop(inst_id, None)
-                        NPC_ATTR_MAP.pop(inst_id, None)
-                        exp_state.setdefault('spawned_npcs', set()).discard(inst_id)
-                        exp_state.get('monster_pos', {}).pop(inst_id, None)
-                        exp_state.get('attack_cd', {}).pop(inst_id, None)
-                exp_state['active_monsters'] = []
-                exp_state['kill_tracker'] = []
-                if exp_state['cur_group'] < exp_cfg.get('group_count', 7):
-                    exp_state['cur_group'] += 1
-                    exp_state['cur_wave'] = 1
-                    exp_state['wave_kills'] = 0
-                    exp_state['group_start_time'] = int(time.time())
-                    spawn_exp_stage_subwave_internal(conn_for_sync, send_rpc_push_func, picked_char, exp_state, exp_cfg, _build_exp_npc_wrapper(send_rpc_push_func, exp_state))
-                    _send_exp_tag683(send_rpc_push_func, exp_state, exp_cfg)
-                else:
-                    finish_exp_stage(conn_for_sync, send_rpc_push_func, picked_char, exp_state, win=True)
-        # The runtime wrapper schedules the next AI tick only when this
-        # function reports that the run is still active.  A group timeout
-        # advances the run, so keep the loop alive for the newly spawned wave.
-        return bool(exp_state.get('ai_active') and picked_char.get('map_id') == map_str)
+    # DailyExpData.GroupTime is a run/group setting, not permission to despawn
+    # living NPCs or advance the wave. The client expects each configured
+    # subwave to remain active until every spawned instance dies; the separate
+    # CopySceneData exist_time timer ends the full run.
 
     player_pos = picked_char.get('pos', [0, 100, 0, 0])
     px = player_pos[0] / 100.0
@@ -2545,6 +2520,7 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
             NPC_INST_MAP.pop(inst_id, None)
             NPC_ATTR_MAP.pop(inst_id, None)
             exp_state.get('monster_pos', {}).pop(inst_id, None)
+            exp_state.get('monster_heading', {}).pop(inst_id, None)
             exp_state.get('attack_cd', {}).pop(inst_id, None)
             continue
         if NPC_HP_MAP.get(inst_id, 0) <= 0:
@@ -2601,6 +2577,7 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
             if inst_id not in stopped_monsters:
                 stopped_monsters.add(inst_id)
                 heading = int(math.degrees(math.atan2(dx, dz)) * 100)
+                exp_state.setdefault('monster_heading', {})[inst_id] = heading
                 pos_obj_stop = encode_sproto([(0, int(mx * 100)), (1, 0), (2, int(mz * 100)), (3, heading)])
                 m_move_stop = encode_sproto([(0, pos_obj_stop), (1, pos_obj_stop)])
                 char_move_stop = encode_sproto([(0, inst_id), (1, m_move_stop), (2, True)])
@@ -2614,6 +2591,7 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
             new_mz = mz + (dz / dist) * step
             exp_state['monster_pos'][inst_id] = [new_mx, new_mz]
             heading = int(math.degrees(math.atan2(dx, dz)) * 100)
+            exp_state.setdefault('monster_heading', {})[inst_id] = heading
             pos_obj = encode_sproto([(0, int(new_mx * 100)), (1, 0), (2, int(new_mz * 100)), (3, heading)])
             m_move = encode_sproto([(0, pos_obj), (1, pos_obj)])
             char_move = encode_sproto([(0, inst_id), (1, m_move), (2, True)])
@@ -2623,6 +2601,7 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
             if inst_id not in stopped_monsters:
                 stopped_monsters.add(inst_id)
                 heading = int(math.degrees(math.atan2(dx, dz)) * 100)
+                exp_state.setdefault('monster_heading', {})[inst_id] = heading
                 pos_obj_stop = encode_sproto([(0, int(mx * 100)), (1, 0), (2, int(mz * 100)), (3, heading)])
                 m_move_stop = encode_sproto([(0, pos_obj_stop), (1, pos_obj_stop)])
                 char_move_stop = encode_sproto([(0, inst_id), (1, m_move_stop), (2, True)])
@@ -2763,6 +2742,7 @@ def clear_exp_active_monsters(exp_state, send_rpc_push):
         NPC_INST_MAP.pop(inst_id, None)
         NPC_ATTR_MAP.pop(inst_id, None)
         exp_state.get('monster_pos', {}).pop(inst_id, None)
+        exp_state.get('monster_heading', {}).pop(inst_id, None)
         exp_state.get('attack_cd', {}).pop(inst_id, None)
     exp_state['active_monsters'] = []
 
@@ -3065,6 +3045,7 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid):
         NPC_INST_MAP.pop(inst_id, None)
         NPC_ATTR_MAP.pop(inst_id, None)
         exp_state.get('monster_pos', {}).pop(inst_id, None) if exp_state else None
+        exp_state.get('monster_heading', {}).pop(inst_id, None) if exp_state else None
         exp_state.get('attack_cd', {}).pop(inst_id, None) if exp_state else None
 
     if valid_kill:
@@ -3151,7 +3132,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             state={'copy_id':copy_id,'members':list(dict.fromkeys(int(x) for x in members)),
                 'owner_id':int(picked_char.get('id',0)),'team_id':picked_char.get('exp_team_id'),'char_refs':{},
                 'cur_group':1,'cur_wave':1,'subwave':1,'wave_kills':0,'total_kills':0,'deaths':0,
-                'start_time':now,'end_time':now+duration,'group_start_time':now,'active_monsters':[],'monster_pos':{},
+                'start_time':now,'end_time':now+duration,'group_start_time':now,'active_monsters':[],'monster_pos':{},'monster_heading':{},
                 'ai_active':True,'run_initialized':True,'runtime_started':False,
                 'defer_start':bool(picked_char.get('exp_defer_start')),'kill_tracker':[],'killed_npcs':[],'spawned_npcs':set()}
             for cid in state['members']:
@@ -3173,16 +3154,27 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             for inst in state.get('active_monsters',[]):
                 attr=NPC_ATTR_MAP.get(inst)
                 if attr is not None:
-                    send_rpc_push_safe(conn,509,encode_sproto([(0,attr)]))
                     nid=NPC_INST_MAP.get(inst)
+                    pos=state.get('monster_pos',{}).get(inst)
+                    if nid and pos is not None:
+                        npc_cfg=NPC_CONFIG.get(str(nid),{})
+                        _inst,attr=build_npc_attr_sproto(
+                            nid,npc_cfg.get('name',f"Monster_{nid}"),
+                            int(round(pos[0]*100)),int(round(pos[1]*100)),
+                            int(state.get('monster_heading',{}).get(inst,0)),
+                            existing_inst_id=inst)
+                    send_rpc_push_safe(conn,509,encode_sproto([(0,attr)]))
                     if nid:
                         stats=get_npc_attr(nid)
                         sync_npc_attrs_rpc(conn,inst,stats,NPC_HP_MAP.get(inst,stats['hp_max']))
+            start_exp_stage_runtime(conn,picked_char,state)
             return
         def create_exp_npc(nid,name,x,z,o):
             inst,attr=build_npc_attr_sproto(nid,name,x,z,o)
             if inst:
-                state['monster_pos'][inst]=[x/100.0,z/100.0]; push(509,encode_sproto([(0,attr)]))
+                state['monster_pos'][inst]=[x/100.0,z/100.0]
+                state.setdefault('monster_heading',{})[inst]=int(o)
+                push(509,encode_sproto([(0,attr)]))
                 state.setdefault('spawned_npcs',set()).add(inst)
             return inst
         spawn_exp_stage_subwave_internal(conn,push,picked_char,state,cfg,create_exp_npc)
