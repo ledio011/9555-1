@@ -2382,7 +2382,7 @@ def build_npc_attr_sproto(nid, name, x, z, o):
     inst_id = GLOBAL_INST_COUNTER
     NPC_HP_MAP[inst_id] = hp_max
     NPC_INST_MAP[inst_id] = str(nid)
-    print(f"[EXP SPAWN] inst_id={inst_id} npcid={nid} hp_max={hp_max} atk={atk} def={df}")
+    print(f"[NPC SPAWN] inst_id={inst_id} npcid={nid} hp_max={hp_max} atk={atk} def={df}")
 
     final_nid = str(nid)
     if ";" in final_nid:
@@ -2464,6 +2464,7 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
         with run_lock:
             group_start = exp_state.get('group_start_time', int(time.time()))
             if int(time.time()) - group_start >= group_time and exp_state.get('ai_active'):
+                print(f"[EXP STAGE] group timeout copy={exp_state.get('copy_id')} group={exp_state.get('cur_group')} wave={exp_state.get('cur_wave')} retiring={len(exp_state.get('active_monsters', []))}")
                 # Partial-wave kills still count toward kill missions even
                 # though the remaining live NPCs are retired for the next group.
                 flush_exp_kill_tracker(exp_state, conn_for_sync, picked_char, send_rpc_push_func)
@@ -5716,10 +5717,34 @@ def client_handler(conn, addr):
                 copy_id = field_text(body, 0)
                 cfg = COPY_SCENE_CONFIG.get(copy_id)
                 if picked_char and copy_id in ["223", "224", "225", "226", "227", "228", "229"]:
-                    # Security: Deny entry if player is already in an exp stage dungeon
-                    if picked_char.get('exp_stage_state') is not None or picked_char.get('active_copy_id'):
-                        print(f"[EXP STAGE] denied id={copy_id}; player already in exp stage")
+                    exp_state = picked_char.get('exp_stage_state')
+                    active_copy_id = str(picked_char.get('active_copy_id') or '')
+                    current_map = str(picked_char.get('map_id') or '11')
+                    active_cfg = COPY_SCENE_CONFIG.get(active_copy_id, {})
+                    active_copy_maps = {active_copy_id}
+                    if active_cfg.get('map_id'):
+                        active_copy_maps.add(str(active_cfg['map_id']))
+                    active_copy_is_current = bool(active_copy_id and current_map in active_copy_maps)
+                    current_map_is_copy = any(
+                        not is_exp_map(other_id) and str(other_cfg.get('map_id') or '') == current_map
+                        for other_id, other_cfg in COPY_SCENE_CONFIG.items()
+                    )
+                    # Only block when the character has a live EXP state, is
+                    # physically on an EXP map, or is still inside its active
+                    # copy. A stale active_copy_id from another copy must not
+                    # lock an otherwise-city character out of EXP entry.
+                    if exp_state is not None or is_exp_map(current_map) or active_copy_is_current or current_map_is_copy:
+                        state_copy_id = str(exp_state.get('copy_id') or '') if isinstance(exp_state, dict) else ''
+                        print(f"[EXP STAGE] denied id={copy_id}; active state copy={state_copy_id or '-'} active_copy={active_copy_id or '-'} map={current_map}")
                     else:
+                        if active_copy_id:
+                            picked_char['active_copy_id'] = None
+                            if (picked_char.get('pre_copy_pos') is not None
+                                    and str(picked_char.get('pre_copy_map') or '') != current_map):
+                                picked_char['pre_copy_pos'] = None
+                                picked_char['pre_copy_map'] = None
+                            print(f"[EXP RECOVERY] released stale copy marker copy={active_copy_id} map={current_map} player={picked_char.get('id')}")
+                            save_chars(all_accounts_chars)
                         # Fix: Validate player level against exp stage min_level and max_level
                         player_lv = picked_char.get('level', 1)
                         min_lv = (cfg or {}).get('min_level', 1)
