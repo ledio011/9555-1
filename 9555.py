@@ -10,11 +10,15 @@ server_session_counter = 8000
 GLOBAL_INST_COUNTER = 3000000
 NPC_INST_MAP = {} # inst_id -> nid (to resolve rewards)
 NPC_HP_MAP = {}   # inst_id -> current hp
+NPC_ATTR_MAP = {} # runtime NPC payloads for reconnect replay
+TEAM_STATES = {}
+CHAR_TEAM = {}
+TEAM_INVITES = {}
+TEAM_MATCH_QUEUE = {}
+TEAM_ID_COUNTER = 500000
+EXP_RUN_COUNTER = 900000
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 DEAD_NPC_SET = set() # duplicate death/reward prevention set
-EXP_STAGE_IDS = frozenset(str(copy_id) for copy_id in range(223, 230))
-EXP_STAGE_FINISH_LOCK = threading.Lock()
-EXP_STAGE_KILL_LOCK = threading.Lock()
 RANDOM_NAME_CALLED = set()  # connection identities that have had their first random name request
 ALL_CONNECTIONS = {}  # char_id -> (conn, picked_char) for tracking online players
 CONNECTION_LOCKS = {}  # char_id -> threading.Lock() for per-connection send protection
@@ -212,8 +216,6 @@ try:
                         'eff0': parts[24],
                         'eff1': parts[26] if len(parts) > 26 else "",
                         'eff2': parts[28] if len(parts) > 28 else "",
-                        'cooldown_ms': int(parts[10]) if len(parts) > 10 and parts[10].isdigit() else 1000,
-                        'trace_distance': int(parts[12]) if len(parts) > 12 and parts[12].isdigit() else 500,
                         'priority': int(parts[29]) if len(parts) > 29 and parts[29].isdigit() else 0
                     }
                     # Build reverse lookup: effId -> skillId
@@ -762,10 +764,13 @@ try:
                         'map_id': parts[5],
                         'subtype': int(parts[12]) if parts[12].isdigit() else 0,
                         'exist_time': int(parts[13]) if parts[13].isdigit() else 0,
+                        'time_inc': parts[8] if len(parts) > 8 else '',
                         'end_time': int(parts[10]) if parts[10].isdigit() else 0,
                         'max_plays': int(parts[18]) if parts[18].isdigit() else 0,
                         'min_level': int(parts[19]) if parts[19].isdigit() else 1,
-                        'max_level': int(parts[20]) if len(parts) > 20 and parts[20].isdigit() else 80
+                        'max_level': int(parts[20]) if len(parts) > 20 and parts[20].isdigit() else 80,
+                        'min_member': int(parts[21]) if len(parts) > 21 and parts[21].isdigit() else 1,
+                        'max_member': int(parts[22]) if len(parts) > 22 and parts[22].isdigit() else 4
                     }
         print(f"[COPY SCENE CONFIG LOADED] daily_copies={len(COPY_SCENE_CONFIG)}")
 
@@ -1562,7 +1567,7 @@ def broadcast_aoi_move(char):
         return
     char_id = char.get('id', 0)
     map_id = str(char.get('map_id', '11'))
-    if is_single_player_map(map_id):
+    if is_single_player_map(map_id) and not ((char.get('exp_stage_state') or {}).get('team_id')):
         return
     pos = char.get('pos', [0, 0, 0, 0])
     try:
@@ -1581,7 +1586,7 @@ def broadcast_aoi_move(char):
         pf_p = sproto_pack(ph_p + aoi_move)
         pkt = struct.pack(">H", len(pf_p)) + pf_p
         for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-            if ch and ch.get('id', 0) != char_id and str(ch.get('map_id', '11')) == map_id:
+            if ch and can_aoi_exchange(char, ch):
                 try:
                     c_lock = CONNECTION_LOCKS.get(cid)
                     if c_lock:
@@ -1601,7 +1606,7 @@ def broadcast_aoi_stop_move(char):
         return
     char_id = char.get('id', 0)
     map_id = str(char.get('map_id', '11'))
-    if is_single_player_map(map_id):
+    if is_single_player_map(map_id) and not ((char.get('exp_stage_state') or {}).get('team_id')):
         return
     pos = char.get('pos', [0, 0, 0, 0])
     try:
@@ -1620,7 +1625,7 @@ def broadcast_aoi_stop_move(char):
         pf_p = sproto_pack(ph_p + aoi_stop)
         pkt = struct.pack(">H", len(pf_p)) + pf_p
         for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-            if ch and ch.get('id', 0) != char_id and str(ch.get('map_id', '11')) == map_id:
+            if ch and can_aoi_exchange(char, ch):
                 try:
                     c_lock = CONNECTION_LOCKS.get(cid)
                     if c_lock:
@@ -1640,7 +1645,7 @@ def broadcast_aoi_attribute(char):
         return
     char_id = char.get('id', 0)
     map_id = str(char.get('map_id', '11'))
-    if is_single_player_map(map_id):
+    if is_single_player_map(map_id) and not ((char.get('exp_stage_state') or {}).get('team_id')):
         return
     stats = get_character_stats(char)
     hp_cur = char.get('hp', stats['hp_max'])
@@ -1663,7 +1668,7 @@ def broadcast_aoi_attribute(char):
         pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_attr)]))
         pkt = struct.pack(">H", len(pf_p)) + pf_p
         for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-            if ch and ch.get('id', 0) != char_id and str(ch.get('map_id', '11')) == map_id:
+            if ch and can_aoi_exchange(char, ch):
                 try:
                     c_lock = CONNECTION_LOCKS.get(cid)
                     if c_lock:
@@ -1704,9 +1709,144 @@ def send_rpc_push_safe(c, tag, data):
     try:
         ph_p = encode_sproto([(0, tag)])
         pf_p = sproto_pack(ph_p + data)
-        c.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+        lock = None
+        for cid, (active_conn, _ch) in list(ALL_CONNECTIONS.items()):
+            if active_conn is c:
+                lock = CONNECTION_LOCKS.get(cid); break
+        if lock:
+            with lock: c.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+        else: c.sendall(struct.pack(">H", len(pf_p)) + pf_p)
     except:
         pass
+
+
+def send_push_to_char(char_id, tag, data):
+    try:
+        conn, ch = ALL_CONNECTIONS.get(int(char_id), (None, None))
+        if conn is None or ch is None:
+            return False
+        send_rpc_push_safe(conn, tag, data)
+        return True
+    except Exception:
+        return False
+
+def exp_member_ids(state):
+    return list(dict.fromkeys(int(cid) for cid in (state.get('members') or [state.get('owner_id')]) if cid is not None))
+
+def exp_send_push(state, tag, data, exclude=None):
+    excluded = set(int(cid) for cid in (exclude or []))
+    for cid in exp_member_ids(state):
+        conn, ch = ALL_CONNECTIONS.get(cid, (None, None))
+        if cid not in excluded and conn is not None and ch is not None and str(ch.get('map_id')) == str(state.get('copy_id')):
+            send_rpc_push_safe(conn, tag, data)
+
+def exp_participant_chars(state):
+    out = []
+    for cid in exp_member_ids(state):
+        conn, ch = ALL_CONNECTIONS.get(cid, (None, None))
+        if ch is None:
+            ch = state.get('char_refs', {}).get(cid)
+        if ch is not None:
+            out.append((cid, conn, ch))
+    return out
+
+def exp_online_members(state, alive=False):
+    out = []
+    for cid in exp_member_ids(state):
+        conn, ch = ALL_CONNECTIONS.get(cid, (None, None))
+        if conn is not None and ch is not None and str(ch.get('map_id')) == str(state.get('copy_id')) and (not alive or ch.get('hp', 0) > 0):
+            out.append((cid, conn, ch))
+    return out
+
+def exp_sync_npc_attrs(state, inst_id, stats, hp):
+    oth=encode_sproto([(0,hp),(2,stats['lv'])]); base=encode_sproto([(0,stats['hp_max'])])
+    allv=encode_sproto([(0,stats['hp_max']),(2,stats['atk']),(3,stats['def']),(4,stats['hit']),(5,stats['eva']),(6,stats['cri']),(7,stats['res']),(8,stats['exd']),(9,stats['exr']),(10,stats['crd']),(11,stats['crr']),(12,stats['defa']),(13,500),(17,stats['dgea']),(18,stats['resa']),(19,stats['hita']),(20,stats['cria'])])
+    obj=encode_sproto([(0,inst_id),(1,oth),(2,base),(3,allv)])
+    exp_send_push(state,510,encode_sproto([(0,obj)]))
+
+def is_exp_map(map_id):
+    return str(map_id) in ('223','224','225','226','227','228','229')
+
+def can_aoi_exchange(source, target):
+    if not source or not target or source.get('id')==target.get('id') or str(source.get('map_id'))!=str(target.get('map_id')): return False
+    if is_exp_map(source.get('map_id')):
+        state=source.get('exp_stage_state')
+        return bool(state and state.get('team_id') and state is target.get('exp_stage_state'))
+    return not is_single_player_map(source.get('map_id'))
+
+def send_packet_to_char(char_id, packet):
+    conn=ALL_CONNECTIONS.get(int(char_id),(None,None))[0]
+    if conn is None: return False
+    try:
+        lock=CONNECTION_LOCKS.get(int(char_id))
+        if lock:
+            with lock: conn.sendall(packet)
+        else: conn.sendall(packet)
+        return True
+    except Exception: return False
+
+def sync_exp_team_aoi(char):
+    state=char.get('exp_stage_state') if char else None
+    if not state or not state.get('team_id'): return
+    own=build_aoi_add_packet(char)
+    if not own: return
+    for cid,conn,peer in exp_online_members(state):
+        if cid==int(char.get('id',0)): continue
+        other=build_aoi_add_packet(peer)
+        if other:
+            send_packet_to_char(char['id'],other);send_packet_to_char(cid,own)
+
+def team_member_blob(char, team_id):
+    stats = get_character_stats(char)
+    hpmax = int(stats.get('hp_max', 1))
+    goal = str(char.get('team_goal_copy', ''))
+    goal_cfg = COPY_SCENE_CONFIG.get(goal, {})
+    attempts = copy_attempts_remaining(char, goal, goal_cfg) if goal in DAILY_EXP_CONFIG else -1
+    return encode_sproto([(0, int(char.get('id', 0))), (1, int(team_id)), (2, str(char.get('name', 'Hero'))),
+        (3, int(char.get('level', 1))), (4, int(char.get('prof', 0))), (5, int(stats.get('power', 0))),
+        (6, int(char.get('map_id', 11))), (7, 0), (8, 0), (9, max(0, int(char.get('hp', hpmax)))),
+        (10, hpmax), (14, build_main_player_visual(char)), (15, attempts),
+        (16, int(char.get('guild_id', 0))), (17, str(char.get('guild_name', '')))])
+
+def team_payload(team):
+    if not team or not team.get('members'):
+        return None
+    leader_id = int(team['leader_id'])
+    leader = ALL_CONNECTIONS.get(leader_id, (None, team.get('char_refs', {}).get(leader_id)))[1]
+    if leader is None:
+        return None
+    others = {}
+    for cid in team['members']:
+        if int(cid) == leader_id: continue
+        char = ALL_CONNECTIONS.get(int(cid), (None, team.get('char_refs', {}).get(int(cid))))[1]
+        if char is not None: others[int(cid)] = team_member_blob(char, team['id'])
+    return encode_sproto([(0, int(team['id'])), (1, team_member_blob(leader, team['id'])), (2, len(team['members'])),
+        (3, int(team.get('verify', 0))), (4, others), (5, str(team.get('goal_id', ''))),
+        (6, int(team.get('min_level', 1))), (7, int(team.get('max_level', 80))), (8, int(team.get('recruit', 0)))])
+
+def send_team_update(team_id, only_ids=None):
+    team = TEAM_STATES.get(int(team_id))
+    payload = team_payload(team)
+    if payload is None: return
+    data = encode_sproto([(0, payload)])
+    for cid in list(team.get('members', []) if only_ids is None else only_ids):
+        send_push_to_char(cid, 518, data)
+
+def send_team_member_update(team_id, char, force=False):
+    team = TEAM_STATES.get(int(team_id))
+    if not team or not char: return
+    run = team.get('active_run')
+    member_id = int(char.get('id', 0))
+    updates = run.setdefault('member_update_at', {}) if run else {}
+    now = time.monotonic()
+    if not force and now - updates.get(member_id, 0) < 0.5: return
+    if run: updates[member_id] = now
+    data = encode_sproto([(0, int(team_id)), (1, team_member_blob(char, team_id))])
+    for cid in list(team.get('members', [])):
+        send_push_to_char(cid, 575, data)
+
+def get_team_for_char(char_id):
+    return TEAM_STATES.get(CHAR_TEAM.get(int(char_id)))
 
 def get_relife_config(death_count):
     if RELIFE_DATA:
@@ -2145,6 +2285,7 @@ def build_npc_attr_sproto(nid, name, x, z, o):
         (15, x), (16, z), (17, o), (18, lvl), (21, name),
         (24, dgea), (25, resa), (26, hita), (27, cria)
     ])
+    NPC_ATTR_MAP[inst_id] = attr
     return inst_id, attr
 
 
@@ -2155,7 +2296,7 @@ def _build_exp_npc_wrapper(send_rpc_push, exp_state):
     Fix: Also tracks monster_pos in exp_state so AI loop uses correct spawn positions."""
     def send_npc_wrapper(nid, name, x, z, o):
         inst_id, attr = build_npc_attr_sproto(nid, name, x, z, o)
-        send_rpc_push(509, attr)
+        send_rpc_push(509, encode_sproto([(0, attr)]))
         # Fix: Track monster position in exp_state so AI loop uses correct spawn position
         if exp_state and 'monster_pos' in exp_state:
             exp_state['monster_pos'][inst_id] = [x / 100.0, z / 100.0]
@@ -2176,17 +2317,31 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
         conn_for_sync: Connection object for sync_char_attrs_rpc
         on_player_die: Callback(conn, send_func, picked_char, exp_state) called when player dies
     """
-    if not picked_char or not exp_state.get('ai_active') or picked_char.get('map_id') != map_str:
-        return
-    if picked_char.get('hp', 0) <= 0:
-        return
+    if not picked_char or not exp_state.get('ai_active') or str(picked_char.get('map_id')) != str(map_str):
+        return False
+    if exp_state.get('team_id'):
+        live = exp_online_members(exp_state, alive=True)
+        if not live: return bool(exp_state.get('ai_active'))
+        _target_id, conn_for_sync, picked_char = live[0]
+    elif picked_char.get('hp', 0) <= 0:
+        return False
 
-    # Fix: Enforce group time limit - if group exceeds time limit, force advance to next wave/group
     exp_cfg = DAILY_EXP_CONFIG.get(exp_state.get('copy_id', ''), {})
     group_time = exp_cfg.get('group_time', 60)
     group_start = exp_state.get('group_start_time', int(time.time()))
     if int(time.time()) - group_start >= group_time:
-        _cleanup_exp_stage_npcs(exp_state, send_rpc_push_func)
+        for inst_id in list(exp_state.get('active_monsters', [])):
+            if inst_id not in DEAD_NPC_SET:
+                target_nid = NPC_INST_MAP.get(inst_id)
+                if target_nid:
+                    DEAD_NPC_SET.add(inst_id)
+                    send_rpc_push_func(506, encode_sproto([(0, inst_id)]))
+                    NPC_HP_MAP.pop(inst_id, None)
+                    NPC_INST_MAP.pop(inst_id, None)
+                    NPC_ATTR_MAP.pop(inst_id, None)
+                exp_state.get('monster_pos', {}).pop(inst_id, None)
+                exp_state.get('attack_cd', {}).pop(inst_id, None)
+        exp_state['active_monsters'] = []
         exp_state['kill_tracker'] = []
         if exp_state['cur_group'] < exp_cfg.get('group_count', 7):
             exp_state['cur_group'] += 1
@@ -2196,66 +2351,56 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
             spawn_exp_stage_subwave_internal(conn_for_sync, send_rpc_push_func, picked_char, exp_state, exp_cfg, _build_exp_npc_wrapper(send_rpc_push_func, exp_state))
             _send_exp_tag683(send_rpc_push_func, exp_state, exp_cfg)
         else:
-            # The final group's deadline is the stage's final completion condition.
             finish_exp_stage(conn_for_sync, send_rpc_push_func, picked_char, exp_state, win=True)
         return
 
     player_pos = picked_char.get('pos', [0, 100, 0, 0])
-    # Fix: Player pos is ALWAYS stored in hundredths of units (same as MonsterData).
-    # The > 200 heuristic was wrong: when player is at origin (0,0), abs(0) < 200
-    # so px stayed 0 (hundredths) instead of 0.0 (world units). For exp stage,
-    # monster_pos is stored in world units, so player pos must also be world units.
     px = player_pos[0] / 100.0
     pz = player_pos[2] / 100.0
     player_stats = get_character_stats(picked_char)
 
-    # Fix: Use AIData for AI behavior parameters instead of hardcoded values
-    # AIData 1007: LockDistance=500 (5.0 units), SkillCD=1000-3000ms
-    # NpcData: MoveSpeed=700 (7.0 world units/sec), WalkSpeed=5
     ai_data_id = '1007'  # Default AIDATAID for exp stage monsters
     ai_cfg = AI_DATA_CONFIG.get(ai_data_id, {
         'lock_distance': 500, 'skill_cd_min': 1000, 'skill_cd_max': 3000,
         'around_min_distance': 100, 'around_max_distance': 200,
     })
-    # Fix: For exp stage (single-player dungeon), ALL monsters must aggro the player.
-    # LockDistance=5.0 (AIData) is for open-world NPCs where distant NPCs ignore the player.
-    # In a dungeon, the map is ~20 units wide and monsters spawn across the entire area.
-    # With 5.0 unit detection, most monsters never see the player and never attack.
-    # The client's PatrolState uses 5.0 units too, but the client-side AI is DESTROYED
-    # for MultiScene (ObjNPC.cs destroys AILogic). The server controls ALL monster behavior.
     lock_distance = 50.0  # Cover entire exp stage map so all monsters detect and chase player
-    # Attack range: monsters stop at around distance (1-2 units) to attack
     around_min = ai_cfg['around_min_distance'] / 100.0  # 1.0 units
     around_max = ai_cfg['around_max_distance'] / 100.0  # 2.0 units
     attack_distance = (around_min + around_max) / 2.0  # 1.5 units average
-    # WalkSpeed from NpcData: 5 = 5.0 world units per second (monsters walk, not run)
-    # AI loop runs every 0.2s (client UpdateSecond), step = speed * interval
     move_speed_per_tick = 5.0 * 0.2  # 1.0 units per 0.2s tick
 
-    # Per-monster attack cooldown tracking
     if 'attack_cd' not in exp_state:
         exp_state['attack_cd'] = {}
 
     current_time = time.time()
 
     for inst_id in list(exp_state.get('active_monsters', [])):
-        # Fix: Remove dead NPCs from active_monsters first to prevent re-processing
-        # If NPC_HP_MAP was already popped (msg 111 killed it), treat as dead
         if inst_id in DEAD_NPC_SET:
-            # The thread that claimed this death is still completing its kill handling.
+            if inst_id in exp_state.get('active_monsters', []):
+                exp_state['active_monsters'].remove(inst_id)
+                print(f"[EXP AI] Cleaned up already-dead inst_id={inst_id} from active_monsters")
+            NPC_HP_MAP.pop(inst_id, None)
+            NPC_INST_MAP.pop(inst_id, None)
+            NPC_ATTR_MAP.pop(inst_id, None)
+            exp_state.get('monster_pos', {}).pop(inst_id, None)
+            exp_state.get('attack_cd', {}).pop(inst_id, None)
             continue
         if NPC_HP_MAP.get(inst_id, 0) <= 0:
             target_nid_for_death = NPC_INST_MAP.get(inst_id)
             print(f"[EXP AI] Auto-death detected inst_id={inst_id} npcid={target_nid_for_death} hp={NPC_HP_MAP.get(inst_id, 0)}")
             if target_nid_for_death:
-                with EXP_STAGE_KILL_LOCK:
-                    if inst_id in DEAD_NPC_SET:
-                        continue
-                    DEAD_NPC_SET.add(inst_id)
+                DEAD_NPC_SET.add(inst_id)
                 send_rpc_push_func(506, encode_sproto([(0, inst_id)]))
+                NPC_HP_MAP.pop(inst_id, None)
+                NPC_INST_MAP.pop(inst_id, None)
+                if inst_id in exp_state.get('active_monsters', []):
+                    exp_state['active_monsters'].remove(inst_id)
+                NPC_ATTR_MAP.pop(inst_id, None)
+                exp_state.get('monster_pos', {}).pop(inst_id, None)
+                exp_state.get('attack_cd', {}).pop(inst_id, None)
                 on_npc_killed(conn_for_sync, send_rpc_push_func, picked_char, inst_id, target_nid_for_death)
             else:
-                # No npcid found — still clean up
                 if inst_id in exp_state.get('active_monsters', []):
                     exp_state['active_monsters'].remove(inst_id)
             continue
@@ -2264,43 +2409,39 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
             continue
 
         m_pos = exp_state['monster_pos'].setdefault(inst_id, [6.94, -11.37])
+        if exp_state.get('team_id'):
+            live_targets = exp_online_members(exp_state, alive=True)
+            if not live_targets: continue
+            _tid, target_conn, target_char = min(live_targets, key=lambda item: (item[2].get('pos', [0,100,0,0])[0] / 100.0 - m_pos[0]) ** 2 + (item[2].get('pos', [0,100,0,0])[2] / 100.0 - m_pos[1]) ** 2)
+            conn_for_sync = target_conn; picked_char = target_char
+            target_pos = picked_char.get('pos', [0, 100, 0, 0])
+            px = target_pos[0] / 100.0; pz = target_pos[2] / 100.0
+            player_stats = get_character_stats(picked_char)
         mx, mz = m_pos[0], m_pos[1]
         dx = px - mx
         dz = pz - mz
         dist = math.sqrt(dx * dx + dz * dz)
 
-        # Fix: Use LockDistance from AIData (5.0 units) for detection range
         if dist > lock_distance:
-            # Monster is out of detection range - don't move or attack
             continue
 
         if dist > attack_distance:
-            # Move toward player using MoveSpeed from NpcData
             step = min(move_speed_per_tick, dist - attack_distance)
             new_mx = mx + (dx / dist) * step
             new_mz = mz + (dz / dist) * step
             exp_state['monster_pos'][inst_id] = [new_mx, new_mz]
-            # Fix: Calculate orientation so monster faces the player (degrees * 100)
             heading = int(math.degrees(math.atan2(dx, dz)) * 100)
             pos_obj = encode_sproto([(0, int(new_mx * 100)), (1, 0), (2, int(new_mz * 100)), (3, heading)])
-            # Fix: Include both pos (field 0) and pos2 (field 1) in movement sproto
             m_move = encode_sproto([(0, pos_obj), (1, pos_obj)])
-            # Fix: Set walk=True so monsters walk instead of run
             char_move = encode_sproto([(0, inst_id), (1, m_move), (2, True)])
             send_func(507, encode_sproto([(0, char_move)]))
         else:
-            # In attack range - stop and attack
-            # Fix: Calculate orientation so monster faces the player when attacking
             heading = int(math.degrees(math.atan2(dx, dz)) * 100)
             pos_obj_stop = encode_sproto([(0, int(mx * 100)), (1, 0), (2, int(mz * 100)), (3, heading)])
-            # Fix: Include both pos (field 0) and pos2 (field 1) in movement sproto
             m_move_stop = encode_sproto([(0, pos_obj_stop), (1, pos_obj_stop)])
-            # Fix: Set walk=True so monsters walk instead of run
             char_move_stop = encode_sproto([(0, inst_id), (1, m_move_stop), (2, True)])
             send_func(513, encode_sproto([(0, char_move_stop)]))
 
-            # Fix: Per-monster attack cooldown from AIData SkillCD (1-3s random)
-            # Set cooldown once when monster first attacks, then reuse it
             if inst_id not in exp_state['attack_cd']:
                 exp_state['attack_cd'][inst_id] = {
                     'last_attack': 0,
@@ -2319,9 +2460,6 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
             if is_hit and dmg > 0:
                 picked_char['hp'] = max(0, picked_char['hp'] - dmg)
 
-                # Fix: Send TAG 508 (ret_skill_use) so client plays NPC attack animation
-                # ret_skill_use: sendderId(0), targetId(1), skillId(2), attack_list(3)
-                # attack_list: id(0), value(1) where value = damage dealt
                 attack_list_entry = encode_sproto([(0, picked_char['id']), (1, dmg)])
                 ret_skill = encode_sproto([
                     (0, inst_id),
@@ -2331,152 +2469,47 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
                 ])
                 send_rpc_push_func(508, ret_skill)
 
-                # Fix: Send TAG 511 (show_damage_board) so client displays damage numbers on player
-                # acceptdamge sproto: id(0), damage(1), skillId(2), effinfoId(3), cri(4)
                 dmg_entry = encode_sproto([(0, picked_char['id']), (1, dmg), (2, monster_skill), (3, "10000"), (4, is_cri)])
                 dmg_board = encode_sproto([(0, [dmg_entry])])
                 send_rpc_push_func(511, dmg_board)
                 sync_char_attrs_rpc(conn_for_sync, picked_char)
+                if exp_state.get('team_id'):
+                    broadcast_aoi_attribute(picked_char)
+                    send_team_member_update(exp_state['team_id'], picked_char, force=picked_char.get('hp', 0) <= 0)
                 if picked_char['hp'] <= 0:
                     on_player_die(conn_for_sync, send_func, picked_char, exp_state)
-                    return
+                    if not exp_state.get('team_id'):
+                        return False
 
     return exp_state.get('ai_active') and picked_char.get('map_id') == map_str
 
 
-def _exp_stage_spawn_count(exp_cfg, copy_id, group=None):
-    """Count configured monsters using the same selection rules as the spawner."""
-    wave_count = max(0, int(exp_cfg.get('wave_count', 4)))
-    group_count = max(0, int(exp_cfg.get('group_count', 7)))
-    monster_groups = exp_cfg.get('monsters', [f"{copy_id}1"])
-    first_group = group or 1
-    last_group = group or group_count
-    total = 0
-
-    for group_index in range(first_group, last_group + 1):
-        for wave_index in range(1, wave_count + 1):
-            subwave = (group_index - 1) * wave_count + wave_index
-            if not monster_groups:
-                continue
-            mon_group_id = monster_groups[(subwave - 1) % len(monster_groups)]
-            mon_entries = MONSTER_DATA.get(mon_group_id, [])
-            group_num = ((subwave - 1) % 28) + 1
-            subwave_spawns = [m for m in mon_entries if m.get('group') == group_num]
-            if not subwave_spawns:
-                subwave_spawns = mon_entries[:5]
-            total += len(subwave_spawns)
-
-    if total:
-        return total
+def _send_exp_tag683(send_rpc_push, exp_state, exp_cfg):
     counts = exp_cfg.get('group_npc_count', [5, 10, 15, 20])
-    return sum(max(0, int(count)) for count in counts[:wave_count]) * (last_group - first_group + 1)
-
-
-def _exp_stage_ui_progress(exp_state, exp_cfg):
-    """Scale actual kills to the fixed denominator used by the current client UI."""
+    if not isinstance(counts, list) or not counts: counts = [5, 10, 15, 20]
     wave_count = max(1, int(exp_cfg.get('wave_count', 4)))
     group_count = max(1, int(exp_cfg.get('group_count', 7)))
-    counts = exp_cfg.get('group_npc_count', [5, 10, 15, 20])
-    ui_kills_per_group = max(1, int(counts[0])) * wave_count
-    ui_total_kills = ui_kills_per_group * group_count
-    actual_group_kills = _exp_stage_spawn_count(exp_cfg, exp_state['copy_id'], exp_state['cur_group'])
-    actual_total_kills = _exp_stage_spawn_count(exp_cfg, exp_state['copy_id'])
-    wave_kills = exp_state.get('wave_kills', 0)
-    total_kills = exp_state.get('total_kills', 0)
-    shown_wave_kills = min(ui_kills_per_group, int(wave_kills * ui_kills_per_group / actual_group_kills)) if actual_group_kills else 0
-    shown_total_kills = min(ui_total_kills, int(total_kills * ui_total_kills / actual_total_kills)) if actual_total_kills else 0
-    return shown_wave_kills, shown_total_kills
-
-
-def _exp_stage_position_bounds(copy_id):
-    """Derive a conservative movement boundary from configured spawn points."""
-    exp_cfg = DAILY_EXP_CONFIG.get(str(copy_id), {})
-    points = []
-    for mon_group_id in exp_cfg.get('monsters', []):
-        points.extend((entry['x'], entry['z']) for entry in MONSTER_DATA.get(mon_group_id, []))
-    if not points:
-        return (-2000, 2000, -2000, 2000)
-    margin = 1000
-    return (
-        min(point[0] for point in points) - margin,
-        max(point[0] for point in points) + margin,
-        min(point[1] for point in points) - margin,
-        max(point[1] for point in points) + margin
-    )
-
-
-def _exp_stage_position_is_valid(picked_char, position, now=None):
-    """Reject EXP-stage teleports and positions outside configured stage bounds."""
-    if len(position) < 4:
-        return False
-    copy_id = str(picked_char.get('map_id', ''))
-    min_x, max_x, min_z, max_z = _exp_stage_position_bounds(copy_id)
-    x, z = position[0], position[2]
-    if not (min_x <= x <= max_x and min_z <= z <= max_z) or abs(position[1]) > 2000:
-        return False
-
-    now = time.monotonic() if now is None else now
-    previous = picked_char.get('_exp_last_move_pos', picked_char.get('pos', position))
-    last_time = picked_char.get('_exp_last_move_time', now)
-    elapsed = max(0.0, now - last_time)
-    dx = x - previous[0]
-    dz = z - previous[2]
-    max_distance = max(150.0, elapsed * 2000.0 + 50.0)
-    if math.sqrt(dx * dx + dz * dz) > max_distance:
-        return False
-
-    picked_char['_exp_last_move_pos'] = list(position)
-    picked_char['_exp_last_move_time'] = now
-    return True
-
-
-def _cleanup_exp_stage_npcs(exp_state, send_rpc_push=None):
-    for inst_id in list(exp_state.get('active_monsters', [])):
-        if send_rpc_push:
-            send_rpc_push(506, encode_sproto([(0, inst_id)]))
-        NPC_HP_MAP.pop(inst_id, None)
-        NPC_INST_MAP.pop(inst_id, None)
-        DEAD_NPC_SET.discard(inst_id)
-        exp_state.get('monster_pos', {}).pop(inst_id, None)
-    exp_state['active_monsters'] = []
-    exp_state.get('attack_cd', {}).clear()
-
-
-def _send_exp_tag683(send_rpc_push, exp_state, exp_cfg):
-    """Send stage progress scaled to the fixed denominator supported by the client."""
-    # Keep index=0 because the client only supports a fixed progress denominator.
-    # Scale configured spawn counts to its 5-per-subwave display.
-    wave_index = 0
-    shown_wave_kills, shown_total_kills = _exp_stage_ui_progress(exp_state, exp_cfg)
-    copy_id_str = str(exp_state['copy_id'])
+    actual_group = max(1, sum(int(n) for n in counts))
+    actual_total = actual_group * group_count
+    display_group = int(round(min(actual_group, exp_state.get('wave_kills', 0)) * (int(counts[0]) * wave_count) / actual_group))
+    display_total = int(round(min(actual_total, exp_state.get('total_kills', 0)) * (int(counts[0]) * wave_count * group_count) / actual_total))
     send_rpc_push(683, encode_sproto([
-        (0, copy_id_str),             # id (string) — must match client's DailyExpData.ID
-        (1, wave_index),              # index  (always 0 — client uses WaveNums[0]=5 for denominators)
-        (2, exp_state['end_time']),   # time   (unix timestamp)
-        (3, exp_state['cur_group']),  # parm1  (current group number, shown as "X/7")
-        (4, shown_wave_kills),         # parm2 (scaled to the current UI denominator)
-        (5, shown_total_kills)         # parm3 (scaled to the current UI denominator)
+        (0, str(exp_state['copy_id'])), (1, 0), (2, exp_state['end_time']),
+        (3, exp_state['cur_group']), (4, display_group), (5, display_total)
     ]))
 
-
 def spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state, exp_cfg, send_npc_func):
-    wave_count = max(1, int(exp_cfg.get('wave_count', 4)))
-    subwave = (exp_state['cur_group'] - 1) * wave_count + exp_state['cur_wave']
+    subwave = (exp_state['cur_group'] - 1) * 4 + exp_state['cur_wave']
     exp_state['subwave'] = subwave
     exp_state['active_monsters'] = []
 
-    # Fix: Use all 4 monster types from DailyExpData, rotating through them
-    # Each subwave cycles through the 4 monster groups (e.g., 2231, 2232, 2233, 2234)
     monster_groups = exp_cfg.get('monsters', [f"{exp_state['copy_id']}1"])
     mon_group_id = monster_groups[(subwave - 1) % len(monster_groups)]
     mon_entries = MONSTER_DATA.get(mon_group_id, [])
 
-    # MonsterData groups are 1-28 for each monster type
-    # Map subwave (1-28) to group number (1-28)
     group_num = ((subwave - 1) % 28) + 1
     subwave_spawns = [m for m in mon_entries if m.get('group') == group_num]
     if not subwave_spawns:
-        # Fallback: use first 5 monsters from the group
         subwave_spawns = mon_entries[:5]
 
     for m in subwave_spawns:
@@ -2502,122 +2535,136 @@ def get_exp_stage_full_reward(char_lv):
                 return count
     return 195000
 
-
-def _exp_stage_reward_amounts(picked_char, exp_state, win):
-    exp_cfg = DAILY_EXP_CONFIG.get(str(exp_state.get('copy_id', '')), {})
-    total_max_kills = _exp_stage_spawn_count(exp_cfg, exp_state.get('copy_id', ''))
-    ratio = min(1.0, exp_state.get('total_kills', 0) / total_max_kills) if total_max_kills else 1.0
-    full_exp = get_exp_stage_full_reward(picked_char.get('level', 1))
-    exp_reward = int(full_exp * ratio * (1.0 if win else 0.5))
-    return exp_reward, int(exp_reward * 0.1), ratio, total_max_kills
-
+def finish_exp_team_stage(conn, push, owner, state, win):
+    if state.get('team_finish_handled'): return
+    state['team_finish_handled']=True; state['ai_active']=False
+    for key in ('timeout_timer','ai_timer'):
+        timer=state.get(key)
+        if timer: timer.cancel()
+    copy_id=str(state['copy_id']); cfg=DAILY_EXP_CONFIG.get(copy_id,{})
+    counts=cfg.get('group_npc_count',[5,10,15,20]);
+    if not isinstance(counts,list) or not counts: counts=[5,10,15,20]
+    expected=max(1,sum(int(x) for x in counts)*int(cfg.get('group_count',7)))
+    ratio=min(1.0,max(0.0,int(state.get('total_kills',0))/expected))
+    flag=0; grade=0
+    if win:
+        flag|=1;grade+=1
+        if ratio>=0.8:flag|=2;grade+=1
+        if int(state.get('deaths',0))==0:flag|=4;grade+=1
+    subtype=(COPY_SCENE_CONFIG.get(copy_id) or {}).get('subtype',12)
+    members=exp_participant_chars(state)
+    if state.get('team_id'):
+        for cid,_member_conn,_char in members: broadcast_aoi_remove(cid, copy_id)
+    for cid,member_conn,char in members:
+        amount=int(get_exp_stage_full_reward(char.get('level',1))*ratio*(1 if win else 0.5)); cash=int(amount*0.1)
+        send=lambda tag,data,who=cid:send_push_to_char(who,tag,data)
+        if amount or cash:grant_item_rewards(char,[("2001",0,amount),("1001",0,cash)],member_conn or conn,send,save=False)
+        items=[encode_sproto([(0,'2001'),(1,amount),(3,0)]),encode_sproto([(0,'1001'),(1,cash),(3,0)])]
+        result=encode_sproto([(0,subtype),(1,copy_id),(2,bool(win)),(3,flag),(4,grade),(5,items)])
+        char['pending_exp_result']=result.hex()
+        if member_conn and str(char.get('map_id'))==copy_id:
+            send(552,result);char.pop('pending_exp_result',None)
+        if win:
+            advance_missions(char,send,'dungeon',target_id='105');advance_missions(char,send,'level')
+        char.pop('_skip_mission_save',None)
+    save_chars(all_accounts_chars)
+    delay=5 if win else (3 if int(time.time())>=int(state.get('end_time',0)) else 0)
+    for cid,_member_conn,char in members:
+        pos=char.get('pre_copy_pos'); mid=char.get('pre_copy_map','11')
+        char['_exp_return_pos']=pos;char['_exp_return_map']=mid
+        char.pop('exp_stage_state',None);char['active_copy_id']=None;char['exp_team_id']=None
+        char.pop('pre_copy_pos',None);char.pop('pre_copy_map',None)
+        def leave(who=cid,ch=char,retpos=pos,retmap=mid):
+            ch.pop('_exp_leave_timer',None);active,online=ALL_CONNECTIONS.get(who,(None,None))
+            if active and online is ch:
+                start_map_transition(active,ch,retmap,lambda tag,data,target=who:send_push_to_char(target,tag,data),override_pos=retpos)
+            else:
+                if retpos:ch['pos']=retpos
+                ch['map_id']=retmap;save_chars(all_accounts_chars)
+        if delay:
+            timer=threading.Timer(delay,leave);timer.daemon=True;char['_exp_leave_timer']=timer;timer.start()
+        else: leave()
+    team=TEAM_STATES.get(int(state.get('team_id') or 0))
+    if team:team['active_run']=None;team['pending_run']=None;send_team_update(team['id'])
+    save_chars(all_accounts_chars)
 
 def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
-    if not picked_char or picked_char.get('exp_stage_state') is not exp_state:
+    if exp_state.get('team_id'):
+        finish_exp_team_stage(conn,send_rpc_push,picked_char,exp_state,win)
         return
-    is_timeout = not win and int(time.time()) >= exp_state.get('end_time', 0)
-    terminal = win or is_timeout
-    with EXP_STAGE_FINISH_LOCK:
-        if exp_state.get('finished'):
-            return
-        if terminal:
-            exp_state['finished'] = True
-        elif exp_state.get('awaiting_relief'):
-            return
-        else:
-            exp_state['awaiting_relief'] = True
-
     exp_state['ai_active'] = False
     timeout_timer = exp_state.get('timeout_timer')
     if timeout_timer is not None:
         timeout_timer.cancel()
     copy_id = exp_state['copy_id']
+    char_lv = picked_char.get('level', 1) if picked_char else 1
+
+    full_exp = get_exp_stage_full_reward(char_lv)
     exp_cfg = DAILY_EXP_CONFIG.get(copy_id, {})
-    exp_reward, cash_reward, ratio, total_max_kills = _exp_stage_reward_amounts(picked_char, exp_state, win)
-    if not terminal:
-        exp_reward = 0
-        cash_reward = 0
-    elif not exp_state.get('result_reward_granted'):
-        grant_item_rewards(
-            picked_char,
-            [("2001", 0, exp_reward), ("1001", 0, cash_reward)],
-            conn,
-            send_rpc_push,
-            save=True
-        )
-        exp_state['result_reward_granted'] = True
+    wave_count = exp_cfg.get('wave_count', 4)
+    group_count = exp_cfg.get('group_count', 7)
+    counts = exp_cfg.get('group_npc_count', [5, 10, 15, 20])
+    if not isinstance(counts, list) or not counts: counts = [5, 10, 15, 20]
+    total_max_kills = max(1, sum(int(n) for n in counts) * int(group_count))
+    ratio = min(1.0, exp_state['total_kills'] / total_max_kills) if total_max_kills > 0 else 1.0
 
-    if terminal:
-        _cleanup_exp_stage_npcs(exp_state, send_rpc_push)
+    exp_reward = int(full_exp * ratio) if win else int(full_exp * ratio * 0.5)
+    cash_reward = int(exp_reward * 0.1)
 
-    # Fix: item sproto schema: Tag 0=itemId(string), Tag 1=itemCount(int), Tag 3=quality(int)
-    # (Tag 2 is skipped in the client's item.decode() — quality is at Tag 3)
+    if picked_char:
+        rewards = [("2001", 0, exp_reward), ("1001", 0, cash_reward)]
+        grant_item_rewards(picked_char, rewards, conn, send_rpc_push, save=True)
+
     res_items = [
         encode_sproto([(0, "2001"), (1, exp_reward), (3, 0)]),
         encode_sproto([(0, "1001"), (1, cash_reward), (3, 0)])
     ]
 
-    # Issue 39/40: Calculate gradeFlag as bitmask for star descriptions
-    # Bit 0 (1): Completed on time (win within timer)
-    # Bit 1 (2): Killed >= 80% of monsters
-    # Bit 2 (4): No deaths (death_count didn't increase)
     gradeFlag = 0
     grade = 0
     if win:
-        # Bit 0: Completed on time — always true if won before timeout
         gradeFlag |= 1
         grade += 1
-        # Bit 1: Killed >= 80% of monsters
         kill_ratio = exp_state.get('total_kills', 0) / total_max_kills if total_max_kills > 0 else 0
         if kill_ratio >= 0.8:
             gradeFlag |= 2
             grade += 1
-        # Bit 2: No deaths during this dungeon run
         if exp_state.get('deaths', 0) == 0:
             gradeFlag |= 4
             grade += 1
 
     if picked_char:
         if win:
-            # Fix: Use actual subtype from COPY_SCENE_CONFIG instead of hardcoded 12
             copy_cfg = COPY_SCENE_CONFIG.get(copy_id, {})
             subtype = copy_cfg.get('subtype', 12)
-            # Tag 552: copy_scene_result (win case — send before cleanup)
-            # Fix: Client's copy_scene_result.request.id is a STRING type
             send_rpc_push(552, encode_sproto([
                 (0, subtype), (1, str(copy_id)), (2, win), (3, gradeFlag), (4, grade), (5, res_items)
             ]))
-            # Bug 4: Save and sync missions once at dungeon completion
-            # (wave completion skips save/sync via _skip_mission_save flag)
             advance_missions(picked_char, send_rpc_push, 'dungeon', target_id='105')
             advance_missions(picked_char, send_rpc_push, 'level')
-            # Force final mission save/sync at dungeon completion
             picked_char.pop('_skip_mission_save', None)
             save_chars(all_accounts_chars)
             send_rpc_push(519, sync_mission_data(picked_char))
             saved_pos = picked_char.get('pre_copy_pos')
             saved_map = picked_char.get('pre_copy_map', '11')
+            picked_char['_exp_return_pos'] = saved_pos
+            picked_char['_exp_return_map'] = saved_map
             picked_char['pre_copy_pos'] = None
             picked_char['pre_copy_map'] = None
-            # Issue 54/62: Clear active_copy_id on win to prevent stale state
             picked_char['active_copy_id'] = None
-            # Issue 127: Store leave_timer in picked_char BEFORE popping exp_stage_state
-            # so disconnect cleanup can still cancel it
             def leave_exp_copy():
-                # Bug 2: If transition fails (stale conn), force position/map restore
-                # so the player is not stuck in the dungeon after reconnect
                 try:
-                    start_map_transition(conn, picked_char, saved_map, send_rpc_push, override_pos=saved_pos)
-                except Exception:
-                    # Connection closed or stale — force restore position and map
-                    # so the next reconnect places the player correctly
-                    try:
-                        if saved_pos:
-                            picked_char['pos'] = saved_pos
+                    active_conn = ALL_CONNECTIONS.get(int(picked_char.get('id', 0)), (None, None))[0]
+                    if active_conn:
+                        start_map_transition(active_conn, picked_char, saved_map, lambda tag, data: send_push_to_char(picked_char['id'], tag, data), override_pos=saved_pos)
+                    else:
+                        if saved_pos: picked_char['pos'] = saved_pos
                         picked_char['map_id'] = saved_map
                         save_chars(all_accounts_chars)
-                    except Exception:
-                        pass
+                except Exception:
+                    if saved_pos: picked_char['pos'] = saved_pos
+                    picked_char['map_id'] = saved_map
+                    save_chars(all_accounts_chars)
                 finally:
                     picked_char.pop('_exp_leave_timer', None)
 
@@ -2627,60 +2674,52 @@ def finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True):
             picked_char.pop('exp_stage_state', None)
             timer.start()
         else:
-            # Check if this is a timeout (time expired) vs a player death.
-            # Timeout: no relife offered, just fail and return to city.
-            # Death: offer relife via TAG 618.
+            is_timeout = int(time.time()) >= exp_state.get('end_time', 0)
+
             if is_timeout:
-                # Timeout: clean up and return to city, no relife
                 exp_state['deaths'] = exp_state.get('deaths', 0) + 1
-                # Send TAG 552 (copy_scene_result) for timeout fail so client shows fail screen
                 copy_cfg = COPY_SCENE_CONFIG.get(copy_id, {})
                 subtype = copy_cfg.get('subtype', 12)
-                # Fix: Client's copy_scene_result.request.id is a STRING type
-                send_rpc_push(552, encode_sproto([
+                result = encode_sproto([
                     (0, subtype), (1, str(copy_id)), (2, False), (3, gradeFlag), (4, grade), (5, res_items)
-                ]))
-                # Clean up exp_stage state and return to city
+                ])
+                picked_char['pending_exp_result'] = result.hex()
+                if ALL_CONNECTIONS.get(int(picked_char.get('id', 0)), (None, None))[0]:
+                    send_rpc_push(552, result); picked_char.pop('pending_exp_result', None)
                 picked_char.pop('exp_stage_state', None)
                 picked_char['active_copy_id'] = None
                 saved_pos = picked_char.get('pre_copy_pos')
                 saved_map = picked_char.get('pre_copy_map', '11')
+                picked_char['_exp_return_pos'] = saved_pos; picked_char['_exp_return_map'] = saved_map
                 picked_char['pre_copy_pos'] = None
                 picked_char['pre_copy_map'] = None
                 def leave_after_timeout():
                     try:
-                        start_map_transition(conn, picked_char, saved_map, send_rpc_push, override_pos=saved_pos)
-                    except Exception:
-                        try:
-                            if saved_pos:
-                                picked_char['pos'] = saved_pos
+                        active_conn = ALL_CONNECTIONS.get(int(picked_char.get('id', 0)), (None, None))[0]
+                        if active_conn:
+                            start_map_transition(active_conn, picked_char, saved_map, lambda tag, data: send_push_to_char(picked_char['id'], tag, data), override_pos=saved_pos)
+                        else:
+                            if saved_pos: picked_char['pos'] = saved_pos
                             picked_char['map_id'] = saved_map
                             save_chars(all_accounts_chars)
-                        except Exception:
-                            pass
+                    except Exception:
+                        if saved_pos: picked_char['pos'] = saved_pos
+                        picked_char['map_id'] = saved_map
+                        save_chars(all_accounts_chars)
+                    finally: picked_char.pop('_exp_leave_timer', None)
                 timer = threading.Timer(3.0, leave_after_timeout)
-                timer.daemon = True
+                timer.daemon = True; picked_char['_exp_leave_timer'] = timer
                 timer.start()
             else:
-                # Player death: offer relife via TAG 618
                 exp_state['deaths'] = exp_state.get('deaths', 0) + 1
                 death_count = exp_state['deaths']
                 relife_cfg = get_relife_config(death_count)
-                # Tag 618: notice_relife_player schema: type(0), cost(1), itemId(2), characterid(3), name(4)
                 relife_req = encode_sproto([
                     (0, 1),
                     (1, relife_cfg.get('use_count', 1)),  # cost field - item cost
                     (2, "9202")
                 ])
                 send_rpc_push(618, relife_req)
-                # Do NOT send TAG 552 (copy_scene_result) for EXP dungeon lose.
-                # The client's RebirthUIRoot handles the flow:
-                # - Player clicks "Respawn in place" → sends msg 132 with isInplace=True
-                # - Player clicks "Return to city" → sends msg 132 with isInplace=False
-                # Sending TAG 552 would show CopyFailShowRoot which OVERLAYS RebirthUI,
-                # making the respawn button inaccessible.
-                # Do NOT remove exp_stage_state on lose — keep it so relife can resume the dungeon
-                # The state will be removed when the player confirms relife or abandons
 
     print(f"[EXP STAGE] Finished copy={copy_id} win={win} total_kills={exp_state['total_kills']} exp={exp_reward} cash={cash_reward}")
 
@@ -2688,95 +2727,72 @@ def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid):
     if not picked_char: return
 
     exp_state = picked_char.get('exp_stage_state')
+    exp_push = (lambda tag, data: exp_send_push(exp_state, tag, data)) if exp_state and exp_state.get('team_id') else send_rpc_push
     if exp_state and inst_id:
-        with EXP_STAGE_KILL_LOCK:
-            active_monsters = exp_state.get('active_monsters', [])
-            killed_list = exp_state.get('killed_npcs', [])
-            if (exp_state.get('finished') or exp_state.get('awaiting_relief')
-                    or inst_id in killed_list or inst_id not in active_monsters
-                    or str(NPC_INST_MAP.get(inst_id)) != str(npcid)):
-                print(f"[EXP KILL] rejected inst_id={inst_id}; not an active live stage NPC")
-                return
-            killed_list.append(inst_id)
-            exp_state['killed_npcs'] = killed_list
-            active_monsters.remove(inst_id)
+        killed_list = exp_state.get('killed_npcs', [])
+        if inst_id in killed_list:
+            print(f"[EXP KILL] DUPLICATE skip inst_id={inst_id} already processed")
+            return
+        killed_list.append(inst_id)
+        exp_state['killed_npcs'] = killed_list
 
-    valid_kill = npcid and npcid != "None" and str(npcid) in NPC_CONFIG
+    valid_kill = npcid and npcid != "None"
 
     print(f"[EXP KILL] on_npc_killed inst_id={inst_id} npcid={npcid} valid={valid_kill} exp_state={exp_state is not None}")
     if exp_state and inst_id:
         active_monsters = exp_state.get('active_monsters', [])
+        print(f"[EXP KILL] active_monsters_before={len(active_monsters)} inst_id_in_list={inst_id in active_monsters}")
+
+        if inst_id in active_monsters:
+            active_monsters.remove(inst_id)
+            print(f"[EXP KILL] removed inst_id={inst_id} from active_monsters remaining={len(active_monsters)}")
 
         if valid_kill:
             exp_state['wave_kills'] += 1
             exp_state['total_kills'] += 1
             print(f"[EXP KILL] COUNTED wave_kills={exp_state['wave_kills']} total_kills={exp_state['total_kills']} wave={exp_state['cur_wave']} group={exp_state['cur_group']}")
-            # Issue 99/100: Track unique NPC IDs for batch mission advancement
             kt = exp_state.get('kill_tracker', [])
             if npcid not in kt:
                 kt.append(npcid)
         else:
             print(f"[EXP KILL] SKIPPED counting — invalid npcid={npcid}")
 
-        # Issue 183: Define exp_cfg OUTSIDE if valid_kill block
-        # so wave advancement check at line below doesn't crash with NameError
         exp_cfg = DAILY_EXP_CONFIG.get(exp_state['copy_id'], {})
+        if valid_kill:
+            _send_exp_tag683(exp_push, exp_state, exp_cfg)
 
-        # Bug 10/14: Do NOT send TAG 683 on every kill — only on wave transition.
-        # Sending it 140 times per dungeon creates unnecessary network traffic.
-        # The _send_exp_tag683 function is called after wave/group advancement below.
-
-        # Issue 91: send_npc_wrapper must use send_rpc_push, not conn directly,
-        # so it works correctly when called from relife AI thread
         if len(active_monsters) == 0:
-            # Bug 4/5: Batch mission advancement — skip save/sync per wave,
-            # will save once at dungeon completion in finish_exp_stage
-            picked_char['_skip_mission_save'] = True
-            # Batch-advance kill missions for all unique NPC types killed this wave
             kill_tracker = exp_state.get('kill_tracker', [])
-            for unique_nid in kill_tracker:
-                advance_missions(picked_char, send_rpc_push, 'kill', target_id=unique_nid)
-            advance_missions(picked_char, send_rpc_push, 'level')
-            picked_char['_skip_mission_save'] = False
-            # Clear the tracker for the next subwave
+            mission_chars = exp_participant_chars(exp_state) if exp_state.get('team_id') else [(int(picked_char.get('id', 0)), conn, picked_char)]
+            for member_id, member_conn, member_char in mission_chars:
+                member_push = (lambda tag, data, cid=member_id: send_push_to_char(cid, tag, data)) if exp_state.get('team_id') else send_rpc_push
+                member_char['_skip_mission_save'] = True
+                for unique_nid in kill_tracker:
+                    advance_missions(member_char, member_push, 'kill', target_id=unique_nid)
+                advance_missions(member_char, member_push, 'level')
+                member_char['_skip_mission_save'] = False
             exp_state['kill_tracker'] = []
-            # Advance to next subwave (cur_wave cycles 1-4 within each group)
             if exp_state['cur_wave'] < exp_cfg.get('wave_count', 4):
                 exp_state['cur_wave'] += 1
-                # Fix: Do NOT reset wave_kills — it accumulates across all 4 subwaves
-                # within a client wave. Reset only when the full wave cycle completes
-                # (i.e., when advancing to a new group below).
-                # Issue 23: Client EXPSceneManager.OpenBlock() is empty — skip TAG 515
-                spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state, exp_cfg, _build_exp_npc_wrapper(send_rpc_push, exp_state))
-                # Issue 126: Send TAG 683 after new subwave spawn so UI updates immediately
-                _send_exp_tag683(send_rpc_push, exp_state, exp_cfg)
+                spawn_exp_stage_subwave_internal(conn, exp_push, picked_char, exp_state, exp_cfg, _build_exp_npc_wrapper(exp_push, exp_state))
+                _send_exp_tag683(exp_push, exp_state, exp_cfg)
             else:
-                # All 4 subwaves in this group's wave cycle complete — advance to next group
                 if exp_state['cur_group'] < exp_cfg.get('group_count', 7):
                     exp_state['cur_group'] += 1
                     exp_state['cur_wave'] = 1
-                    # Fix: Reset wave_kills when starting a new group (new wave cycle)
                     exp_state['wave_kills'] = 0
-                    # Fix: Reset group start time for new group
                     exp_state['group_start_time'] = int(time.time())
-                    # Issue 23: Client EXPSceneManager.OpenBlock() is empty — skip TAG 515
-                    spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state, exp_cfg, _build_exp_npc_wrapper(send_rpc_push, exp_state))
-                    # Issue 126: Send TAG 683 after new subwave spawn so UI updates immediately
-                    _send_exp_tag683(send_rpc_push, exp_state, exp_cfg)
+                    spawn_exp_stage_subwave_internal(conn, exp_push, picked_char, exp_state, exp_cfg, _build_exp_npc_wrapper(exp_push, exp_state))
+                    _send_exp_tag683(exp_push, exp_state, exp_cfg)
                 else:
-                    finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=True)
+                    finish_exp_stage(conn, exp_push, picked_char, exp_state, win=True)
 
-    # Issue 76: Clean up NPC_HP_MAP and NPC_INST_MAP to prevent memory leak
-    # Do this regardless of whether npcid is valid — the monster is dead either way
     if inst_id:
         NPC_HP_MAP.pop(inst_id, None)
         NPC_INST_MAP.pop(inst_id, None)
-        if exp_state:
-            DEAD_NPC_SET.discard(inst_id)
-            exp_state.get('monster_pos', {}).pop(inst_id, None)
-            exp_state.get('attack_cd', {}).pop(inst_id, None)
-        exp_state.get('monster_pos', {}).pop(inst_id, None)
-        exp_state.get('attack_cd', {}).pop(inst_id, None)
+        NPC_ATTR_MAP.pop(inst_id, None)
+        exp_state.get('monster_pos', {}).pop(inst_id, None) if exp_state else None
+        exp_state.get('attack_cd', {}).pop(inst_id, None) if exp_state else None
 
     if valid_kill:
         npc_stats = get_npc_attr(npcid)
@@ -2785,147 +2801,97 @@ def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid):
 
         exp_kill, cash_kill = calculate_npc_kill_rewards(char_lv, npc_lv)
         kill_rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
-        # Issue 86: save=False to avoid 140 disk writes per dungeon — save once per wave instead
-        grant_item_rewards(picked_char, kill_rewards, conn, send_rpc_push, save=False)
+        if exp_state and exp_state.get('team_id'):
+            popup = encode_sproto([(0, [encode_sproto([(0, '2001'), (1, exp_kill), (3, 0)]), encode_sproto([(0, '1001'), (1, cash_kill), (3, 0)])])])
+            for member_id, member_conn, member_char in exp_participant_chars(exp_state):
+                member_push = lambda tag, data, cid=member_id: send_push_to_char(cid, tag, data)
+                grant_item_rewards(member_char, kill_rewards, member_conn, member_push, save=False)
+                member_push(638, popup)
+        else:
+            grant_item_rewards(picked_char, kill_rewards, conn, send_rpc_push, save=False)
 
-        # Issue 6: Removed TAG 638 (show_reward_items_tips) from per-kill — sending it 140 times
-        # creates massive visual clutter with overlapping reward popups. The EXP/cash are already
-        # granted silently via grant_item_rewards() and reflected in the player's balance.
 
-        # Issue 99/100: Mission advancement moved to wave completion above to batch the calls
-        # Previously called advance_missions('kill', target_id=npcid) and advance_missions('level') here
-        # Now only called once per wave completion, reducing 280 calls to ~28 calls per dungeon
 
-        # Issue 33/34: Do NOT spawn drop items for EXP dungeon — rewards are EXP (2001) and Cash (1001),
-        # which are non-physical currencies. Spawning Cash as a ground drop creates broken/unpickable items.
-        # The rewards are already granted directly via grant_item_rewards() above.
+
+def start_exp_stage_runtime(conn, owner, state):
+    if not state or state.get('runtime_started') or state.get('defer_start'): return
+    state['runtime_started'] = True
+    def current_owner():
+        owner_id = int(state.get('owner_id', owner.get('id', 0)))
+        return ALL_CONNECTIONS.get(owner_id, (None, state.get('char_refs', {}).get(owner_id)))[1] or owner
+    def push(tag, data): exp_send_push(state, tag, data)
+    def on_player_die(dead_conn, _send, dead_char, run):
+        if run.get('team_id'):
+            dead_ids = run.setdefault('dead_members', [])
+            if int(dead_char['id']) not in dead_ids:
+                dead_ids.append(int(dead_char['id'])); run['deaths'] = int(run.get('deaths', 0)) + 1
+            cost = get_relife_config(run['deaths']).get('use_count', 1)
+            send_push_to_char(dead_char['id'], 618, encode_sproto([(0, 1), (1, cost), (2, '9202')]))
+        else:
+            finish_exp_stage(dead_conn or conn, push, dead_char, run, win=False)
+    def tick():
+        if not state.get('ai_active'): return
+        char = current_owner()
+        if not char: return
+        active_conn = ALL_CONNECTIONS.get(int(char.get('id', 0)), (conn, char))[0] or conn
+        try: more = run_exp_monster_ai_shared(state, str(state['copy_id']), char, push, push, active_conn, on_player_die)
+        except Exception as exc:
+            print(f'[EXP AI] {exc}'); more = bool(state.get('ai_active'))
+        if more and state.get('ai_active'):
+            t = threading.Timer(0.2, tick); t.daemon = True; state['ai_timer'] = t; t.start()
+    def timeout():
+        if state.get('ai_active') and int(time.time()) >= int(state.get('end_time', 0)):
+            state['ai_active'] = False
+            char = current_owner()
+            active_conn = ALL_CONNECTIONS.get(int(char.get('id', 0)), (conn, char))[0] or conn if char else conn
+            finish_exp_stage(active_conn, push, char, state, win=False)
+    t = threading.Timer(max(1, int(state.get('end_time', time.time()+1))-int(time.time())), timeout)
+    t.daemon = True; state['timeout_timer'] = t; t.start()
+    t = threading.Timer(0.2, tick); t.daemon = True; state['ai_timer'] = t; t.start()
+
 
 def spawn_map_npcs(conn, map_id, picked_char=None):
-    """Spawns all NPCs, Monsters, and Traffic defined in data for the map."""
     map_str = str(map_id)
-    connection_id = id(conn)
-    spawned_maps = NPC_SPAWNED_MAPS.setdefault(connection_id, set())
-    if map_str in spawned_maps:
-        print(f"[NPC SPAWN] already sent map={map_str} to this connection")
-        return
+    spawned_maps = NPC_SPAWNED_MAPS.setdefault(id(conn), set())
+    if map_str in spawned_maps: return
     spawned_maps.add(map_str)
-
     def send_npc_create(nid, name, x, z, o):
-        # Bug 6: Use shared build_npc_attr_sproto to eliminate code duplication
         inst_id, attr = build_npc_attr_sproto(nid, name, x, z, o)
-        ph = encode_sproto([(0, 509)]); pf = sproto_pack(ph + encode_sproto([(0, attr)]))
-        try: conn.sendall(struct.pack(">H", len(pf)) + pf)
-        except: pass
+        send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
         return inst_id
-
-    # Check for EXP Stage maps (223-229) - CopySceneData MapId equals the copy_id
-    if map_str in ["223", "224", "225", "226", "227", "228", "229"] and picked_char:
-        copy_id = map_str
-        exp_cfg = DAILY_EXP_CONFIG.get(copy_id, DAILY_EXP_CONFIG.get("223", {
-            'wave_count': 4, 'group_npc_count': [5, 10, 15, 20], 'group_count': 7, 'group_time': 60,
-            'monsters': [f"{copy_id}1", f"{copy_id}2", f"{copy_id}3", f"{copy_id}4"]
-        }))
-        # Calculate total time from config: group_time * group_count
-        total_time = exp_cfg.get('group_time', 60) * exp_cfg.get('group_count', 7)
-        end_time = int(time.time()) + total_time
-        exp_state = {
-            'copy_id': copy_id,
-            'cur_group': 1,
-            'cur_wave': 1,
-            'subwave': 1,
-            'wave_kills': 0,
-            'total_kills': 0,
-            'deaths': 0,  # Track deaths for star rating (gradeFlag bit 2)
-            'start_time': int(time.time()),
-            'end_time': end_time,
-            'group_start_time': int(time.time()),  # Fix: Track when current group started for time enforcement
-            'active_monsters': [],
-            'monster_pos': {},
-            'ai_active': True,
-            'kill_tracker': [],  # Issue 99/100: Track unique NPC IDs killed this wave for batch mission advancement (list for JSON serialization)
-            'killed_npcs': []  # Fix: Track all killed inst_ids to prevent double-counting (list for JSON serialization)
-        }
-        if picked_char:
-            # Issue 69: Clean up old exp_stage_state before creating new one to prevent orphaned AI threads
-            old_exp_state = picked_char.get('exp_stage_state')
-            if old_exp_state is not None:
-                old_exp_state['ai_active'] = False
-                old_timeout = old_exp_state.get('timeout_timer')
-                if old_timeout is not None:
-                    old_timeout.cancel()
-                old_leave = old_exp_state.get('leave_timer')
-                if old_leave is not None:
-                    old_leave.cancel()
-                picked_char.pop('exp_stage_state', None)
-                print(f"[EXP STAGE] Cleaned up old exp_stage_state before new entry")
-            picked_char['exp_stage_state'] = exp_state
-
-        def push_wrapper(tag, data):
-            try:
-                ph_p = encode_sproto([(0, tag)])
-                pf_p = sproto_pack(ph_p + data)
-                # Issue 238: Use send_lock for thread-safe socket writes, matching send_rpc_push
-                with send_lock:
-                    conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
-            except: pass
-
-        # Issue 57: Change type from 0 to 2 so CountDownTimeLogic auto-closes at 00:00:00
-        push_wrapper(629, encode_sproto([(0, end_time), (1, 2)]))
-        # Fix: Client's notice_copy_scene_info.request.id is a STRING type.
-        # Sending an int causes the client to fail parsing the id field.
-        push_wrapper(683, encode_sproto([
-            (0, str(copy_id)), (1, 0), (2, end_time), (3, 1), (4, 0), (5, 0)
-        ]))
-
-        def local_send_npc(nid, name, x, z, o):
-            inst_id = send_npc_create(nid, name, x, z, o)
-            if inst_id:
-                exp_state['monster_pos'][inst_id] = [x / 100.0, z / 100.0]
-            return inst_id
-
-        spawn_exp_stage_subwave_internal(conn, push_wrapper, picked_char, exp_state, exp_cfg, local_send_npc)
-
-        # Bug 2: Use shared AI loop function instead of duplicating ~80 lines
-        def run_exp_monster_ai():
-            def on_player_die_main(c, sf, pc, es):
-                print(f"[EXP STAGE AI] Player {pc['id']} died in EXP Stage!")
-                finish_exp_stage(c, sf, pc, es, win=False)
-            should_continue = run_exp_monster_ai_shared(
-                exp_state, map_str, picked_char,
-                push_wrapper, push_wrapper, conn, on_player_die_main
-            )
-            if should_continue:
-                # Fix: Use 0.2s interval to match client's AILogic.UpdateSecond coroutine
-                timer = threading.Timer(0.2, run_exp_monster_ai)
-                timer.daemon = True
-                timer.start()
-
-        # Server-side timeout: auto-fail dungeon when time expires
-        timeout_seconds = exp_state['end_time'] - int(time.time())
-        def exp_stage_timeout():
-            if picked_char and picked_char.get('exp_stage_state') is exp_state and picked_char.get('map_id') == map_str:
-                print(f"[EXP STAGE TIMEOUT] Player {picked_char['id']} time expired in copy {copy_id}")
-                exp_state['ai_active'] = False
-                final_group_expired = (
-                    exp_state.get('cur_group', 0) >= exp_cfg.get('group_count', 7)
-                    and int(time.time()) >= exp_state.get('group_start_time', int(time.time())) + exp_cfg.get('group_time', 60)
-                )
-                finish_exp_stage(conn, push_wrapper, picked_char, exp_state, win=final_group_expired)
-        timeout_timer = threading.Timer(timeout_seconds, exp_stage_timeout)
-        timeout_timer.daemon = True
-        exp_state['timeout_timer'] = timeout_timer  # Issue 37: store reference for cancellation
-        timeout_timer.start()
-
-        # Fix: Use 0.2s interval to match client's AILogic.UpdateSecond coroutine
-        ai_timer = threading.Timer(0.2, run_exp_monster_ai)
-        ai_timer.daemon = True
-        ai_timer.start()
+    if map_str in ('223','224','225','226','227','228','229') and picked_char:
+        copy_id=map_str; cfg=DAILY_EXP_CONFIG.get(copy_id, DAILY_EXP_CONFIG.get('223', {}))
+        state=picked_char.get('exp_stage_state')
+        resuming=bool(state and state.get('run_initialized') and str(state.get('copy_id'))==copy_id)
+        if not resuming:
+            now=int(time.time()); members=picked_char.get('exp_members') or [int(picked_char.get('id',0))]
+            duration=int((COPY_SCENE_CONFIG.get(copy_id) or {}).get('exist_time') or 600)
+            state={'copy_id':copy_id,'members':list(dict.fromkeys(int(x) for x in members)),
+                'owner_id':int(picked_char.get('id',0)),'team_id':picked_char.get('exp_team_id'),'char_refs':{},
+                'cur_group':1,'cur_wave':1,'subwave':1,'wave_kills':0,'total_kills':0,'deaths':0,
+                'start_time':now,'end_time':now+duration,'group_start_time':now,'active_monsters':[],'monster_pos':{},
+                'ai_active':True,'run_initialized':True,'runtime_started':False,
+                'defer_start':bool(picked_char.get('exp_defer_start')),'kill_tracker':[],'killed_npcs':[]}
+            for cid in state['members']:
+                member=ALL_CONNECTIONS.get(cid,(None,None))[1]
+                if member is not None: state['char_refs'][cid]=member; member['exp_stage_state']=state
+            picked_char['exp_stage_state']=state
+        state.setdefault('char_refs',{})[int(picked_char.get('id',0))]=picked_char
+        def push(tag,data): exp_send_push(state,tag,data)
+        push(629,encode_sproto([(0,state['end_time']),(1,2)])); _send_exp_tag683(push,state,cfg)
+        if resuming:
+            for inst in state.get('active_monsters',[]):
+                attr=NPC_ATTR_MAP.get(inst)
+                if attr is not None: send_rpc_push_safe(conn,509,encode_sproto([(0,attr)]))
+            return
+        def create_exp_npc(nid,name,x,z,o):
+            inst,attr=build_npc_attr_sproto(nid,name,x,z,o)
+            if inst:
+                state['monster_pos'][inst]=[x/100.0,z/100.0]; push(509,encode_sproto([(0,attr)]))
+            return inst
+        spawn_exp_stage_subwave_internal(conn,push,picked_char,state,cfg,create_exp_npc)
+        start_exp_stage_runtime(conn,picked_char,state)
         return
-
-    # 1. Spawn Static NPCs & Monsters
-    # Map 11 (TUTORIAL_CAR) is fully client-side: CitySimController spawns all ambient NPCs,
-    # CheckKillTargetMission spawns mission NPCs, and cars spawn at their map-defined positions.
-    # Server must NOT spawn anything on map 11 to avoid duplicates and broken positions.
     if map_str != "11" and map_str in STATIC_NPC_DATA:
         for m in STATIC_NPC_DATA[map_str]:
             cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}"})
@@ -2936,8 +2902,6 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
             send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
-    # 2. Spawn Mission targets defined by the APK data.
-    # Map 11 mission targets are spawned by the client. Skip server-side spawning.
     if map_str == "11":
         return
     if picked_char:
@@ -2946,7 +2910,6 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 cfg = missions_data.get(mid)
                 if cfg:
                     logic_id = str(cfg.get('logic_id', ''))
-                    # The client looks up KillTargetMissionData by LogicID (matching DataManager.GetKillTargetMissionDataById).
                     spawn_key = logic_id if logic_id in KILL_TARGET_SPAWNS else str(mid)
                     if spawn_key in KILL_TARGET_SPAWNS:
                         for s in KILL_TARGET_SPAWNS[spawn_key]:
@@ -3096,19 +3059,6 @@ def copy_attempts_remaining(picked_char, copy_id, cfg):
     if copy_id not in remaining:
         remaining[copy_id] = int(cfg.get('max_plays', 3))
     return max(0, int(remaining[copy_id]))
-
-
-def current_copy_for_subtype(level, subtype):
-    eligible = [
-        (cfg, copy_id)
-        for copy_id, cfg in COPY_SCENE_CONFIG.items()
-        if cfg.get('subtype') == subtype
-        and cfg.get('min_level', 1) <= level <= cfg.get('max_level', 80)
-    ]
-    if not eligible:
-        return None
-    return max(eligible, key=lambda pair: (int(pair[0].get('min_level', 1)), -int(pair[1])))[1]
-
 
 def street_race_rewards(level):
     """Return exactly the level-resolved _drop_bc ShowRewardData items."""
@@ -3581,11 +3531,11 @@ def broadcast_aoi_add(target_conn, target_char, sender_conn=None, sender_char=No
     if pkt is None:
         return
     # Skip player-to-player AOI on single-player maps (e.g., Map 11)
-    if is_single_player_map(target_map):
+    if is_single_player_map(target_map) and not ((target_char.get('exp_stage_state') or {}).get('team_id')):
         return
     # Send to all other connections that have a character on the same map
     for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-        if ch and ch.get('id', 0) != target_id and str(ch.get('map_id', '11')) == target_map:
+        if ch and can_aoi_exchange(target_char, ch):
             try:
                 c_lock = CONNECTION_LOCKS.get(cid)
                 if c_lock:
@@ -3600,8 +3550,8 @@ def broadcast_aoi_add(target_conn, target_char, sender_conn=None, sender_char=No
 def broadcast_aoi_remove(char_id, map_id):
     """Broadcast aoi_remove (msg 506) when a player leaves a map."""
     map_id = str(map_id)
-    # Skip player-to-player AOI on single-player maps (e.g., Map 11)
-    if is_single_player_map(map_id):
+    source_char = ALL_CONNECTIONS.get(int(char_id), (None, None))[1]
+    if is_single_player_map(map_id) and not (source_char and (source_char.get('exp_stage_state') or {}).get('team_id')):
         return
     try:
         aoi_data = encode_sproto([(0, char_id)])
@@ -3609,7 +3559,7 @@ def broadcast_aoi_remove(char_id, map_id):
         pf_p = sproto_pack(ph_p + aoi_data)
         pkt = struct.pack(">H", len(pf_p)) + pf_p
         for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-            if ch and str(ch.get('map_id', '11')) == map_id:
+            if ch and (can_aoi_exchange(source_char, ch) if source_char else str(ch.get('map_id', '11')) == map_id):
                 try:
                     c_lock = CONNECTION_LOCKS.get(cid)
                     if c_lock:
@@ -3630,6 +3580,8 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
 
     src_map = str(picked_char.get('map_id') or '11')
     target_map_id = str(target_map_id) or '11'
+    if src_map != target_map_id: broadcast_aoi_remove(picked_char.get('id', 0), src_map)
+    NPC_SPAWNED_MAPS.setdefault(id(conn), set()).discard(target_map_id)
     picked_char['map_id'] = target_map_id
     scene_name = "Unknown"
 
@@ -3705,10 +3657,11 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
 
         # TAG 505: aoi_add (NPCs)
         spawn_map_npcs(conn, target_map_id, picked_char)
+        if is_exp_map(target_map_id): sync_exp_team_aoi(picked_char)
 
         # Broadcast this new player to all other players on the same map
         # Skip player-to-player AOI on single-player maps (e.g., Map 11)
-        if not is_single_player_map(target_map_id):
+        if not is_single_player_map(target_map_id) and not is_exp_map(target_map_id):
             broadcast_aoi_add(conn, picked_char)
             # Send existing players on this map to the new player
             for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
@@ -3871,7 +3824,7 @@ def _sync_friend_online_state(char_id, state):
 
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
-    global server_session_counter, ALL_CONNECTIONS, MAIL_ID_COUNTER
+    global server_session_counter, ALL_CONNECTIONS, MAIL_ID_COUNTER, TEAM_ID_COUNTER, EXP_RUN_COUNTER
     conn_id = id(conn)
     # ALL_CONNECTIONS will be updated when character is picked
     send_lock = threading.Lock()
@@ -4249,10 +4202,17 @@ def client_handler(conn, addr):
 
                         # TAG 505: aoi_add (NPCs)
                         spawn_map_npcs(conn, mid, picked_char)
+                        if is_exp_map(mid): sync_exp_team_aoi(picked_char)
+                        restored_team = get_team_for_char(char_id)
+                        if restored_team: send_team_update(restored_team['id'])
+                        pending_result = picked_char.pop('pending_exp_result', None)
+                        if pending_result:
+                            try: send_rpc_push(552, bytes.fromhex(pending_result))
+                            except Exception: pass
 
                         # MULTIPLAYER AOI SYNC - Broadcast this new player to existing players
                         # Skip player-to-player AOI on single-player maps (e.g., Map 11)
-                        if not is_single_player_map(mid):
+                        if not is_single_player_map(mid) and not is_exp_map(mid):
                             broadcast_aoi_add(conn, picked_char)
                             # Send existing players on this map to the new player
                             for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
@@ -4275,10 +4235,10 @@ def client_handler(conn, addr):
                         exp_state = picked_char.get('exp_stage_state')
                         if exp_state:
                             # Issue 57: Change type from 0 to 2 so CountDownTimeLogic auto-closes at 00:00:00
-                            send_rpc_push(629, encode_sproto([(0, exp_state['end_time']), (1, 2)]))
+                            exp_send_push(exp_state, 629, encode_sproto([(0, exp_state['end_time']), (1, 2)]))
                             # Send TAG 683 with raw kill counts for client UI
                             exp_cfg_for_ready = DAILY_EXP_CONFIG.get(exp_state['copy_id'], {})
-                            _send_exp_tag683(send_rpc_push, exp_state, exp_cfg_for_ready)
+                            _send_exp_tag683(lambda tag, data: exp_send_push(exp_state, tag, data), exp_state, exp_cfg_for_ready)
                             print(f"[EXP STAGE] map_ready sent 629 & 683 updates for copy={mid}")
                     if mid == "502":
                         # Map 502 exposes its match timer only through this APK tag.
@@ -4329,29 +4289,17 @@ def client_handler(conn, addr):
                 p_raw = body.get(0)
                 if p_raw and picked_char:
                     pd = decode_sproto(p_raw)
-                    proposed_pos = [
-                        get_val_int(pd, 0), get_val_int(pd, 1),
-                        get_val_int(pd, 2), get_val_int(pd, 3)
-                    ]
-                    is_exp_map = str(picked_char.get('map_id', '')) in EXP_STAGE_IDS
-                    exp_state = picked_char.get('exp_stage_state') if is_exp_map else None
-                    accepted = not is_exp_map or (
-                        exp_state is not None
-                        and not exp_state.get('finished')
-                        and not exp_state.get('awaiting_relief')
-                        and _exp_stage_position_is_valid(picked_char, proposed_pos)
-                    )
-                    if accepted:
-                        picked_char['pos'] = proposed_pos
-                        # Issue 224: Throttle position saves to avoid excessive disk I/O.
-                        last_pos_save = picked_char.get('_last_pos_save', 0)
-                        if int(time.time()) - last_pos_save >= 30:
-                            save_chars(all_accounts_chars)
-                            picked_char['_last_pos_save'] = int(time.time())
-                        broadcast_aoi_move(picked_char)
-                    else:
-                        current_pos = picked_char.get('pos', [0, 100, 0, 0])
-                        p_raw = encode_sproto([(i, value) for i, value in enumerate(current_pos)])
+                    picked_char['pos'] = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
+                    # Issue 224: Throttle position saves to avoid excessive disk I/O.
+                    # Save every 30 seconds instead of on every move packet (~10Hz).
+                    # The position is still saved on important events: dungeon entry/exit,
+                    # map transition, disconnect, mission completion, etc.
+                    last_pos_save = picked_char.get('_last_pos_save', 0)
+                    if int(time.time()) - last_pos_save >= 30:
+                        save_chars(all_accounts_chars)
+                        picked_char['_last_pos_save'] = int(time.time())
+                    # Broadcast movement to other players on the same map (TAG 507)
+                    broadcast_aoi_move(picked_char)
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, p_raw)]))
@@ -4704,13 +4652,11 @@ def client_handler(conn, addr):
             elif msg == 115: # use_item, including vehicle exchange vouchers
                 index_id = get_val_int(body, 0, -1)
                 success = 0
-                used_item_id = None
                 if picked_char:
                     inventory = picked_char.get('inventory', [])
                     item_index = index_id - 10000
                     if 0 <= item_index < len(inventory):
                         item = inventory[item_index]
-                        used_item_id = str(item.get('id', ''))
                         mount_id = mount_id_from_voucher(item.get('id'))
                         if mount_id:
                             mount = picked_char.setdefault('mounts', {}).setdefault(mount_id, {})
@@ -4729,25 +4675,20 @@ def client_handler(conn, addr):
                             cfg = ITEM_CONFIG[item['id']]
                             if cfg['type'] == 18: # REMAIN ticket
                                 subtype = cfg['function']
-                                selected_copy_id = current_copy_for_subtype(
-                                    int(picked_char.get('level', 1)), subtype
-                                )
-                                if selected_copy_id:
-                                    state = ensure_daily_copy_state(picked_char)
-                                    remaining = copy_attempts_remaining(
-                                        picked_char,
-                                        selected_copy_id,
-                                        COPY_SCENE_CONFIG[selected_copy_id]
-                                    )
-                                    state['remaining'][selected_copy_id] = remaining + 1
-                                    item['amount'] -= 1
-                                    if item['amount'] < 1:
-                                        inventory.pop(item_index)
-                                    success = 1
-                                    save_chars(all_accounts_chars)
-                                    send_rpc_push(611, sync_inventory_data(picked_char))
-                                    send_rpc_push(555, sync_copy_scenes(picked_char))
-                                    print(f"[TICKET] used item={item['id']} copy={selected_copy_id} remaining={remaining + 1}")
+                                state = ensure_daily_copy_state(picked_char)
+                                # Find all copy IDs for this subtype and reset their remaining counts.
+                                # The client uses Item 9205 (SubType 7) for Street Race.
+                                for copy_id, sc_cfg in COPY_SCENE_CONFIG.items():
+                                    if sc_cfg['subtype'] == subtype:
+                                        state['remaining'][copy_id] = sc_cfg['max_plays']
+                                item['amount'] -= 1
+                                if item['amount'] < 1:
+                                    inventory.pop(item_index)
+                                success = 1
+                                save_chars(all_accounts_chars)
+                                send_rpc_push(611, sync_inventory_data(picked_char))
+                                send_rpc_push(555, sync_copy_scenes(picked_char))
+                                print(f"[TICKET] used item={item['id']} for subtype={subtype}")
                 send_rpc_push(526, encode_sproto([(0, success), (1, index_id)]))
 
                 # TAG 525: update_item - notify client about individual item change
@@ -4756,8 +4697,7 @@ def client_handler(conn, addr):
                 if success and picked_char:
                     inventory = picked_char.get('inventory', [])
                     item_index = index_id - 10000
-                    if (0 <= item_index < len(inventory)
-                            and str(inventory[item_index].get('id', '')) == used_item_id):
+                    if 0 <= item_index < len(inventory):
                         item = inventory[item_index]
                         gi = encode_sproto([
                             (0, index_id),          # indexId
@@ -4870,41 +4810,20 @@ def client_handler(conn, addr):
                     dlist = decode_sproto_list(dlist_raw)
                     print(f"[COMBAT] RX 111 count={len(dlist)}")
                     attacker_stats = get_character_stats(picked_char)
-                    exp_message_cooldowns = set()
                     for d_bytes in dlist:
                         d = decode_sproto(d_bytes)
                         target_id = get_val_int(d, 0)
                         client_dmg = get_val_int(d, 1)
                         # acceptdamge schema: id(0), damage(1), skillId(2), effinfoId(3), cri(4), parm(5-8)
                         skill_id = str(d.get(2, "50001"))
+                        # effinfo_id is NOT trusted from client - will be derived server-side from skill_id
                         effinfo_id = None
-                        client_effinfo_id = d.get(3, "")
-                        if isinstance(client_effinfo_id, bytes):
-                            client_effinfo_id = client_effinfo_id.decode('utf-8', errors='ignore')
-                        else:
-                            client_effinfo_id = str(client_effinfo_id)
                         is_cri = get_val_int(d, 4, 0) == 1
 
                         print(f"[COMBAT] accept_damge target={target_id} client_dmg={client_dmg} skill={skill_id} eff={effinfo_id} cri={is_cri}")
 
-                        current_map = str(picked_char.get('map_id', ''))
-                        is_exp = current_map in EXP_STAGE_IDS
-                        if is_exp:
-                            exp_state = picked_char.get('exp_stage_state')
-                            if (not exp_state or exp_state.get('finished') or exp_state.get('awaiting_relief')
-                                    or str(exp_state.get('copy_id')) != current_map
-                                    or target_id not in exp_state.get('active_monsters', [])
-                                    or target_id in DEAD_NPC_SET
-                                    or target_id not in NPC_HP_MAP
-                                    or target_id not in NPC_INST_MAP):
-                                print(f"[EXP MSG111] rejected non-owned or inactive target={target_id} map={current_map}")
-                                continue
-
                         # --- Check if target is an online player (PvP) ---
                         target_cid, target_conn, target_char = find_player_connection(target_id)
-                        if is_exp and target_char is not None:
-                            print(f"[EXP MSG111] rejected PvP target={target_id} in stage map={current_map}")
-                            continue
 
                         if target_char is not None:
                             # === PvP: target is an online player ===
@@ -4930,19 +4849,9 @@ def client_handler(conn, addr):
                                 skill_lv = 0
                                 effinfo_id = None
 
-                            skill_cfg = SKILL_CONFIG.get(skill_id, {})
-                            if is_exp:
-                                allowed_effects = {
-                                    skill_cfg.get(effect_key)
-                                    for effect_key in ('eff0', 'eff1', 'eff2')
-                                    if skill_cfg.get(effect_key)
-                                }
-                                effinfo_id = (
-                                    client_effinfo_id
-                                    if client_effinfo_id in allowed_effects
-                                    else skill_cfg.get('eff0', "10000")
-                                )
-                            elif effinfo_id is None:
+                            # Server-authoritative effinfo_id: derive from skill_id, not from client
+                            if effinfo_id is None:
+                                skill_cfg = SKILL_CONFIG.get(skill_id, {})
                                 effinfo_id = skill_cfg.get('eff0', "10000")
 
                             server_dmg, hit, calc_cri = get_combat_damage(attacker_stats, target_stats, skill_id, skill_lv, pvp_scale=1.0, effinfo_id=effinfo_id)
@@ -5081,14 +4990,11 @@ def client_handler(conn, addr):
                                 print(f"[COMBAT] Tag 111 rejected: NPC {target_id} already dead")
                                 continue
 
-                            target_nid = NPC_INST_MAP.get(target_id)
-                            if is_exp and not target_nid:
-                                print(f"[EXP MSG111] rejected target without NPC type id={target_id}")
-                                continue
-                            if not target_nid:
-                                target_nid = str(target_id)
-                                NPC_INST_MAP[target_id] = target_nid
-                            print(f"[EXP MSG111] target_id={target_id} target_nid={target_nid} map={current_map} is_exp={is_exp} client_dmg={client_dmg}")
+                            target_nid = NPC_INST_MAP.get(target_id, str(target_id))
+                            NPC_INST_MAP[target_id] = target_nid
+                            cur_map = str(picked_char.get('map_id', ''))
+                            is_exp = cur_map in ['223','224','225','226','227','228','229']
+                            print(f"[EXP MSG111] target_id={target_id} target_nid={target_nid} map={cur_map} is_exp={is_exp} client_dmg={client_dmg}")
 
                             nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
                             defender_stats = get_npc_attr(nid_str, picked_char.get('level', 1))
@@ -5121,36 +5027,6 @@ def client_handler(conn, addr):
                                 skill_cfg = SKILL_CONFIG.get(skill_id, {})
                                 effinfo_id = skill_cfg.get('eff0', "10000")
 
-                            if is_exp:
-                                monster_pos = exp_state.get('monster_pos', {}).get(target_id)
-                                if not monster_pos:
-                                    print(f"[EXP MSG111] rejected target without stage position={target_id}")
-                                    continue
-                                player_pos = picked_char.get('pos', [0, 100, 0, 0])
-                                player_x, player_z = player_pos[0] / 100.0, player_pos[2] / 100.0
-                                skill_range = max(
-                                    2.0,
-                                    int(SKILL_CONFIG.get(skill_id, {}).get('trace_distance', 500)) / 100.0 + 2.0
-                                )
-                                if math.hypot(player_x - monster_pos[0], player_z - monster_pos[1]) > skill_range:
-                                    print(f"[EXP MSG111] rejected out-of-range target={target_id} skill={skill_id}")
-                                    continue
-
-                                cooldown_key = (skill_id, effinfo_id)
-                                if cooldown_key not in exp_message_cooldowns:
-                                    cooldowns = exp_state.setdefault('player_skill_cooldowns', {})
-                                    cooldown_ms = max(
-                                        100,
-                                        int(SKILL_CONFIG.get(skill_id, {}).get('cooldown_ms', 1000))
-                                    )
-                                    now = time.monotonic()
-                                    last_hit = cooldowns.get(cooldown_key, 0)
-                                    if now - last_hit < cooldown_ms / 1000.0:
-                                        print(f"[EXP MSG111] rejected skill cooldown skill={skill_id} eff={effinfo_id}")
-                                        continue
-                                    cooldowns[cooldown_key] = now
-                                    exp_message_cooldowns.add(cooldown_key)
-
                             server_dmg, hit, calc_cri = get_combat_damage(
                                 attacker_stats, defender_stats, skill_id, skill_lv, effinfo_id=effinfo_id, sat_type='satm'
                             )
@@ -5158,13 +5034,34 @@ def client_handler(conn, addr):
                                 server_dmg = 0
                                 calc_cri = False
 
-                            actual_dmg = server_dmg
+                            # Fix: For exp stage (multi-scene), client calculates damage locally.
+                            # The client sends accept_damge with the damage it calculated.
+                            # However, the client sends ONE accept_damge per effinfo per skill.
+                            # A skill with EffId_0, EffId_1, EffId_2 will send 3 separate accept_damge messages.
+                            # Each message has its own damage value for that effinfo.
+                            # The server should trust the client's damage for exp stage.
+                            # IMPORTANT: client_dmg can be 0 for misses or negative for heals.
+                            # Only apply damage when client_dmg > 0; for misses, don't apply server_dmg
+                            # because the client already determined it was a miss.
+                            if is_exp:
+                                actual_dmg = client_dmg if client_dmg > 0 else 0
+                            else:
+                                actual_dmg = server_dmg
 
                             NPC_HP_MAP[target_id] -= actual_dmg
 
                             # Bug 6: Only send TAG 510 when actual_dmg > 0 to avoid wasting bandwidth on misses
+                            exp_state_hit = picked_char.get('exp_stage_state') if is_exp else None
                             if actual_dmg > 0:
-                                sync_npc_attrs_rpc(conn, target_id, defender_stats, max(0, NPC_HP_MAP[target_id]))
+                                if exp_state_hit and exp_state_hit.get('team_id'):
+                                    exp_sync_npc_attrs(exp_state_hit, target_id, defender_stats, max(0, NPC_HP_MAP[target_id]))
+                                else:
+                                    sync_npc_attrs_rpc(conn, target_id, defender_stats, max(0, NPC_HP_MAP[target_id]))
+                            if exp_state_hit and exp_state_hit.get('team_id'):
+                                hit_entry = encode_sproto([(0, target_id), (1, actual_dmg), (2, skill_id), (3, effinfo_id or ''), (4, is_cri)])
+                                exp_send_push(exp_state_hit, 511, encode_sproto([(0, [hit_entry])]), exclude=[picked_char.get('id', 0)])
+                                skill_hit = encode_sproto([(0, picked_char.get('id', 0)), (1, target_id), (2, skill_id), (3, [encode_sproto([(0, target_id), (1, actual_dmg)])])])
+                                exp_send_push(exp_state_hit, 508, skill_hit, exclude=[picked_char.get('id', 0)])
                             # For non-exp maps, send TAG 511 so client displays damage.
                             if not is_exp:
                                 dmg_entry = encode_sproto([
@@ -5180,14 +5077,27 @@ def client_handler(conn, addr):
                             # Issue 213: TAG 514 (hit_action) client handler does nothing — skip sending
 
                             if NPC_HP_MAP[target_id] <= 0:
-                                with EXP_STAGE_KILL_LOCK:
-                                    if target_id in DEAD_NPC_SET:
-                                        print(f"[EXP MSG111] NPC already dead target_id={target_id}, skipping")
-                                        continue
-                                    DEAD_NPC_SET.add(target_id)
+                                # Fix: Only process death once - skip if already dead
+                                if target_id in DEAD_NPC_SET:
+                                    print(f"[EXP MSG111] NPC already dead target_id={target_id}, skipping")
+                                    continue
+                                DEAD_NPC_SET.add(target_id)
                                 print(f"[EXP MSG111] NPC DEAD target_id={target_id} target_nid={target_nid} hp={NPC_HP_MAP[target_id]}")
 
-                                send_rpc_push(506, encode_sproto([(0, target_id)]))
+                                kill_state = picked_char.get('exp_stage_state') if is_exp else None
+                                kill_remove = encode_sproto([(0, target_id)])
+                                if kill_state and kill_state.get('team_id'):
+                                    exp_send_push(kill_state, 506, kill_remove)
+                                    NPC_ATTR_MAP.pop(target_id, None)
+                                else:
+                                    send_rpc_push(506, kill_remove)
+
+                                # Fix: For exp stage, immediately remove from active_monsters to prevent AI loop re-processing
+                                if is_exp and picked_char:
+                                    exp_state_msg111 = picked_char.get('exp_stage_state')
+                                    if exp_state_msg111 and target_id in exp_state_msg111.get('active_monsters', []):
+                                        exp_state_msg111['active_monsters'].remove(target_id)
+                                        print(f"[EXP MSG111] Removed target_id={target_id} from active_monsters, remaining={len(exp_state_msg111['active_monsters'])}")
 
                                 # BOSS DEATH HANDLING
                                 if target_id == picked_char.get('boss_inst_id'):
@@ -5278,18 +5188,11 @@ def client_handler(conn, addr):
                         npcid = NPC_INST_MAP.get(inst_id)
 
                 is_duplicate = False
-                is_exp_death = bool(picked_char and str(picked_char.get('map_id', '')) in EXP_STAGE_IDS)
-                if is_exp_death:
-                    # EXP deaths are decided by server-side HP in MSG 111 or the AI loop.
-                    # A client death notification must never claim a living stage NPC.
-                    is_duplicate = True
-                    print(f"[EXP MSG{msg}] ignored client NPC-death report inst_id={inst_id}")
-                elif inst_id is not None and inst_id > 1000000:
+                if inst_id is not None and inst_id > 1000000:
                     if inst_id in DEAD_NPC_SET: is_duplicate = True
                     else: DEAD_NPC_SET.add(inst_id)
 
-                if not is_exp_death and inst_id and inst_id in NPC_HP_MAP:
-                    del NPC_HP_MAP[inst_id]
+                if inst_id and inst_id in NPC_HP_MAP: del NPC_HP_MAP[inst_id]
 
                 if picked_char and not is_duplicate:
                     if die_type in [2, 6]:
@@ -5351,6 +5254,9 @@ def client_handler(conn, addr):
                                 (7, picked_char['id'])
                             ]))
                     else:
+                        exp_state_death = picked_char.get('exp_stage_state')
+                        if exp_state_death and exp_state_death.get('team_id') and inst_id:
+                            exp_send_push(exp_state_death, 506, encode_sproto([(0, inst_id)]), exclude=[picked_char.get('id', 0)])
                         on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid)
 
                     if die_type == 3:
@@ -5444,7 +5350,7 @@ def client_handler(conn, addr):
                 cfg = COPY_SCENE_CONFIG.get(copy_id)
                 if picked_char and copy_id in ["223", "224", "225", "226", "227", "228", "229"]:
                     # Security: Deny entry if player is already in an exp stage dungeon
-                    if picked_char.get('exp_stage_state') is not None:
+                    if picked_char.get('exp_stage_state') is not None or picked_char.get('active_copy_id'):
                         print(f"[EXP STAGE] denied id={copy_id}; player already in exp stage")
                     else:
                         # Fix: Validate player level against exp stage min_level and max_level
@@ -5457,39 +5363,40 @@ def client_handler(conn, addr):
                             print(f"[EXP STAGE] denied id={copy_id}; level {player_lv} > max {max_lv}")
                         else:
                             remaining = copy_attempts_remaining(picked_char, copy_id, cfg or {'max_plays': 3})
-                            if remaining == 0 and bool(body.get(2, False)):
-                                ticket_item = next((
-                                    item for item in picked_char.get('inventory', [])
-                                    if item.get('amount', 0) > 0
-                                    and ITEM_CONFIG.get(str(item.get('id')), {}).get('type') == 18
-                                    and ITEM_CONFIG.get(str(item.get('id')), {}).get('function') == (cfg or {}).get('subtype')
-                                ), None)
-                                if ticket_item:
-                                    ticket_item['amount'] -= 1
-                                    if ticket_item['amount'] <= 0:
-                                        picked_char['inventory'].remove(ticket_item)
-                                    send_rpc_push(611, sync_inventory_data(picked_char))
-                                    remaining = 1
-                                    print(f"[EXP STAGE] consumed entry ticket item={ticket_item['id']} copy={copy_id}")
-                            if remaining > 0:
+                            use_time_item = msg == 107 and bool(body.get(1, False))
+                            extra_item_used = False
+                            if remaining <= 0 and use_time_item:
+                                item_id = str((cfg or {}).get('time_inc') or '')
+                                inventory = picked_char.get('inventory', [])
+                                stack = next((item for item in inventory if str(item.get('id')) == item_id), None) if item_id else None
+                                if stack is not None and int(stack.get('amount', 1)) > 0:
+                                    stack['amount'] = int(stack.get('amount', 1)) - 1
+                                    if stack['amount'] <= 0: inventory.remove(stack)
+                                    picked_char['inventory'] = inventory
+                                    extra_item_used = True
+                            if remaining > 0 or extra_item_used:
                                 # Fix: Restore player HP to full before entering exp stage
                                 player_stats_entry = get_character_stats(picked_char)
                                 picked_char['hp'] = player_stats_entry['hp_max']
                                 sync_char_attrs_rpc(conn, picked_char)
+                                # Issue 52: Clear DEAD_NPC_SET when entering new EXP dungeon to prevent memory leak
+                                DEAD_NPC_SET.clear()
                                 if picked_char.get('pre_copy_pos') is None:
                                     picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
                                     picked_char['pre_copy_map'] = str(picked_char.get('map_id', '11'))
                                 state = ensure_daily_copy_state(picked_char)
-                                state['remaining'][copy_id] = max(0, remaining - 1)
+                                if remaining > 0: state['remaining'][copy_id] = remaining - 1
+                                if extra_item_used: send_rpc_push(611, sync_inventory_data(picked_char))
                                 picked_char['active_copy_id'] = copy_id
+                                picked_char['exp_members'] = [int(picked_char.get('id', 0))]
+                                picked_char['exp_team_id'] = None
+                                picked_char['exp_defer_start'] = False
                                 save_chars(all_accounts_chars)
                                 send_rpc_push(555, sync_copy_scenes(picked_char))
                                 advance_missions(picked_char, send_rpc_push, 'dungeon', target_id=copy_id)
                                 # Fix: Use copy_id as map_id (CopySceneData MapId equals the copy_id)
                                 start_map_transition(conn, picked_char, copy_id, send_rpc_push)
-                                picked_char['_exp_last_move_pos'] = list(picked_char.get('pos', [0, 100, 0, 0]))
-                                picked_char['_exp_last_move_time'] = time.monotonic()
-                                print(f"[EXP STAGE] entered id={copy_id} remaining={remaining - 1}")
+                                print(f"[EXP STAGE] entered id={copy_id} remaining={max(0, remaining - 1)} extra_item={extra_item_used}")
                             else:
                                 print(f"[EXP STAGE] denied id={copy_id}; daily attempts exhausted")
                 elif picked_char and cfg and cfg['subtype'] == 7:
@@ -5616,14 +5523,6 @@ def client_handler(conn, addr):
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                             conn.sendall(struct.pack(">H", len(pf)) + pf)
                         continue
-                    if (str(exp_state_check.get('copy_id')) != current_map
-                            or exp_state_check.get('finished')
-                            or picked_char.get('hp', 0) > 0):
-                        print(f"[RELIFE] denied for player {picked_char['id']}; invalid revive state")
-                        if session is not None:
-                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                            conn.sendall(struct.pack(">H", len(pf)) + pf)
-                        continue
 
                     # Read isInplace from client request: field 0 = bool
                     try:
@@ -5633,38 +5532,19 @@ def client_handler(conn, addr):
                     except Exception:
                         is_inplace = False
 
-                    relife_cfg = get_relife_config(exp_state_check.get('deaths', 1))
-                    revive_item_id = "9202"
-                    revive_cost = max(0, int(relife_cfg.get('use_count', 1))) if is_inplace else 0
-                    inventory = picked_char.get('inventory', [])
-                    available_revive_items = sum(
-                        max(0, int(item.get('amount', 0)))
-                        for item in inventory
-                        if item.get('id') == revive_item_id
-                    )
-                    if available_revive_items < revive_cost:
-                        print(f"[RELIFE] denied for player {picked_char['id']}; need {revive_cost} {revive_item_id}")
-                        send_rpc_push(618, encode_sproto([
-                            (0, 1), (1, revive_cost), (2, revive_item_id)
-                        ]))
-                        if session is not None:
-                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                            conn.sendall(struct.pack(">H", len(pf)) + pf)
-                        continue
-
-                    remaining_cost = revive_cost
-                    for item in list(inventory):
-                        if item.get('id') != revive_item_id or remaining_cost <= 0:
+                    revive_cost = max(1, int(get_relife_config(exp_state_check.get('deaths', 1)).get('use_count', 1)))
+                    revive_item_id = '9202'
+                    if is_inplace:
+                        inventory = picked_char.get('inventory', [])
+                        revive_stack = next((item for item in inventory if str(item.get('id')) == revive_item_id), None)
+                        if revive_stack is None or int(revive_stack.get('amount', 1)) < revive_cost:
+                            if session is not None:
+                                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                                conn.sendall(struct.pack('>H', len(pf)) + pf)
                             continue
-                        amount = max(0, int(item.get('amount', 0)))
-                        consumed = min(amount, remaining_cost)
-                        item['amount'] = amount - consumed
-                        remaining_cost -= consumed
-                        if item['amount'] <= 0:
-                            inventory.remove(item)
-                    if revive_cost:
+                        revive_stack['amount'] = int(revive_stack.get('amount', 1)) - revive_cost
+                        if revive_stack['amount'] <= 0: inventory.remove(revive_stack)
                         picked_char['inventory'] = inventory
-                        send_rpc_push(611, sync_inventory_data(picked_char))
 
                     p_stats = get_character_stats(picked_char)
                     picked_char['hp'] = p_stats['hp_max']
@@ -5682,8 +5562,7 @@ def client_handler(conn, addr):
 
                     picked_char['pos'] = pos
 
-                    if revive_cost:
-                        print(f"[REVIVE] Consumed {revive_cost} revive item(s) {revive_item_id}")
+                    print(f'[REVIVE] Consumed {revive_cost} revive item(s) {revive_item_id}')
 
                     # Build Tag 512 (aoi_relife_player) with correct nested structure
                     # character_relife: id(0), attribute_other(1), movement(2)
@@ -5710,7 +5589,12 @@ def client_handler(conn, addr):
                     # Broadcast Tag 512 to all other players on the same map
                     # so they see the player revive instead of staying dead/ghost
                     map_id = str(picked_char.get('map_id', '11'))
-                    if not is_single_player_map(map_id):
+                    revive_state = picked_char.get('exp_stage_state')
+                    if revive_state and revive_state.get('team_id'):
+                        exp_send_push(revive_state, 512, relife_frame_data, exclude=[picked_char.get('id', 0)])
+                        send_team_update(revive_state['team_id'])
+                        send_team_member_update(revive_state['team_id'], picked_char, force=True)
+                    elif not is_single_player_map(map_id):
                         try:
                             r_ph = encode_sproto([(0, 512)])
                             r_pf = sproto_pack(r_ph + relife_frame_data)
@@ -5727,101 +5611,55 @@ def client_handler(conn, addr):
                         except Exception as e:
                             print(f"[REVIVE] Failed to broadcast Tag 512: {e}")
 
-                    # Handle EXP dungeon relife - resume monster AI if in EXP dungeon
                     exp_state = picked_char.get('exp_stage_state')
                     if exp_state and is_inplace:
-                        # Issue 29: Stop the old AI first to prevent double AI threads
-                        exp_state['ai_active'] = False
-                        # Issue 78: Cancel the old timeout timer and restart it
-                        old_timeout = exp_state.get('timeout_timer')
-                        if old_timeout is not None:
-                            old_timeout.cancel()
-                        time.sleep(0.3)  # Wait for old AI tick to finish
-                        exp_state['awaiting_relief'] = False
-                        exp_state['ai_active'] = True
-                        # Fix: Do NOT reset deaths on relife - the "No deaths" star should reflect
-                        # whether the player completed the dungeon without dying at all.
-                        # Reliving means the player died, so they should not get the no-deaths star.
-                        print(f"[RELIFE] Player {picked_char['id']} respawned in EXP dungeon copy={exp_state['copy_id']}")
-                        # Restart the monster AI loop for EXP dungeon
-                        map_str = exp_state['copy_id']
-                        # Issue 77: Capture conn in a local variable to avoid stale closure
-                        relife_conn = conn
-                        relife_send = lambda tag, data: send_rpc_push_safe(relife_conn, tag, data)
-                        # Bug 2: Use shared AI loop function instead of duplicating ~80 lines
-                        def run_relife_ai():
-                            def on_player_die_relife(c, sf, pc, es):
-                                finish_exp_stage(c, sf, pc, es, win=False)
-                            should_continue = run_exp_monster_ai_shared(
-                                exp_state, map_str, picked_char,
-                                relife_send, relife_send, relife_conn, on_player_die_relife
-                            )
-                            if should_continue:
-                                # Fix: Use 0.2s interval to match client's AILogic.UpdateSecond
-                                t = threading.Timer(0.2, run_relife_ai)
-                                t.daemon = True
-                                t.start()
-                        # Fix: Use 0.2s interval to match client's AILogic.UpdateSecond
-                        ai_t = threading.Timer(0.2, run_relife_ai)
-                        ai_t.daemon = True
-                        ai_t.start()
-                        # Issue 78: Restart the timeout timer for the remaining dungeon time
-                        # Fix: Update end_time in exp_state so TAG 683 shows correct countdown
-                        remaining_seconds = exp_state['end_time'] - int(time.time())
-                        if remaining_seconds > 0:
-                            # Extend end_time by remaining seconds from now
-                            exp_state['end_time'] = int(time.time()) + remaining_seconds
-                            # Update TAG 629 countdown timer with new end_time
-                            send_rpc_push_safe(relife_conn, 629, encode_sproto([(0, exp_state['end_time']), (1, 2)]))
-                            # Fix: Send TAG 683 after relife so client UI shows current wave/group/kill state
-                            exp_cfg_relife = DAILY_EXP_CONFIG.get(exp_state['copy_id'], {})
-                            _send_exp_tag683(relife_send, exp_state, exp_cfg_relife)
-                            def exp_stage_timeout_after_relife():
-                                if picked_char and picked_char.get('exp_stage_state') is exp_state and picked_char.get('map_id') == map_str:
-                                    print(f"[EXP STAGE TIMEOUT] Player {picked_char['id']} time expired after relife in copy {exp_state['copy_id']}")
-                                    exp_state['ai_active'] = False
-                                    finish_exp_stage(relife_conn, lambda tag, data: send_rpc_push_safe(relife_conn, tag, data), picked_char, exp_state, win=False)
-                            new_timeout_timer = threading.Timer(remaining_seconds, exp_stage_timeout_after_relife)
-                            new_timeout_timer.daemon = True
-                            exp_state['timeout_timer'] = new_timeout_timer
-                            new_timeout_timer.start()
+                        if exp_state.get('team_id'):
+                            dead_members = exp_state.setdefault('dead_members', [])
+                            exp_state['dead_members'] = [cid for cid in dead_members if int(cid) != int(picked_char.get('id', 0))]
+                            exp_send_push(exp_state, 629, encode_sproto([(0, exp_state['end_time']), (1, 2)]))
+                            _send_exp_tag683(lambda tag, data: exp_send_push(exp_state, tag, data), exp_state, DAILY_EXP_CONFIG.get(exp_state['copy_id'], {}))
+                            sync_exp_team_aoi(picked_char)
+                        else:
+                            for timer_key in ('ai_timer', 'timeout_timer'):
+                                run_timer = exp_state.get(timer_key)
+                                if run_timer is not None: run_timer.cancel()
+                            exp_state['ai_active'] = True
+                            exp_state['runtime_started'] = False
+                            start_exp_stage_runtime(conn, picked_char, exp_state)
+                        print(f"[RELIFE] Player {picked_char['id']} respawned in EXP copy={exp_state['copy_id']}")
                     elif exp_state and not is_inplace:
-                        # Player chose to return to city - clean up EXP dungeon state
-                        if not exp_state.get('result_reward_granted'):
-                            exp_reward, cash_reward, _, _ = _exp_stage_reward_amounts(picked_char, exp_state, False)
-                            grant_item_rewards(
-                                picked_char,
-                                [("2001", 0, exp_reward), ("1001", 0, cash_reward)],
-                                conn,
-                                send_rpc_push,
-                                save=False
-                            )
-                            exp_state['result_reward_granted'] = True
-                        # Stop AI and timeout timers first
-                        exp_state['ai_active'] = False
-                        _cleanup_exp_stage_npcs(exp_state, send_rpc_push)
-                        exp_state['finished'] = True
-                        old_tt = exp_state.get('timeout_timer')
-                        if old_tt is not None:
-                            old_tt.cancel()
+                        cid = int(picked_char.get('id', 0))
+                        if exp_state.get('team_id'):
+                            exp_state['members'] = [x for x in exp_state.get('members', []) if int(x) != cid]
+                            exp_state.get('char_refs', {}).pop(cid, None)
+                            team = TEAM_STATES.get(int(exp_state.get('team_id') or 0))
+                            if team:
+                                team_remove_member(team, cid)
+                                if not exp_state['members']:
+                                    exp_state['ai_active'] = False
+                                    for timer_key in ('ai_timer', 'timeout_timer'):
+                                        run_timer = exp_state.get(timer_key)
+                                        if run_timer is not None: run_timer.cancel()
+                                    team['active_run'] = None; team['pending_run'] = None
+                                else:
+                                    exp_state['owner_id'] = int(team.get('leader_id', exp_state.get('owner_id', 0)))
+                                    team['active_run'] = exp_state
+                        else:
+                            exp_state['ai_active'] = False
+                            for timer_key in ('ai_timer', 'timeout_timer'):
+                                run_timer = exp_state.get(timer_key)
+                                if run_timer is not None: run_timer.cancel()
+                        if exp_state.get('team_id'): broadcast_aoi_remove(picked_char.get('id', 0), picked_char.get('map_id', '11'))
                         picked_char.pop('exp_stage_state', None)
-                        # Issue 55: Clear active_copy_id when returning to city from EXP dungeon
                         picked_char['active_copy_id'] = None
-                        # Restore player to pre-copy position and map
+                        picked_char['exp_team_id'] = None
                         saved_pos = picked_char.get('pre_copy_pos')
                         saved_map = picked_char.get('pre_copy_map', '11')
-                        picked_char['pre_copy_pos'] = None
-                        picked_char['pre_copy_map'] = None
-                        if saved_pos:
-                            picked_char['pos'] = saved_pos
+                        picked_char['pre_copy_pos'] = None; picked_char['pre_copy_map'] = None
+                        if saved_pos: picked_char['pos'] = saved_pos
                         picked_char['map_id'] = saved_map
-                        # Send map transition to client so player actually sees the city
-                        try:
-                            start_map_transition(conn, picked_char, saved_map, send_rpc_push, override_pos=saved_pos)
-                        except Exception:
-                            pass
-                        print(f"[RELIFE] Player {picked_char['id']} returned to city from EXP dungeon; map={saved_map}")
-
+                        start_map_transition(conn, picked_char, saved_map, send_rpc_push, override_pos=saved_pos)
+                        print(f"[RELIFE] Player {picked_char['id']} returned from EXP to map={saved_map}")
                     save_chars(all_accounts_chars)
                     print(f"[REVIVE] Player {picked_char['id']} revived with HP={p_stats['hp_max']} isInplace={is_inplace} pos={pos}")
 
@@ -5846,10 +5684,10 @@ def client_handler(conn, addr):
                         print(f"[EXP STAGE] start_battle denied; map mismatch map={current_map} expected={expected_map}")
                     else:
                         # Issue 57: Change type from 0 to 2 so CountDownTimeLogic auto-closes at 00:00:00
-                        send_rpc_push(629, encode_sproto([(0, exp_state['end_time']), (1, 2)]))
+                        exp_send_push(exp_state, 629, encode_sproto([(0, exp_state['end_time']), (1, 2)]))
                         # Send TAG 683 with raw kill counts for client UI
                         exp_cfg_for_battle = DAILY_EXP_CONFIG.get(exp_state['copy_id'], {})
-                        _send_exp_tag683(send_rpc_push, exp_state, exp_cfg_for_battle)
+                        _send_exp_tag683(lambda tag, data: exp_send_push(exp_state, tag, data), exp_state, exp_cfg_for_battle)
                         print(f"[EXP STAGE] start_battle sent 629 & 683 updates for copy={exp_state['copy_id']}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -5976,67 +5814,149 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg in (109, 161, 163, 166): # team requests: req_invite_team, req_join_team, update_team_setting, leave_team
-                # TAG 516: invite_join_team - sent when someone invites you to team
-                # TAG 517: req_invite_team_result - result of invite acceptance
-                # TAG 518: update_team - team state update
-                # update_team.request schema: team(0) - where team has id(0), teamleader(1), count(2),
-                #   isVerfiy(3), teammembers(4), goalId(5), minLevel(6), maxLevel(7), recruit(8)
-                if picked_char and msg == 109:
-                    # Invite sent - send invite to target and result back
-                    target_id = get_val_int(body, 0)
-                    # TAG 516: invite_join_team - notify the invited player
-                    # invite_join_team.request: teamid(0), member(1), goalId(2)
-                    # teammember schema: id(0), teamid(1), name(2), level(3)
-                    member_info = encode_sproto([
-                        (0, picked_char['id']),
-                        (2, picked_char['name']),
-                        (3, picked_char.get('level', 1))
-                    ])
-                    send_rpc_push(516, encode_sproto([
-                        (0, 0),           # teamid
-                        (1, member_info),  # member
-                        (2, "")            # goalId
-                    ]))
-                    # TAG 517: req_invite_team_result - ok(0), id(1)
-                    send_rpc_push(517, encode_sproto([(0, 0), (1, target_id)]))
-                    # TAG 518: update_team - send proper team object
-                    team_obj = encode_sproto([
-                        (0, 0),   # id
-                        (2, 0),   # count
-                        (4, {})   # teammembers (empty dict)
-                    ])
-                    send_rpc_push(518, encode_sproto([(0, team_obj)]))
-                elif picked_char and msg == 161:
-                    # Join team request - send result
-                    teamid = get_val_int(body, 0)
-                    # TAG 517: req_invite_team_result - ok(0), id(1)
-                    send_rpc_push(517, encode_sproto([(0, 0), (1, picked_char['id'])]))
-                    team_obj = encode_sproto([
-                        (0, teamid),
-                        (2, 0),   # count
-                        (4, {})   # teammembers
-                    ])
-                    send_rpc_push(518, encode_sproto([(0, team_obj)]))
-                elif picked_char and msg == 166:
-                    # Leave team - send empty team update
-                    team_obj = encode_sproto([
-                        (0, 0),
-                        (2, 0),
-                        (4, {})
-                    ])
-                    send_rpc_push(518, encode_sproto([(0, team_obj)]))
-                elif picked_char and msg == 163:
-                    # Update team setting
-                    team_obj = encode_sproto([
-                        (0, 0),
-                        (2, 0),
-                        (4, {})
-                    ])
-                    send_rpc_push(518, encode_sproto([(0, team_obj)]))
+            elif msg in (109, 110, 161, 162, 163, 164, 166, 213, 214, 215, 216, 217):
+                cid=int(picked_char.get('id',0)) if picked_char else 0
+                if picked_char and msg==109:
+                    target=get_val_int(body,0,-1)
+                    if target==-1:
+                        goal=get_val_str(body,1,''); team=get_team_for_char(cid); ok=False
+                        if team is None and not picked_char.get('active_copy_id') and not picked_char.get('exp_stage_state'):
+                            TEAM_ID_COUNTER+=1
+                            team={'id':TEAM_ID_COUNTER,'leader_id':cid,'members':[],'goal_id':goal,
+                                'min_level':get_val_int(body,2,1),'max_level':get_val_int(body,3,80),
+                                'verify':get_val_int(body,4,0),'recruit':get_val_int(body,5,0),'char_refs':{},'pending_apps':{}}
+                            if team_join_member(team,picked_char): TEAM_STATES[team['id']]=team; ok=True
+                        elif team and team.get('leader_id')==cid and not team.get('active_run'):
+                            team['goal_id']=goal; team['min_level']=get_val_int(body,2,team.get('min_level',1))
+                            team['max_level']=get_val_int(body,3,team.get('max_level',80)); team['verify']=get_val_int(body,4,team.get('verify',0))
+                            team['recruit']=get_val_int(body,5,team.get('recruit',0))
+                            ok=True
+                        if ok:
+                            picked_char['team_goal_copy']=goal
+                            send_team_update(team['id'])
+                        send_rpc_push(517,encode_sproto([(0,1 if ok else 0),(1,cid)]))
+                    else:
+                        team=get_team_for_char(cid); target_conn,target_char=ALL_CONNECTIONS.get(target,(None,None))
+                        ok=bool(team and team.get('leader_id')==cid and not team.get('active_run') and target_conn and target_char and target not in team['members'] and len(team['members'])<4 and not target_char.get('exp_stage_state') and not target_char.get('active_copy_id'))
+                        if ok:
+                            TEAM_INVITES[target]={'team_id':team['id'],'inviter_id':cid,'expires_at':int(time.time())+60}
+                            send_push_to_char(target,516,encode_sproto([(0,int(team['id'])),(1,team_member_blob(picked_char,team['id'])),(2,str(team.get('goal_id','')))]))
+                        send_rpc_push(517,encode_sproto([(0,1 if ok else 0),(1,target)]))
+                elif picked_char and msg==110:
+                    invite=TEAM_INVITES.get(cid); ok=get_val_int(body,0,0)==1
+                    inviter=get_val_int(body,1,0)
+                    valid=bool(invite and invite.get('expires_at',0)>=int(time.time()) and invite.get('inviter_id')==inviter)
+                    if invite and inviter:
+                        send_push_to_char(inviter,517,encode_sproto([(0,1 if ok and valid else 0),(1,cid)]))
+                    if not ok or not valid: TEAM_INVITES.pop(cid,None)
+                elif picked_char and msg==161:
+                    tid=get_val_int(body,0); team=TEAM_STATES.get(tid); inv=TEAM_INVITES.get(cid,{})
+                    invited=inv.get('team_id')==tid and inv.get('expires_at',0)>=int(time.time())
+                    if team and not team.get('active_run') and (invited or not team.get('verify')):
+                        if team_join_member(team,picked_char): TEAM_INVITES.pop(cid,None);send_team_update(tid)
+                    elif team and not team.get('active_run') and team.get('verify') and cid not in team['members']:
+                        team.setdefault('pending_apps',{})[cid]=picked_char
+                        send_push_to_char(team['leader_id'],572,encode_sproto([(0,team_member_blob(picked_char,tid))]))
+                elif picked_char and msg==162:
+                    applicant=get_val_int(body,0); agree=get_val_int(body,1,0)==1
+                    team=get_team_for_char(cid)
+                    if team and team.get('leader_id')==cid:
+                        ch=team.get('pending_apps',{}).pop(applicant,None)
+                        if ch is not None:
+                            if agree: team_join_member(team,ch)
+                            send_push_to_char(applicant,576,encode_sproto([(0,int(team['id'])),(1,1 if agree else 0)]))
+                            if agree: send_team_update(team['id'])
+                elif picked_char and msg==163:
+                    team=get_team_for_char(cid)
+                    if team and team.get('leader_id')==cid and not team.get('active_run') and not team.get('pending_run'):
+                        team['verify']=get_val_int(body,0,team.get('verify',0));send_team_update(team['id'])
+                elif picked_char and msg==213:
+                    team=get_team_for_char(cid)
+                    if team and team.get('leader_id')==cid and not team.get('active_run'):
+                        goal=get_val_str(body,0,team.get('goal_id',''))
+                        if team.get('matching'): stop_team_match(team,team.get('goal_id',''),1)
+                        team['goal_id']=goal
+                        team['min_level']=max(1,get_val_int(body,1,team.get('min_level',1)))
+                        team['max_level']=max(team['min_level'],get_val_int(body,2,team.get('max_level',80)))
+                        team['verify']=get_val_int(body,3,team.get('verify',0))
+                        team['recruit']=get_val_int(body,4,team.get('recruit',team.get('recruit',0)))
+                        for member_id in team.get('members',[]):
+                            member=ALL_CONNECTIONS.get(int(member_id),(None,team.get('char_refs',{}).get(int(member_id))))[1]
+                            if member: member['team_goal_copy']=goal
+                        send_team_update(team['id'])
+                elif picked_char and msg==164:
+                    team=get_team_for_char(cid); target=get_val_int(body,0)
+                    if team and team.get('leader_id')==cid and target!=cid:
+                        if target in team.get('members',[]):
+                            detach_exp_team_member(team,target)
+                            send_push_to_char(target,518,encode_sproto([]))
+                elif picked_char and msg==166:
+                    team=get_team_for_char(cid)
+                    if team:
+                        detach_exp_team_member(team,cid)
+                        send_rpc_push(518,encode_sproto([]))
+                elif picked_char and msg==214:
+                    goal=get_val_str(body,0,''); goal_type=get_val_int(body,1,1)
+                    if goal in DAILY_EXP_CONFIG:
+                        team=get_team_for_char(cid)
+                        if team is None and not picked_char.get('active_copy_id') and not picked_char.get('exp_stage_state'):
+                            cfg=COPY_SCENE_CONFIG.get(goal,{})
+                            TEAM_ID_COUNTER+=1
+                            team={'id':TEAM_ID_COUNTER,'leader_id':cid,'members':[],'goal_id':goal,
+                                'min_level':int(cfg.get('min_level',1)),'max_level':int(cfg.get('max_level',80)),
+                                'verify':0,'recruit':0,'char_refs':{},'pending_apps':{}}
+                            if team_join_member(team,picked_char): TEAM_STATES[team['id']]=team
+                            else: team=None
+                        if team and team.get('leader_id')==cid and not team.get('active_run') and all(not ALL_CONNECTIONS.get(int(mid),(None,None))[1].get('active_copy_id') for mid in team.get('members',[]) if ALL_CONNECTIONS.get(int(mid),(None,None))[1]):
+                            team['goal_id']=goal; picked_char['team_goal_copy']=goal
+                            queue_team_match(team,goal,goal_type); send_team_update(team['id'])
+                elif picked_char and msg==216:
+                    goal=get_val_str(body,0,''); goal_type=get_val_int(body,1,1)
+                    stop_team_match(get_team_for_char(cid),goal,goal_type)
+                elif picked_char and msg==215:
+                    team=get_team_for_char(cid); goal=get_val_str(body,0,''); copy_id=goal if goal in DAILY_EXP_CONFIG else ''
+                    cfg=COPY_SCENE_CONFIG.get(copy_id)
+                    if team and team.get('leader_id')==cid and get_val_int(body,1,1)==1 and cfg and not team.get('active_run') and not team.get('pending_run'):
+                        ids=list(team['members']); minm=max(2,int(cfg.get('min_member',2)))
+                        valid=minm<=len(ids)<=int(cfg.get('max_member',4)) and all(ALL_CONNECTIONS.get(x,(None,None))[0] is not None and ALL_CONNECTIONS.get(x,(None,None))[1] is not None for x in ids)
+                        if valid:
+                            valid=all(not ALL_CONNECTIONS[x][1].get('exp_stage_state') and not ALL_CONNECTIONS[x][1].get('active_copy_id') and cfg['min_level']<=int(ALL_CONNECTIONS[x][1].get('level',1))<=cfg['max_level'] for x in ids)
+                        if valid:
+                            leader=ALL_CONNECTIONS.get(int(team['leader_id']),(None,None))[1]
+                            valid=bool(leader and copy_attempts_remaining(leader,copy_id,cfg)>0)
+                        if valid:
+                            EXP_RUN_COUNTER+=1; session_id=EXP_RUN_COUNTER
+                            team['pending_run']={'session':session_id,'copy_id':copy_id,'ready':{x:False for x in ids}}
+                            for x in ids: send_push_to_char(x,602,encode_sproto([(0,copy_id),(1,1),(2,session_id)]))
+                            def expire_ready(tid=int(team['id']), sid=session_id):
+                                current=TEAM_STATES.get(tid); waiting=current.get('pending_run') if current else None
+                                if waiting and waiting.get('session')==sid:
+                                    for member_id in current.get('members',[]): send_push_to_char(member_id,603,encode_sproto([(0,0),(1,1)]))
+                                    current['pending_run']=None; current.pop('_ready_timer',None)
+                            ready_timer=threading.Timer(35.0,expire_ready); ready_timer.daemon=True
+                            team['_ready_timer']=ready_timer; ready_timer.start()
+                        else:
+                            for member_id in ids: send_push_to_char(member_id,603,encode_sproto([(0,int(cid)),(1,1)]))
+                elif picked_char and msg==217:
+                    team=get_team_for_char(cid); pending=team.get('pending_run') if team else None
+                    if pending and get_val_int(body,0)==pending['session'] and cid in pending['ready']:
+                        state_value=get_val_int(body,1,1)
+                        if state_value==0:
+                            pending['ready'][cid]=True
+                            for x in team['members']: send_push_to_char(x,603,encode_sproto([(0,cid),(1,0)]))
+                            if all(pending['ready'].values()):
+                                if not start_team_exp_run(team,pending['copy_id']):
+                                    for x in team['members']: send_push_to_char(x,603,encode_sproto([(0,cid),(1,1)]))
+                                    team['pending_run']=None
+                                ready_timer=team.pop('_ready_timer',None)
+                                if ready_timer: ready_timer.cancel()
+                        else:
+                            for x in team['members']: send_push_to_char(x,603,encode_sproto([(0,cid),(1,1)]))
+                            team['pending_run']=None
+                            ready_timer=team.pop('_ready_timer',None)
+                            if ready_timer: ready_timer.cancel()
                 if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    ph=encode_sproto([(1,session)]);pf=sproto_pack(ph+encode_sproto([]));conn.sendall(struct.pack('>H',len(pf))+pf)
 
             elif msg in [118, 218, 145, 202, 210, 225, 242, 252, 253, 254, 255, 257, 258, 261, 266, 278, 296, 299, 313, 319]:
                 resp_data = encode_sproto([])
@@ -6261,28 +6181,49 @@ def client_handler(conn, addr):
                             conn.sendall(struct.pack(">H", len(pf)) + pf)
                         continue
 
-                    # Fix: If player has _exp_leave_timer, the leave is already scheduled — just ACK and return
                     if has_leave_timer:
-                        print(f"[LEAVE COPY] Player {picked_char['id']} already leaving exp stage, ACK only")
+                        leave_timer = picked_char.pop('_exp_leave_timer', None)
+                        if leave_timer is not None: leave_timer.cancel()
+                        saved_pos = picked_char.pop('_exp_return_pos', None) or picked_char.get('pre_copy_pos')
+                        saved_map = picked_char.pop('_exp_return_map', None) or picked_char.get('pre_copy_map', '11')
+                        picked_char.pop('pre_copy_pos', None); picked_char.pop('pre_copy_map', None)
+                        picked_char.pop('active_copy_id', None)
+                        start_map_transition(conn, picked_char, saved_map, send_rpc_push, override_pos=saved_pos)
+                        save_chars(all_accounts_chars)
                         if session is not None:
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                            conn.sendall(struct.pack(">H", len(pf)) + pf)
+                            conn.sendall(struct.pack('>H', len(pf)) + pf)
                         continue
 
-                    # Issue 42: Clean up exp_stage_state when leaving EXP dungeon
                     if picked_char.get('exp_stage_state'):
                         exp_st = picked_char['exp_stage_state']
-                        exp_st['ai_active'] = False
-                        _cleanup_exp_stage_npcs(exp_st, send_rpc_push)
-                        tt = exp_st.get('timeout_timer')
-                        if tt is not None:
-                            tt.cancel()
-                        # Issue 56/127: Cancel leave_timer from picked_char (stored there after exp_stage_state pop)
-                        lt = picked_char.pop('_exp_leave_timer', None)
-                        if lt is not None:
-                            lt.cancel()
+                        if exp_st.get('team_id'):
+                            cid = int(picked_char.get('id', 0))
+                            exp_st['members'] = [x for x in exp_st.get('members', []) if int(x) != cid]
+                            exp_st.get('char_refs', {}).pop(cid, None)
+                            team = TEAM_STATES.get(int(exp_st.get('team_id') or 0))
+                            if team:
+                                team_remove_member(team, cid)
+                                send_team_update(team['id'])
+                                if not exp_st['members']:
+                                    exp_st['ai_active'] = False
+                                    for timer_key in ('ai_timer', 'timeout_timer'):
+                                        run_timer = exp_st.get(timer_key)
+                                        if run_timer is not None: run_timer.cancel()
+                                    team['active_run'] = None
+                                    team['pending_run'] = None
+                                else:
+                                    exp_st['owner_id'] = int(team.get('leader_id', exp_st.get('owner_id', 0)))
+                                    team['active_run'] = exp_st
+                        else:
+                            exp_st['ai_active'] = False
+                            for timer_key in ('ai_timer', 'timeout_timer'):
+                                run_timer = exp_st.get(timer_key)
+                                if run_timer is not None: run_timer.cancel()
+                        if exp_st.get('team_id'): broadcast_aoi_remove(picked_char.get('id', 0), picked_char.get('map_id', '11'))
                         picked_char.pop('exp_stage_state', None)
-                        print(f"[LEAVE COPY] Cleaned up exp_stage_state for player {picked_char.get('id', 0)}")
+                        picked_char['active_copy_id'] = None
+                        print('[LEAVE COPY] Removed player from EXP run')
                     if picked_char.get('active_copy_id'):
                         saved_pos = picked_char.get('pre_copy_pos')
                         saved_map = picked_char.get('pre_copy_map', '11')
@@ -6295,11 +6236,27 @@ def client_handler(conn, addr):
                         saved_map = picked_char.get('pre_arena_map', '11')
                         picked_char['pre_arena_pos'] = None
                         picked_char['pre_arena_map'] = None
+                    if in_exp_stage:
+                        saved_pos = picked_char.get('pre_copy_pos')
+                        saved_map = picked_char.get('pre_copy_map', '11')
+                        picked_char['pre_copy_pos'] = None; picked_char['pre_copy_map'] = None
                     start_map_transition(conn, picked_char, saved_map, send_rpc_push, override_pos=saved_pos)
                     save_chars(all_accounts_chars)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 165: # get_team_list
+                goal=get_val_str(body,0,'')
+                teams={}
+                for team_id,team in list(TEAM_STATES.items()):
+                    if team.get('active_run') or len(team.get('members',[]))>=4: continue
+                    if goal and str(team.get('goal_id',''))!=goal: continue
+                    payload=team_payload(team)
+                    if payload is not None: teams[int(team_id)]=payload
+                send_rpc_push(574,encode_sproto([(0,teams)]))
+                if session is not None:
+                    ph=encode_sproto([(1,session)]);pf=sproto_pack(ph+encode_sproto([]));conn.sendall(struct.pack('>H',len(pf))+pf)
 
             # === SOCIAL UI HANDLERS ===
 
@@ -7062,46 +7019,173 @@ def client_handler(conn, addr):
         try:
             if conn_id in NPC_SPAWNED_MAPS:
                 del NPC_SPAWNED_MAPS[conn_id]
-            # Issue 36: Clean up exp_stage_state on disconnect to prevent stale state
             if picked_char and picked_char.get('exp_stage_state'):
-                exp_st = picked_char['exp_stage_state']
-                exp_st['ai_active'] = False
-                _cleanup_exp_stage_npcs(exp_st)
-                tt = exp_st.get('timeout_timer')
-                if tt is not None:
-                    tt.cancel()
-                # Issue 56/127: Cancel leave_timer from picked_char (stored there after exp_stage_state pop)
-                lt = picked_char.pop('_exp_leave_timer', None)
-                if lt is not None:
-                    lt.cancel()
-                picked_char.pop('exp_stage_state', None)
-                # Issue 62: Clear active_copy_id on disconnect
-                picked_char['active_copy_id'] = None
-                # Fix: Return disconnected player to city instead of leaving them on empty exp stage map
-                # Use pre_copy_pos if available, otherwise default city position
-                saved_pos = picked_char.get('pre_copy_pos')
-                saved_map = picked_char.get('pre_copy_map', '11')
-                picked_char['pre_copy_pos'] = None
-                picked_char['pre_copy_map'] = None
-                if saved_pos:
-                    picked_char['pos'] = saved_pos
-                picked_char['map_id'] = saved_map
                 save_chars(all_accounts_chars)
-                print(f"[DISCONNECT] Cleaned up exp_stage_state for player {picked_char.get('id', 0)}; returned to map={saved_map}")
             # Broadcast aoi_remove before removing from tracking
             if picked_char:
                 broadcast_aoi_remove(picked_char.get('id', 0), picked_char.get('map_id', '11'))
             RANDOM_NAME_CALLED.discard(conn_id)
             if picked_char:
                 char_id = picked_char.get('id', 0)
-                ALL_CONNECTIONS.pop(char_id, None)  # Remove from online tracking
-                CONNECTION_LOCKS.pop(char_id, None)  # Remove connection lock
+                if ALL_CONNECTIONS.get(char_id, (None, None))[0] is conn:
+                    ALL_CONNECTIONS.pop(char_id, None)
+                    CONNECTION_LOCKS.pop(char_id, None)
                 # Update offline state for all friends/enemies who have this player
                 _sync_friend_online_state(char_id, 0)
             conn.close()
         except Exception:
             pass
         print(f"[-] Client disconnected: {addr}")
+
+
+def team_join_member(team, char):
+    cid=int(char.get('id',0))
+    if not team or len(team.get('members',[]))>=4 or cid in team.get('members',[]): return False
+    if not int(team.get('min_level',1))<=int(char.get('level',1))<=int(team.get('max_level',80)): return False
+    if char.get('exp_stage_state') or char.get('active_copy_id') or (CHAR_TEAM.get(cid) not in (None, int(team.get('id', 0)))): return False
+    team.setdefault('members',[]).append(cid); team.setdefault('char_refs',{})[cid]=char
+    CHAR_TEAM[cid]=int(team['id']); char['team_goal_copy']=str(team.get('goal_id',''))
+    return True
+
+def team_remove_member(team, char_id):
+    cid=int(char_id)
+    if not team or cid not in team.get('members',[]): return
+    team['members'].remove(cid); CHAR_TEAM.pop(cid,None); team.get('char_refs',{}).pop(cid,None)
+    ch=ALL_CONNECTIONS.get(cid,(None,None))[1]
+    if ch: ch.pop('team_goal_copy',None)
+    if team.get('leader_id')==cid and team['members']: team['leader_id']=team['members'][0]
+    if not team.get('members'): TEAM_STATES.pop(int(team['id']),None)
+
+def send_team_match_state(member_ids, goal_id, goal_type, state):
+    data=encode_sproto([(0,int(state)),(1,str(goal_id)),(2,int(goal_type))])
+    for member_id in member_ids: send_push_to_char(member_id,681,data)
+
+def queue_team_match(team, goal_id, goal_type):
+    copy_id=str(goal_id); cfg=COPY_SCENE_CONFIG.get(copy_id)
+    if not team or not cfg or copy_id not in DAILY_EXP_CONFIG: return False
+    max_members=min(4,int(cfg.get('max_member',4))); min_members=max(2,int(cfg.get('min_member',2)))
+    if len(team.get('members',[]))>=min_members:
+        team['matching']=False
+        send_team_match_state(list(team.get('members',[])),copy_id,goal_type,1)
+        return True
+    queue=TEAM_MATCH_QUEUE.setdefault(copy_id,[])
+    if team['id'] not in queue: queue.append(team['id'])
+    team['matching']=True
+    send_team_match_state(list(team.get('members',[])),copy_id,goal_type,0)
+    while len(team.get('members',[])) < min_members:
+        other_id=next((tid for tid in queue if tid!=team['id']),None)
+        if other_id is None: break
+        other=TEAM_STATES.get(other_id)
+        if other is None or other.get('active_run') or not other.get('matching'):
+            queue.remove(other_id); continue
+        combined=list(team.get('members',[]))+list(other.get('members',[]))
+        if len(combined)>max_members:
+            queue.remove(other_id); continue
+        players=[]; valid=True
+        for member_id in combined:
+            member=ALL_CONNECTIONS.get(int(member_id),(None,None))[1]
+            if member is None or not int(cfg.get('min_level',1))<=int(member.get('level',1))<=int(cfg.get('max_level',80)):
+                valid=False; break
+            players.append((int(member_id),member))
+        if not valid:
+            queue.remove(other_id); continue
+        queue.remove(other_id)
+        for member_id,member in players:
+            if member_id not in team['members']: team['members'].append(member_id)
+            team.setdefault('char_refs',{})[member_id]=member
+            CHAR_TEAM[member_id]=int(team['id']); member['team_goal_copy']=copy_id
+        other['members']=[]; other['char_refs']={}; TEAM_STATES.pop(int(other_id),None)
+        send_team_update(team['id'])
+        if len(team['members'])>=min_members:
+            team['matching']=False
+            if team['id'] in queue: queue.remove(team['id'])
+            send_team_match_state(list(team['members']),copy_id,goal_type,1)
+            break
+    return True
+
+def stop_team_match(team, goal_id, goal_type):
+    copy_id=str(goal_id)
+    if team:
+        team['matching']=False
+        queue=TEAM_MATCH_QUEUE.get(copy_id,[])
+        if team['id'] in queue: queue.remove(team['id'])
+        if not queue: TEAM_MATCH_QUEUE.pop(copy_id,None)
+        send_team_match_state(list(team.get('members',[])),copy_id,goal_type,1)
+def detach_exp_team_member(team, member_id):
+    cid=int(member_id); state=team.get('active_run') if team else None
+    if team and team.get('matching'): stop_team_match(team,team.get('goal_id',''),1)
+    if team and team.get('pending_run'):
+        for other_id in team.get('members',[]):
+            if int(other_id)!=cid: send_push_to_char(other_id,603,encode_sproto([(0,cid),(1,1)]))
+        team['pending_run']=None
+        ready_timer=team.pop('_ready_timer',None)
+        if ready_timer: ready_timer.cancel()
+    conn,char=ALL_CONNECTIONS.get(cid,(None,None))
+    if char is None and team: char=team.get('char_refs',{}).get(cid)
+    if state and cid in exp_member_ids(state):
+        if char and char.get('exp_stage_state') is state:
+            if conn and is_exp_map(char.get('map_id')): broadcast_aoi_remove(cid,char.get('map_id'))
+            pos=char.get('pre_copy_pos'); mid=char.get('pre_copy_map','11')
+            state['members']=[x for x in state.get('members',[]) if int(x)!=cid]
+            state.get('char_refs',{}).pop(cid,None)
+            char.pop('exp_stage_state',None); char['active_copy_id']=None; char['exp_team_id']=None
+            char.pop('pre_copy_pos',None); char.pop('pre_copy_map',None)
+            if conn:
+                start_map_transition(conn,char,mid,lambda tag,data,who=cid:send_push_to_char(who,tag,data),override_pos=pos)
+            else:
+                if pos: char['pos']=pos
+                char['map_id']=mid
+        else:
+            state['members']=[x for x in state.get('members',[]) if int(x)!=cid]
+            state.get('char_refs',{}).pop(cid,None)
+    team_remove_member(team,cid)
+    if state:
+        if state.get('members'):
+            team['active_run']=state
+            state['owner_id']=int(team.get('leader_id',state.get('owner_id',0)))
+        else:
+            state['ai_active']=False
+            for timer_key in ('ai_timer','timeout_timer'):
+                run_timer=state.get(timer_key)
+                if run_timer is not None: run_timer.cancel()
+            if team: team['active_run']=None; team['pending_run']=None
+    if team and team.get('members'): send_team_update(team['id'])
+    save_chars(all_accounts_chars)
+def start_team_exp_run(team, copy_id):
+    copy_id=str(copy_id); cfg=COPY_SCENE_CONFIG.get(copy_id)
+    ids=list(team.get('members',[]))
+    if not cfg or copy_id not in DAILY_EXP_CONFIG or len(ids)<max(2,int(cfg.get('min_member',2))) or len(ids)>int(cfg.get('max_member',4)): return False
+    players=[]
+    for cid in ids:
+        conn,ch=ALL_CONNECTIONS.get(cid,(None,None))
+        if conn is None or ch is None or ch.get('exp_stage_state') or ch.get('active_copy_id') or not cfg['min_level']<=int(ch.get('level',1))<=cfg['max_level']: return False
+        players.append((cid,conn,ch))
+    leader=next((ch for cid,_conn,ch in players if int(cid)==int(team.get('leader_id',0))),None)
+    if leader is None or copy_attempts_remaining(leader,copy_id,cfg)<=0: return False
+    for cid,conn,ch in players:
+        if ch.get('pre_copy_pos') is None:
+            ch['pre_copy_pos']=list(ch.get('pos',[29860,100,-17005,0])); ch['pre_copy_map']=str(ch.get('map_id','11'))
+        daily=ensure_daily_copy_state(ch)
+        remaining=copy_attempts_remaining(ch,copy_id,cfg)
+        if remaining>0: daily['remaining'][copy_id]=remaining-1
+        ch['active_copy_id']=copy_id; ch['exp_members']=ids; ch['exp_team_id']=int(team['id']); ch['exp_defer_start']=True
+        ch['hp']=get_character_stats(ch)['hp_max']; sync_char_attrs_rpc(conn,ch)
+        send_push_to_char(cid,555,sync_copy_scenes(ch))
+        advance_missions(ch,lambda tag,data,who=cid:send_push_to_char(who,tag,data),'dungeon',target_id=copy_id)
+    save_chars(all_accounts_chars); DEAD_NPC_SET.clear()
+    for cid,conn,ch in players:
+        start_map_transition(conn,ch,copy_id,lambda tag,data,who=cid:send_push_to_char(who,tag,data))
+    owner=ALL_CONNECTIONS.get(int(team['leader_id']),(None,players[0][2]))[1] or players[0][2]
+    state=owner.get('exp_stage_state')
+    if not state or str(state.get('copy_id'))!=copy_id: return False
+    state['team_id']=int(team['id']); state['members']=ids; state['owner_id']=int(team['leader_id']); state['defer_start']=False
+    for cid,conn,ch in players:
+        ch['exp_stage_state']=state; ch['exp_team_id']=int(team['id']); ch['exp_defer_start']=False
+        state.setdefault('char_refs',{})[cid]=ch
+    team['active_run']=state; team['pending_run']=None
+    _send_exp_tag683(lambda tag,data:exp_send_push(state,tag,data),state,DAILY_EXP_CONFIG[copy_id])
+    start_exp_stage_runtime(players[0][1],owner,state); send_team_update(team['id']); save_chars(all_accounts_chars)
+    return True
 
 def start_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
