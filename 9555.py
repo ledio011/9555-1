@@ -2576,6 +2576,12 @@ def _build_exp_npc_wrapper(send_rpc_push, exp_state):
     return send_npc_wrapper
 
 
+def exp_npc_hp_lock(exp_state, inst_id):
+    """Serialize HP/death commits for one EXP monster across squad threads."""
+    locks = exp_state.setdefault('_npc_hp_locks', {})
+    return locks.setdefault(int(inst_id), threading.Lock())
+
+
 def flush_exp_kill_tracker(exp_state, conn, picked_char, send_rpc_push):
     """Credit each valid NPC death once, including partial waves at timeout."""
     if not exp_state:
@@ -2641,7 +2647,19 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
     current_time = time.time()
 
     for inst_id in list(exp_state.get('active_monsters', [])):
-        if inst_id in DEAD_NPC_SET:
+        auto_death_nid = None
+        auto_death_hp_zero = False
+        with exp_npc_hp_lock(exp_state, inst_id):
+            already_dead = inst_id in DEAD_NPC_SET
+            if not already_dead and NPC_HP_MAP.get(inst_id, 0) <= 0:
+                auto_death_hp_zero = True
+                auto_death_nid = NPC_INST_MAP.get(inst_id)
+                if auto_death_nid:
+                    # Mark under the same per-monster lock used by combat so
+                    # another hit cannot land between zero HP and death.
+                    DEAD_NPC_SET.add(inst_id)
+
+        if already_dead:
             if inst_id in exp_state.get('active_monsters', []):
                 exp_state['active_monsters'].remove(inst_id)
                 print(f"[EXP AI] Cleaned up already-dead inst_id={inst_id} from active_monsters")
@@ -2652,13 +2670,11 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
             exp_state.get('monster_heading', {}).pop(inst_id, None)
             exp_state.get('attack_cd', {}).pop(inst_id, None)
             continue
-        if NPC_HP_MAP.get(inst_id, 0) <= 0:
-            target_nid_for_death = NPC_INST_MAP.get(inst_id)
-            print(f"[EXP AI] Auto-death detected inst_id={inst_id} npcid={target_nid_for_death} hp={NPC_HP_MAP.get(inst_id, 0)}")
-            if target_nid_for_death:
-                DEAD_NPC_SET.add(inst_id)
+        if auto_death_hp_zero:
+            print(f"[EXP AI] Auto-death detected inst_id={inst_id} npcid={auto_death_nid} hp={NPC_HP_MAP.get(inst_id, 0)}")
+            if auto_death_nid:
                 send_rpc_push_func(506, encode_sproto([(0, inst_id)]))
-                on_npc_killed(conn_for_sync, send_rpc_push_func, picked_char, inst_id, target_nid_for_death)
+                on_npc_killed(conn_for_sync, send_rpc_push_func, picked_char, inst_id, auto_death_nid)
             else:
                 if inst_id in exp_state.get('active_monsters', []):
                     exp_state['active_monsters'].remove(inst_id)
@@ -5528,7 +5544,7 @@ def client_handler(conn, addr):
                                         or int(picked_char.get('id', 0)) not in exp_member_ids(exp_state_hit)
                                         or target_id not in active_ids or target_id not in spawned_ids
                                         or target_id not in NPC_HP_MAP or target_id not in NPC_INST_MAP
-                                        or NPC_HP_MAP.get(target_id, 0) <= 0):
+                                        or target_id in DEAD_NPC_SET):
                                     print(f"[EXP HIT] rejected unowned/inactive target={target_id} map={cur_map}")
                                     continue
 
@@ -5599,7 +5615,45 @@ def client_handler(conn, addr):
                             else:
                                 actual_dmg = server_dmg
 
-                            NPC_HP_MAP[target_id] -= actual_dmg
+                            exp_npc_died = False
+                            exp_dead_target = False
+                            if is_exp:
+                                # A squad can submit hits from different client
+                                # threads at nearly the same time. Recheck and
+                                # commit HP/death under one per-NPC lock so a
+                                # second hit cannot damage an HP-zero enemy or
+                                # race the kill counter.
+                                with exp_npc_hp_lock(exp_state_hit, target_id):
+                                    active_now = exp_state_hit.get('active_monsters', [])
+                                    spawned_now = exp_state_hit.get('spawned_npcs', set())
+                                    hp_now = NPC_HP_MAP.get(target_id)
+                                    if (exp_state_hit.get('_finish_handled')
+                                            or target_id not in active_now
+                                            or target_id not in spawned_now
+                                            or hp_now is None
+                                            or target_id not in NPC_INST_MAP
+                                            or target_id in DEAD_NPC_SET):
+                                        exp_dead_target = True
+                                    elif int(hp_now) <= 0:
+                                        # Recover a zero-HP instance left by an
+                                        # earlier interrupted death path, and
+                                        # finalize it without applying another hit.
+                                        NPC_HP_MAP[target_id] = 0
+                                        DEAD_NPC_SET.add(target_id)
+                                        exp_npc_died = True
+                                        actual_dmg = 0
+                                    else:
+                                        hp_after = max(0, int(hp_now) - max(0, int(actual_dmg)))
+                                        NPC_HP_MAP[target_id] = hp_after
+                                        if hp_after == 0:
+                                            DEAD_NPC_SET.add(target_id)
+                                            exp_npc_died = True
+                            else:
+                                NPC_HP_MAP[target_id] -= actual_dmg
+
+                            if exp_dead_target:
+                                print(f"[EXP HIT] rejected target already dead/inactive target={target_id}")
+                                continue
 
                             # Bug 6: Only send TAG 510 when actual_dmg > 0 to avoid wasting bandwidth on misses
                             if actual_dmg > 0:
@@ -5626,12 +5680,14 @@ def client_handler(conn, addr):
 
                             # Issue 213: TAG 514 (hit_action) client handler does nothing — skip sending
 
-                            if NPC_HP_MAP[target_id] <= 0:
+                            npc_died = exp_npc_died if is_exp else NPC_HP_MAP[target_id] <= 0
+                            if npc_died:
                                 # Fix: Only process death once - skip if already dead
-                                if target_id in DEAD_NPC_SET:
+                                if not is_exp and target_id in DEAD_NPC_SET:
                                     print(f"[EXP MSG111] NPC already dead target_id={target_id}, skipping")
                                     continue
-                                DEAD_NPC_SET.add(target_id)
+                                if not is_exp:
+                                    DEAD_NPC_SET.add(target_id)
                                 print(f"[EXP MSG111] NPC DEAD target_id={target_id} target_nid={target_nid} hp={NPC_HP_MAP[target_id]}")
 
                                 kill_state = picked_char.get('exp_stage_state') if is_exp else None
