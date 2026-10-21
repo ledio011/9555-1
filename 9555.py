@@ -1808,6 +1808,76 @@ def exp_sync_npc_attrs(state, inst_id, stats, hp):
 def is_exp_map(map_id):
     return str(map_id) in ('223','224','225','226','227','228','229')
 
+def reconcile_exp_stage_login(char):
+    """Restore a live EXP run on reconnect and discard orphaned entry markers."""
+    if not char:
+        return False
+    leave_timer = char.get('_exp_leave_timer')
+    if leave_timer is not None:
+        try:
+            if leave_timer.is_alive():
+                return False
+        except Exception:
+            return False
+        char.pop('_exp_leave_timer', None)
+
+    char_id = int(char.get('id', 0))
+    current_map = str(char.get('map_id') or '11')
+    state = char.get('exp_stage_state')
+    if state is None:
+        try:
+            team_id = int(char.get('exp_team_id') or CHAR_TEAM.get(char_id, 0) or 0)
+        except (TypeError, ValueError):
+            team_id = 0
+        team = TEAM_STATES.get(team_id)
+        team_run = team.get('active_run') if team else None
+        if team_run and char_id in exp_member_ids(team_run):
+            state = team_run
+            char['exp_stage_state'] = state
+
+    if state is not None:
+        copy_id = str(state.get('copy_id') or '')
+        is_member = char_id in exp_member_ids(state)
+        run_live = not state.get('_finish_handled') and not state.get('team_finish_handled') and state.get('ai_active', True)
+        if is_exp_map(copy_id) and is_member and run_live:
+            char_refs = state.get('char_refs')
+            if not isinstance(char_refs, dict):
+                char_refs = {}
+                state['char_refs'] = char_refs
+            char_refs[char_id] = char
+            if current_map != copy_id:
+                # The in-memory run survives a socket reconnect, while the
+                # character location can lag behind it. Resume at the stage's
+                # known safe spawn point so monsters and player share a map.
+                char['map_id'] = copy_id
+                char['pos'] = [0, 100, 0, 0]
+                char['active_copy_id'] = copy_id
+                print(f"[EXP RECOVERY] resumed live run copy={copy_id} player={char_id}")
+                return True
+            char['active_copy_id'] = copy_id
+            return False
+
+        if not is_exp_map(current_map):
+            char_refs = state.get('char_refs')
+            if isinstance(char_refs, dict) and char_refs.get(char_id) is char:
+                char_refs.pop(char_id, None)
+            char.pop('exp_stage_state', None)
+
+    active_copy_id = str(char.get('active_copy_id') or '')
+    if is_exp_map(active_copy_id) and not is_exp_map(current_map):
+        # active_copy_id is saved, but the live run object is deliberately
+        # runtime-only. If the player is outside the EXP map and no live run
+        # can be restored, this marker must not lock them out of a new entry.
+        char['active_copy_id'] = None
+        char['exp_team_id'] = None
+        char.pop('exp_members', None)
+        char['exp_defer_start'] = False
+        char.pop('pre_copy_pos', None)
+        char.pop('pre_copy_map', None)
+        print(f"[EXP RECOVERY] cleared orphan entry marker copy={active_copy_id} player={char_id}")
+        return True
+    return False
+
 def can_aoi_exchange(source, target):
     if not source or not target or source.get('id')==target.get('id') or str(source.get('map_id'))!=str(target.get('map_id')): return False
     if is_exp_map(source.get('map_id')):
@@ -4221,6 +4291,7 @@ def client_handler(conn, addr):
                     picked_char['last_played'] = int(time.time())
                     print(f"[CHARACTER PICK] id={picked_char['id']} level={picked_char.get('level')}")
                     init_character_fields(picked_char)
+                    reconcile_exp_stage_login(picked_char)
                     # Initial Mission Assignment for new characters
                     has_active_main = False
                     for active_id in picked_char['active_missions']:
