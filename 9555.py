@@ -2780,21 +2780,56 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
     return exp_state.get('ai_active') and picked_char.get('map_id') == map_str
 
 
-def _send_exp_tag683(send_rpc_push, exp_state, exp_cfg):
+def exp_spawn_profile(exp_state, exp_cfg):
+    """Select the APK's enemy-count/spawn-set variant from squad size.
+
+    DailyExpData has parallel GroupNpcCount and Monsters arrays: one complete
+    set for each supported party size (solo through four players). Keep the
+    choice on the run state so reconnects or a member leaving cannot change
+    the active run's spawn profile midway through.
+    """
     counts = exp_cfg.get('group_npc_count', [5, 10, 15, 20])
-    if not isinstance(counts, list) or not counts: counts = [5, 10, 15, 20]
+    monsters = exp_cfg.get('monsters', [])
+    if not isinstance(counts, list) or not counts:
+        counts = [5, 10, 15, 20]
+    if not isinstance(monsters, list) or not monsters:
+        raise ValueError(f"EXP config has no spawn profiles copy={exp_state.get('copy_id')}")
+    profile_count = min(len(counts), len(monsters))
+    if profile_count < 1:
+        raise ValueError(f"EXP config has no usable spawn profiles copy={exp_state.get('copy_id')}")
+
+    if exp_state.get('spawn_profile_index') is None:
+        member_count = max(1, len(exp_member_ids(exp_state)))
+        profile_index = min(member_count - 1, profile_count - 1)
+        exp_state['spawn_profile_index'] = profile_index
+        exp_state['spawn_count_per_wave'] = max(1, int(counts[profile_index]))
+    else:
+        profile_index = max(0, min(profile_count - 1, int(exp_state['spawn_profile_index'])))
+        exp_state['spawn_profile_index'] = profile_index
+        exp_state['spawn_count_per_wave'] = max(
+            1, int(exp_state.get('spawn_count_per_wave', counts[profile_index]))
+        )
+    return profile_index, exp_state['spawn_count_per_wave']
+
+
+def exp_stage_kill_limits(exp_state, exp_cfg):
+    """Return the exact group and run kill caps represented by client index."""
+    _profile_index, per_wave = exp_spawn_profile(exp_state, exp_cfg)
+    wave_count = max(1, int(exp_cfg.get('wave_count', 4)))
     group_count = max(1, int(exp_cfg.get('group_count', 7)))
-    # The APK reads GroupNpcCount[0] * WaveCount for its group quota.  Treat
-    # the configured values (5, 10, 15, 20) as cumulative group targets, so
-    # this quota and the actual spawn total both end at 20 instead of 50.
-    actual_group = max(1, int(counts[-1]))
-    actual_total = actual_group * group_count
-    group_kills = min(actual_group, max(0, int(exp_state.get('wave_kills', 0))))
-    total_kills = min(actual_total, max(0, int(exp_state.get('total_kills', 0))))
+    group_target = per_wave * wave_count
+    return group_target, group_target * group_count
+
+
+def _send_exp_tag683(send_rpc_push, exp_state, exp_cfg):
+    group_target, total_target = exp_stage_kill_limits(exp_state, exp_cfg)
+    profile_index = int(exp_state.get('spawn_profile_index', 0))
+    group_kills = min(group_target, max(0, int(exp_state.get('wave_kills', 0))))
+    total_kills = min(total_target, max(0, int(exp_state.get('total_kills', 0))))
     send_rpc_push(683, encode_sproto([
-        # The APK reads parm2/parm3 directly as kill counts.  Since waves
-        # spawn only each target's delta, raw kills now match its 20/140 caps.
-        (0, str(exp_state['copy_id'])), (1, 0), (2, exp_state['end_time']),
+        # The APK uses index to select the party-size count in GroupNpcCount.
+        # Its displayed caps are per-wave count * WaveCount * GroupCount.
+        (0, str(exp_state['copy_id'])), (1, profile_index), (2, exp_state['end_time']),
         (3, exp_state['cur_group']),
         (4, group_kills), (5, total_kills)
     ]))
@@ -2814,37 +2849,22 @@ def spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state
     monster_groups = exp_cfg.get('monsters', [])
     if len(monster_groups) != wave_count:
         raise ValueError(f"EXP config wave/map mismatch copy={exp_state.get('copy_id')} waves={wave_count} maps={len(monster_groups)}")
-    mon_group_id = monster_groups[cur_wave - 1]
+    profile_index, expected_count = exp_spawn_profile(exp_state, exp_cfg)
+    mon_group_id = monster_groups[profile_index]
     mon_entries = MONSTER_DATA.get(mon_group_id, [])
 
-    # MonsterData.Group is the one-based subwave number across the full run.
+    # Each Monsters entry is a complete party-size variant containing every
+    # one-based subwave group. GroupNpcCount[index] selects the row count.
     group_num = subwave
     subwave_spawns = [m for m in mon_entries if m.get('group') == group_num]
     group_npc_count = exp_cfg.get('group_npc_count', [5, 10, 15, 20])
     if not isinstance(group_npc_count, list) or len(group_npc_count) < wave_count:
         raise ValueError(f"EXP config has incomplete wave counts copy={exp_state.get('copy_id')} counts={group_npc_count}")
-    wave_target = int(group_npc_count[cur_wave - 1])
-    previous_target = int(group_npc_count[cur_wave - 2]) if cur_wave > 1 else 0
-    if wave_target < previous_target or previous_target < 0:
-        raise ValueError(
-            f"EXP wave targets must be cumulative and non-decreasing copy={exp_state.get('copy_id')} "
-            f"wave={cur_wave} previous={previous_target} target={wave_target}"
-        )
-    expected_count = wave_target - previous_target
-    if len(subwave_spawns) != wave_target:
-        raise ValueError(
-            f"EXP spawn table mismatch copy={exp_state.get('copy_id')} group={cur_group} wave={cur_wave} "
-            f"map={mon_group_id} MonsterData.Group={group_num} target={wave_target} actual={len(subwave_spawns)}"
-        )
-
-    # Each MonsterData wave stores positions up to its cumulative target.
-    # Spawn only the newly required slice so each group reaches the client's
-    # quota instead of spawning 5 + 10 + 15 + 20 monsters (50 total).
-    subwave_spawns = subwave_spawns[previous_target:wave_target]
     if len(subwave_spawns) != expected_count:
         raise ValueError(
-            f"EXP incremental spawn table mismatch copy={exp_state.get('copy_id')} group={cur_group} wave={cur_wave} "
-            f"expected={expected_count} actual={len(subwave_spawns)}"
+            f"EXP spawn table mismatch copy={exp_state.get('copy_id')} group={cur_group} wave={cur_wave} "
+            f"profile={profile_index} map={mon_group_id} MonsterData.Group={group_num} "
+            f"target={expected_count} actual={len(subwave_spawns)}"
         )
 
     for m in subwave_spawns:
@@ -2863,8 +2883,8 @@ def spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state
 
     print(
         f"[EXP STAGE] Spawned copy={exp_state['copy_id']} group={exp_state['cur_group']} "
-        f"wave={exp_state['cur_wave']} subwave={subwave} target={wave_target} "
-        f"new={len(exp_state['active_monsters'])} monsters"
+        f"wave={exp_state['cur_wave']} subwave={subwave} profile={profile_index} "
+        f"map={mon_group_id} target={expected_count} new={len(exp_state['active_monsters'])} monsters"
     )
 
 def get_exp_stage_full_reward(char_lv):
@@ -2910,9 +2930,8 @@ def finish_exp_team_stage(conn, push, owner, state, win):
         timer=state.get(key)
         if timer: timer.cancel()
     copy_id=str(state['copy_id']); cfg=DAILY_EXP_CONFIG.get(copy_id,{})
-    counts=cfg.get('group_npc_count',[5,10,15,20]);
-    if not isinstance(counts,list) or not counts: counts=[5,10,15,20]
-    expected=max(1,int(counts[-1])*int(cfg.get('group_count',7)))
+    _group_target, expected = exp_stage_kill_limits(state, cfg)
+    expected=max(1,expected)
     ratio=min(1.0,max(0.0,int(state.get('total_kills',0))/expected))
     flag=0; grade=0
     if win:
@@ -2992,11 +3011,8 @@ def _finish_exp_stage_impl(conn, send_rpc_push, picked_char, exp_state, win=True
 
     full_exp = get_exp_stage_full_reward(char_lv)
     exp_cfg = DAILY_EXP_CONFIG.get(copy_id, {})
-    wave_count = exp_cfg.get('wave_count', 4)
-    group_count = exp_cfg.get('group_count', 7)
-    counts = exp_cfg.get('group_npc_count', [5, 10, 15, 20])
-    if not isinstance(counts, list) or not counts: counts = [5, 10, 15, 20]
-    total_max_kills = max(1, int(counts[-1]) * int(group_count))
+    _group_target, total_max_kills = exp_stage_kill_limits(exp_state, exp_cfg)
+    total_max_kills = max(1, total_max_kills)
     ratio = min(1.0, exp_state['total_kills'] / total_max_kills) if total_max_kills > 0 else 1.0
 
     exp_reward = int(full_exp * ratio) if win else int(full_exp * ratio * 0.5)
@@ -3691,6 +3707,17 @@ def accept_mission_logic(picked_char, mid):
         print(f"[accept_mission_logic] FAILED: {mid} not in missions_data")
         return False
     m = missions_data[mid]
+    # Main-chain completion may activate the next mission before the client
+    # sends its follow-up accept request. Treat that retry as an acknowledgement
+    # and preserve the existing state/progress instead of rejecting or resetting it.
+    active_missions = picked_char.get('active_missions')
+    if not isinstance(active_missions, dict):
+        active_missions = {}
+        picked_char['active_missions'] = active_missions
+    if mid in active_missions:
+        print(f"[accept_mission_logic] {mid} already active; acknowledging existing state")
+        return True
+
     pre_id = m.get('pre_id', "")
     is_main_chain = (
             m.get('class') == 1
@@ -3714,10 +3741,6 @@ def accept_mission_logic(picked_char, mid):
                     return False
             except: return False
 
-    if 'active_missions' not in picked_char: picked_char['active_missions'] = {}
-    if mid in picked_char['active_missions']:
-        print(f"[accept_mission_logic] FAILED: {mid} already active")
-        return False
     try:
         imid = int(mid)
         if imid in picked_char.get('completed_side_missions', []):
