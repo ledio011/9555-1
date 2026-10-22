@@ -7118,11 +7118,81 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 298: # impact_npc (Vehicle collision / running over NPC)
-                # The APK sends this request with no payload. It is only a
-                # visual collision notification; the authoritative NPC death
-                # and IMPACT_NPC mission event arrives separately as MSG 307.
-                # Never grant currency or mission progress from this signal.
-                print(f"[SECURITY] ignored rewardless MSG 298 player={picked_char.get('id') if picked_char else '-'}")
+                # ObjRagdollNPC sends MSG 298 when a client-side race pedestrian
+                # reaches 0 HP. Unlike combat NPC deaths, there is no MSG 307,
+                # and this request contains no NPC ID or position. Only accept
+                # it from the active character while their configured race is
+                # running; cap bursts to the local NPC pool and bound total
+                # drops per entry to limit replay/farming.
+                race_copy_id = str(picked_char.get('active_copy_id') or '') if picked_char else ''
+                race_cfg = COPY_SCENE_CONFIG.get(race_copy_id, {})
+                race_map = str(race_cfg.get('map_id') or '')
+                race_started = picked_char.get('street_race_started_at') if picked_char else None
+                race_impact_valid = bool(
+                    picked_char
+                    and is_current_character_connection(conn, picked_char)
+                    and race_cfg.get('subtype') == 7
+                    and race_map
+                    and str(picked_char.get('map_id') or '') == race_map
+                    and race_started is not None
+                    and not picked_char.get('street_race_result_recorded')
+                )
+                if race_impact_valid:
+                    now_wall = time.time()
+                    recent_impact_times = []
+                    for impact_at in picked_char.get('street_race_npc_drop_times', []):
+                        try:
+                            impact_at = float(impact_at)
+                        except (TypeError, ValueError):
+                            continue
+                        if 0 <= now_wall - impact_at < 3.0:
+                            recent_impact_times.append(impact_at)
+                    try:
+                        impact_count = max(0, int(picked_char.get('street_race_npc_drop_count', 0)))
+                    except (TypeError, ValueError):
+                        impact_count = 300
+
+                    if impact_count >= 300 or len(recent_impact_times) >= 20:
+                        print(f"[STREET RACE SECURITY] rejected MSG 298 player={picked_char.get('id')} count={impact_count} burst={len(recent_impact_times)}")
+                    else:
+                        player_level = int(picked_char.get('level', 1))
+                        # Preserve the pre-existing MSG 298 reward amounts;
+                        # this change adds the missing ground-drop packet.
+                        exp_drop, cash_drop = calculate_npc_kill_rewards(player_level, npc_level=1)
+                        collision_rewards = [("2001", 0, exp_drop), ("1001", 0, cash_drop)]
+                        grant_item_rewards(picked_char, collision_rewards, conn, send_rpc_push, save=False)
+                        send_rpc_push(638, encode_sproto([(0, [
+                            encode_sproto([(0, "2001"), (1, exp_drop), (3, 0)]),
+                            encode_sproto([(0, "1001"), (1, cash_drop), (3, 0)])
+                        ])]))
+
+                        # Street Race NPCs are client-local; place the visible
+                        # coin drop at the last server-synced car position.
+                        player_pos = picked_char.get('pos')
+                        if not isinstance(player_pos, (list, tuple)) or len(player_pos) < 3:
+                            player_pos = street_race_start_position(race_map) or [0, 100, 0, 0]
+                        try:
+                            drop_x, drop_z = int(player_pos[0]), int(player_pos[2])
+                        except (TypeError, ValueError):
+                            fallback_pos = street_race_start_position(race_map) or [0, 100, 0, 0]
+                            drop_x, drop_z = int(fallback_pos[0]), int(fallback_pos[2])
+                        drop_item = encode_sproto([(0, "1001"), (1, cash_drop), (3, 0)])
+                        send_rpc_push(527, encode_sproto([
+                            (0, next_global_inst_id()),
+                            (1, drop_x),
+                            (2, drop_z),
+                            (3, 0),
+                            (4, drop_item),
+                            (7, picked_char['id'])
+                        ]))
+
+                        recent_impact_times.append(now_wall)
+                        picked_char['street_race_npc_drop_times'] = recent_impact_times
+                        picked_char['street_race_npc_drop_count'] = impact_count + 1
+                        save_chars(all_accounts_chars)
+                        print(f"[STREET RACE] collision NPC drop player={picked_char.get('id')} race={race_copy_id} count={impact_count + 1}/300 exp={exp_drop} cash={cash_drop}")
+                else:
+                    print(f"[STREET RACE SECURITY] ignored MSG 298 outside active race player={picked_char.get('id') if picked_char else '-'}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -7293,6 +7363,10 @@ def client_handler(conn, addr):
                                 picked_char['street_race_started_at'] = None
                                 picked_char['street_race_checkpoint_progress'] = 0
                                 picked_char['street_race_movement_valid'] = True
+                                # MSG 298 has no NPC instance ID, so keep its
+                                # reward budget scoped to this race entry.
+                                picked_char['street_race_npc_drop_count'] = 0
+                                picked_char['street_race_npc_drop_times'] = []
                                 picked_char.pop('street_race_last_car_pos', None)
                                 picked_char.pop('street_race_last_move_at', None)
                                 picked_char.pop('street_race_elapsed_offset_cs', None)
