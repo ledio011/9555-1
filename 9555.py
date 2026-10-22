@@ -3059,10 +3059,15 @@ def _send_exp_tag683(send_rpc_push, exp_state, exp_cfg):
     profile_index = int(exp_state.get('spawn_profile_index', 0))
     group_kills = min(group_target, max(0, int(exp_state.get('wave_kills', 0))))
     total_kills = min(total_target, max(0, int(exp_state.get('total_kills', 0))))
+    # Tag 683 drives the EXP info panel's Bonus Time display. Keep it on the
+    # current group's deadline; Tag 629 separately carries the full run limit.
+    group_start = int(exp_state.get('group_start_time', exp_state.get('start_time', time.time())))
+    group_duration = max(1, int(exp_cfg.get('group_time', 60)))
+    bonus_end_time = min(int(exp_state['end_time']), group_start + group_duration)
     send_rpc_push(683, encode_sproto([
         # The APK uses index to select the party-size count in GroupNpcCount.
         # Its displayed caps are per-wave count * WaveCount * GroupCount.
-        (0, str(exp_state['copy_id'])), (1, profile_index), (2, exp_state['end_time']),
+        (0, str(exp_state['copy_id'])), (1, profile_index), (2, bonus_end_time),
         (3, exp_state['cur_group']),
         (4, group_kills), (5, total_kills)
     ]))
