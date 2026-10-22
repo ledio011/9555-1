@@ -8,7 +8,9 @@ TMP_DB = CHAR_DB + ".tmp"
 RESOURCE_ROOT = os.path.join(SCRIPT_DIR, "assets")
 server_session_counter = 8000
 GLOBAL_INST_COUNTER = 3000000
+GLOBAL_INST_COUNTER_LOCK = threading.Lock()
 NPC_INST_MAP = {} # inst_id -> nid (to resolve rewards)
+NPC_INSTANCE_MAP = {} # inst_id -> map ID, to reject cross-map forged death reports
 NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_ATTR_MAP = {} # runtime NPC payloads for reconnect replay
 TEAM_STATES = {}
@@ -19,10 +21,43 @@ TEAM_ID_COUNTER = 500000
 EXP_RUN_COUNTER = 900000
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 DEAD_NPC_SET = set() # duplicate death/reward prevention set
+LOCAL_NPC_DEATHS = {} # (character, map, npc, spawn) -> last accepted local death time
+LOCAL_NPC_DEATH_LOCK = threading.Lock()
+SURVEY_PROGRESS_TIMES = {} # (character, mission) -> last accepted survey event (monotonic)
+CAR_MISSION_EVENT_TIMES = {} # character -> last accepted generic car robbery event (monotonic)
 RANDOM_NAME_CALLED = set()  # connection identities that have had their first random name request
 ALL_CONNECTIONS = {}  # char_id -> (conn, picked_char) for tracking online players
 CONNECTION_LOCKS = {}  # char_id -> threading.Lock() for per-connection send protection
 MAIL_ID_COUNTER = 1000000  # Will be initialized from max existing mailId on startup
+CHAR_DB_SAVE_LOCK = threading.Lock() # serialize atomic snapshots to the shared temp/backup files
+TEAM_ID_COUNTER_LOCK = threading.Lock()
+EXP_RUN_COUNTER_LOCK = threading.Lock()
+MAIL_ID_COUNTER_LOCK = threading.Lock()
+
+def next_global_inst_id():
+    global GLOBAL_INST_COUNTER
+    with GLOBAL_INST_COUNTER_LOCK:
+        GLOBAL_INST_COUNTER += 1
+        return GLOBAL_INST_COUNTER
+
+def next_team_id():
+    global TEAM_ID_COUNTER
+    with TEAM_ID_COUNTER_LOCK:
+        TEAM_ID_COUNTER += 1
+        return TEAM_ID_COUNTER
+
+def next_exp_run_id():
+    global EXP_RUN_COUNTER
+    with EXP_RUN_COUNTER_LOCK:
+        EXP_RUN_COUNTER += 1
+        return EXP_RUN_COUNTER
+
+def next_mail_id():
+    global MAIL_ID_COUNTER
+    with MAIL_ID_COUNTER_LOCK:
+        mail_id = MAIL_ID_COUNTER
+        MAIL_ID_COUNTER += 1
+        return mail_id
 
 # Load Mission Data
 missions_data = {}
@@ -39,10 +74,13 @@ TARGET_CAR_SPAWNS = {}  # logicId -> list of car spawns
 MISSION_REQUIRE_DATA = {} # logicId -> dict
 MOVE_TARGET_DATA = {}   # logicId -> dict
 SURVEY_DATA = {}        # logicId -> dict
+MULTI_DELIVERY_DATA = {} # logicId -> ordered delivery stops
 EFF_CONFIG = {}   # effId -> effect info template
 SKILL_CONFIG = {} # skillId -> skill info template
 EFF_TO_SKILL = {} # effId -> skillId (reverse lookup for Tag 128)
 MOUNT_CONFIG = {} # garage vehicle id -> client MountData definition
+COLOR_CONFIG = {} # color id -> authoritative PriceType/PriceCost from ColorData
+WILD_BOSS_CONFIG = {} # ID -> configured PVE world boss and required level band
 COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
 SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
 STREET_RACE_REWARD_BY_LEVEL = {} # level -> AdaptData _drop_bc ShowRewardData id
@@ -544,7 +582,9 @@ try:
                         'x': int(parts[4]),
                         'z': int(parts[5]),
                         'o': int(parts[6]),
-                        'group': group
+                        'group': group,
+                        'rebirth_type': int(parts[7]) if len(parts) > 7 and parts[7].lstrip('-').isdigit() else 0,
+                        'rebirth_time': int(parts[8]) if len(parts) > 8 and parts[8].lstrip('-').isdigit() else -1,
                     }
                     if group == 9999:
                         if mid not in STATIC_NPC_DATA: STATIC_NPC_DATA[mid] = []
@@ -661,9 +701,32 @@ try:
                 parts = line.strip().split(",")
                 if len(parts) > 3 and parts[0] == "*" and parts[1].isdigit():
                     SURVEY_DATA[parts[1]] = {
-                        'need_num': int(parts[3]) if parts[3].isdigit() else 1
+                        'scene_id': parts[2],
+                        'x': float(parts[4]) if len(parts) > 4 and parts[4] else 0.0,
+                        'z': float(parts[6]) if len(parts) > 6 and parts[6] else 0.0,
+                        'count': int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else 1,
+                        'survey_time': int(parts[9]) if len(parts) > 9 and parts[9].isdigit() else 1000,
+                        'auto_refresh_time': int(parts[11]) if len(parts) > 11 and parts[11].isdigit() else 0,
+                        'need_num': int(parts[12]) if len(parts) > 12 and parts[12].isdigit() else 1
                     }
         print(f"[SURVEY DATA LOADED] count={len(SURVEY_DATA)}")
+
+    # Load ordered stops for MULTI_DELIVERY missions. Message 178 increments
+    # one stop at a time, and message 182 may finish only after the final stop.
+    md_path = os.path.join(text_asset_root, "MultiDeliveryMissionData")
+    if os.path.exists(md_path):
+        with open(md_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 4 and parts[0] == "*" and parts[1].isdigit() and parts[2].isdigit():
+                    MULTI_DELIVERY_DATA.setdefault(parts[1], []).append({
+                        'index': int(parts[2]),
+                        'npc_id': parts[3],
+                        'map_id': parts[4],
+                    })
+        for stops in MULTI_DELIVERY_DATA.values():
+            stops.sort(key=lambda stop: stop['index'])
+        print(f"[MULTI DELIVERY DATA LOADED] count={len(MULTI_DELIVERY_DATA)}")
 
     # Universal Mission Requirements & Placements Enrichment
     for mid, m in missions_data.items():
@@ -749,11 +812,43 @@ try:
                         'need_show': int(parts[36]) if parts[36].isdigit() else 0,
                         'is_motor': is_motor,
                         'model_id': parts[15] if len(parts) > 15 else '',
-                        'gta_link_car_id': parts[38] if len(parts) > 38 and parts[38] else parts[1]
+                        'gta_link_car_id': parts[38] if len(parts) > 38 and parts[38] else parts[1],
+                        'price_type': int(parts[43]) if len(parts) > 43 and parts[43].lstrip('-').isdigit() else -1,
+                        'price': int(parts[44]) if len(parts) > 44 and parts[44].isdigit() else 0
                     }
         garage_count = sum(1 for v in MOUNT_CONFIG.values() if v.get('need_show') == 1)
         motor_count = sum(1 for v in MOUNT_CONFIG.values() if v.get('is_motor') == 1)
         print(f"[MOUNT CONFIG LOADED] total={len(MOUNT_CONFIG)} garage={garage_count} motorcycles={motor_count}")
+
+    # ColorData is the authority for garage paint prices. The client sends
+    # only mountId/colorId in mount_use_color, so never trust a client price.
+    color_path = os.path.join(text_asset_root, "ColorData")
+    if os.path.exists(color_path):
+        with open(color_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 4 and parts[0] == "*" and parts[1]:
+                    if parts[3].lstrip('-').isdigit() and parts[4].lstrip('-').isdigit():
+                        COLOR_CONFIG[parts[1]] = {
+                            'price_type': int(parts[3]),
+                            'price': int(parts[4])
+                        }
+        print(f"[COLOR CONFIG LOADED] colors={len(COLOR_CONFIG)}")
+
+    # Only configured PVE world-boss IDs may enter the corresponding scene.
+    wild_boss_path = os.path.join(text_asset_root, "WildBossData")
+    if os.path.exists(wild_boss_path):
+        with open(wild_boss_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 14 and parts[0] == "*" and parts[1]:
+                    WILD_BOSS_CONFIG[parts[1]] = {
+                        'map_id': parts[2],
+                        'type': int(parts[5]) if parts[5].isdigit() else 0,
+                        'min_level': int(parts[13]) if parts[13].isdigit() else 1,
+                        'max_level': int(parts[14]) if parts[14].isdigit() else 80,
+                    }
+        print(f"[WILD BOSS CONFIG LOADED] count={len(WILD_BOSS_CONFIG)}")
 
     # Daily-copy UI receives its state from TAG 555.  Keep the IDs/types in
     # lockstep with CopySceneData so client tutorials can locate their target.
@@ -1087,6 +1182,11 @@ def _serializable_character_data(value, seen=None):
     return value
 
 def save_chars(data):
+    """Serialize concurrent writers before using the shared atomic-save files."""
+    with CHAR_DB_SAVE_LOCK:
+        _save_chars_atomic(data)
+
+def _save_chars_atomic(data):
     """Crash-safe atomic writer to prevent character loss during kill -9."""
     if not isinstance(data, dict):
         return
@@ -1696,7 +1796,12 @@ def broadcast_aoi_attribute(char):
             (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
             (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
         ])
-        prop = encode_sproto([(13, char.get('cash', 0))])
+        prop = encode_sproto([(13, get_currency_balance(char, 0)),
+                              (14, get_currency_balance(char, 1)),
+                              (15, get_currency_balance(char, 2)),
+                              (16, get_currency_balance(char, 3)),
+                              (17, get_currency_balance(char, 4)),
+                              (18, get_currency_balance(char, 5))])
         aoi_attr = encode_sproto([
             (0, char_id), (1, attr_oth), (2, attr_base), (3, attr_all), (5, prop)
         ])
@@ -2240,6 +2345,35 @@ def get_char_ov(c, sort_index=None):
         (5, 0)
     ])
 
+MONEY_FIELDS = ('cash', 'gold', 'diamond', 'guild_contribute', 'battle_coin', 'activity_coin')
+MONEY_DEFAULTS = (1000, 100, 10, 0, 0, 0)
+CHARACTER_TRANSACTION_LOCKS = {}
+CHARACTER_TRANSACTION_LOCKS_GUARD = threading.Lock()
+
+def get_character_transaction_lock(char):
+    """Serialize reward and purchase state changes for duplicate character sessions."""
+    char_id = str(char.get('id', ''))
+    with CHARACTER_TRANSACTION_LOCKS_GUARD:
+        return CHARACTER_TRANSACTION_LOCKS.setdefault(char_id, threading.RLock())
+
+def get_currency_balance(char, money_type):
+    """Return one persisted APK currency balance (MONEY_TYPE values are 0..5)."""
+    try:
+        money_type = int(money_type)
+        if not 0 <= money_type < len(MONEY_FIELDS):
+            return 0
+        return max(0, int(char.get(MONEY_FIELDS[money_type], MONEY_DEFAULTS[money_type])))
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+def set_currency_balance(char, money_type, amount):
+    """Persist one nonnegative APK currency balance on a character."""
+    money_type = int(money_type)
+    if not 0 <= money_type < len(MONEY_FIELDS):
+        return False
+    char[MONEY_FIELDS[money_type]] = max(0, int(amount))
+    return True
+
 def get_full_char(c):
     gen = get_general(c)
     stats = get_character_stats(c)
@@ -2254,7 +2388,9 @@ def get_full_char(c):
         (15, 1)
     ])
 
-    prop = encode_sproto([(13, c.get('cash', 1000)), (14, 100), (15, 10), (16, 0), (17, 0), (18, 0)])
+    prop = encode_sproto([(13, get_currency_balance(c, 0)), (14, get_currency_balance(c, 1)),
+                          (15, get_currency_balance(c, 2)), (16, get_currency_balance(c, 3)),
+                          (17, get_currency_balance(c, 4)), (18, get_currency_balance(c, 5))])
     pos = c.get('pos', [29860, 100, -17005, 0])
     mv = get_movement(pos[0], pos[1], pos[2], pos[3])
 
@@ -2318,7 +2454,12 @@ def sync_char_attrs_rpc(conn, picked_char, conn_id=None):
         (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
     ])
 
-    prop = encode_sproto([(13, picked_char.get('cash', 0))])
+    prop = encode_sproto([(13, get_currency_balance(picked_char, 0)),
+                          (14, get_currency_balance(picked_char, 1)),
+                          (15, get_currency_balance(picked_char, 2)),
+                          (16, get_currency_balance(picked_char, 3)),
+                          (17, get_currency_balance(picked_char, 4)),
+                          (18, get_currency_balance(picked_char, 5))])
 
     aoi_attr = encode_sproto([
         (0, picked_char['id']), (1, attr_oth), (2, attr_base), (3, attr_all), (5, prop)
@@ -2574,7 +2715,6 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
 def build_npc_attr_sproto(nid, name, x, z, o, existing_inst_id=None):
     """Build NPC attribute sproto for TAG 509 (npc_create).
     Bug 1/6: Shared function to eliminate code duplication between send_npc_create and send_npc_wrapper."""
-    global GLOBAL_INST_COUNTER
     npc_stats = get_npc_attr(nid)
     hp_max = npc_stats['hp_max']
     atk = npc_stats['atk']
@@ -2595,8 +2735,7 @@ def build_npc_attr_sproto(nid, name, x, z, o, existing_inst_id=None):
     lvl = npc_stats['lv']
 
     if existing_inst_id is None:
-        GLOBAL_INST_COUNTER += 1
-        inst_id = GLOBAL_INST_COUNTER
+        inst_id = next_global_inst_id()
         hp_cur = hp_max
         NPC_HP_MAP[inst_id] = hp_max
         NPC_INST_MAP[inst_id] = str(nid)
@@ -2631,6 +2770,7 @@ def _build_exp_npc_wrapper(send_rpc_push, exp_state):
     Fix: Also tracks monster_pos in exp_state so AI loop uses correct spawn positions."""
     def send_npc_wrapper(nid, name, x, z, o):
         inst_id, attr = build_npc_attr_sproto(nid, name, x, z, o)
+        NPC_INSTANCE_MAP[inst_id] = exp_run_map_id(exp_state)
         send_rpc_push(509, encode_sproto([(0, attr)]))
         # Fix: Track monster position in exp_state so AI loop uses correct spawn position
         if exp_state and 'monster_pos' in exp_state:
@@ -2725,15 +2865,11 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
                     DEAD_NPC_SET.add(inst_id)
 
         if already_dead:
-            if inst_id in exp_state.get('active_monsters', []):
-                exp_state['active_monsters'].remove(inst_id)
-                print(f"[EXP AI] Cleaned up already-dead inst_id={inst_id} from active_monsters")
-            NPC_HP_MAP.pop(inst_id, None)
-            NPC_INST_MAP.pop(inst_id, None)
-            NPC_ATTR_MAP.pop(inst_id, None)
-            exp_state.get('monster_pos', {}).pop(inst_id, None)
-            exp_state.get('monster_heading', {}).pop(inst_id, None)
-            exp_state.get('attack_cd', {}).pop(inst_id, None)
+            # Combat marks HP zero while holding the same per-NPC lock, then
+            # sends the final HP/removal packets and calls on_npc_killed after
+            # releasing it. Do not tear down its records here: an AI tick in
+            # that small window would otherwise make the combat path lose the
+            # HP/instance data needed to finish the client death notification.
             continue
         if auto_death_hp_zero:
             print(f"[EXP AI] Auto-death detected inst_id={inst_id} npcid={auto_death_nid} hp={NPC_HP_MAP.get(inst_id, 0)}")
@@ -2786,77 +2922,89 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
         dist = math.sqrt(dx * dx + dz * dz)
 
         if dist > lock_distance:
-            stopped_monsters = exp_state.setdefault('movement_stopped', set())
-            if inst_id not in stopped_monsters:
-                stopped_monsters.add(inst_id)
-                heading = int(math.degrees(math.atan2(dx, dz)) * 100)
-                exp_state.setdefault('monster_heading', {})[inst_id] = heading
-                pos_obj_stop = encode_sproto([(0, int(mx * 100)), (1, 0), (2, int(mz * 100)), (3, heading)])
-                m_move_stop = encode_sproto([(0, pos_obj_stop), (1, pos_obj_stop)])
-                char_move_stop = encode_sproto([(0, inst_id), (1, m_move_stop), (2, True)])
-                send_func(513, encode_sproto([(0, char_move_stop)]))
+            with exp_npc_hp_lock(exp_state, inst_id):
+                if (inst_id in DEAD_NPC_SET or NPC_HP_MAP.get(inst_id, 0) <= 0
+                        or inst_id not in exp_state.get('active_monsters', [])):
+                    continue
+                stopped_monsters = exp_state.setdefault('movement_stopped', set())
+                if inst_id not in stopped_monsters:
+                    stopped_monsters.add(inst_id)
+                    heading = int(math.degrees(math.atan2(dx, dz)) * 100)
+                    exp_state.setdefault('monster_heading', {})[inst_id] = heading
+                    pos_obj_stop = encode_sproto([(0, int(mx * 100)), (1, 0), (2, int(mz * 100)), (3, heading)])
+                    m_move_stop = encode_sproto([(0, pos_obj_stop), (1, pos_obj_stop)])
+                    char_move_stop = encode_sproto([(0, inst_id), (1, m_move_stop), (2, True)])
+                    send_func(513, encode_sproto([(0, char_move_stop)]))
             continue
 
         if dist > attack_distance:
-            exp_state.setdefault('movement_stopped', set()).discard(inst_id)
-            step = min(move_speed_per_tick, dist - attack_distance)
-            new_mx = mx + (dx / dist) * step
-            new_mz = mz + (dz / dist) * step
-            exp_state['monster_pos'][inst_id] = [new_mx, new_mz]
-            heading = int(math.degrees(math.atan2(dx, dz)) * 100)
-            exp_state.setdefault('monster_heading', {})[inst_id] = heading
-            pos_obj = encode_sproto([(0, int(new_mx * 100)), (1, 0), (2, int(new_mz * 100)), (3, heading)])
-            m_move = encode_sproto([(0, pos_obj), (1, pos_obj)])
-            char_move = encode_sproto([(0, inst_id), (1, m_move), (2, True)])
-            send_func(507, encode_sproto([(0, char_move)]))
-        else:
-            stopped_monsters = exp_state.setdefault('movement_stopped', set())
-            if inst_id not in stopped_monsters:
-                stopped_monsters.add(inst_id)
+            with exp_npc_hp_lock(exp_state, inst_id):
+                if (inst_id in DEAD_NPC_SET or NPC_HP_MAP.get(inst_id, 0) <= 0
+                        or inst_id not in exp_state.get('active_monsters', [])):
+                    continue
+                exp_state.setdefault('movement_stopped', set()).discard(inst_id)
+                step = min(move_speed_per_tick, dist - attack_distance)
+                new_mx = mx + (dx / dist) * step
+                new_mz = mz + (dz / dist) * step
+                exp_state['monster_pos'][inst_id] = [new_mx, new_mz]
                 heading = int(math.degrees(math.atan2(dx, dz)) * 100)
                 exp_state.setdefault('monster_heading', {})[inst_id] = heading
-                pos_obj_stop = encode_sproto([(0, int(mx * 100)), (1, 0), (2, int(mz * 100)), (3, heading)])
-                m_move_stop = encode_sproto([(0, pos_obj_stop), (1, pos_obj_stop)])
-                char_move_stop = encode_sproto([(0, inst_id), (1, m_move_stop), (2, True)])
-                send_func(513, encode_sproto([(0, char_move_stop)]))
+                pos_obj = encode_sproto([(0, int(new_mx * 100)), (1, 0), (2, int(new_mz * 100)), (3, heading)])
+                m_move = encode_sproto([(0, pos_obj), (1, pos_obj)])
+                char_move = encode_sproto([(0, inst_id), (1, m_move), (2, True)])
+                send_func(507, encode_sproto([(0, char_move)]))
+        else:
+            with exp_npc_hp_lock(exp_state, inst_id):
+                if (inst_id in DEAD_NPC_SET or NPC_HP_MAP.get(inst_id, 0) <= 0
+                        or inst_id not in exp_state.get('active_monsters', [])):
+                    continue
+                stopped_monsters = exp_state.setdefault('movement_stopped', set())
+                if inst_id not in stopped_monsters:
+                    stopped_monsters.add(inst_id)
+                    heading = int(math.degrees(math.atan2(dx, dz)) * 100)
+                    exp_state.setdefault('monster_heading', {})[inst_id] = heading
+                    pos_obj_stop = encode_sproto([(0, int(mx * 100)), (1, 0), (2, int(mz * 100)), (3, heading)])
+                    m_move_stop = encode_sproto([(0, pos_obj_stop), (1, pos_obj_stop)])
+                    char_move_stop = encode_sproto([(0, inst_id), (1, m_move_stop), (2, True)])
+                    send_func(513, encode_sproto([(0, char_move_stop)]))
 
-            if inst_id not in exp_state['attack_cd']:
-                exp_state['attack_cd'][inst_id] = {
-                    'last_attack': 0,
-                    'skill_cd': random.uniform(ai_cfg['skill_cd_min'], ai_cfg['skill_cd_max']) / 1000.0
-                }
-            cd_info = exp_state['attack_cd'][inst_id]
-            if current_time - cd_info['last_attack'] < cd_info['skill_cd']:
-                continue  # Cooldown not ready, skip attack this tick
-            cd_info['last_attack'] = current_time
+                if inst_id not in exp_state['attack_cd']:
+                    exp_state['attack_cd'][inst_id] = {
+                        'last_attack': 0,
+                        'skill_cd': random.uniform(ai_cfg['skill_cd_min'], ai_cfg['skill_cd_max']) / 1000.0
+                    }
+                cd_info = exp_state['attack_cd'][inst_id]
+                if current_time - cd_info['last_attack'] < cd_info['skill_cd']:
+                    continue  # Cooldown not ready, skip attack this tick
+                cd_info['last_attack'] = current_time
 
-            monster_stats = get_npc_attr(target_nid)
-            monster_skill = monster_cfg.get('skill_group', '50001') or '50001'
-            dmg, is_hit, is_cri = get_combat_damage(monster_stats, player_stats, skill_id=monster_skill, skill_lv=1)
+                monster_stats = get_npc_attr(target_nid)
+                monster_skill = monster_cfg.get('skill_group', '50001') or '50001'
+                dmg, is_hit, is_cri = get_combat_damage(monster_stats, player_stats, skill_id=monster_skill, skill_lv=1)
 
-            if is_hit and dmg > 0:
-                picked_char['hp'] = max(0, picked_char['hp'] - dmg)
+                if is_hit and dmg > 0:
+                    picked_char['hp'] = max(0, picked_char['hp'] - dmg)
 
-                attack_list_entry = encode_sproto([(0, picked_char['id']), (1, dmg)])
-                ret_skill = encode_sproto([
-                    (0, inst_id),
-                    (1, picked_char['id']),
-                    (2, monster_skill),
-                    (3, [attack_list_entry])
-                ])
-                send_rpc_push_func(508, ret_skill)
+                    attack_list_entry = encode_sproto([(0, picked_char['id']), (1, dmg)])
+                    ret_skill = encode_sproto([
+                        (0, inst_id),
+                        (1, picked_char['id']),
+                        (2, monster_skill),
+                        (3, [attack_list_entry])
+                    ])
+                    send_rpc_push_func(508, ret_skill)
 
-                dmg_entry = encode_sproto([(0, picked_char['id']), (1, dmg), (2, monster_skill), (3, "10000"), (4, is_cri)])
-                dmg_board = encode_sproto([(0, [dmg_entry])])
-                send_rpc_push_func(511, dmg_board)
-                sync_char_attrs_rpc(conn_for_sync, picked_char)
-                if exp_state.get('team_id'):
-                    broadcast_aoi_attribute(picked_char)
-                    send_team_member_update(exp_state['team_id'], picked_char, force=picked_char.get('hp', 0) <= 0)
-                if picked_char['hp'] <= 0:
-                    on_player_die(conn_for_sync, send_func, picked_char, exp_state)
-                    if not exp_state.get('team_id'):
-                        return False
+                    dmg_entry = encode_sproto([(0, picked_char['id']), (1, dmg), (2, monster_skill), (3, "10000"), (4, is_cri)])
+                    dmg_board = encode_sproto([(0, [dmg_entry])])
+                    send_rpc_push_func(511, dmg_board)
+                    sync_char_attrs_rpc(conn_for_sync, picked_char)
+                    if exp_state.get('team_id'):
+                        broadcast_aoi_attribute(picked_char)
+                        send_team_member_update(exp_state['team_id'], picked_char, force=picked_char.get('hp', 0) <= 0)
+                    if picked_char['hp'] <= 0:
+                        on_player_die(conn_for_sync, send_func, picked_char, exp_state)
+                        if not exp_state.get('team_id'):
+                            return False
 
     return exp_state.get('ai_active') and picked_char.get('map_id') == map_str
 
@@ -2996,6 +3144,7 @@ def clear_exp_active_monsters(exp_state, send_rpc_push):
         spawned.discard(inst_id)
         NPC_HP_MAP.pop(inst_id, None)
         NPC_INST_MAP.pop(inst_id, None)
+        NPC_INSTANCE_MAP.pop(inst_id, None)
         NPC_ATTR_MAP.pop(inst_id, None)
         exp_state.get('monster_pos', {}).pop(inst_id, None)
         exp_state.get('monster_heading', {}).pop(inst_id, None)
@@ -3319,6 +3468,7 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid):
     if inst_id:
         NPC_HP_MAP.pop(inst_id, None)
         NPC_INST_MAP.pop(inst_id, None)
+        NPC_INSTANCE_MAP.pop(inst_id, None)
         NPC_ATTR_MAP.pop(inst_id, None)
         exp_state.get('monster_pos', {}).pop(inst_id, None) if exp_state else None
         exp_state.get('monster_heading', {}).pop(inst_id, None) if exp_state else None
@@ -3389,6 +3539,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
     spawned_maps.add(map_str)
     def send_npc_create(nid, name, x, z, o):
         inst_id, attr = build_npc_attr_sproto(nid, name, x, z, o)
+        NPC_INSTANCE_MAP[inst_id] = map_str
         send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
         return inst_id
     if is_exp_map(map_str) and picked_char:
@@ -3452,6 +3603,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                             int(round(pos[0]*100)),int(round(pos[1]*100)),
                             int(state.get('monster_heading',{}).get(inst,0)),
                             existing_inst_id=inst)
+                        NPC_INSTANCE_MAP[inst] = map_str
                     send_rpc_push_safe(conn,509,encode_sproto([(0,attr)]))
                     if nid:
                         stats=get_npc_attr(nid)
@@ -3460,6 +3612,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             return
         def create_exp_npc(nid,name,x,z,o):
             inst,attr=build_npc_attr_sproto(nid,name,x,z,o)
+            NPC_INSTANCE_MAP[inst] = map_str
             if inst:
                 state['monster_pos'][inst]=[x/100.0,z/100.0]
                 state.setdefault('monster_heading',{})[inst]=int(o)
@@ -3589,6 +3742,15 @@ def current_daily_stamp():
     """The server's daily-copy reset key (UTC calendar day adjusted for 03:00 AM reset)."""
     adjusted_time = time.time() - (3 * 3600)
     return time.strftime('%Y-%m-%d', time.gmtime(adjusted_time))
+
+def current_sign_calendar():
+    """Use the same 03:00 server reset for daily/weekly/monthly sign state."""
+    adjusted = time.gmtime(time.time() - (3 * 3600))
+    return {
+        'date': time.strftime('%Y-%m-%d', adjusted),
+        'week_day': adjusted.tm_wday + 1,
+        'month_day': adjusted.tm_mday,
+    }
 
 def ensure_daily_copy_state(picked_char):
     """Reset the APK-configured daily attempts once per calendar day at 03:00 AM."""
@@ -3991,6 +4153,130 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
         send_rpc_push(519, sync_mission_data(picked_char))
     return updated
 
+def claim_client_local_npc_death(picked_char, npcid, x, z):
+    """Validate and de-duplicate map NPC deaths reported without a server instance ID.
+
+    The APK's city NPC death request contains only NPC type and coordinates.
+    Match it against this map's MonsterData or the character's active quest
+    spawn, require the player to be nearby, and consume one configured spawn
+    slot so replayed reports cannot mint repeated kill rewards.
+    """
+    try:
+        map_id = str(picked_char.get('map_id', ''))
+        nid = str(npcid)
+        x = int(x)
+        z = int(z)
+        pos = picked_char.get('pos') or []
+        px = int(pos[0])
+        pz = int(pos[2])
+        char_id = int(picked_char.get('id', 0))
+    except (TypeError, ValueError, IndexError):
+        return False
+    if not char_id or nid not in NPC_CONFIG or math.hypot(px - x, pz - z) > 1500:
+        return False
+
+    candidates = []
+    for category in (MONSTER_DATA, STATIC_NPC_DATA):
+        for slot, spawn in enumerate(category.get(map_id, [])):
+            if str(spawn.get('nid')) != nid:
+                continue
+            rebirth_ms = int(spawn.get('rebirth_time', -1))
+            cooldown = max(30.0, min(3600.0, rebirth_ms / 1000.0)) if rebirth_ms > 0 else 300.0
+            candidates.append((math.hypot(x - int(spawn['x']), z - int(spawn['z'])),
+                               int(spawn['x']), int(spawn['z']), f"{category is STATIC_NPC_DATA}:{slot}",
+                               max(1500, int(spawn.get('patrol_distance', 0)) + 1000), cooldown))
+
+    # Kill-target NPCs can be mission-spawned from their separate placement
+    # table and therefore may not have a MonsterData row for the current map.
+    for mid, mdata in picked_char.get('active_missions', {}).items():
+        if mdata.get('state') != 1:
+            continue
+        cfg = missions_data.get(mid, {})
+        logic_id = str(cfg.get('logic_id', ''))
+        spawn_key = logic_id if logic_id in KILL_TARGET_SPAWNS else str(mid)
+        for row_index, spawn in enumerate(KILL_TARGET_SPAWNS.get(spawn_key, [])):
+            if str(spawn.get('map')) != map_id or str(spawn.get('nid')) != nid:
+                continue
+            count = max(1, int(spawn.get('num', 1)))
+            radius = max(1000, int(spawn.get('range', 500)) + 1000)
+            distance = math.hypot(x - int(spawn['x']), z - int(spawn['z']))
+            for slot in range(count):
+                candidates.append((distance, int(spawn['x']), int(spawn['z']),
+                                   f"quest:{mid}:{row_index}:{slot}", radius, 300.0))
+
+    candidates = [candidate for candidate in candidates if candidate[0] <= candidate[4]]
+    if not candidates:
+        return False
+    candidates.sort(key=lambda candidate: candidate[0])
+    now = time.monotonic()
+    with LOCAL_NPC_DEATH_LOCK:
+        # Bound memory while preserving recent replay protection.
+        if len(LOCAL_NPC_DEATHS) > 10000:
+            LOCAL_NPC_DEATHS.clear()
+        for _distance, sx, sz, slot_key, _radius, cooldown in candidates:
+            key = (char_id, map_id, nid, slot_key, sx, sz)
+            last = LOCAL_NPC_DEATHS.get(key)
+            if last is not None and now - last < cooldown:
+                continue
+            LOCAL_NPC_DEATHS[key] = now
+            return True
+    return False
+
+def validate_arrive_target_report(picked_char, mission_id):
+    """Validate the APK's MSG 307 type=4 arrival report against its next waypoint."""
+    mdata = picked_char.get('active_missions', {}).get(str(mission_id))
+    cfg = missions_data.get(str(mission_id), {})
+    if not mdata or mdata.get('state') != 1 or cfg.get('logic_type') != 21:
+        return False
+    move_cfg = MOVE_TARGET_DATA.get(str(cfg.get('logic_id', '')))
+    if not move_cfg or str(move_cfg.get('map_id')) != str(picked_char.get('map_id')):
+        return False
+    points = [part for part in str(move_cfg.get('target_point', '')).split('|') if part]
+    progress = int((mdata.get('parm') or [0])[0])
+    if not points:
+        return False
+    point = points[min(progress, len(points) - 1)].split('#')
+    if len(point) < 2:
+        return False
+    try:
+        target_x, target_z = int(point[0]), int(point[1])
+        pos = picked_char.get('pos') or []
+        return len(pos) >= 3 and math.hypot(int(pos[0]) - target_x, int(pos[2]) - target_z) <= 850
+    except (TypeError, ValueError):
+        return False
+
+def validate_car_mission_report(picked_char, die_type):
+    """Check city car mission events against active objectives and locations."""
+    if not picked_char or str(picked_char.get('map_id')) != '11':
+        return False
+    if die_type == 2:
+        if not any(missions_data.get(mid, {}).get('logic_type') == 19
+                   and entry.get('state') == 1
+                   for mid, entry in picked_char.get('active_missions', {}).items()):
+            return False
+        char_id = int(picked_char.get('id', 0))
+        now = time.monotonic()
+        last = CAR_MISSION_EVENT_TIMES.get(char_id, 0.0)
+        if now - last < 3.0:
+            return False
+        CAR_MISSION_EVENT_TIMES[char_id] = now
+        return True
+    if die_type == 6:
+        pos = picked_char.get('pos') or []
+        try:
+            px, pz = int(pos[0]), int(pos[2])
+        except (TypeError, ValueError, IndexError):
+            return False
+        for mid, entry in picked_char.get('active_missions', {}).items():
+            cfg = missions_data.get(mid, {})
+            if entry.get('state') != 1 or cfg.get('logic_type') != 24:
+                continue
+            logic_id = str(cfg.get('logic_id', ''))
+            for car in TARGET_CAR_SPAWNS.get(logic_id, []):
+                if str(car.get('map')) == '11' and math.hypot(px - int(car.get('x', 0)), pz - int(car.get('z', 0))) <= 1000:
+                    return True
+    return False
+
 def init_character_fields(c):
     fields = {
         'level': 1, 'exp': 0, 'cash': 1000,
@@ -4263,9 +4549,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         # BOSS SPAWN for Dominance Map 502
         if target_map_id == "502":
             did = picked_char.get('active_domin_id', '1')
-            global GLOBAL_INST_COUNTER
-            GLOBAL_INST_COUNTER += 1
-            boss_inst_id = GLOBAL_INST_COUNTER
+            boss_inst_id = next_global_inst_id()
             picked_char['boss_inst_id'] = boss_inst_id
             picked_char['boss_pos'] = [400, 120, 0, -9000]
 
@@ -4274,6 +4558,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
             boss_stats = get_npc_attr("1105", player_level)
             NPC_HP_MAP[boss_inst_id] = boss_stats['hp_max']
             NPC_INST_MAP[boss_inst_id] = "BOSS_" + did
+            NPC_INSTANCE_MAP[boss_inst_id] = "502"
             # The APK cannot create the zombie player (or the VS panel) until
             # map_ready.  Remember it here; MSG 100 sends the actual tag 544.
             picked_char['boss_waiting_for_map_ready'] = True
@@ -4969,9 +5254,16 @@ def client_handler(conn, addr):
             elif msg == 113: # complete_mission
                 if picked_char:
                     mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
-                    m_entry = picked_char.get('active_missions', {}).get(mid)
+                    claim_mission = False
+                    with get_character_transaction_lock(picked_char):
+                        m_entry = picked_char.get('active_missions', {}).get(mid)
+                        if m_entry and m_entry.get('state') == 2:
+                            # Mark before granting: duplicate/reconnected
+                            # sessions cannot both claim the same objective.
+                            m_entry['state'] = 3
+                            claim_mission = True
                     print(f"[MISSION COMPLETE REQ] mid={mid} entry_exists={m_entry is not None} state={m_entry['state'] if m_entry else 'N/A'}")
-                    if m_entry and m_entry['state'] == 2:
+                    if claim_mission:
                         m_cfg = missions_data.get(mid)
                         if m_cfg:
                             print(f"[MISSION CHAIN] completed={mid} last_main_before={picked_char.get('last_main_mission_id')}")
@@ -5047,6 +5339,7 @@ def client_handler(conn, addr):
                                 # the exit sequence only after that response has been pushed.
                                 schedule_domin_return()
                         else:
+                            m_entry['state'] = 2
                             if session is not None:
                                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                                 conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -5087,66 +5380,53 @@ def client_handler(conn, addr):
 
             elif msg == 524: # set_mission_param
                 mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
-                idx = get_val_int(body, 1); val = get_val_int(body, 2)
-                if picked_char and mid in picked_char.get('active_missions', {}):
-                    # Reject client param changes for server-driven capture and
-                    # EXP-copy missions. EXP progress comes from the validated
-                    # stage-entry event, not client-written mission parameters.
-                    m_cfg_524 = missions_data.get(mid, {})
-                    if m_cfg_524.get('logic_type') in (25, 105):
-                        print(f"[MISSION SECURITY] MSG 524 rejected for server-driven mission {mid}")
-                    elif 0 < idx <= 8:
-                        picked_char['active_missions'][mid]['parm'][idx-1] = val
-                        save_chars(all_accounts_chars)
-                    if session is not None:
-                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                        conn.sendall(struct.pack(">H", len(pf)) + pf)
+                # TAG 524 is a server-to-client progress update in this APK.
+                # No client request path writes mission parameters directly;
+                # progress must come from validated gameplay events.
+                print(f"[MISSION SECURITY] ignored client MSG 524 mission={mid}")
+                if picked_char:
                     send_rpc_push(519, sync_mission_data(picked_char))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 523: # set_mission_state
                 mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
                 state = get_val_int(body, 1)
-                if picked_char and mid in picked_char.get('active_missions', {}):
-                    cur_state = picked_char['active_missions'][mid].get('state', 1)
-                    m_cfg_523 = missions_data.get(mid, {})
-                    if (m_cfg_523.get('logic_type') == 105
-                            and (state != 2 or cur_state != 2)):
-                        # Mission 1019 (EXP_COPY / logic type 105) may only
-                        # complete after the server records a valid EXP entry.
-                        print(f"[MISSION SECURITY] MSG 523 rejected: forged EXP mission state mid={mid} state={state} current={cur_state}")
-                        if session is not None:
-                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                            conn.sendall(struct.pack(">H", len(pf)) + pf)
-                        continue
-                    # Only allow 1→2 (active→completed) if the server already set it to 2 via advance_missions.
-                    # This prevents a client from forging mission completion.
-                    if state == 2 and cur_state != 2:
-                        # Client is trying to set state=2 without server confirmation — reject.
-                        if m_cfg_523.get('logic_type') == 25:
-                            print(f"[MISSION SECURITY] MSG 523 rejected: cannot forge capture mission {mid} completion")
-                            if session is not None:
-                                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                                conn.sendall(struct.pack(">H", len(pf)) + pf)
-                            return
-                    picked_char['active_missions'][mid]['state'] = state
-                    save_chars(all_accounts_chars)
-                    if session is not None:
-                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                        conn.sendall(struct.pack(">H", len(pf)) + pf)
+                # The APK only receives TAG 523 to apply a server decision.
+                # Accepting it from the client lets it mark missions complete
+                # (and collect rewards through MSG 113) without doing the task.
+                print(f"[MISSION SECURITY] ignored client MSG 523 mission={mid} state={state}")
+                if picked_char:
                     send_rpc_push(519, sync_mission_data(picked_char))
+                if session is not None:
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 130: # skill_level_up
                 sid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
                 cur_lv = get_val_int(body, 1)
                 if picked_char:
-                    cost = get_skill_upgrade_cost(cur_lv)
-                    if picked_char.get('cash', 0) >= cost and picked_char.get('level', 1) > cur_lv + 1:
+                    prof_skills = PROF_SKILLS.get(int(picked_char.get('prof', 0)), PROF_SKILLS[0])
+                    valid_skill_ids = set(prof_skills['atk'] if isinstance(prof_skills['atk'], list) else [prof_skills['atk']])
+                    valid_skill_ids.update((prof_skills['dodge'], prof_skills['starter_active']))
+                    skill_levels = picked_char.setdefault('skill_levels', {})
+                    skill_key = next((key for key in skill_levels if str(key) == sid), sid)
+                    server_skill_lv = int(skill_levels.get(skill_key, 0))
+                    skill_is_owned = sid in valid_skill_ids or skill_key in skill_levels
+                    skill_matches_server = skill_is_owned and cur_lv == server_skill_lv and cur_lv >= 0
+                    cost = get_skill_upgrade_cost(cur_lv) if skill_matches_server else None
+                    if (cost is not None and cost > 0
+                            and picked_char.get('cash', 0) >= cost
+                            and picked_char.get('level', 1) > server_skill_lv + 1):
                         picked_char['cash'] -= cost
-                        picked_char['skill_levels'][sid] = cur_lv + 1
+                        skill_levels[skill_key] = server_skill_lv + 1
                         save_chars(all_accounts_chars)
                         smap = build_skills_map(picked_char['prof'], picked_char['level'], picked_char['skill_levels'])
                         send_rpc_push(540, encode_sproto([(0, smap), (1, True)]))
                         sync_char_attrs_rpc(conn, picked_char)
+                    elif not skill_matches_server:
+                        print(f"[SKILL SECURITY] rejected inconsistent/unknown upgrade sid={sid} client_lv={cur_lv} server_lv={server_skill_lv}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -5256,24 +5536,70 @@ def client_handler(conn, addr):
             elif msg == 241: # mount_use_color / colour purchase or selection
                 mount_id = field_text(body, 0)
                 color_id = field_text(body, 1)
-                if picked_char and mount_id in MOUNT_CONFIG and color_id in MOUNT_CONFIG[mount_id]['colors']:
-                    mounts = picked_char.setdefault('mounts', {})
-                    mount = mounts.setdefault(mount_id, {})
-                    if int(mount.get('state', 0)) == 2:
-                        unlocked = set(str(x) for x in mount.get('unlocked_colors', []))
-                        unlocked.add(MOUNT_CONFIG[mount_id]['default_color'])
-                        unlocked.add(color_id)
-                        mount['unlocked_colors'] = sorted(unlocked, key=lambda x: (len(x), x))
-                        mount['select'] = color_id
-                        save_chars(all_accounts_chars)
-                        # ret_mount_use_color needs the full map as well as the
-                        # selected vehicle/colour; omitting the map is the cause
-                        # of PlayerCarRootLogic's null-reference crash.
+                if picked_char and mount_id in MOUNT_CONFIG:
+                    mount_cfg = MOUNT_CONFIG[mount_id]
+                    response_color = None
+                    bought_color = False
+                    with get_character_transaction_lock(picked_char):
+                        mounts = picked_char.setdefault('mounts', {})
+                        mount = mounts.setdefault(mount_id, {})
+                        if (mount_cfg.get('need_show') == 1 and
+                                int(mount.get('state', 0)) == 2):
+                            configured_colors = set(mount_cfg.get('colors', []))
+                            raw_unlocked = mount.get('unlocked_colors', [])
+                            if not isinstance(raw_unlocked, (list, tuple, set)):
+                                raw_unlocked = []
+                            unlocked = set(str(x) for x in raw_unlocked)
+                            default_color = str(mount_cfg.get('default_color', ''))
+                            if default_color in configured_colors:
+                                unlocked.add(default_color)
+
+                            if color_id in configured_colors and color_id in unlocked:
+                                # An owned color can be selected at no cost.
+                                mount['select'] = color_id
+                                mount['unlocked_colors'] = sorted(unlocked, key=lambda x: (len(x), x))
+                                response_color = color_id
+                            elif color_id in configured_colors:
+                                # A locked color is a purchase. Price and balance
+                                # come from server assets/state, never request data.
+                                color_price = COLOR_CONFIG.get(color_id)
+                                if color_price:
+                                    price_type = color_price.get('price_type', -1)
+                                    price = color_price.get('price', -1)
+                                    balance = get_currency_balance(picked_char, price_type)
+                                    if (0 <= price_type < len(MONEY_FIELDS) and
+                                            0 <= price and balance >= price):
+                                        set_currency_balance(picked_char, price_type, balance - price)
+                                        unlocked.add(color_id)
+                                        mount['unlocked_colors'] = sorted(unlocked, key=lambda x: (len(x), x))
+                                        mount['select'] = color_id
+                                        response_color = color_id
+                                        bought_color = True
+                                    else:
+                                        print(f"[MOUNT SECURITY] rejected color purchase mount={mount_id} color={color_id} price={price} currency={price_type} balance={balance}")
+                                else:
+                                    print(f"[MOUNT SECURITY] rejected color without config mount={mount_id} color={color_id}")
+
+                            if response_color is not None:
+                                save_chars(all_accounts_chars)
+                                if bought_color:
+                                    sync_char_attrs_rpc(conn, picked_char)
+                                sync_main_player_visual(picked_char, send_rpc_push)
+                                print(f"[MOUNT] {'color purchased' if bought_color else 'color selected'} id={mount_id} color={response_color}")
+                            else:
+                                # This response closes the client's wait box and
+                                # restores the authoritative selection after a
+                                # rejected/forged color request.
+                                response_color = str(mount.get('select') or default_color)
+                                if response_color not in configured_colors:
+                                    response_color = default_color
+
+                    if response_color is not None:
+                        # ret_mount_use_color includes the full map, as required
+                        # by PlayerCarRootLogic, including on a rejected purchase.
                         send_rpc_push(632, encode_sproto([
-                            (0, build_mount_info(picked_char)), (1, mount_id), (2, color_id)
+                            (0, build_mount_info(picked_char)), (1, mount_id), (2, response_color)
                         ]))
-                        sync_main_player_visual(picked_char, send_rpc_push)
-                        print(f"[MOUNT] colour selected id={mount_id} color={color_id}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -5292,15 +5618,27 @@ def client_handler(conn, addr):
             elif msg == 323: # buy_car_shop
                 mount_id = field_text(body, 0)
                 if picked_char and mount_id in MOUNT_CONFIG:
-                    mount = picked_char.setdefault('mounts', {}).setdefault(mount_id, {})
-                    if int(mount.get('state', 0)) == 0:
-                        mount['state'] = 1
-                        mount.setdefault('select', MOUNT_CONFIG[mount_id]['default_color'])
-                        mount.setdefault('unlocked_colors', [MOUNT_CONFIG[mount_id]['default_color']])
-                        save_chars(all_accounts_chars)
-                    # ret_buy_car_shop.mountId(0), state(1)
-                    send_rpc_push(691, encode_sproto([(0, mount_id), (1, int(mount.get('state', 1)))]))
-                    print(f"[MOUNT] garage purchase id={mount_id}")
+                    with get_character_transaction_lock(picked_char):
+                        mount_cfg = MOUNT_CONFIG[mount_id]
+                        mount = picked_char.setdefault('mounts', {}).setdefault(mount_id, {})
+                        if int(mount.get('state', 0)) == 0:
+                            price_type = int(mount_cfg.get('price_type', -1))
+                            price = int(mount_cfg.get('price', -1))
+                            balance = get_currency_balance(picked_char, price_type)
+                            if (mount_cfg.get('need_show') == 1 and
+                                    0 <= price_type < len(MONEY_FIELDS) and
+                                    price >= 0 and balance >= price):
+                                set_currency_balance(picked_char, price_type, balance - price)
+                                mount['state'] = 1
+                                mount.setdefault('select', mount_cfg['default_color'])
+                                mount.setdefault('unlocked_colors', [mount_cfg['default_color']])
+                                save_chars(all_accounts_chars)
+                                sync_char_attrs_rpc(conn, picked_char)
+                                print(f"[MOUNT] garage purchase id={mount_id} price={price} currency={price_type}")
+                            else:
+                                print(f"[MOUNT SECURITY] rejected purchase id={mount_id} price={price} currency={price_type} balance={balance}")
+                        # ret_buy_car_shop.mountId(0), state(1)
+                        send_rpc_push(691, encode_sproto([(0, mount_id), (1, int(mount.get('state', 1)))]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -5674,6 +6012,12 @@ def client_handler(conn, addr):
                             cur_map = str(picked_char.get('map_id', ''))
                             is_exp = is_exp_map(cur_map)
                             exp_state_hit = picked_char.get('exp_stage_state') if is_exp else None
+                            if not is_exp and (
+                                    target_id not in NPC_INST_MAP
+                                    or str(NPC_INSTANCE_MAP.get(target_id, '')) != cur_map
+                                    or target_id not in NPC_HP_MAP):
+                                print(f"[COMBAT SECURITY] rejected unknown/cross-map NPC target={target_id} map={cur_map}")
+                                continue
                             if is_exp:
                                 active_ids = exp_state_hit.get('active_monsters', []) if exp_state_hit else []
                                 spawned_ids = exp_state_hit.get('spawned_npcs', set()) if exp_state_hit else set()
@@ -5935,6 +6279,50 @@ def client_handler(conn, addr):
                         conn.sendall(struct.pack(">H", len(pf)) + pf)
                     continue
 
+                cur_map = str(picked_char.get('map_id', '11')) if picked_char else ''
+                report_valid = False
+                if picked_char and msg == 127:
+                    # MSG 127 carries the NPC's serverId. Only accept instances
+                    # that this server actually created, with the matching type.
+                    report_valid = bool(inst_id and str(NPC_INST_MAP.get(inst_id, '')) == str(npcid)
+                                         and str(NPC_INSTANCE_MAP.get(inst_id, '')) == cur_map
+                                         and int(NPC_HP_MAP.get(inst_id, 1)) <= 0)
+                elif picked_char and die_type in (2, 6):
+                    # Car robbery packets carry no vehicle ID. Match the
+                    # active objective; targeted-car missions also require
+                    # the player to be at the configured vehicle spawn.
+                    report_valid = validate_car_mission_report(picked_char, die_type)
+                elif picked_char and die_type == 4:
+                    report_valid = validate_arrive_target_report(picked_char, npcid)
+                elif picked_char and cur_map == '11':
+                    report_x = get_val_int(body, 1, None)
+                    report_z = get_val_int(body, 2, None)
+                    if report_x is not None and report_z is not None:
+                        report_valid = claim_client_local_npc_death(picked_char, npcid, report_x, report_z)
+                elif picked_char and inst_id:
+                    # Outside the city, client death reports must reference a
+                    # server-created NPC instance on this map whose server HP
+                    # has reached zero; a death report alone cannot mint kills.
+                    report_valid = bool(str(NPC_INST_MAP.get(inst_id, '')) == str(npcid)
+                                         and str(NPC_INSTANCE_MAP.get(inst_id, '')) == cur_map
+                                         and int(NPC_HP_MAP.get(inst_id, 1)) <= 0)
+
+                if not report_valid:
+                    print(f"[NPC DEATH SECURITY] rejected client report msg={msg} inst_id={inst_id} npc={npcid} map={cur_map} type={die_type}")
+                    if session is not None:
+                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                        conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    continue
+
+                if picked_char and die_type == 4:
+                    advance_missions(picked_char, send_rpc_push, 'interact', target_id=npcid, die_type=die_type)
+                    advance_missions(picked_char, send_rpc_push, 'level')
+                    save_chars(all_accounts_chars)
+                    if session is not None:
+                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                        conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    continue
+
                 is_duplicate = False
                 if inst_id is not None and inst_id > 1000000:
                     if inst_id in DEAD_NPC_SET: is_duplicate = True
@@ -5947,7 +6335,6 @@ def client_handler(conn, addr):
                         advance_missions(picked_char, send_rpc_push, 'car', die_type=die_type)
 
                     # Map 11 NPCs are fully client-side — resolve NPC ID and grant kill rewards
-                    cur_map = str(picked_char.get('map_id', '11'))
                     if cur_map == '11':
                         # For client-local map 11 NPCs, the inst_id is a client-generated ID.
                         # The client sends the npcid directly in field 0 of tag 307.
@@ -5985,9 +6372,7 @@ def client_handler(conn, addr):
                             player_pos_m11 = picked_char.get('pos', [0, 100, 0, 0])
                             drop_x_m11 = player_pos_m11[0] + random.randint(-500, 500)
                             drop_z_m11 = player_pos_m11[2] + random.randint(-500, 500)
-                            global GLOBAL_INST_COUNTER
-                            GLOBAL_INST_COUNTER += 1
-                            drop_inst_id_m11 = GLOBAL_INST_COUNTER
+                            drop_inst_id_m11 = next_global_inst_id()
                             drop_item_m11 = encode_sproto([
                                 (0, "1001"),
                                 (1, cash_kill_m11),
@@ -6073,26 +6458,11 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 298: # impact_npc (Vehicle collision / running over NPC)
-                impact_type = get_val_int(body, 0)
-                print(f"[*] Vehicle impact with NPC type={impact_type}")
-                if picked_char and is_exp_map(picked_char.get('map_id', '')):
-                    # Vehicle impact reports do not identify an authoritative
-                    # EXP monster/drop and cannot grant stage rewards.
-                    print(f"[EXP REWARD] ignored client impact report player={picked_char.get('id')}")
-                elif picked_char:
-                    char_lv = picked_char.get('level', 1)
-                    exp_impact, cash_impact = calculate_npc_kill_rewards(char_lv, npc_level=1)
-                    impact_rewards = [("2001", 0, exp_impact), ("1001", 0, cash_impact)]
-                    grant_item_rewards(picked_char, impact_rewards, conn, send_rpc_push)
-
-                    # Send floating reward popup tip (Tag 638)
-                    send_rpc_push(638, encode_sproto([(0, [
-                        encode_sproto([(0, "2001"), (1, exp_impact), (3, 0)]),
-                        encode_sproto([(0, "1001"), (1, cash_impact), (3, 0)])
-                    ])]))
-
-                    advance_missions(picked_char, send_rpc_push, 'impact')
-                    advance_missions(picked_char, send_rpc_push, 'level')
+                # The APK sends this request with no payload. It is only a
+                # visual collision notification; the authoritative NPC death
+                # and IMPACT_NPC mission event arrives separately as MSG 307.
+                # Never grant currency or mission progress from this signal.
+                print(f"[SECURITY] ignored rewardless MSG 298 player={picked_char.get('id') if picked_char else '-'}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -6214,6 +6584,8 @@ def client_handler(conn, addr):
                         state['remaining'][copy_id] = remaining - 1
                         picked_char['active_copy_id'] = copy_id
                         picked_char['street_race_return_scheduled'] = False
+                        picked_char['street_race_result_recorded'] = False
+                        picked_char['street_race_started_at'] = time.monotonic()
                         save_chars(all_accounts_chars)
                         start_map_transition(conn, picked_char, cfg['map_id'], send_rpc_push)
                         send_rpc_push(555, sync_copy_scenes(picked_char))
@@ -6239,7 +6611,19 @@ def client_handler(conn, addr):
                 won = get_val_int(body, 0, 0) == 1
                 elapsed = max(0, get_val_int(body, 1, 0))
                 path_str = field_text(body, 2)
-                if picked_char and cfg and cfg['subtype'] == 7:
+                race_started_at = float(picked_char.get('street_race_started_at', 0.0)) if picked_char else 0.0
+                server_elapsed = max(0.0, time.monotonic() - race_started_at) if race_started_at else 0.0
+                race_map_valid = bool(picked_char and cfg and str(picked_char.get('map_id')) == str(cfg.get('map_id')))
+                race_time_valid = bool(elapsed > 0 and elapsed <= 3600000
+                                       and server_elapsed >= 5.0
+                                       and elapsed <= int((server_elapsed + 5.0) * 100))
+                if (picked_char and cfg and cfg['subtype'] == 7 and race_map_valid
+                        and not picked_char.get('street_race_result_recorded')
+                        and race_time_valid):
+                    # A race result is a single-use claim for the active run.
+                    # The client supplies the finish result, so also require a
+                    # real start, the race map, and a plausible elapsed time.
+                    picked_char['street_race_result_recorded'] = True
                     state = ensure_daily_copy_state(picked_char)
                     best_times = state.setdefault('best_times', {})
                     best_strs = state.setdefault('best_times_str', {})
@@ -6269,6 +6653,8 @@ def client_handler(conn, addr):
                     send_rpc_push(555, sync_copy_scenes(picked_char))
                     schedule_street_race_return()
                     print(f"[STREET RACE] result id={active_copy_id} win={won} time={elapsed} rewards={rewards}")
+                elif picked_char and cfg and cfg.get('subtype') == 7:
+                    print(f"[STREET RACE SECURITY] rejected result map_ok={race_map_valid} time_ok={race_time_valid} duplicate={bool(picked_char.get('street_race_result_recorded'))}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -6530,8 +6916,16 @@ def client_handler(conn, addr):
                     if is_current_character_connection(conn, picked_char):
                         reconcile_exp_stage_login(picked_char)
                     current_map = str(picked_char.get('map_id', '11'))
+                    boss_cfg = WILD_BOSS_CONFIG.get(mid, {}) if msg == 201 else {}
+                    valid_world_boss = (msg != 201 or (
+                        boss_cfg.get('type') == 5
+                        and str(boss_cfg.get('map_id')) == mid
+                        and int(boss_cfg.get('min_level', 1)) <= int(picked_char.get('level', 1)) <= int(boss_cfg.get('max_level', 80))
+                    ))
                     if not is_current_character_connection(conn, picked_char):
                         print(f"[SCENE ENTRY] denied stale character socket player={picked_char.get('id')}")
+                    elif not valid_world_boss:
+                        print(f"[WORLD BOSS SECURITY] rejected unconfigured/ineligible id={mid} player={picked_char.get('id')}")
                     elif (is_exp_map(mid) or is_exp_map(current_map)
                             or picked_char.get('exp_stage_state')):
                         # EXP maps can only be entered through the validated
@@ -6577,29 +6971,29 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 270: # download_finish
-                if picked_char and not picked_char.get('download_complete'):
-                    picked_char['download_complete'] = True
-                    # Expansion Rewards from DownloadRewardData
-                    if DOWNLOAD_REWARD_DATA:
-                        for item_id, count, quality in DOWNLOAD_REWARD_DATA:
-                            add_to_inventory(picked_char, item_id, count)
-                    else:
-                        # Fallback - only items that exist in ItemData
-                        add_to_inventory(picked_char, "5011", 1)   # EXP*100000
-                        add_to_inventory(picked_char, "5012", 1)   # EXP*1000000
-                        add_to_inventory(picked_char, "5026", 5)   # World Channel Speak
-                    save_chars(all_accounts_chars)
+                if picked_char:
+                    with get_character_transaction_lock(picked_char):
+                        if not picked_char.get('download_complete'):
+                            picked_char['download_complete'] = True
+                            # Expansion Rewards from DownloadRewardData
+                            if DOWNLOAD_REWARD_DATA:
+                                for item_id, count, quality in DOWNLOAD_REWARD_DATA:
+                                    add_to_inventory(picked_char, item_id, count)
+                            else:
+                                # Fallback - only items that exist in ItemData
+                                add_to_inventory(picked_char, "5011", 1)   # EXP*100000
+                                add_to_inventory(picked_char, "5012", 1)   # EXP*1000000
+                                add_to_inventory(picked_char, "5026", 5)   # World Channel Speak
+                            save_chars(all_accounts_chars)
 
-                    # Sync items and finalize client state
-                    send_rpc_push(611, sync_inventory_data(picked_char))
-
-                    send_rpc_push(654, encode_sproto([(0, 1)])) # start_enter_game state=1
-                    print(f"[REWARD] Expansion finalized and rewards granted for player {picked_char['id']}")
-                elif picked_char:
-                    print(f"[REWARD] Player {picked_char['id']} already claimed expansion rewards.")
-                    # Keep the current client session consistent with the
-                    # persisted completion state if it repeats MSG 270.
-                    send_rpc_push(654, encode_sproto([(0, 1)]))
+                            # Sync items and finalize client state
+                            send_rpc_push(611, sync_inventory_data(picked_char))
+                            print(f"[REWARD] Expansion finalized and rewards granted for player {picked_char['id']}")
+                        else:
+                            print(f"[REWARD] Player {picked_char['id']} already claimed expansion rewards.")
+                        # Keep the current client session consistent with the
+                        # persisted completion state if MSG 270 repeats.
+                        send_rpc_push(654, encode_sproto([(0, 1)])) # start_enter_game state=1
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -6672,8 +7066,8 @@ def client_handler(conn, addr):
                         goal=get_val_str(body,1,''); team=get_team_for_char(cid); ok=False
                         if team is None and is_character_available_for_team(picked_char):
                             goal_min,goal_max=team_goal_level_bounds(goal,get_val_int(body,2,1),get_val_int(body,3,80))
-                            TEAM_ID_COUNTER+=1
-                            team={'id':TEAM_ID_COUNTER,'leader_id':cid,'members':[],'goal_id':goal,
+                            team_id=next_team_id()
+                            team={'id':team_id,'leader_id':cid,'members':[],'goal_id':goal,
                                 'min_level':goal_min,'max_level':goal_max,
                                 'verify':get_val_int(body,4,0),'recruit':get_val_int(body,5,0),'char_refs':{},'pending_apps':{}}
                             if team_join_member(team,picked_char): TEAM_STATES[team['id']]=team; ok=True
@@ -6771,8 +7165,8 @@ def client_handler(conn, addr):
                         team=get_team_for_char(cid)
                         if team is None and is_character_available_for_team(picked_char):
                             cfg=COPY_SCENE_CONFIG.get(goal,{})
-                            TEAM_ID_COUNTER+=1
-                            team={'id':TEAM_ID_COUNTER,'leader_id':cid,'members':[],'goal_id':goal,
+                            team_id=next_team_id()
+                            team={'id':team_id,'leader_id':cid,'members':[],'goal_id':goal,
                                 'min_level':int(cfg.get('min_level',1)),'max_level':int(cfg.get('max_level',80)),
                                 'verify':0,'recruit':0,'char_refs':{},'pending_apps':{}}
                             if team_join_member(team,picked_char): TEAM_STATES[team['id']]=team
@@ -6808,7 +7202,7 @@ def client_handler(conn, addr):
                             # into a run for free.
                             valid=all(copy_attempts_remaining(ALL_CONNECTIONS[x][1],copy_id,cfg)>0 for x in ids)
                         if valid:
-                            EXP_RUN_COUNTER+=1; session_id=EXP_RUN_COUNTER
+                            session_id=next_exp_run_id()
                             team['pending_run']={'session':session_id,'copy_id':copy_id,'ready':{x:False for x in ids}}
                             for x in ids: send_push_to_char(x,602,encode_sproto([(0,copy_id),(1,1),(2,session_id)]))
                             def expire_ready(tid=int(team['id']), sid=session_id):
@@ -6906,33 +7300,51 @@ def client_handler(conn, addr):
                     print(f"[COPY] sent daily copy state level={picked_char.get('level', 1)}")
 
                 elif msg == 253 and picked_char: # request_sign_week_info
-                    day = int(picked_char.get('sign_week_day', 1))
-                    claimed = bool(picked_char.get('sign_week_claimed', False))
+                    sign_calendar = current_sign_calendar()
+                    day = int(sign_calendar['week_day'])
+                    claimed = picked_char.get('sign_week_claimed_date') == sign_calendar['date']
                     send_rpc_push(641, encode_sproto([(0, day), (1, not claimed), (2, False)]))
 
                 elif msg == 255 and picked_char: # sign_week
-                    day = int(picked_char.get('sign_week_day', 1))
-                    picked_char['sign_week_claimed'] = True
-                    picked_char['cash'] = picked_char.get('cash', 0) + 10000
-                    save_chars(all_accounts_chars)
-                    send_rpc_push(643, encode_sproto([(0, day), (1, False)]))
-                    send_rpc_push(611, sync_inventory_data(picked_char))
-                    sync_char_attrs_rpc(conn, picked_char)
+                    with get_character_transaction_lock(picked_char):
+                        sign_calendar = current_sign_calendar()
+                        day = int(sign_calendar['week_day'])
+                        if picked_char.get('sign_week_claimed_date') != sign_calendar['date']:
+                            picked_char['sign_week_claimed_date'] = sign_calendar['date']
+                            picked_char['sign_week_day'] = day
+                            picked_char['sign_week_claimed'] = True
+                            picked_char['cash'] = picked_char.get('cash', 0) + 10000
+                            save_chars(all_accounts_chars)
+                            send_rpc_push(643, encode_sproto([(0, day), (1, False)]))
+                            send_rpc_push(611, sync_inventory_data(picked_char))
+                            sync_char_attrs_rpc(conn, picked_char)
+                        else:
+                            print(f"[REWARD SECURITY] duplicate weekly sign rejected player={picked_char.get('id')}")
 
                 elif msg == 252 and picked_char: # request_sign_30_day_info
-                    cur_day = int(picked_char.get('sign_30_day', 0))
-                    claimed = bool(picked_char.get('sign_30_claimed', False))
-                    send_rpc_push(640, encode_sproto([(0, cur_day), (1, max(1, cur_day)), (2, 0), (3, not claimed), (4, False), (5, 30), (6, "")]))
+                    sign_calendar = current_sign_calendar()
+                    cur_day = min(30, int(sign_calendar['month_day']))
+                    claimed = (picked_char.get('sign_30_claimed_date') == sign_calendar['date']
+                               or int(sign_calendar['month_day']) > 30)
+                    send_rpc_push(640, encode_sproto([(0, cur_day), (1, cur_day), (2, 0), (3, not claimed), (4, False), (5, 30), (6, "")]))
 
                 elif msg == 254 and picked_char: # sign_30_day
-                    cur_day = int(picked_char.get('sign_30_day', 0)) + 1
-                    picked_char['sign_30_day'] = cur_day
-                    picked_char['sign_30_claimed'] = True
-                    picked_char['cash'] = picked_char.get('cash', 0) + 20000
-                    save_chars(all_accounts_chars)
-                    send_rpc_push(642, encode_sproto([(0, cur_day), (1, cur_day), (2, 0), (3, False), (4, False), (5, 30), (6, "")]))
-                    send_rpc_push(611, sync_inventory_data(picked_char))
-                    sync_char_attrs_rpc(conn, picked_char)
+                    with get_character_transaction_lock(picked_char):
+                        sign_calendar = current_sign_calendar()
+                        cur_day = min(30, int(sign_calendar['month_day']))
+                        already_claimed = (picked_char.get('sign_30_claimed_date') == sign_calendar['date']
+                                           or int(sign_calendar['month_day']) > 30)
+                        if not already_claimed:
+                            picked_char['sign_30_day'] = cur_day
+                            picked_char['sign_30_claimed_date'] = sign_calendar['date']
+                            picked_char['sign_30_claimed'] = True
+                            picked_char['cash'] = picked_char.get('cash', 0) + 20000
+                            save_chars(all_accounts_chars)
+                            send_rpc_push(642, encode_sproto([(0, cur_day), (1, cur_day), (2, 0), (3, False), (4, False), (5, 30), (6, "")]))
+                            send_rpc_push(611, sync_inventory_data(picked_char))
+                            sync_char_attrs_rpc(conn, picked_char)
+                        else:
+                            print(f"[REWARD SECURITY] duplicate 30-day sign rejected player={picked_char.get('id')}")
 
                 elif msg == 258 and picked_char: # request_daily_buy
                     d_buys = {
@@ -7029,37 +7441,102 @@ def client_handler(conn, addr):
 
             elif msg == 178: # update_misison_parm
                 mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
+                param_type = get_val_int(body, 1)
+                param_value = get_val_int(body, 2)
                 if picked_char:
-                    # Survey interaction sends msg 178
-                    advance_missions(picked_char, send_rpc_push, 'interact', target_id=mid)
+                    mdata = picked_char.get('active_missions', {}).get(mid)
+                    m_cfg = missions_data.get(mid, {})
+                    logic_type = m_cfg.get('logic_type')
+                    logic_id = str(m_cfg.get('logic_id', ''))
+                    accepted = False
+                    required = 0
+                    if mdata and mdata.get('state') == 1 and param_type == 1 and param_value == 1:
+                        if logic_type == 6:
+                            # SurveyMissionData is authoritative for both the
+                            # target map and world position. The client can only
+                            # submit a single unit while standing at that item.
+                            survey = SURVEY_DATA.get(logic_id)
+                            pos = picked_char.get('pos') or []
+                            if survey and str(survey.get('scene_id')) == str(picked_char.get('map_id')) and len(pos) >= 3:
+                                sx = int(round(float(survey.get('x', 0.0)) * 100))
+                                sz = int(round(float(survey.get('z', 0.0)) * 100))
+                                radius = 400 if str(survey.get('scene_id')) == '11' else 250
+                                near_item = math.hypot(int(pos[0]) - sx, int(pos[2]) - sz) <= radius
+                                now_mono = time.monotonic()
+                                cooldown_key = (int(picked_char.get('id', 0)), mid)
+                                last_event = SURVEY_PROGRESS_TIMES.get(cooldown_key, 0.0)
+                                cooldown = max(0.8, int(survey.get('survey_time', 1000)) / 1000.0)
+                                if near_item and now_mono - last_event >= cooldown:
+                                    required = int(survey.get('need_num', m_cfg.get('require_num', 1)))
+                                    accepted = True
+                                    SURVEY_PROGRESS_TIMES[cooldown_key] = now_mono
+                        elif logic_type == 13:
+                            # Multi-delivery only advances at the configured
+                            # stop for the current progress index.
+                            stops = MULTI_DELIVERY_DATA.get(logic_id, [])
+                            progress = int((mdata.get('parm') or [0])[0])
+                            if progress < max(0, len(stops) - 1) and str(stops[progress].get('map_id')) == str(picked_char.get('map_id')):
+                                required = len(stops)
+                                accepted = required > 0
+                                if accepted:
+                                    now_mono = time.monotonic()
+                                    cooldown_key = (int(picked_char.get('id', 0)), mid)
+                                    last_event = SURVEY_PROGRESS_TIMES.get(cooldown_key, 0.0)
+                                    accepted = now_mono - last_event >= 1.0
+                                    if accepted:
+                                        SURVEY_PROGRESS_TIMES[cooldown_key] = now_mono
+
+                    if accepted:
+                        parm = mdata.setdefault('parm', [0] * 8)
+                        if len(parm) < 8:
+                            parm.extend([0] * (8 - len(parm)))
+                        parm[0] = min(required, int(parm[0]) + 1)
+                        send_rpc_push(524, encode_sproto([(0, mid), (1, 1), (2, parm[0])]))
+                        if parm[0] >= required:
+                            mdata['state'] = 2
+                            send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(519, sync_mission_data(picked_char))
+                        print(f"[MISSION PROGRESS] msg=178 mission={mid} progress={parm[0]}/{required}")
+                    else:
+                        print(f"[MISSION SECURITY] rejected MSG 178 mission={mid} type={logic_type} map={picked_char.get('map_id')}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 179: # update_misison_complete
+            elif msg in (179, 182): # update_misison_complete (APK protocol ID 182)
                 mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
-                if picked_char and mid in picked_char.get('active_missions', {}):
-                    picked_char['active_missions'][mid]['state'] = 2
-                    save_chars(all_accounts_chars)
-                    send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
-                    send_rpc_push(519, sync_mission_data(picked_char))
-                    print(f"[MISSION DIALOG COMPLETE] mission_id={mid}")
+                if picked_char:
+                    mdata = picked_char.get('active_missions', {}).get(mid)
+                    m_cfg = missions_data.get(mid, {})
+                    logic_type = m_cfg.get('logic_type')
+                    can_finish_dialog = bool(mdata and mdata.get('state') == 1
+                                              and logic_type == 0 and m_cfg.get('class') != 6)
+                    if mdata and mdata.get('state') == 1 and logic_type == 13:
+                        stops = MULTI_DELIVERY_DATA.get(str(m_cfg.get('logic_id', '')), [])
+                        can_finish_dialog = bool(stops and int((mdata.get('parm') or [0])[0]) >= len(stops) - 1)
+                    # Story dialogues and completed multi-delivery routes are
+                    # the only client-confirmed transitions. Kill, EXP 1019,
+                    # capture and other objectives are advanced by the server.
+                    if can_finish_dialog:
+                        mdata['state'] = 2
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                        send_rpc_push(519, sync_mission_data(picked_char))
+                        print(f"[MISSION DIALOG COMPLETE] mission_id={mid}")
+                    elif mdata and mdata.get('state') != 2:
+                        print(f"[MISSION SECURITY] rejected dialog completion mission={mid} type={logic_type} state={mdata.get('state')}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 119: # ask_pickup_item
-                iid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
-                if picked_char and is_exp_map(picked_char.get('map_id', '')):
-                    # EXP kills have server-issued rewards and do not create
-                    # client-claimable item drops; accepting this ID directly
-                    # would let a client mint arbitrary inventory items.
-                    print(f"[EXP REWARD] ignored client pickup report player={picked_char.get('id')} item={iid}")
-                elif picked_char:
-                    advance_missions(picked_char, send_rpc_push, 'pickup', target_id=iid)
-                    advance_missions(picked_char, send_rpc_push, 'interact', target_id=iid)
-                    add_to_inventory(picked_char, iid, 1)
-                    send_rpc_push(611, sync_inventory_data(picked_char))
+                server_drop_id = get_val_int(body, 0, -1)
+                # APK schema confirms field 0 is a server drop-instance ID.
+                # This server's drop objects are client-side reward visuals and
+                # already have their rewards issued by the validated kill path;
+                # treating that instance ID as an item ID allowed inventory minting.
+                print(f"[SECURITY] ignored unregistered pickup request player={picked_char.get('id') if picked_char else '-'} drop={server_drop_id}")
                 if session is not None:
                     resp = encode_sproto([(0, 0)])
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
@@ -7184,8 +7661,7 @@ def client_handler(conn, addr):
                         context = context_raw.decode('utf-8', errors='ignore')
                     else:
                         context = str(context_raw)
-                    mail_id = MAIL_ID_COUNTER
-                    MAIL_ID_COUNTER += 1
+                    mail_id = next_mail_id()
                     sender_name = picked_char.get('name', 'Player')
                     mail_entry = {
                         'mailId': mail_id,
@@ -7254,28 +7730,30 @@ def client_handler(conn, addr):
                         save_chars(all_accounts_chars)
                         send_rpc_push(532, encode_sproto([(0, mail_id)]))
                     elif operation == 2: # get items
-                        for mi in picked_char.get('mails', []):
-                            if mi.get('mailId') == mail_id:
-                                mi['mailState'] = 3  # GETITEM - client IsGetItem() checks mailstate==3
-                                for it in mi.get('items', []):
-                                    add_to_inventory(picked_char, str(it.get('itemId', 0)), it.get('count', 1))
-                                send_rpc_push(611, sync_inventory_data(picked_char))
-                                # Send updated mail_update (531) so client knows the mail state changed
-                                mi_bytes = build_mail_update(mi)
-                                send_rpc_push(531, mi_bytes)
-                                break
-                        save_chars(all_accounts_chars)
+                        with get_character_transaction_lock(picked_char):
+                            for mi in picked_char.get('mails', []):
+                                if mi.get('mailId') == mail_id and mi.get('mailState', 0) != 3:
+                                    mi['mailState'] = 3  # GETITEM - client IsGetItem() checks mailstate==3
+                                    for it in mi.get('items', []):
+                                        add_to_inventory(picked_char, str(it.get('itemId', 0)), it.get('count', 1))
+                                    send_rpc_push(611, sync_inventory_data(picked_char))
+                                    # Send updated mail_update (531) so client knows the mail state changed
+                                    mi_bytes = build_mail_update(mi)
+                                    send_rpc_push(531, mi_bytes)
+                                    break
+                            save_chars(all_accounts_chars)
                     elif operation == 3: # get all items
-                        for mi in picked_char.get('mails', []):
-                            if mi.get('mailState', 0) != 3:  # Skip already claimed
-                                mi['mailState'] = 3  # GETITEM - client IsGetItem() checks mailstate==3
-                                for it in mi.get('items', []):
-                                    add_to_inventory(picked_char, str(it.get('itemId', 0)), it.get('count', 1))
-                                # Send updated mail_update (531) for each claimed mail
-                                mi_bytes = build_mail_update(mi)
-                                send_rpc_push(531, mi_bytes)
-                        send_rpc_push(611, sync_inventory_data(picked_char))
-                        save_chars(all_accounts_chars)
+                        with get_character_transaction_lock(picked_char):
+                            for mi in picked_char.get('mails', []):
+                                if mi.get('mailState', 0) != 3:  # Skip already claimed
+                                    mi['mailState'] = 3  # GETITEM - client IsGetItem() checks mailstate==3
+                                    for it in mi.get('items', []):
+                                        add_to_inventory(picked_char, str(it.get('itemId', 0)), it.get('count', 1))
+                                    # Send updated mail_update (531) for each claimed mail
+                                    mi_bytes = build_mail_update(mi)
+                                    send_rpc_push(531, mi_bytes)
+                            send_rpc_push(611, sync_inventory_data(picked_char))
+                            save_chars(all_accounts_chars)
                     elif operation == 4: # delete all
                         picked_char['mails'] = []
                         save_chars(all_accounts_chars)
@@ -7771,8 +8249,7 @@ def client_handler(conn, addr):
                         context = context_raw.decode('utf-8', errors='ignore')
                     else:
                         context = str(context_raw)
-                    mail_id = MAIL_ID_COUNTER
-                    MAIL_ID_COUNTER += 1
+                    mail_id = next_mail_id()
                     mail_entry = {
                         'mailId': mail_id,
                         'sendertype': 0,
