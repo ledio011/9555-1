@@ -2866,7 +2866,7 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
 
         if already_dead:
             # Combat marks HP zero while holding the same per-NPC lock, then
-            # sends the final HP/removal packets and calls on_npc_killed after
+            # sends the final HP update and calls on_npc_killed after
             # releasing it. Do not tear down its records here: an AI tick in
             # that small window would otherwise make the combat path lose the
             # HP/instance data needed to finish the client death notification.
@@ -2874,7 +2874,11 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
         if auto_death_hp_zero:
             print(f"[EXP AI] Auto-death detected inst_id={inst_id} npcid={auto_death_nid} hp={NPC_HP_MAP.get(inst_id, 0)}")
             if auto_death_nid:
-                send_rpc_push_func(506, encode_sproto([(0, inst_id)]))
+                death_stats = get_npc_attr(auto_death_nid)
+                if exp_state.get('team_id'):
+                    exp_sync_npc_attrs(exp_state, inst_id, death_stats, 0)
+                else:
+                    sync_npc_attrs_rpc(conn_for_sync, inst_id, death_stats, 0)
                 on_npc_killed(conn_for_sync, send_rpc_push_func, picked_char, inst_id, auto_death_nid)
             else:
                 if inst_id in exp_state.get('active_monsters', []):
@@ -6138,8 +6142,8 @@ def client_handler(conn, addr):
                                 print(f"[EXP HIT] rejected target already dead/inactive target={target_id}")
                                 continue
 
-                            # Bug 6: Only send TAG 510 when actual_dmg > 0 to avoid wasting bandwidth on misses
-                            if actual_dmg > 0:
+                            # Sync changed HP and always deliver HP=0 when death is finalized.
+                            if actual_dmg > 0 or (is_exp and exp_npc_died):
                                 if exp_state_hit and exp_state_hit.get('team_id'):
                                     exp_sync_npc_attrs(exp_state_hit, target_id, defender_stats, max(0, NPC_HP_MAP[target_id]))
                                 else:
@@ -6173,13 +6177,14 @@ def client_handler(conn, addr):
                                     DEAD_NPC_SET.add(target_id)
                                 print(f"[EXP MSG111] NPC DEAD target_id={target_id} target_nid={target_nid} hp={NPC_HP_MAP[target_id]}")
 
-                                kill_state = picked_char.get('exp_stage_state') if is_exp else None
-                                kill_remove = encode_sproto([(0, target_id)])
-                                if kill_state and kill_state.get('team_id'):
-                                    exp_send_push(kill_state, 506, kill_remove)
-                                    NPC_ATTR_MAP.pop(target_id, None)
-                                else:
-                                    send_rpc_push(506, kill_remove)
+                                if not is_exp:
+                                    # Non-EXP despawns keep their existing AOI path.
+                                    send_rpc_push(506, encode_sproto([(0, target_id)]))
+                                # EXP clients receive HP=0 above. Their ObjNPC
+                                # death handler plays the death state and
+                                # recycles the body after its native delay; an
+                                # immediate AOI remove skips that lifecycle and
+                                # can leave inconsistent visible/invisible NPCs.
 
                                 # BOSS DEATH HANDLING
                                 if target_id == picked_char.get('boss_inst_id'):
