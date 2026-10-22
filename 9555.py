@@ -6392,9 +6392,10 @@ def client_handler(conn, addr):
                                 (7, picked_char['id'])
                             ]))
                     else:
-                        exp_state_death = picked_char.get('exp_stage_state')
-                        if exp_state_death and exp_state_death.get('team_id') and inst_id:
-                            exp_send_push(exp_state_death, 506, encode_sproto([(0, inst_id)]), exclude=[picked_char.get('id', 0)])
+                        # EXP combat already broadcast TAG 510 with HP=0 to
+                        # every squad member. Do not immediately remove the NPC
+                        # from only the other clients: let each client play its
+                        # normal death animation and recycle it on the same delay.
                         on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid)
 
                     if die_type == 3:
