@@ -1810,10 +1810,14 @@ def update_street_race_checkpoint_progress(char, move_body, car_pos):
             dx = float(car_pos[0]) - float(previous[0])
             dz = float(car_pos[2]) - float(previous[2])
             distance_cm = math.hypot(dx, dz)
-            # CarControl caps the APK car at MaxSpeed * 1.05. Allow a further
-            # 20% for client/server timing and quantization, plus 1.5m for a
-            # delayed 5Hz movement packet. A larger jump makes a win ineligible.
-            max_distance_cm = max_speed * 100.0 * 1.05 * elapsed * 1.20 + 150.0
+            # ObjPlayerCar.SynPlayerPosition sends one position every 0.2s.
+            # TCP can deliver queued updates back-to-back, so server receive
+            # time alone can be near zero even when the client moved for one
+            # full send interval. Include that client interval in the speed
+            # budget, then retain the 20% timing/quantization margin and 1.5m
+            # tolerance. This still rejects jumps that cannot fit one client
+            # update at the configured vehicle's maximum speed.
+            max_distance_cm = max_speed * 100.0 * 1.05 * (elapsed + 0.20) * 1.20 + 150.0
             # CarControllerRootLogic.OnClickResetBtn is a normal client action:
             # CarChaseSceneManager.ResetPlayerCarToLastPoint teleports the car
             # to the start or the last cleared route point. Accept only those
@@ -4102,6 +4106,27 @@ def validate_street_race_splits(value, elapsed, expected_count=None, require_com
         if len(splits) != int(expected_count) or any(split <= 0 for split in splits):
             return ''
     return '#'.join(str(split) for split in splits)
+
+def street_race_finish_position_valid(char, copy_id):
+    """Check the last server-seen car position against the client's finish point."""
+    checkpoints = STREET_RACE_CHECKPOINTS.get(str(copy_id), [])
+    position = char.get('pos') if isinstance(char, dict) else None
+    if not checkpoints or not isinstance(position, (list, tuple)) or len(position) < 3:
+        return False
+    try:
+        finish = checkpoints[-1]
+        dx = float(position[0]) - float(finish[0])
+        dy = float(position[1]) - float(finish[1])
+        dz = float(position[2]) - float(finish[2])
+        mount_id, _, _ = get_equipped_mount(char)
+        max_speed = float(MOUNT_CONFIG.get(mount_id, {}).get('max_speed', 0) or 0)
+        # MovePathPoint activates at 15 Unity units. Allow one 0.2s car
+        # position interval because EndMission can be sent before its final
+        # movement snapshot arrives at the server.
+        radius_cm = 1500.0 + max_speed * 100.0 * 0.20 * 1.05 * 1.20
+        return dx * dx + dy * dy + dz * dz <= radius_cm * radius_cm
+    except (TypeError, ValueError, IndexError):
+        return False
 
 def current_sign_calendar():
     """Use the same 03:00 server reset for daily/weekly/monthly sign state."""
@@ -7321,10 +7346,20 @@ def client_handler(conn, addr):
                         picked_char.get('street_race_checkpoint_progress', 0))) if picked_char else 0
                 except (TypeError, ValueError):
                     tracked_checkpoints = 0
-                race_route_valid = (not won or (expected_checkpoints is not None
-                                    and expected_checkpoints > 0
-                                    and tracked_checkpoints >= expected_checkpoints
-                                    and picked_char.get('street_race_movement_valid', True)))
+                finish_position_valid = bool(
+                    picked_char and street_race_finish_position_valid(picked_char, active_copy_id))
+                movement_valid = bool(picked_char and picked_char.get('street_race_movement_valid', True))
+                # The client completes on the last MovePathPoint and submits
+                # one positive split for each route checkpoint. Accept the
+                # final server snapshot as proof of that last point when it
+                # arrived just before EndMission; still require ordered server
+                # checkpoint progress and valid movement for earlier points.
+                route_progress_valid = bool(
+                    expected_checkpoints is not None and expected_checkpoints > 0
+                    and (tracked_checkpoints >= expected_checkpoints
+                         or (tracked_checkpoints >= expected_checkpoints - 1
+                             and finish_position_valid)))
+                race_route_valid = (not won or (route_progress_valid and movement_valid))
                 race_splits_valid = (not won or (expected_checkpoints is not None
                                      and expected_checkpoints > 0
                                      and bool(valid_splits) and race_route_valid))
@@ -7357,6 +7392,7 @@ def client_handler(conn, addr):
                                         if row['id'] == int(picked_char.get('id', 0))), -1)
                     old_time = best_times.get(active_copy_id)
                     new_record = won and (old_time is None or elapsed < int(old_time))
+                    rewards = street_race_rewards(picked_char.get('level', 1), active_copy_id) if won else []
                     if won:
                         if new_record:
                             best_times[active_copy_id] = elapsed
@@ -7368,11 +7404,12 @@ def client_handler(conn, addr):
                             if mount_id:
                                 state.setdefault('best_mounts', {})[active_copy_id] = mount_id
                                 state.setdefault('best_mount_colors', {})[active_copy_id] = mount_color
-                            rewards = street_race_rewards(picked_char.get('level', 1), active_copy_id) if won else []
                     if won and rewards:
                         grant_item_rewards(picked_char, rewards, conn, send_rpc_push)
 
-                    result_items = [encode_sproto([(0, item_id), (1, amount), (2, quality)])
+                    # SprotoType.item reserves tag 2; quality is field 3 in
+                    # the APK's schema (itemId=0, itemCount=1, quality=3).
+                    result_items = [encode_sproto([(0, item_id), (1, amount), (3, quality)])
                                     for item_id, quality, amount in rewards]
                     rank_after = next((i + 1 for i, row in enumerate(street_race_rank_records(active_copy_id))
                                        if row['id'] == int(picked_char.get('id', 0))), -1)
@@ -7393,7 +7430,7 @@ def client_handler(conn, addr):
                     send_rpc_push(555, sync_copy_scenes(picked_char))
                     print(f"[STREET RACE] result id={active_copy_id} win={won} time={elapsed} rewards={rewards}")
                 elif picked_char and cfg and cfg.get('subtype') == 7:
-                    print(f"[STREET RACE SECURITY] rejected result map_ok={race_map_valid} time_ok={race_time_valid} route_ok={race_route_valid} splits_ok={race_splits_valid} duplicate={bool(picked_char.get('street_race_result_recorded'))}")
+                    print(f"[STREET RACE SECURITY] rejected result map_ok={race_map_valid} time_ok={race_time_valid} route_ok={race_route_valid} progress={tracked_checkpoints}/{expected_checkpoints} finish_pos={finish_position_valid} movement_ok={movement_valid} splits_ok={race_splits_valid} duplicate={bool(picked_char.get('street_race_result_recorded'))}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
