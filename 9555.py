@@ -84,6 +84,10 @@ WILD_BOSS_CONFIG = {} # ID -> configured PVE world boss and required level band
 COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
 SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
 STREET_RACE_REWARD_BY_LEVEL = {} # level -> AdaptData _drop_bc ShowRewardData id
+STREET_RACE_CHECKPOINT_COUNTS = {} # copy id -> required player-car route checkpoints
+STREET_RACE_CHECKPOINTS = {} # copy id -> ordered checkpoint positions in centimeters
+STREET_RACE_START_POSITIONS = {} # copy id -> client PointType=2/BlockIndex=0 car start, in centimeters
+STREET_RACE_MAX_TIME_CS = 8640000 # GameDefine.DayCentiSecond, the CAR ranking score range
 ADAPT_DATA = {} # level -> dict of std values from AdaptData
 ITEM_CONFIG = {} # itemId -> {type, function}
 FUNCTION_DATA = {} # funcId -> {class, condition, is_download, first_open, unlock_type, side_mission}
@@ -805,12 +809,19 @@ try:
                 if len(parts) > 36 and parts[0] == "*" and parts[1]:
                     colors = [x for x in parts[28].split("#") if x]
                     is_motor = int(parts[41]) if len(parts) > 41 and parts[41].isdigit() else 0
+                    try:
+                        # MountData.MaxSpeed is stored in cm/s. CarControl's
+                        # public MaxSp value and the race movement allowance use m/s.
+                        max_speed = float(parts[24]) / 100.0 if len(parts) > 24 and parts[24] else 0.0
+                    except (TypeError, ValueError):
+                        max_speed = 0.0
                     MOUNT_CONFIG[parts[1]] = {
                         'colors': colors,
                         'default_color': parts[29] if parts[29] else (colors[0] if colors else "1"),
                         'item_id': parts[4],
                         'need_show': int(parts[36]) if parts[36].isdigit() else 0,
                         'is_motor': is_motor,
+                        'max_speed': max_speed,
                         'model_id': parts[15] if len(parts) > 15 else '',
                         'gta_link_car_id': parts[38] if len(parts) > 38 and parts[38] else parts[1],
                         'price_type': int(parts[43]) if len(parts) > 43 and parts[43].lstrip('-').isdigit() else -1,
@@ -864,6 +875,9 @@ try:
                         'map_id': parts[5],
                         'subtype': int(parts[12]) if parts[12].isdigit() else 0,
                         'exist_time': int(parts[13]) if parts[13].isdigit() else 0,
+                        # Street Race rows 211-217 use Parm3 (0-6) to identify
+                        # the route in their daily rotation.
+                        'daily_slot': int(parts[16]) if len(parts) > 16 and parts[16].isdigit() else -1,
                         'time_inc': parts[8] if len(parts) > 8 else '',
                         'end_time': int(parts[10]) if parts[10].isdigit() else 0,
                         'max_plays': int(parts[18]) if parts[18].isdigit() else 0,
@@ -877,6 +891,51 @@ try:
                         'single_map_id': parts[31] if len(parts) > 31 and parts[31].isdigit() else ''
                     }
         print(f"[COPY SCENE CONFIG LOADED] daily_copies={len(COPY_SCENE_CONFIG)}")
+
+    # The APK builds each race route from PointType=2 CarMissionBlockData rows.
+    # BlockIndex 0 is the local car start; positive indexes are ordered checkpoints.
+    car_blocks_path = os.path.join(text_asset_root, "CarMissionBlockData")
+    if os.path.exists(car_blocks_path):
+        with open(car_blocks_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(',')
+                if (len(parts) > 10 and parts[0] == '*' and parts[1].isdigit()
+                        and parts[2] == '2' and parts[10].lstrip('-').isdigit()
+                        and parts[1] in COPY_SCENE_CONFIG
+                        and COPY_SCENE_CONFIG[parts[1]].get('subtype') == 7):
+                    try:
+                        point = tuple(int(round(float(parts[i]) * 100)) for i in (3, 4, 5))
+                    except (TypeError, ValueError):
+                        continue
+                    block_index = int(parts[10])
+                    if block_index == 0:
+                        try:
+                            heading = int(round(float(parts[7]) * 100))
+                        except (TypeError, ValueError):
+                            heading = 0
+                        STREET_RACE_START_POSITIONS[parts[1]] = (*point, heading)
+                    elif block_index > 0:
+                        STREET_RACE_CHECKPOINTS.setdefault(parts[1], []).append(
+                            (block_index, point))
+        for copy_id, indexed_points in STREET_RACE_CHECKPOINTS.items():
+            indexed_points.sort(key=lambda entry: entry[0])
+            STREET_RACE_CHECKPOINTS[copy_id] = [point for _, point in indexed_points]
+            STREET_RACE_CHECKPOINT_COUNTS[copy_id] = len(STREET_RACE_CHECKPOINTS[copy_id])
+        print(f"[STREET RACE] route checkpoint counts={STREET_RACE_CHECKPOINT_COUNTS}")
+
+    # Load ItemData before reward handling so later reward and inventory paths
+    # can validate configured item IDs.
+    item_path = os.path.join(text_asset_root, "ItemData")
+    if os.path.exists(item_path):
+        with open(item_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(',')
+                if len(parts) > 11 and parts[0] == '*' and parts[1]:
+                    ITEM_CONFIG[parts[1]] = {
+                        'type': int(parts[7]) if parts[7].isdigit() else 0,
+                        'function': int(parts[11]) if parts[11].isdigit() else 0
+                    }
+        print(f"[ITEM CONFIG LOADED] items={len(ITEM_CONFIG)}")
 
     # Street Race's actual reward preview is resolved by AdaptData's
     # _drop_bc key, then ShowRewardData.  Read those client tables rather
@@ -896,8 +955,9 @@ try:
 
                         if item_id:
                             rewards.append((item_id, quality, count))
-                        elif count_str and count_str in ITEM_CONFIG:
-                            rewards.append((count_str, quality, 1))
+                        # ShowRewardData.InitData/AddListItem in the APK ignores
+                        # slots whose ItemN field is empty, regardless of the
+                        # quality or count columns in that slot.
                     SHOW_REWARD_CONFIG[parts[1]] = rewards
         print(f"[SHOW REWARD CONFIG LOADED] count={len(SHOW_REWARD_CONFIG)}")
 
@@ -941,18 +1001,6 @@ try:
                 reward_id = STREET_RACE_REWARD_BY_LEVEL[lv]
                 rewards = SHOW_REWARD_CONFIG.get(str(reward_id), [])
                 print(f"[STREET RACE] Level {lv} -> Reward ID {reward_id}: {rewards}")
-
-    item_path = os.path.join(text_asset_root, "ItemData")
-    if os.path.exists(item_path):
-        with open(item_path, "r", encoding='utf-8') as f:
-            for line in f:
-                parts = line.strip().split(',')
-                if len(parts) > 11 and parts[0] == '*' and parts[1]:
-                    ITEM_CONFIG[parts[1]] = {
-                        'type': int(parts[7]) if parts[7].isdigit() else 0,
-                        'function': int(parts[11]) if parts[11].isdigit() else 0
-                    }
-        print(f"[ITEM CONFIG LOADED] items={len(ITEM_CONFIG)}")
 
     # Load FunctionData (feature unlock gates by level)
     func_path = os.path.join(text_asset_root, "FunctionData")
@@ -1687,14 +1735,133 @@ def build_aoi_add_packet(char):
         print(f"[AOI] Failed to build aoi_add packet for id={char_id}: {e}")
         return None
 
+def street_race_config_for_map(map_id):
+    """Return the Street Race copy row for its physical route map, if any."""
+    mid = str(map_id)
+    return next((cfg for cfg in COPY_SCENE_CONFIG.values()
+                 if cfg.get('subtype') == 7 and str(cfg.get('map_id') or '') == mid), None)
+
+def street_race_return_point(char):
+    """Return the saved pre-race map and position, with a safe city fallback."""
+    return_map = str(char.get('pre_copy_map') or '11')
+    if street_race_config_for_map(return_map):
+        return_map = '11'
+    return_pos = char.get('pre_copy_pos') or [29860, 100, -17005, 0]
+    return return_map, list(return_pos)
+
+def street_race_start_position(map_id):
+    """Return the APK's local race-car start point, with MapInfo birth fallback."""
+    cfg = street_race_config_for_map(map_id)
+    if cfg:
+        for copy_id, copy_cfg in COPY_SCENE_CONFIG.items():
+            if copy_cfg is cfg:
+                route_start = STREET_RACE_START_POSITIONS.get(str(copy_id))
+                if route_start:
+                    return list(route_start)
+
+    birth = str(MAP_CONFIG.get(str(map_id), {}).get('birth') or '')
+    parts = birth.split('#')
+    if len(parts) < 3:
+        return None
+    try:
+        x, y, z = int(parts[0]), int(parts[1]), int(parts[2])
+        heading = int(parts[3]) if len(parts) > 3 else 0
+    except (TypeError, ValueError):
+        return None
+    return [x, y if y else 100, z, heading]
+
+def update_street_race_checkpoint_progress(char, move_body, car_pos):
+    """Record ordered checkpoints reached by the APK's player-car move packets."""
+    if get_val_int(move_body, 2, 0) != 1:
+        return
+    copy_id = str(char.get('active_copy_id') or '')
+    cfg = COPY_SCENE_CONFIG.get(copy_id, {})
+    if (cfg.get('subtype') != 7
+            or str(char.get('map_id')) != str(cfg.get('map_id'))
+            or char.get('street_race_started_at') is None
+            or char.get('street_race_result_recorded')):
+        return
+
+    checkpoints = STREET_RACE_CHECKPOINTS.get(copy_id, [])
+    try:
+        progress = int(char.get('street_race_checkpoint_progress', 0))
+    except (TypeError, ValueError):
+        progress = 0
+    progress = max(0, min(progress, len(checkpoints)))
+    previous = char.get('street_race_last_car_pos')
+    now = time.monotonic()
+    previous_at = char.get('street_race_last_move_at')
+    mount_id, _, _ = get_equipped_mount(char)
+    max_speed = float(MOUNT_CONFIG.get(mount_id, {}).get('max_speed', 0) or 0)
+    if previous is not None and previous_at is not None and max_speed > 0:
+        try:
+            elapsed = max(0.0, now - float(previous_at))
+            dx = float(car_pos[0]) - float(previous[0])
+            dz = float(car_pos[2]) - float(previous[2])
+            distance_cm = math.hypot(dx, dz)
+            # CarControl caps the APK car at MaxSpeed * 1.05. Allow a further
+            # 20% for client/server timing and quantization, plus 1.5m for a
+            # delayed 5Hz movement packet. A larger jump makes a win ineligible.
+            max_distance_cm = max_speed * 100.0 * 1.05 * elapsed * 1.20 + 150.0
+            # CarControllerRootLogic.OnClickResetBtn is a normal client action:
+            # CarChaseSceneManager.ResetPlayerCarToLastPoint teleports the car
+            # to the start or the last cleared route point. Accept only those
+            # exact route destinations (with a small physics/quantization
+            # tolerance), while continuing to reject arbitrary teleports.
+            reset_target = None
+            if progress > 0 and progress <= len(checkpoints):
+                reset_target = checkpoints[progress - 1]
+            elif progress == 0:
+                reset_target = STREET_RACE_START_POSITIONS.get(copy_id)
+            is_client_reset = False
+            if reset_target is not None:
+                try:
+                    rx = float(car_pos[0]) - float(reset_target[0])
+                    rz = float(car_pos[2]) - float(reset_target[2])
+                    is_client_reset = math.hypot(rx, rz) <= 250.0
+                except (TypeError, ValueError, IndexError):
+                    is_client_reset = False
+            if distance_cm > max_distance_cm and not is_client_reset:
+                char['street_race_movement_valid'] = False
+                print(f"[STREET RACE SECURITY] implausible movement copy={copy_id} "
+                      f"distance_cm={int(distance_cm)} limit_cm={int(max_distance_cm)}")
+        except (TypeError, ValueError, IndexError):
+            char['street_race_movement_valid'] = False
+    char['street_race_last_move_at'] = now
+
+    def within_client_radius(start, end, point):
+        # MovePathPoint fires at a 15 world-unit radius. Positions in MSG 101
+        # and the data table are both centimeters.
+        ax, ay, az = (float(value) for value in start[:3])
+        bx, by, bz = (float(value) for value in end[:3])
+        px, py, pz = (float(value) for value in point)
+        dx, dy, dz = bx - ax, by - ay, bz - az
+        length_sq = dx * dx + dy * dy + dz * dz
+        if length_sq > 0:
+            t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy + (pz - az) * dz) / length_sq))
+        else:
+            t = 1.0
+        ex, ey, ez = ax + t * dx - px, ay + t * dy - py, az + t * dz - pz
+        return ex * ex + ey * ey + ez * ez <= 1500.0 * 1500.0
+
+    while progress < len(checkpoints):
+        start = previous if isinstance(previous, (list, tuple)) and len(previous) >= 3 else car_pos
+        if not within_client_radius(start, car_pos, checkpoints[progress]):
+            break
+        progress += 1
+        char['street_race_checkpoint_progress'] = progress
+        print(f"[STREET RACE] checkpoint copy={copy_id} progress={progress}/{len(checkpoints)}")
+    char['street_race_last_car_pos'] = list(car_pos)
+
 def is_single_player_map(map_id):
     """Return True if the map should not have player-to-player AOI.
     Map 11 = city (client-side NPCs only).
     Map 502 = Domin arena (instanced, one player per fight).
     Maps 220 and 223-229 = EXP stage scenes. Map 220 is the solo scene with
-    player AOI isolated per run; 223-229 are team-copy instances."""
+    player AOI isolated per run; 223-229 are team-copy instances. Street Race
+    rows are MaxMember=1 copies, even though their physical map IDs are shared."""
     mid = str(map_id)
-    return mid in ("11", "502") or is_exp_map(mid)
+    return mid in ("11", "502") or is_exp_map(mid) or street_race_config_for_map(mid) is not None
 
 def broadcast_aoi_move(char):
     """Broadcast TAG 507 (aoi_update_move) to all other players on the same map.
@@ -3752,6 +3919,105 @@ def current_daily_stamp():
     adjusted_time = time.time() - (3 * 3600)
     return time.strftime('%Y-%m-%d', time.gmtime(adjusted_time))
 
+def street_race_daily_copy_id():
+    """Return today's Street Race route, following the 03:00 UTC daily reset."""
+    race_rows = [(str(copy_id), cfg) for copy_id, cfg in COPY_SCENE_CONFIG.items()
+                 if cfg.get('subtype') == 7]
+    if not race_rows:
+        return ''
+
+    # The APK data defines seven routes with Parm3 slots 0..6.  Align the
+    # route rotation with the same 03:00 reset used by daily copy state.
+    day_slot = time.gmtime(time.time() - (3 * 3600)).tm_wday
+    for copy_id, cfg in race_rows:
+        if cfg.get('daily_slot') == day_slot:
+            return copy_id
+
+    # Keep the race available if a future client table adds a route without
+    # Parm3 metadata; the known rows are ordered by their configured IDs.
+    race_rows.sort(key=lambda row: int(row[0]))
+    return race_rows[day_slot % len(race_rows)][0]
+
+def street_race_rank_records(copy_id):
+    """Return unique best-time records for one route, fastest first."""
+    records_by_id = {}
+    for area_dict in all_accounts_chars.values():
+        if not isinstance(area_dict, dict):
+            continue
+        for char_list in area_dict.values():
+            if not isinstance(char_list, list):
+                continue
+            for c_data in char_list:
+                if not isinstance(c_data, dict):
+                    continue
+                state = c_data.get('daily_copy_state', {})
+                best_times = state.get('best_times', {}) if isinstance(state, dict) else {}
+                raw_time = best_times.get(str(copy_id)) if isinstance(best_times, dict) else None
+                try:
+                    elapsed = int(raw_time)
+                    char_id = int(c_data.get('id', 0))
+                except (TypeError, ValueError):
+                    continue
+                # The APK's Street Race success flow does not call its timeout
+                # handler when ExistTime elapses. CAR ranks encode elapsed time
+                # against GameDefine.DayCentiSecond, so retain every valid run
+                # in that score range instead of silently dropping runs over
+                # the displayed 900-second countdown.
+                max_time = STREET_RACE_MAX_TIME_CS
+                if char_id <= 0 or elapsed <= 0 or elapsed > max_time:
+                    continue
+
+                best_mounts = state.get('best_mounts', {})
+                best_colors = state.get('best_mount_colors', {})
+                mount_id = str(best_mounts.get(str(copy_id), '')) if isinstance(best_mounts, dict) else ''
+                color_id = str(best_colors.get(str(copy_id), '')) if isinstance(best_colors, dict) else ''
+                if not mount_id:
+                    try:
+                        mount_id, color_id, _ = get_equipped_mount(c_data)
+                    except (AttributeError, TypeError, ValueError):
+                        continue
+                if not mount_id or mount_id not in MOUNT_CONFIG:
+                    continue
+
+                previous = records_by_id.get(char_id)
+                if previous is None or elapsed < previous['elapsed']:
+                    name = str(c_data.get('name', 'Hero'))
+                    rank_name = f'{name}#{mount_id}'
+                    if color_id:
+                        rank_name += f'#{color_id}'
+                    try:
+                        profession = int(c_data.get('prof', 1) or 1)
+                    except (TypeError, ValueError):
+                        profession = 1
+                    records_by_id[char_id] = {
+                        'id': char_id,
+                        'elapsed': elapsed,
+                        'name': rank_name,
+                        'prof': profession,
+                    }
+
+    return sorted(records_by_id.values(), key=lambda row: (row['elapsed'], row['id']))
+
+def validate_street_race_splits(value, elapsed, expected_count=None, require_complete=False):
+    """Validate checkpoint times and require a full route for a successful result."""
+    if not value or len(value) > 1024:
+        return ''
+    raw_splits = value.split('#')
+    if not raw_splits or len(raw_splits) > 64:
+        return ''
+    try:
+        splits = [int(part) for part in raw_splits]
+    except (TypeError, ValueError):
+        return ''
+    if any(split < 0 or split > elapsed for split in splits):
+        return ''
+    if any(splits[i] > splits[i + 1] for i in range(len(splits) - 1)):
+        return ''
+    if require_complete and expected_count is not None:
+        if len(splits) != int(expected_count) or any(split <= 0 for split in splits):
+            return ''
+    return '#'.join(str(split) for split in splits)
+
 def current_sign_calendar():
     """Use the same 03:00 server reset for daily/weekly/monthly sign state."""
     adjusted = time.gmtime(time.time() - (3 * 3600))
@@ -3824,10 +4090,9 @@ def street_race_rewards(level):
 def sync_copy_scenes(picked_char):
     """Build TAG 555 from the APK's CopySceneData definitions."""
     level = int(picked_char.get('level', 1))
-    # CopySceneData contains the level variants for each daily activity.  The
-    # client expects one current copy per subtype, not every future/parallel
-    # Street Race row.  Select the highest unlocked level bracket; ties use
-    # the first configured ID (e.g. Street Race 211 at level 4).
+    daily_race_id = street_race_daily_copy_id()
+    # CopySceneData contains level variants and seven rotating Street Race
+    # routes.  The APK's daily-copy list must receive only the current route.
     selected = {}
     for copy_id, cfg in COPY_SCENE_CONFIG.items():
         if level < cfg['min_level']:
@@ -3841,6 +4106,8 @@ def sync_copy_scenes(picked_char):
             numeric_id = 0
         rank = (int(cfg['min_level']), -numeric_id)
         subtype = cfg['subtype']
+        if subtype == 7 and copy_id != daily_race_id:
+            continue
         if subtype not in selected or rank > selected[subtype][0]:
             selected[subtype] = (rank, copy_id, cfg)
     copies = {}
@@ -3965,10 +4232,10 @@ def give_mission_rewards(picked_char, mid):
             # Note: skill sync is handled by sync_char_attrs_rpc in the caller after this function returns
 
         # Send original reward popup (Tag 638)
-        # item schema: itemId(0), itemCount(1), quality(3)
+        # Sproto item schema: itemId(0), itemCount(1), quality(2).
         popup_items = [
-            encode_sproto([(0, "2001"), (1, added_exp), (3, 0)]),
-            encode_sproto([(0, "1001"), (1, added_cash), (3, 0)])
+            encode_sproto([(0, "2001"), (1, added_exp), (2, 0)]),
+            encode_sproto([(0, "1001"), (1, added_cash), (2, 0)])
         ]
 
         items, amts = reward.get('items', []), reward.get('item_amounts', [])
@@ -3976,7 +4243,7 @@ def give_mission_rewards(picked_char, mid):
         for i in range(len(items)):
             if items[i]:
                 amt = amts[i] if i < len(amts) else 1
-                popup_items.append(encode_sproto([(0, items[i]), (1, amt), (3, 0)]))
+                popup_items.append(encode_sproto([(0, items[i]), (1, amt), (2, 0)]))
                 add_to_inventory(picked_char, items[i], amt)
                 granted_items.append((items[i], amt))
 
@@ -4104,8 +4371,15 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             logic_id_str = str(cfg.get('logic_id'))
             target_id_str = str(target_id) if target_id is not None else ''
             if logic_type == 102:
-                # LogicType 102 (CAR_COPY / 飙车副本) matches any car copy scene (211-217), logic_id "102", "飙车副本", or event "car_copy" / "dungeon"
-                matched = target_id_str in ['102', '211', '212', '213', '214', '215', '216', '217', '飙车副本'] or event in ['car_copy', 'dungeon']
+                # Mission 1004 is completed by the Street Race result event.
+                # Do not let unrelated dungeon entries (for example EXP Stage)
+                # complete a car mission.
+                race_copy_ids = {str(copy_id) for copy_id, race_cfg in COPY_SCENE_CONFIG.items()
+                                 if race_cfg.get('subtype') == 7}
+                matched = event == 'car_copy' and (
+                    target_id_str in race_copy_ids
+                    or target_id_str in ['102', '飙车副本']
+                )
             elif logic_type == 105:
                 # Mission 1019 (EXP copy) stores its discriminator in Target=105;
                 # LogicID is #N/A in this client's MissionData row.
@@ -4470,6 +4744,11 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
 
     # Update position
     landing_pos = override_pos
+    if not landing_pos and street_race_config_for_map(target_map_id):
+        landing_pos = street_race_start_position(target_map_id)
+        if landing_pos:
+            scene_name = MAP_CONFIG.get(target_map_id, {}).get('scene', scene_name)
+            print(f"[STREET RACE] route start map={target_map_id} pos={landing_pos}")
     if not landing_pos and target_map_id == "502":
         # Lord Battle: Restore verified MapInfo coordinates (Y=120)
         landing_pos = [-400, 120, 0, 9000]
@@ -4708,6 +4987,7 @@ def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
     global server_session_counter, ALL_CONNECTIONS, MAIL_ID_COUNTER, TEAM_ID_COUNTER, EXP_RUN_COUNTER
     conn_id = id(conn)
+    street_race_result_restore_pending = False
     # ALL_CONNECTIONS will be updated when character is picked
     send_lock = threading.Lock()
 
@@ -4767,45 +5047,6 @@ def client_handler(conn, addr):
             print('[M1003 DEBUG] Arena exit countdown finished; returned to saved city position')
 
         leave_after_notice(5)
-
-    def schedule_street_race_return():
-        """Apply CopySceneData.EndTime (five seconds) after a race result."""
-        if not picked_char or picked_char.get('street_race_return_scheduled'):
-            return
-        copy_id = str(picked_char.get('active_copy_id') or '')
-        cfg = COPY_SCENE_CONFIG.get(copy_id)
-        if not cfg or cfg.get('subtype') != 7:
-            return
-        picked_char['street_race_return_scheduled'] = True
-        delay = int(cfg.get('end_time') or 5)
-
-        def leave_after_notice(seconds_left):
-            if not picked_char or picked_char.get('active_copy_id') != copy_id:
-                return
-            if seconds_left > 0:
-                # This follows the CopySceneData EndTime=5 for every Street
-                # Race route and uses the same APK dialog notification path
-                # as the other local copy exits.
-                send_rpc_push(529, encode_sproto([
-                    (0, f"You will leave the scene after {seconds_left} seconds"),
-                    (1, True)
-                ]))
-                timer = threading.Timer(1.0, leave_after_notice, args=(seconds_left - 1,))
-                timer.daemon = True
-                timer.start()
-                return
-
-            return_pos = picked_char.get('pre_copy_pos')
-            return_map = picked_char.get('pre_copy_map', '11')
-            picked_char['pre_copy_pos'] = None
-            picked_char['pre_copy_map'] = None
-            picked_char['active_copy_id'] = None
-            picked_char['street_race_return_scheduled'] = False
-            save_chars(all_accounts_chars)
-            start_map_transition(conn, picked_char, return_map, send_rpc_push, override_pos=return_pos)
-            print(f"[STREET RACE] exit countdown finished; returned to map {return_map} after copy={copy_id}")
-
-        leave_after_notice(delay)
 
     try:
         # HTTP updater traffic begins with GET/HEAD; game packets begin with a
@@ -4906,6 +5147,65 @@ def client_handler(conn, addr):
                     print(f"[CHARACTER PICK] id={picked_char['id']} level={picked_char.get('level')}")
                     init_character_fields(picked_char)
                     reconcile_exp_stage_login(picked_char)
+                    picked_char.pop('_street_race_return_reconnect', None)
+                    active_copy_id = str(picked_char.get('active_copy_id') or '')
+                    active_copy_cfg = COPY_SCENE_CONFIG.get(active_copy_id, {})
+                    current_map_id = str(picked_char.get('map_id') or '11')
+                    terminal_result_at_entrance = bool(
+                        active_copy_cfg.get('subtype') == 7
+                        and picked_char.get('street_race_result_recorded')
+                        and picked_char.get('street_race_pending_result')
+                        and current_map_id == str(picked_char.get('pre_copy_map') or '11'))
+                    active_race = bool(active_copy_cfg.get('subtype') == 7
+                                       and (str(active_copy_cfg.get('map_id')) == current_map_id
+                                            or terminal_result_at_entrance))
+                    orphaned_race_map = street_race_config_for_map(current_map_id) is not None and not active_race
+                    if active_race:
+                        # A full login reconstructs CarChaseSceneManager from scene
+                        # data. An unfinished race restarts at the route start; a
+                        # completed race returns to its entrance to restore its result
+                        # page without silently starting another car run underneath it.
+                        picked_char['street_race_started_at'] = None
+                        picked_char.pop('street_race_elapsed_offset_cs', None)
+                        picked_char['street_race_checkpoint_progress'] = 0
+                        picked_char.pop('street_race_last_car_pos', None)
+                        if picked_char.get('street_race_result_recorded'):
+                            if picked_char.get('street_race_pending_result'):
+                                street_race_result_restore_pending = True
+                                return_map, return_pos = street_race_return_point(picked_char)
+                                picked_char['map_id'] = return_map
+                                picked_char['pos'] = return_pos
+                            else:
+                                # Recover old/incomplete records from before result
+                                # payloads were persisted; let the player restart.
+                                picked_char['street_race_result_recorded'] = False
+                                picked_char['pos'] = (street_race_start_position(current_map_id)
+                                                      or picked_char.get('pos')
+                                                      or [29860, 100, -17005, 0])
+                        else:
+                            picked_char.pop('street_race_pending_result', None)
+                            picked_char['pos'] = (street_race_start_position(current_map_id)
+                                                  or picked_char.get('pos')
+                                                  or [29860, 100, -17005, 0])
+                    elif orphaned_race_map or (active_copy_cfg.get('subtype') == 7
+                                              and not active_race):
+                        # A disconnect during a half-finished transition can leave
+                        # the route ID and physical map out of sync. Return to the
+                        # saved entrance instead of loading a broken race scene.
+                        saved_map = str(picked_char.get('pre_copy_map') or '11')
+                        if street_race_config_for_map(saved_map):
+                            saved_map = '11'
+                        saved_pos = picked_char.get('pre_copy_pos') or [29860, 100, -17005, 0]
+                        picked_char['map_id'] = saved_map
+                        picked_char['pos'] = list(saved_pos)
+                        picked_char['active_copy_id'] = None
+                        picked_char['pre_copy_map'] = None
+                        picked_char['pre_copy_pos'] = None
+                        picked_char['street_race_started_at'] = None
+                        picked_char.pop('street_race_elapsed_offset_cs', None)
+                        picked_char['street_race_result_recorded'] = False
+                        picked_char.pop('street_race_pending_result', None)
+                        print(f"[STREET RACE] recovered stale route state player={char_id} map={saved_map}")
                     # Initial Mission Assignment for new characters
                     has_active_main = False
                     for active_id in picked_char['active_missions']:
@@ -5192,11 +5492,150 @@ def client_handler(conn, addr):
                             arena_timer.daemon = True
                             arena_timer.start()
                     send_rpc_push(519, sync_mission_data(picked_char))
+                    if street_race_result_restore_pending:
+                        pending_race_result = picked_char.get('street_race_pending_result')
+                        try:
+                            if pending_race_result and picked_char.get('street_race_result_recorded'):
+                                send_rpc_push(608, bytes.fromhex(pending_race_result))
+                                print(f"[STREET RACE] restored pending result id={picked_char.get('active_copy_id')}")
+                        except (TypeError, ValueError):
+                            print(f"[STREET RACE] invalid saved result payload player={picked_char.get('id')}")
+                            picked_char.pop('street_race_pending_result', None)
+                            picked_char['street_race_result_recorded'] = False
+                            save_chars(all_accounts_chars)
+                        street_race_result_restore_pending = False
+
+            elif msg == 281: # refresh_online_state (client reconnect)
+                reconnect_type = get_val_int(body, 0, 0)
+                reconnect_char_id = get_val_int(body, 1, 0)
+                requested_map = field_text(body, 2, '')
+                reconnect_char = next((c for c in get_account_chars(
+                    all_accounts_chars, cur_areaId, acc_id)
+                    if int(c.get('id', 0)) == reconnect_char_id), None)
+                if reconnect_char:
+                    char_map = str(reconnect_char.get('map_id') or '11')
+                    active_copy_id = str(reconnect_char.get('active_copy_id') or '')
+                    active_cfg = COPY_SCENE_CONFIG.get(active_copy_id, {})
+                    terminal_result_at_entrance = bool(
+                        active_cfg.get('subtype') == 7
+                        and reconnect_char.get('street_race_result_recorded')
+                        and reconnect_char.get('street_race_pending_result')
+                        and char_map == str(reconnect_char.get('pre_copy_map') or '11'))
+                    active_race = bool(active_cfg.get('subtype') == 7
+                                       and (str(active_cfg.get('map_id')) == char_map
+                                            or terminal_result_at_entrance))
+                    requested_race = street_race_config_for_map(requested_map)
+                    char_race_map = street_race_config_for_map(char_map)
+                    is_street_race_reconnect = bool(active_race or requested_race or char_race_map
+                                                     or active_cfg.get('subtype') == 7
+                                                     or reconnect_char.get('_street_race_return_reconnect'))
+                    transition_override_pos = None
+                    if picked_char and int(picked_char.get('id', 0)) != reconnect_char_id:
+                        old_id = int(picked_char.get('id', 0))
+                        if ALL_CONNECTIONS.get(old_id, (None, None))[0] is conn:
+                            ALL_CONNECTIONS.pop(old_id, None)
+                            CONNECTION_LOCKS.pop(old_id, None)
+                    picked_char = reconnect_char
+                    ALL_CONNECTIONS[reconnect_char_id] = (conn, picked_char)
+                    CONNECTION_LOCKS[reconnect_char_id] = send_lock
+                    _sync_friend_online_state(reconnect_char_id, 1)
+                    if is_street_race_reconnect:
+                        # Rebind the authenticated character before route recovery;
+                        # cleanup from an old socket checks connection identity.
+                        if active_cfg.get('subtype') == 7 and not active_race:
+                            # Recover an interrupted map transition to its saved
+                            # entrance, rather than pairing a route ID with a city map.
+                            return_map, return_pos = street_race_return_point(picked_char)
+                            picked_char['map_id'] = return_map
+                            picked_char['pos'] = return_pos
+                            transition_override_pos = return_pos
+                            picked_char['active_copy_id'] = None
+                            picked_char['pre_copy_map'] = None
+                            picked_char['pre_copy_pos'] = None
+                            picked_char['street_race_result_recorded'] = False
+                            picked_char['street_race_started_at'] = None
+                            picked_char.pop('street_race_elapsed_offset_cs', None)
+                            picked_char.pop('street_race_pending_result', None)
+                            char_map = return_map
+                            active_race = False
+
+                        if active_race and reconnect_type == 1:
+                            # With no MainPlayer, CarChaseSceneManager has already
+                            # consumed its one-shot creation event. Reload the scene
+                            # so the APK rebuilds the character/car and registers the
+                            # scene callbacks again. Active races restart from route
+                            # spawn; completed races restore the saved result at entry.
+                            picked_char['street_race_started_at'] = None
+                            picked_char.pop('street_race_elapsed_offset_cs', None)
+                            picked_char['street_race_checkpoint_progress'] = 0
+                            picked_char.pop('street_race_last_car_pos', None)
+                            if picked_char.get('street_race_result_recorded') and picked_char.get('street_race_pending_result'):
+                                street_race_result_restore_pending = bool(
+                                    picked_char.get('street_race_pending_result'))
+                                return_map, return_pos = street_race_return_point(picked_char)
+                                picked_char['map_id'] = return_map
+                                picked_char['pos'] = return_pos
+                                transition_override_pos = return_pos
+                                char_map = return_map
+                            elif picked_char.get('street_race_result_recorded'):
+                                picked_char['street_race_result_recorded'] = False
+                                picked_char.pop('street_race_pending_result', None)
+                            else:
+                                picked_char.pop('street_race_pending_result', None)
+                            start_map_transition(conn, picked_char, char_map, send_rpc_push,
+                                                 override_pos=transition_override_pos)
+                            print(f"[STREET RACE] reconnect rebuilt scene id={active_copy_id} map={char_map}")
+                        elif reconnect_type == 1 or requested_map != char_map:
+                            # The saved server map is authoritative after a leave,
+                            # stale client scene, or half-finished transition.
+                            if not active_race and transition_override_pos is None:
+                                transition_override_pos = list(picked_char.get('pos') or [29860, 100, -17005, 0])
+                            start_map_transition(conn, picked_char, char_map, send_rpc_push,
+                                                 override_pos=transition_override_pos)
+                            if active_race:
+                                picked_char['street_race_started_at'] = None
+                                picked_char.pop('street_race_elapsed_offset_cs', None)
+                                if picked_char.get('street_race_result_recorded'):
+                                    street_race_result_restore_pending = bool(
+                                        picked_char.get('street_race_pending_result'))
+                        elif active_race and picked_char.get('street_race_result_recorded'):
+                            send_rpc_push(629, encode_sproto([(0, int(time.time())), (1, 2)]))
+                        elif active_race:
+                            started_at = picked_char.get('street_race_started_at')
+                            if started_at is not None:
+                                duration = int(active_cfg.get('exist_time') or 900)
+                                elapsed_s = max(0, int(time.monotonic() - float(started_at)))
+                                remaining_s = max(0, duration - elapsed_s)
+                                send_rpc_push(629, encode_sproto([
+                                    (0, int(time.time()) + remaining_s), (1, 0)
+                                ]))
+
+                        send_rpc_push(555, sync_copy_scenes(picked_char))
+                        send_rpc_push(519, sync_mission_data(picked_char))
+                        if (reconnect_type != 1 and not street_race_result_restore_pending
+                                and picked_char.get('street_race_result_recorded')
+                                and picked_char.get('street_race_pending_result')):
+                            try:
+                                send_rpc_push(608, bytes.fromhex(
+                                    picked_char['street_race_pending_result']))
+                            except (TypeError, ValueError):
+                                picked_char.pop('street_race_pending_result', None)
+                                picked_char['street_race_result_recorded'] = False
+                        picked_char.pop('_street_race_return_reconnect', None)
+                        save_chars(all_accounts_chars)
+                        print(f"[STREET RACE] rebound reconnect id={reconnect_char_id} type={reconnect_type} requested_map={requested_map} server_map={picked_char.get('map_id')}")
+                if session is not None:
+                    ph = encode_sproto([(1, session)])
+                    pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 101: # move
                 p_raw = body.get(0)
+                move_map = str(picked_char.get('map_id', '')) if picked_char else ''
+                stale_race_socket = bool(picked_char and street_race_config_for_map(move_map)
+                                         and not is_current_character_connection(conn, picked_char))
                 if p_raw and picked_char and (
-                        not is_exp_map(picked_char.get('map_id', ''))
+                        (not is_exp_map(move_map) and not stale_race_socket)
                         or (is_current_character_connection(conn, picked_char)
                             and picked_char.get('exp_stage_state')
                             and exp_run_map_id(picked_char['exp_stage_state']) == str(picked_char.get('map_id'))
@@ -5205,7 +5644,9 @@ def client_handler(conn, addr):
                             and int(picked_char.get('hp', 0)) > 0)):
                     pd = decode_sproto(p_raw)
                     new_pos = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
-                    move_map = str(picked_char.get('map_id', ''))
+                    if (street_race_config_for_map(move_map)
+                            and is_current_character_connection(conn, picked_char)):
+                        update_street_race_checkpoint_progress(picked_char, body, new_pos)
                     move_exp_state = picked_char.get('exp_stage_state') if is_exp_map(move_map) else None
                     if (move_exp_state and exp_run_map_id(move_exp_state) == move_map
                             and not move_exp_state.get('_finish_handled')
@@ -5655,6 +6096,7 @@ def client_handler(conn, addr):
             elif msg == 115: # use_item, including vehicle exchange vouchers
                 index_id = get_val_int(body, 0, -1)
                 success = 0
+                race_ticket_consumed = False
                 if picked_char:
                     inventory = picked_char.get('inventory', [])
                     item_index = index_id - 10000
@@ -5679,25 +6121,48 @@ def client_handler(conn, addr):
                             if cfg['type'] == 18: # REMAIN ticket
                                 subtype = cfg['function']
                                 state = ensure_daily_copy_state(picked_char)
-                                # Find all copy IDs for this subtype and reset their remaining counts.
-                                # The client uses Item 9205 (SubType 7) for Street Race.
-                                for copy_id, sc_cfg in COPY_SCENE_CONFIG.items():
-                                    if sc_cfg['subtype'] == subtype:
-                                        state['remaining'][copy_id] = sc_cfg['max_plays']
-                                item['amount'] -= 1
-                                if item['amount'] < 1:
-                                    inventory.pop(item_index)
-                                success = 1
-                                save_chars(all_accounts_chars)
-                                send_rpc_push(611, sync_inventory_data(picked_char))
-                                send_rpc_push(555, sync_copy_scenes(picked_char))
-                                print(f"[TICKET] used item={item['id']} for subtype={subtype}")
+                                ticket_use_valid = True
+                                if subtype == 7:
+                                    # A racing ticket grants one extra run for
+                                    # today's rotating route.  Resetting every
+                                    # subtype-7 copy to its base allowance both
+                                    # overgrants attempts and affects routes the
+                                    # client does not currently expose.
+                                    race_copy_id = street_race_daily_copy_id()
+                                    race_cfg = COPY_SCENE_CONFIG.get(race_copy_id, {})
+                                    if race_cfg.get('subtype') == 7:
+                                        current = copy_attempts_remaining(picked_char, race_copy_id, race_cfg)
+                                        state['remaining'][race_copy_id] = current + 1
+                                    else:
+                                        ticket_use_valid = False
+                                else:
+                                    # Other remaining tickets retain their
+                                    # existing configured copy reset behavior.
+                                    for copy_id, sc_cfg in COPY_SCENE_CONFIG.items():
+                                        if sc_cfg['subtype'] == subtype:
+                                            state['remaining'][copy_id] = sc_cfg['max_plays']
+                                if ticket_use_valid:
+                                    item['amount'] -= 1
+                                    if item['amount'] < 1:
+                                        inventory.pop(item_index)
+                                    success = 1
+                                    save_chars(all_accounts_chars)
+                                    send_rpc_push(555, sync_copy_scenes(picked_char))
+                                    if subtype == 7:
+                                        # ret_use_item (TAG 526) decrements the
+                                        # item locally. Sending the already
+                                        # decremented inventory first would
+                                        # make that handler remove it twice.
+                                        race_ticket_consumed = True
+                                    else:
+                                        send_rpc_push(611, sync_inventory_data(picked_char))
+                                    print(f"[TICKET] used item={item.get('id')} for subtype={subtype}")
                 send_rpc_push(526, encode_sproto([(0, success), (1, index_id)]))
 
                 # TAG 525: update_item - notify client about individual item change
                 # update_item schema: containertype(0), indexId(1), gameitem(2)
                 # gameitem schema: indexId(0), itemId(1), bindflag(2), level(3), flags(4), stack(5), quality(6), parm(7), appraise(8)
-                if success and picked_char:
+                if success and picked_char and not race_ticket_consumed:
                     inventory = picked_char.get('inventory', [])
                     item_index = index_id - 10000
                     if 0 <= item_index < len(inventory):
@@ -6617,24 +7082,77 @@ def client_handler(conn, addr):
                 elif picked_char and msg == 276:
                     print(f"[EXP STAGE] denied single entry id={copy_id}; no matching DailyExpData copy for level={picked_char.get('level', 1)}")
                 elif picked_char and cfg and cfg['subtype'] == 7:
-                    remaining = copy_attempts_remaining(picked_char, copy_id, cfg)
-                    if remaining > 0:
-                        if picked_char.get('pre_copy_pos') is None:
-                            picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
-                            picked_char['pre_copy_map'] = str(picked_char.get('map_id', '11'))
-                        state = ensure_daily_copy_state(picked_char)
-                        state['remaining'][copy_id] = remaining - 1
-                        picked_char['active_copy_id'] = copy_id
-                        picked_char['street_race_return_scheduled'] = False
-                        picked_char['street_race_result_recorded'] = False
-                        picked_char['street_race_started_at'] = time.monotonic()
-                        save_chars(all_accounts_chars)
-                        start_map_transition(conn, picked_char, cfg['map_id'], send_rpc_push)
+                    daily_race_id = street_race_daily_copy_id()
+                    player_level = int(picked_char.get('level', 1))
+                    race_mount_id, _, _ = get_equipped_mount(picked_char)
+                    if copy_id != daily_race_id:
+                        # A stale client may still have yesterday's route open.
+                        # Refresh its list and never enter a non-current scene.
                         send_rpc_push(555, sync_copy_scenes(picked_char))
-                        advance_missions(picked_char, send_rpc_push, 'dungeon', target_id=copy_id)
-                        print(f"[STREET RACE] entered id={copy_id} remaining={remaining - 1}/{cfg['max_plays']}")
+                        print(f"[STREET RACE] denied stale route id={copy_id}; today={daily_race_id}")
+                    elif player_level < cfg.get('min_level', 1) or player_level > cfg.get('max_level', 80):
+                        print(f"[STREET RACE] denied id={copy_id}; level={player_level} required={cfg.get('min_level', 1)}-{cfg.get('max_level', 80)}")
+                    elif not race_mount_id or race_mount_id not in MOUNT_CONFIG:
+                        # The APK refuses to send this request without a
+                        # selected vehicle; mirror that gate server-side so a
+                        # malformed account cannot load a null race-car model.
+                        print(f"[STREET RACE] denied id={copy_id}; no valid equipped vehicle")
                     else:
-                        print(f"[STREET RACE] denied id={copy_id}; daily attempts exhausted")
+                        current_copy_id = str(picked_char.get('active_copy_id') or '')
+                        current_cfg = COPY_SCENE_CONFIG.get(current_copy_id, {})
+                        can_repeat = (current_copy_id == copy_id and current_cfg.get('subtype') == 7
+                                      and picked_char.get('street_race_result_recorded'))
+                        if current_copy_id and not can_repeat:
+                            print(f"[STREET RACE] denied duplicate/overlap entry requested={copy_id} active={current_copy_id}")
+                        else:
+                            remaining = copy_attempts_remaining(picked_char, copy_id, cfg)
+                            use_time_item = bool(body.get(1, False))
+                            extra_item_used = False
+                            # The result page's Repeat button can still send
+                            # enter_copy_scene at zero attempts (after showing
+                            # its notice).  Allow that exact completed-run
+                            # retry, but require TimeInc for a fresh exhausted
+                            # entry from the daily-copy page.
+                            if remaining <= 0 and not can_repeat and use_time_item:
+                                item_id = str(cfg.get('time_inc') or '')
+                                inventory = picked_char.get('inventory', [])
+                                stack = next((item for item in inventory
+                                              if str(item.get('id')) == item_id), None) if item_id else None
+                                if stack is not None and int(stack.get('amount', 1)) > 0:
+                                    stack['amount'] = int(stack.get('amount', 1)) - 1
+                                    if stack['amount'] <= 0:
+                                        inventory.remove(stack)
+                                    picked_char['inventory'] = inventory
+                                    extra_item_used = True
+                                else:
+                                    print(f"[STREET RACE] denied id={copy_id}; TimeInc ticket missing")
+
+                            if remaining > 0 or can_repeat or extra_item_used:
+                                if picked_char.get('pre_copy_pos') is None:
+                                    picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                                    picked_char['pre_copy_map'] = str(picked_char.get('map_id', '11'))
+                                state = ensure_daily_copy_state(picked_char)
+                                if remaining > 0:
+                                    state['remaining'][copy_id] = remaining - 1
+                                if extra_item_used:
+                                    send_rpc_push(611, sync_inventory_data(picked_char))
+                                picked_char['active_copy_id'] = copy_id
+                                picked_char['street_race_result_recorded'] = False
+                                picked_char['street_race_started_at'] = None
+                                picked_char['street_race_checkpoint_progress'] = 0
+                                picked_char['street_race_movement_valid'] = True
+                                picked_char.pop('street_race_last_car_pos', None)
+                                picked_char.pop('street_race_last_move_at', None)
+                                picked_char.pop('street_race_elapsed_offset_cs', None)
+                                picked_char.pop('street_race_pending_result', None)
+                                picked_char.pop('street_race_started', None)
+                                picked_char.pop('_street_race_return_reconnect', None)
+                                save_chars(all_accounts_chars)
+                                start_map_transition(conn, picked_char, cfg['map_id'], send_rpc_push)
+                                send_rpc_push(555, sync_copy_scenes(picked_char))
+                                print(f"[STREET RACE] entered id={copy_id} base_plays={max(0, remaining - 1)}/{cfg['max_plays']} repeat={can_repeat} extra_item={extra_item_used}")
+                            else:
+                                print(f"[STREET RACE] denied id={copy_id}; daily attempts exhausted and no valid TimeInc ticket")
                 elif picked_char and msg != 276 and copy_id not in DAILY_EXP_CONFIG:
                     # Save current map and position before entering any copy scene
                     if picked_char.get('pre_copy_pos') is None:
@@ -6651,52 +7169,103 @@ def client_handler(conn, addr):
                 active_copy_id = str(picked_char.get('active_copy_id') or '') if picked_char else ''
                 cfg = COPY_SCENE_CONFIG.get(active_copy_id)
                 won = get_val_int(body, 0, 0) == 1
-                elapsed = max(0, get_val_int(body, 1, 0))
+                reported_elapsed = max(0, get_val_int(body, 1, 0))
                 path_str = field_text(body, 2)
-                race_started_at = float(picked_char.get('street_race_started_at', 0.0)) if picked_char else 0.0
+                race_started_raw = picked_char.get('street_race_started_at') if picked_char else None
+                try:
+                    race_started_at = float(race_started_raw) if race_started_raw is not None else None
+                except (TypeError, ValueError):
+                    race_started_at = None
                 server_elapsed = max(0.0, time.monotonic() - race_started_at) if race_started_at else 0.0
-                race_map_valid = bool(picked_char and cfg and str(picked_char.get('map_id')) == str(cfg.get('map_id')))
-                race_time_valid = bool(elapsed > 0 and elapsed <= 3600000
-                                       and server_elapsed >= 5.0
-                                       and elapsed <= int((server_elapsed + 5.0) * 100))
+                race_map_valid = bool(picked_char and cfg
+                                      and str(picked_char.get('map_id')) == str(cfg.get('map_id'))
+                                      and is_current_character_connection(conn, picked_char))
+                # The APK's Street Race scene displays ExistTime as a timer,
+                # but its CarChaseSceneManager never fails the run at zero.
+                # Keep successful result times within the client's one-day
+                # CAR ranking score range (GameDefine.DayCentiSecond).
+                race_time_limit_cs = STREET_RACE_MAX_TIME_CS
+                expected_checkpoints = STREET_RACE_CHECKPOINT_COUNTS.get(active_copy_id)
+                valid_splits = validate_street_race_splits(
+                    path_str, reported_elapsed, expected_checkpoints, require_complete=won)
+                try:
+                    tracked_checkpoints = max(0, int(
+                        picked_char.get('street_race_checkpoint_progress', 0))) if picked_char else 0
+                except (TypeError, ValueError):
+                    tracked_checkpoints = 0
+                race_route_valid = (not won or (expected_checkpoints is not None
+                                    and expected_checkpoints > 0
+                                    and tracked_checkpoints >= expected_checkpoints
+                                    and picked_char.get('street_race_movement_valid', True)))
+                race_splits_valid = (not won or (expected_checkpoints is not None
+                                     and expected_checkpoints > 0
+                                     and bool(valid_splits) and race_route_valid))
+                race_time_valid = bool(
+                    race_started_at is not None
+                    and (reported_elapsed > 0 or not won)
+                    and reported_elapsed <= race_time_limit_cs
+                    and server_elapsed > 0
+                    and abs((reported_elapsed / 100.0) - server_elapsed) <= 15.0
+                )
                 if (picked_char and cfg and cfg['subtype'] == 7 and race_map_valid
                         and not picked_char.get('street_race_result_recorded')
-                        and race_time_valid):
+                        and race_time_valid and race_splits_valid):
                     # A race result is a single-use claim for the active run.
-                    # The client supplies the finish result, so also require a
-                    # real start, the race map, and a plausible elapsed time.
+                    # The stopwatch begins at MSG 220, not when scene loading
+                    # starts.  The client reports centiseconds; accept only a
+                    # plausible value within the client's CAR ranking range.
                     picked_char['street_race_result_recorded'] = True
+                    picked_char['street_race_started_at'] = None
+                    # Never let the client's centisecond claim produce a
+                    # faster leaderboard time than the server actually saw.
+                    # The 15-second validation window above remains for clock
+                    # and network jitter, but ranking uses the slower value.
+                    elapsed = max(reported_elapsed, int(round(server_elapsed * 100.0)))
+                    picked_char.pop('street_race_elapsed_offset_cs', None)
                     state = ensure_daily_copy_state(picked_char)
                     best_times = state.setdefault('best_times', {})
                     best_strs = state.setdefault('best_times_str', {})
+                    rank_before = next((i + 1 for i, row in enumerate(street_race_rank_records(active_copy_id))
+                                        if row['id'] == int(picked_char.get('id', 0))), -1)
                     old_time = best_times.get(active_copy_id)
                     new_record = won and (old_time is None or elapsed < int(old_time))
                     if won:
                         if new_record:
                             best_times[active_copy_id] = elapsed
-                            best_strs[active_copy_id] = path_str
+                            if valid_splits:
+                                best_strs[active_copy_id] = valid_splits
+                            else:
+                                best_strs.pop(active_copy_id, None)
+                            mount_id, mount_color, _ = get_equipped_mount(picked_char)
+                            if mount_id:
+                                state.setdefault('best_mounts', {})[active_copy_id] = mount_id
+                                state.setdefault('best_mount_colors', {})[active_copy_id] = mount_color
                     rewards = street_race_rewards(picked_char.get('level', 1)) if won else []
                     if won and rewards:
                         grant_item_rewards(picked_char, rewards, conn, send_rpc_push)
 
-                    result_items = [encode_sproto([(0, item_id), (1, amount), (3, quality)])
+                    result_items = [encode_sproto([(0, item_id), (1, amount), (2, quality)])
                                     for item_id, quality, amount in rewards]
-                    # car_copy_result (TAG 608) is the dedicated APK Street
-                    # Race result panel.  It supplies reward icons, time,
-                    # rank placeholders, Continue/Exit and Repeat.
-                    send_rpc_push(608, encode_sproto([
-                        (0, won), (1, result_items), (2, -1), (3, -1),
+                    rank_after = next((i + 1 for i, row in enumerate(street_race_rank_records(active_copy_id))
+                                       if row['id'] == int(picked_char.get('id', 0))), -1)
+                    result_payload = encode_sproto([
+                        (0, won), (1, result_items), (2, rank_before), (3, rank_after),
                         (4, elapsed), (5, 1 if new_record else 0), (6, active_copy_id)
-                    ]))
-                    if won:
-                        # Fix: use 'dungeon' event with target_id='102' to match Mission 1004 (CAR_COPY, logic_type=102)
-                        # Previously 'level' only matched logic_type=7 (LEVEL_UP), blocking mission completion
-                        advance_missions(picked_char, send_rpc_push, 'dungeon', target_id='102')
+                    ])
+                    picked_char['street_race_pending_result'] = result_payload.hex()
+                    save_chars(all_accounts_chars)
+                    # The race stopwatch is finished, but the APK keeps the
+                    # result page open until the player explicitly repeats or leaves.
+                    send_rpc_push(629, encode_sproto([(0, int(time.time())), (1, 2)]))
+                    send_rpc_push(608, result_payload)
+                    # The client completes its CAR_COPY mission when it handles
+                    # TAG 608 after the race result.  Count both successful and
+                    # failed completed attempts here, never on scene entry.
+                    advance_missions(picked_char, send_rpc_push, 'car_copy', target_id=active_copy_id)
                     send_rpc_push(555, sync_copy_scenes(picked_char))
-                    schedule_street_race_return()
                     print(f"[STREET RACE] result id={active_copy_id} win={won} time={elapsed} rewards={rewards}")
                 elif picked_char and cfg and cfg.get('subtype') == 7:
-                    print(f"[STREET RACE SECURITY] rejected result map_ok={race_map_valid} time_ok={race_time_valid} duplicate={bool(picked_char.get('street_race_result_recorded'))}")
+                    print(f"[STREET RACE SECURITY] rejected result map_ok={race_map_valid} time_ok={race_time_valid} route_ok={race_route_valid} splits_ok={race_splits_valid} duplicate={bool(picked_char.get('street_race_result_recorded'))}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -6705,30 +7274,17 @@ def client_handler(conn, addr):
                 sort_type = get_val_int(body, 0)
                 items = []
                 if sort_type == 7: # RANK_TYPE.CAR (Street Race)
-                    # For street race rank, we can show characters who have records.
-                    # We'll collect all characters across all accounts and sort by best time.
-                    all_best_times = []
-                    for area_dict in all_accounts_chars.values():
-                        if isinstance(area_dict, dict):
-                            for char_list in area_dict.values():
-                                if isinstance(char_list, list):
-                                    for c_data in char_list:
-                                        if isinstance(c_data, dict):
-                                            char_name = c_data.get('name', 'Hero')
-                                            c_state = c_data.get('daily_copy_state', {})
-                                            b_times = c_state.get('best_times', {})
-                                            times = [int(t) for t in b_times.values() if t is not None]
-                                            if times:
-                                                all_best_times.append((min(times), char_name, c_data))
-
-                    # Sort by time ASCENDING
-                    all_best_times.sort(key=lambda x: x[0])
-                    for i, (b_time, name, c_data) in enumerate(all_best_times[:50]):
+                    # CAR sort_items use character ID, name#mountId[#colorId],
+                    # and (day-centiseconds - elapsed) in score's high word.
+                    race_copy_id = street_race_daily_copy_id()
+                    records = street_race_rank_records(race_copy_id)
+                    day_centiseconds = STREET_RACE_MAX_TIME_CS
+                    for i, row in enumerate(records[:50]):
                         items.append(encode_sproto([
-                            (0, i + 1),        # id (rank position)
-                            (1, b_time),       # score (time)
-                            (2, name),         # name
-                            (3, c_data.get('prof', 1)), # profession
+                            (0, row['id']),
+                            (1, (day_centiseconds - row['elapsed']) << 32),
+                            (2, row['name']),
+                            (3, row['prof']),
                             (4, str(sort_type)) # sortType
                         ]))
 
@@ -6925,13 +7481,26 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 220: # start_battle (Street Race & EXP Stage start)
-                if picked_char and picked_char.get('active_copy_id'):
-                    copy_id = picked_char['active_copy_id']
+                if picked_char and is_current_character_connection(conn, picked_char) and picked_char.get('active_copy_id'):
+                    copy_id = str(picked_char['active_copy_id'])
                     cfg = COPY_SCENE_CONFIG.get(copy_id)
                     if cfg and cfg['subtype'] == 7:
-                        duration = int(cfg.get('exist_time') or 900)
-                        send_rpc_push(629, encode_sproto([(0, int(time.time()) + duration), (1, 0)]))
-                        print(f"[STREET RACE] started timer for id={copy_id} duration={duration}s")
+                        current_map = str(picked_char.get('map_id', ''))
+                        if current_map == str(cfg.get('map_id')) and not picked_char.get('street_race_result_recorded'):
+                            if picked_char.get('street_race_started_at') is None:
+                                picked_char['street_race_checkpoint_progress'] = 0
+                                start_time = time.monotonic()
+                                picked_char['street_race_started_at'] = start_time
+                                picked_char['street_race_last_move_at'] = start_time
+                                picked_char['street_race_last_car_pos'] = (
+                                    street_race_start_position(current_map)
+                                    or list(picked_char.get('pos') or [0, 100, 0, 0]))
+                                picked_char['street_race_movement_valid'] = True
+                            duration = int(cfg.get('exist_time') or 900)
+                            elapsed_s = max(0, int(time.monotonic() - float(picked_char['street_race_started_at'])))
+                            remaining_s = max(0, duration - elapsed_s)
+                            send_rpc_push(629, encode_sproto([(0, int(time.time()) + remaining_s), (1, 0)]))
+                            print(f"[STREET RACE] started timer for id={copy_id} duration={duration}s remaining={remaining_s}s")
                 # Security: Validate player is actually on the exp stage map before sending battle updates
                 if picked_char and picked_char.get('exp_stage_state'):
                     exp_state = picked_char['exp_stage_state']
@@ -7589,8 +8158,10 @@ def client_handler(conn, addr):
                     # Security: Validate player is actually in a copy scene before processing leave
                     in_copy = picked_char.get('active_copy_id') is not None
                     in_exp_stage = picked_char.get('exp_stage_state') is not None
+                    active_copy_cfg = COPY_SCENE_CONFIG.get(str(picked_char.get('active_copy_id') or ''))
+                    in_street_race = bool(active_copy_cfg and active_copy_cfg.get('subtype') == 7)
                     has_leave_timer = '_exp_leave_timer' in picked_char
-                    if (in_exp_stage or has_leave_timer) and not is_current_character_connection(conn, picked_char):
+                    if (in_exp_stage or in_street_race or has_leave_timer) and not is_current_character_connection(conn, picked_char):
                         print(f"[LEAVE COPY] denied stale character socket player={picked_char.get('id')}")
                         if session is not None:
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -7604,6 +8175,18 @@ def client_handler(conn, addr):
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                             conn.sendall(struct.pack(">H", len(pf)) + pf)
                         continue
+
+                    if in_street_race:
+                        # If the client loses its MainPlayer just after leaving,
+                        # refresh_online_state must rebuild the saved entrance scene.
+                        picked_char['_street_race_return_reconnect'] = True
+                        send_rpc_push(629, encode_sproto([(0, int(time.time())), (1, 2)]))
+                        picked_char['street_race_started_at'] = None
+                        picked_char.pop('street_race_elapsed_offset_cs', None)
+                        picked_char['street_race_result_recorded'] = False
+                        picked_char['street_race_checkpoint_progress'] = 0
+                        picked_char.pop('street_race_last_car_pos', None)
+                        picked_char.pop('street_race_pending_result', None)
 
                     if has_leave_timer:
                         leave_timer = picked_char.pop('_exp_leave_timer', None)
@@ -7665,7 +8248,6 @@ def client_handler(conn, addr):
                         picked_char['pre_copy_pos'] = None
                         picked_char['pre_copy_map'] = None
                         picked_char['active_copy_id'] = None
-                        picked_char['street_race_return_scheduled'] = False
                     else:
                         saved_pos = picked_char.get('pre_arena_pos')
                         saved_map = picked_char.get('pre_arena_map', '11')
