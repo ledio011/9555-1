@@ -84,6 +84,7 @@ WILD_BOSS_CONFIG = {} # ID -> configured PVE world boss and required level band
 COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
 SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
 STREET_RACE_REWARD_BY_LEVEL = {} # level -> AdaptData _drop_bc ShowRewardData id
+STREET_RACE_REWARD_BY_KEY_LEVEL = {} # AdaptData reward key -> level -> ShowRewardData id
 STREET_RACE_CHECKPOINT_COUNTS = {} # copy id -> required player-car route checkpoints
 STREET_RACE_CHECKPOINTS = {} # copy id -> ordered checkpoint positions in centimeters
 STREET_RACE_START_POSITIONS = {} # copy id -> client PointType=2/BlockIndex=0 car start, in centimeters
@@ -314,7 +315,11 @@ try:
                         'width': int(parts[6]) if parts[6].isdigit() else 0,
                         'height': int(parts[7]) if parts[7].isdigit() else 0,
                         'birth': parts[8],
+                        'relife_pos': parts[9] if len(parts) > 9 else '',
                         'teleport_pos': parts[10] if len(parts) > 10 else "",
+                        'exit_pos': parts[11] if len(parts) > 11 else '',
+                        'relife_type': int(parts[22]) if len(parts) > 22 and parts[22].lstrip('-').isdigit() else 0,
+                        'relife_cost': int(parts[23]) if len(parts) > 23 and parts[23].isdigit() else 0,
                         'open_lv': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 0
                     }
         print(f"[MAP CONFIG LOADED] count={len(MAP_CONFIG)}")
@@ -873,6 +878,8 @@ try:
                 if len(parts) > 20 and parts[0] == "*" and parts[1].isdigit() and parts[11] in ("1", "2"):
                     COPY_SCENE_CONFIG[parts[1]] = {
                         'map_id': parts[5],
+                        'show_reward_id': parts[6] if len(parts) > 6 else '',
+                        'drop_id': parts[7] if len(parts) > 7 else '',
                         'subtype': int(parts[12]) if parts[12].isdigit() else 0,
                         'exist_time': int(parts[13]) if parts[13].isdigit() else 0,
                         # Street Race rows 211-217 use Parm3 (0-6) to identify
@@ -885,6 +892,7 @@ try:
                         'max_level': int(parts[20]) if len(parts) > 20 and parts[20].isdigit() else 80,
                         'min_member': int(parts[21]) if len(parts) > 21 and parts[21].isdigit() else 1,
                         'max_member': int(parts[22]) if len(parts) > 22 and parts[22].isdigit() else 4,
+                        'finish_point': parts[26] if len(parts) > 26 else '',
                         # EXP single-player entry uses CopySceneData.SingleMapID
                         # as the physical scene while retaining the selected
                         # copy ID for DailyExpData, rewards, and progress.
@@ -973,6 +981,9 @@ try:
         for parts in rows:
             if len(parts) > 12 and parts[0] == '*' and parts[1].isdigit():
                 lv = int(parts[1])
+                for index, reward_key in enumerate(header):
+                    if reward_key.startswith('_') and index < len(parts) and parts[index].strip():
+                        STREET_RACE_REWARD_BY_KEY_LEVEL.setdefault(reward_key, {})[lv] = parts[index].strip()
                 if street_reward_index >= 0 and len(parts) > street_reward_index:
                     STREET_RACE_REWARD_BY_LEVEL[lv] = parts[street_reward_index]
                 ADAPT_DATA[lv] = {
@@ -2449,6 +2460,80 @@ def get_relife_config(death_count):
                 return cfg
         return RELIFE_DATA[-1]
     return {'id': 1, 'min_count': 1, 'max_count': 999999, 'use_count': 1}
+
+def remember_relife_offer(char, rebirth_type, cost, item_id='9202', killer=None):
+    """Bind a one-shot revive prompt to the character and map that died."""
+    if not isinstance(char, dict):
+        return encode_sproto([(0, int(rebirth_type)), (1, max(1, int(cost))), (2, str(item_id))])
+    offer = {
+        'map_id': str(char.get('map_id', '')),
+        'type': int(rebirth_type),
+        'cost': max(1, int(cost)),
+        'item_id': str(item_id),
+        'expires_at': int(time.time()) + 300,
+    }
+    if isinstance(killer, dict):
+        offer['killer_id'] = int(killer.get('id', 0))
+        offer['killer_name'] = str(killer.get('name', ''))
+    char['_pending_relife'] = offer
+    fields = [(0, offer['type']), (1, offer['cost']), (2, offer['item_id'])]
+    if offer.get('killer_id'):
+        fields.extend([(3, offer['killer_id']), (4, offer.get('killer_name', ''))])
+    return encode_sproto(fields)
+
+def encode_pending_relife_offer(offer):
+    """Rebuild TAG 618 from the small, JSON-safe reconnect snapshot."""
+    if not isinstance(offer, dict):
+        return b''
+    fields = [
+        (0, int(offer.get('type', 1))),
+        (1, max(1, int(offer.get('cost', 1)))),
+        (2, str(offer.get('item_id') or '9202')),
+    ]
+    if offer.get('killer_id'):
+        fields.extend([(3, int(offer['killer_id'])), (4, str(offer.get('killer_name', '')))])
+    return encode_sproto(fields)
+
+def map_relife_type(map_id):
+    cfg = MAP_CONFIG.get(str(map_id), {})
+    try:
+        return int(cfg.get('relife_type', 0))
+    except (TypeError, ValueError):
+        return 0
+
+def supports_normal_relife(map_id):
+    """MapInfo enables ordinary revive offers on rule 1/2 maps only."""
+    mid = str(map_id)
+    return (mid != '502'
+            and not is_exp_map(mid)
+            and street_race_config_for_map(mid) is None
+            and map_relife_type(mid) in (1, 2))
+
+def pending_relife_offer_is_valid(offer, map_id):
+    if not isinstance(offer, dict):
+        return False
+    try:
+        return (str(offer.get('map_id', '')) == str(map_id)
+                and int(offer.get('expires_at', 0)) > int(time.time())
+                and int(offer.get('type', -1)) in (0, 1)
+                and int(offer.get('cost', 0)) > 0
+                and bool(str(offer.get('item_id') or '')))
+    except (TypeError, ValueError):
+        return False
+
+def configured_map_relife_position(map_id):
+    """Return the first client-configured revive point, or the map birth point."""
+    cfg = MAP_CONFIG.get(str(map_id), {})
+    for raw in (cfg.get('relife_pos'), cfg.get('birth')):
+        values = str(raw or '').split('#')
+        if len(values) < 3:
+            continue
+        try:
+            y = int(values[1])
+            return [int(values[0]), y if y != 0 else 100, int(values[2]), int(values[3]) if len(values) > 3 else 0]
+        except (TypeError, ValueError):
+            continue
+    return [29860, 100, -17005, 0]
 
 def get_character_stats(c):
     """Calculates all character attributes and Power based on profession and level."""
@@ -4074,17 +4159,24 @@ def copy_attempts_remaining(picked_char, copy_id, cfg):
         remaining[copy_id] = int(cfg.get('max_plays', 3))
     return max(0, int(remaining[copy_id]))
 
-def street_race_rewards(level):
-    """Return exactly the level-resolved _drop_bc ShowRewardData items."""
+def street_race_rewards(level, copy_id=None):
+    """Resolve the active route's configured DropId through the client's AdaptData."""
     try:
         level = int(level)
     except (TypeError, ValueError):
         level = 1
     level = max(1, min(level, 80))
-    reward_id = STREET_RACE_REWARD_BY_LEVEL.get(level)
+    cfg = COPY_SCENE_CONFIG.get(str(copy_id or ''), {})
+    drop_key = str(cfg.get('drop_id') or '_drop_bc')
+    reward_id = STREET_RACE_REWARD_BY_KEY_LEVEL.get(drop_key, {}).get(level)
+    if not reward_id and drop_key == '_drop_bc':
+        reward_id = STREET_RACE_REWARD_BY_LEVEL.get(level)
     if not reward_id:
-        eligible = [lv for lv in STREET_RACE_REWARD_BY_LEVEL if lv <= level]
-        reward_id = STREET_RACE_REWARD_BY_LEVEL[max(eligible)] if eligible else ''
+        level_map = STREET_RACE_REWARD_BY_KEY_LEVEL.get(drop_key, {})
+        if not level_map and drop_key == '_drop_bc':
+            level_map = STREET_RACE_REWARD_BY_LEVEL
+        eligible = [lv for lv in level_map if lv <= level]
+        reward_id = level_map[max(eligible)] if eligible else ''
     return SHOW_REWARD_CONFIG.get(str(reward_id), [])
 
 def sync_copy_scenes(picked_char):
@@ -4590,10 +4682,15 @@ def init_character_fields(c):
     for k, v in fields.items():
         if k not in c: c[k] = v
 
-    # Initialize or restore HP if not set or if dead
+    # A downed player may reconnect while a server-authored revive offer is
+    # still open. Keep HP at zero only when that offer is still bound to this
+    # character's current map; otherwise repair stale/dead saves as before.
     stats = get_character_stats(c)
-    if 'hp' not in c or c.get('hp', 0) <= 0:
+    pending_relife = c.get('_pending_relife')
+    pending_relife_valid = pending_relife_offer_is_valid(pending_relife, c.get('map_id', ''))
+    if 'hp' not in c or (c.get('hp', 0) <= 0 and not pending_relife_valid):
         c['hp'] = stats['hp_max']
+        c.pop('_pending_relife', None)
 
     # Ensure map_id is never None or "None" string — default to city map "11"
     if c.get('map_id') is None or str(c.get('map_id', '')) == 'None':
@@ -5448,6 +5545,13 @@ def client_handler(conn, addr):
                             exp_cfg_for_ready = DAILY_EXP_CONFIG.get(exp_state['copy_id'], {})
                             _send_exp_tag683(lambda tag, data: exp_send_push(exp_state, tag, data), exp_state, exp_cfg_for_ready)
                             print(f"[EXP STAGE] map_ready sent 629 & 683 updates for copy={mid}")
+                    else:
+                        pending_relife = picked_char.get('_pending_relife')
+                        if (int(picked_char.get('hp', 0)) <= 0
+                                and pending_relife_offer_is_valid(pending_relife, mid)
+                                and supports_normal_relife(mid)):
+                            send_rpc_push(618, encode_pending_relife_offer(pending_relife))
+                            print(f"[RELIFE] replayed pending offer after reconnect player={picked_char.get('id')} map={mid}")
                     if mid == "502":
                         # Map 502 exposes its match timer only through this APK tag.
                         # Cancel any previous arena timer to prevent stale timers from
@@ -6201,12 +6305,21 @@ def client_handler(conn, addr):
                 server_dmg = 0
                 calc_cri = False
 
-                if picked_char and is_exp_map(picked_char.get('map_id', '')):
+                current_map = str(picked_char.get('map_id', '')) if picked_char else ''
+                if picked_char and is_exp_map(current_map):
                     # EXP monster damage is calculated by the server AI from
                     # the active wave. This client-local NPC report carries no
                     # monster instance ID, so accepting it would let a client
                     # inject damage and bypass the run's death/revive state.
                     print(f"[EXP HIT] ignored client-local NPC attack player={picked_char.get('id')}")
+                elif picked_char and street_race_config_for_map(current_map):
+                    # Street Race traffic is client-side scenery. It does not
+                    # damage the character or open a character-revive dialog.
+                    print(f"[STREET RACE] ignored character attack report player={picked_char.get('id')} map={current_map}")
+                elif picked_char and int(picked_char.get('hp', 0)) <= 0:
+                    # A downed player cannot be damaged repeatedly or receive
+                    # duplicate revive offers while the UI is still open.
+                    print(f"[RELIFE] ignored repeated attack on downed player={picked_char.get('id')} map={current_map}")
                 elif picked_char and target_id == picked_char['id']:
                     is_area = (picked_char.get('map_id') == "502")
                     if is_area:
@@ -6267,12 +6380,25 @@ def client_handler(conn, addr):
                             server_dmg = 0
                             calc_cri = False
 
-                    new_hp = picked_char.get('hp', 0) - server_dmg
-                    picked_char['hp'] = max(0, new_hp)
+                    old_hp = max(0, int(picked_char.get('hp', 0)))
+                    new_hp = max(0, old_hp - server_dmg)
+                    picked_char['hp'] = new_hp
                     sync_char_attrs_rpc(conn, picked_char)
-                    if picked_char['hp'] == 0 and picked_char.get('map_id') == '502':
-                        print('[M1003 DEBUG] Player died in arena; scheduling loss return')
-                        schedule_domin_return(restore_hp=True)
+                    if old_hp > 0 and new_hp == 0:
+                        if current_map == '502':
+                            print('[M1003 DEBUG] Player died in arena; scheduling loss return')
+                            schedule_domin_return(restore_hp=True)
+                        elif supports_normal_relife(current_map):
+                            death_count = int(picked_char.get('death_count', 0)) + 1
+                            picked_char['death_count'] = death_count
+                            relife_cfg = get_relife_config(death_count)
+                            relife_type = 0 if map_relife_type(current_map) == 2 else 1
+                            offer_payload = remember_relife_offer(
+                                picked_char, relife_type,
+                                relife_cfg.get('use_count', 1), '9202')
+                            send_rpc_push(618, offer_payload)
+                            save_chars(all_accounts_chars)
+                            print(f"[RELIFE] player downed by NPC player={picked_char.get('id')} map={current_map} type={relife_type}")
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -6324,6 +6450,9 @@ def client_handler(conn, addr):
                         if target_char is not None:
                             if is_exp:
                                 print(f"[EXP HIT] rejected player target={target_id} attacker={picked_char.get('id')}")
+                                continue
+                            if int(target_char.get('hp', 0)) <= 0:
+                                print(f"[PvP] ignored hit on downed player target={target_id}")
                                 continue
                             # === PvP: target is an online player ===
                             # Server-authoritative damage calculation
@@ -6420,59 +6549,58 @@ def client_handler(conn, addr):
                                 pass
 
                             # Check if victim died
-                            if new_hp == 0:
+                            if old_hp > 0 and new_hp == 0:
                                 print(f"[PvP] Player {target_id} killed by {picked_char['id']}")
-                                # Send relife request to victim
-                                death_count = target_char.get('death_count', 0) + 1
-                                target_char['death_count'] = death_count
-                                relife_cfg = get_relife_config(death_count)
-                                # Issue 64: Use REBIRTH_TYPE enum (0=MAIN_CITY, 1=CURRENT_MAP), not RelifeData tier ID
-                                # PvP death: victim returns to main city
-                                relife_req = encode_sproto([
-                                    (0, 0),  # MAIN_CITY_REBIRTH
-                                    (1, relife_cfg.get('use_count', 1)),  # cost field - item cost
-                                    (2, "9202"),
-                                    (3, target_char['id']),
-                                    (4, target_char['name'])
-                                ])
-                                try:
-                                    t_ph = encode_sproto([(0, 618)])
-                                    t_pf = sproto_pack(t_ph + relife_req)
-                                    t_pkt = struct.pack(">H", len(t_pf)) + t_pf
-                                    t_lock = CONNECTION_LOCKS.get(target_cid)
-                                    if t_lock:
-                                        with t_lock:
+                                death_map = str(target_char.get('map_id', ''))
+                                if supports_normal_relife(death_map):
+                                    death_count = int(target_char.get('death_count', 0)) + 1
+                                    target_char['death_count'] = death_count
+                                    relife_cfg = get_relife_config(death_count)
+                                    # PvP deaths return to the main city. Keep
+                                    # killer details because the client offers
+                                    # an optional Add Foe action in this dialog.
+                                    relife_req = remember_relife_offer(
+                                        target_char, 0, relife_cfg.get('use_count', 1),
+                                        '9202', killer=picked_char)
+                                    try:
+                                        t_ph = encode_sproto([(0, 618)])
+                                        t_pf = sproto_pack(t_ph + relife_req)
+                                        t_pkt = struct.pack(">H", len(t_pf)) + t_pf
+                                        t_lock = CONNECTION_LOCKS.get(target_cid)
+                                        if t_lock:
+                                            with t_lock:
+                                                target_conn.sendall(t_pkt)
+                                        else:
                                             target_conn.sendall(t_pkt)
-                                    else:
-                                        target_conn.sendall(t_pkt)
-                                except Exception:
-                                    pass
+                                    except Exception:
+                                        pass
+                                    save_chars(all_accounts_chars)
+                                else:
+                                    print(f"[PvP] death has no normal revive rule map={death_map}")
 
                         elif target_id == picked_char['id']:
                             if is_exp:
                                 print(f"[EXP HIT] rejected self target attacker={picked_char.get('id')}")
                                 continue
                             # Self-damage (rare edge case)
-                            new_hp = picked_char.get('hp', 0) - client_dmg
-                            picked_char['hp'] = max(0, new_hp)
+                            old_hp = max(0, int(picked_char.get('hp', 0)))
+                            new_hp = max(0, old_hp - client_dmg)
+                            picked_char['hp'] = new_hp
                             sync_char_attrs_rpc(conn, picked_char)
-                            if picked_char['hp'] == 0:
-                                if picked_char.get('map_id') == '502':
+                            if old_hp > 0 and new_hp == 0:
+                                current_map = str(picked_char.get('map_id', ''))
+                                if current_map == '502':
                                     print('[M1003 DEBUG] Player died in arena; scheduling loss return')
                                     schedule_domin_return(restore_hp=True)
-                                else:
-                                    death_count = picked_char.get('death_count', 0) + 1
+                                elif supports_normal_relife(current_map):
+                                    death_count = int(picked_char.get('death_count', 0)) + 1
                                     picked_char['death_count'] = death_count
                                     relife_cfg = get_relife_config(death_count)
-                                    # Issue 64: Use REBIRTH_TYPE enum (0=MAIN_CITY, 1=CURRENT_MAP), not RelifeData tier ID
-                                    relife_req = encode_sproto([
-                                        (0, 1),  # CURRENT_MAP_REBIRTH
-                                        (1, relife_cfg.get('use_count', 1)),  # cost field - item cost
-                                        (2, "9202"),
-                                        (3, picked_char['id']),
-                                        (4, picked_char['name'])
-                                    ])
-                                    send_rpc_push(618, relife_req)
+                                    relife_type = 0 if map_relife_type(current_map) == 2 else 1
+                                    send_rpc_push(618, remember_relife_offer(
+                                        picked_char, relife_type,
+                                        relife_cfg.get('use_count', 1), '9202'))
+                                    save_chars(all_accounts_chars)
 
                             # Do NOT echo TAG 511 back to the attacker; the client already displays damage locally.
                             # Issue 213: TAG 514 (hit_action) client handler does nothing — skip sending
@@ -7108,12 +7236,11 @@ def client_handler(conn, addr):
                             remaining = copy_attempts_remaining(picked_char, copy_id, cfg)
                             use_time_item = bool(body.get(1, False))
                             extra_item_used = False
-                            # The result page's Repeat button can still send
-                            # enter_copy_scene at zero attempts (after showing
-                            # its notice).  Allow that exact completed-run
-                            # retry, but require TimeInc for a fresh exhausted
-                            # entry from the daily-copy page.
-                            if remaining <= 0 and not can_repeat and use_time_item:
+                            # A completed result page may send a retry request
+                            # even when its local counter is zero. It still
+                            # costs a remaining play or a configured TimeInc
+                            # ticket; a completed run must not grant free retries.
+                            if remaining <= 0 and use_time_item:
                                 item_id = str(cfg.get('time_inc') or '')
                                 inventory = picked_char.get('inventory', [])
                                 stack = next((item for item in inventory
@@ -7127,7 +7254,7 @@ def client_handler(conn, addr):
                                 else:
                                     print(f"[STREET RACE] denied id={copy_id}; TimeInc ticket missing")
 
-                            if remaining > 0 or can_repeat or extra_item_used:
+                            if remaining > 0 or extra_item_used:
                                 if picked_char.get('pre_copy_pos') is None:
                                     picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
                                     picked_char['pre_copy_map'] = str(picked_char.get('map_id', '11'))
@@ -7152,6 +7279,7 @@ def client_handler(conn, addr):
                                 send_rpc_push(555, sync_copy_scenes(picked_char))
                                 print(f"[STREET RACE] entered id={copy_id} base_plays={max(0, remaining - 1)}/{cfg['max_plays']} repeat={can_repeat} extra_item={extra_item_used}")
                             else:
+                                send_rpc_push(555, sync_copy_scenes(picked_char))
                                 print(f"[STREET RACE] denied id={copy_id}; daily attempts exhausted and no valid TimeInc ticket")
                 elif picked_char and msg != 276 and copy_id not in DAILY_EXP_CONFIG:
                     # Save current map and position before entering any copy scene
@@ -7240,7 +7368,7 @@ def client_handler(conn, addr):
                             if mount_id:
                                 state.setdefault('best_mounts', {})[active_copy_id] = mount_id
                                 state.setdefault('best_mount_colors', {})[active_copy_id] = mount_color
-                    rewards = street_race_rewards(picked_char.get('level', 1)) if won else []
+                            rewards = street_race_rewards(picked_char.get('level', 1), active_copy_id) if won else []
                     if won and rewards:
                         grant_item_rewards(picked_char, rewards, conn, send_rpc_push)
 
@@ -7305,7 +7433,96 @@ def client_handler(conn, addr):
                     # before accepting the client's revive choice.
                     current_map = str(picked_char.get('map_id', ''))
                     if not is_exp_map(current_map):
-                        print(f"[RELIFE] denied for player {picked_char['id']}; not in exp stage map={current_map}")
+                        try:
+                            request_raw = body.get(0, b"")
+                            revive_request = decode_sproto(request_raw) if request_raw else {}
+                            is_inplace = bool(revive_request.get(0, False))
+                        except Exception:
+                            is_inplace = False
+
+                        offer = picked_char.get('_pending_relife')
+                        offer_valid = (supports_normal_relife(current_map)
+                                       and pending_relife_offer_is_valid(offer, current_map)
+                                       and int(picked_char.get('hp', 0)) <= 0)
+                        if not offer_valid:
+                            print(f"[RELIFE] denied for player {picked_char['id']}; no valid map-bound offer map={current_map}")
+                            picked_char.pop('_pending_relife', None)
+                            if session is not None:
+                                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                                conn.sendall(struct.pack(">H", len(pf)) + pf)
+                            continue
+
+                        revive_cost = max(1, int(offer.get('cost', 1)))
+                        revive_item_id = str(offer.get('item_id') or '9202')
+                        if is_inplace:
+                            inventory = picked_char.get('inventory', [])
+                            revive_stack = next((item for item in inventory
+                                                 if str(item.get('id')) == revive_item_id), None)
+                            if revive_stack is None or int(revive_stack.get('amount', 1)) < revive_cost:
+                                if session is not None:
+                                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                                    conn.sendall(struct.pack('>H', len(pf)) + pf)
+                                continue
+                            revive_stack['amount'] = int(revive_stack.get('amount', 1)) - revive_cost
+                            if revive_stack['amount'] <= 0:
+                                inventory.remove(revive_stack)
+                            picked_char['inventory'] = inventory
+                            send_rpc_push(611, sync_inventory_data(picked_char))
+
+                        # The client labels this free action from TAG 618's
+                        # rebirth type: type 0 returns to the main city; type 1
+                        # revives at this map's configured RelifePos.
+                        if not is_inplace and int(offer.get('type', 1)) == 0:
+                            target_map = '101'
+                            pos = configured_map_relife_position(target_map)
+                            stats = get_character_stats(picked_char)
+                            picked_char['hp'] = stats['hp_max']
+                            picked_char['pos'] = pos
+                            picked_char['active_copy_id'] = None
+                            picked_char['pre_copy_map'] = None
+                            picked_char['pre_copy_pos'] = None
+                            picked_char.pop('_pending_relife', None)
+                            start_map_transition(conn, picked_char, target_map, send_rpc_push, override_pos=pos)
+                            save_chars(all_accounts_chars)
+                            print(f"[REVIVE] player={picked_char['id']} returned to main city map={target_map} pos={pos}")
+                        else:
+                            stats = get_character_stats(picked_char)
+                            picked_char['hp'] = stats['hp_max']
+                            pos = (list(picked_char.get('pos') or [0, 100, 0, 0]) if is_inplace
+                                   else configured_map_relife_position(current_map))
+                            picked_char['pos'] = pos
+                            picked_char.pop('_pending_relife', None)
+                            sync_char_attrs_rpc(conn, picked_char)
+                            attr_oth = encode_sproto([
+                                (0, stats['hp_max']), (1, stats['exp']),
+                                (2, stats['lv']), (3, stats['power']), (15, 1)
+                            ])
+                            relife_char = encode_sproto([
+                                (0, picked_char['id']),
+                                (1, attr_oth),
+                                (2, get_movement(pos[0], pos[1], pos[2], pos[3]))
+                            ])
+                            relife_frame_data = encode_sproto([(0, relife_char)])
+                            send_rpc_push(512, relife_frame_data)
+                            if not is_single_player_map(current_map):
+                                r_ph = encode_sproto([(0, 512)])
+                                r_pf = sproto_pack(r_ph + relife_frame_data)
+                                r_pkt = struct.pack(">H", len(r_pf)) + r_pf
+                                for cid, (other_conn, other_char) in list(ALL_CONNECTIONS.items()):
+                                    if (other_char and int(other_char.get('id', 0)) != int(picked_char.get('id', 0))
+                                            and str(other_char.get('map_id', '')) == current_map):
+                                        try:
+                                            other_lock = CONNECTION_LOCKS.get(cid)
+                                            if other_lock:
+                                                with other_lock:
+                                                    other_conn.sendall(r_pkt)
+                                            else:
+                                                other_conn.sendall(r_pkt)
+                                        except Exception:
+                                            pass
+                            save_chars(all_accounts_chars)
+                            print(f"[REVIVE] player={picked_char['id']} revived map={current_map} inplace={is_inplace} pos={pos}")
+
                         if session is not None:
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                             conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -7356,6 +7573,7 @@ def client_handler(conn, addr):
                         revive_stack['amount'] = int(revive_stack.get('amount', 1)) - revive_cost
                         if revive_stack['amount'] <= 0: inventory.remove(revive_stack)
                         picked_char['inventory'] = inventory
+                        send_rpc_push(611, sync_inventory_data(picked_char))
 
                     p_stats = get_character_stats(picked_char)
                     picked_char['hp'] = p_stats['hp_max']
