@@ -7162,8 +7162,11 @@ def client_handler(conn, addr):
                         collision_rewards = [("2001", 0, exp_drop), ("1001", 0, cash_drop)]
                         grant_item_rewards(picked_char, collision_rewards, conn, send_rpc_push, save=False)
                         send_rpc_push(638, encode_sproto([(0, [
-                            encode_sproto([(0, "2001"), (1, exp_drop), (3, 0)]),
-                            encode_sproto([(0, "1001"), (1, cash_drop), (3, 0)])
+                            # The client creates a local coin pickup from TAG 527
+                            # and shows its own coin reward when it reaches the
+                            # player. Keep the EXP tip here, without showing the
+                            # same cash reward a second time.
+                            encode_sproto([(0, "2001"), (1, exp_drop), (3, 0)])
                         ])]))
 
                         # Street Race NPCs are client-local; place the visible
