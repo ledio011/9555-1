@@ -4556,14 +4556,15 @@ def _backpack_records(value):
         return [value]
     return [item for item in value.values() if isinstance(item, dict)]
 
+LEGACY_EQUIPPED_KEYS = {
+    'equipped_equip': ('equip', 'equips', 'equippedEquip', 'Equip'),
+    'equipped_badges': ('badge_equip', 'equipped_badges_items', 'badgeEquip', 'BadgeEquip'),
+    'equipped_fashion': ('fashion_equip', 'equippedFashion', 'fashionEquip', 'FashionEquip'),
+}
+
 def _legacy_equipped_records(picked_char, canonical_key):
     """Read equipment maps written before equipped_* became the save format."""
-    aliases = {
-        'equipped_equip': ('equip', 'equips', 'equippedEquip', 'Equip'),
-        'equipped_badges': ('badge_equip', 'equipped_badges_items', 'badgeEquip', 'BadgeEquip'),
-        'equipped_fashion': ('fashion_equip', 'equippedFashion', 'fashionEquip', 'FashionEquip'),
-    }.get(canonical_key, ())
-    for key in aliases:
+    for key in LEGACY_EQUIPPED_KEYS.get(canonical_key, ()):
         records = _backpack_records(picked_char.get(key))
         if records:
             return records, key
@@ -4665,15 +4666,16 @@ def ensure_backpack_state(picked_char):
     bucket_names = ('inventory', 'equip_inventory', 'badge_inventory', 'fashion_inventory',
                     'equipped_equip', 'equipped_badges', 'equipped_fashion')
     raw = {key: _backpack_records(picked_char.get(key)) for key in bucket_names}
-    legacy_sources = {}
-    had_equipment_state = any(key in picked_char for key in
-                              ('equipped_equip', 'equip', 'equips', 'equippedEquip', 'Equip'))
+    legacy_keys_to_remove = set()
+    had_equipment_state = ('equipped_equip' in picked_char or any(
+        key in picked_char for key in LEGACY_EQUIPPED_KEYS['equipped_equip']))
     for bucket in ('equipped_equip', 'equipped_badges', 'equipped_fashion'):
+        legacy_keys_to_remove.update(key for key in LEGACY_EQUIPPED_KEYS[bucket]
+                                     if key in picked_char)
         if not raw[bucket]:
-            legacy_records, legacy_key = _legacy_equipped_records(picked_char, bucket)
+            legacy_records, _legacy_key = _legacy_equipped_records(picked_char, bucket)
             if legacy_records:
                 raw[bucket] = legacy_records
-                legacy_sources[bucket] = legacy_key
                 if bucket == 'equipped_equip':
                     had_equipment_state = True
     # Re-route every backpack source, not only the legacy shared inventory.
@@ -4715,7 +4717,7 @@ def ensure_backpack_state(picked_char):
     picked_char.update(output)
     # Retire aliases after migration so a later unequip cannot be undone by an
     # old duplicate field on the next login.
-    for legacy_key in set(legacy_sources.values()):
+    for legacy_key in legacy_keys_to_remove:
         picked_char.pop(legacy_key, None)
 
     # Preserve the original per-profession starter weapon and its client slot
