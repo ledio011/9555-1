@@ -127,8 +127,10 @@ DOWNLOAD_REWARD_FALLBACK = [
 DOWNLOAD_REWARD_FALLBACK_ITEM_CONFIG = {
     '9301': {'type': 19, 'quality': 0, 'max_stack': 99999999},
     '9011': {'type': 14, 'quality': 2, 'max_stack': 99999999},
-    '9001': {'type': 3, 'quality': 0, 'max_stack': 99999999},
-    '5026': {'type': 1, 'quality': 1, 'max_stack': 99999999},
+    '9001': {'type': 3, 'quality': 1, 'max_stack': 99999999},
+    # ItemData defines the world-chat ticket as ITEM_TYPE 30 / quality 2.
+    # It still belongs in ITEM_BACKPACK, but keep the fallback metadata exact.
+    '5026': {'type': 30, 'quality': 2, 'max_stack': 99999999},
 }
 DOWNLOAD_REWARD_VERSION = 1
 SKILL_UPGRADE_DATA = {} # level -> {price_type, price_value}
@@ -139,6 +141,10 @@ DAILY_EXP_CONFIG = {} # copy_id -> DailyExpData fields (wave_count, group_npc_co
 DANCE_CONFIG = {} # DanceData ID -> free/paid choreography definition
 CITY_DANCE_CONFIG = {} # CityDanceData ID -> city dance activity definition
 SOCIAL_DANCE_CONFIG = {} # SocialDanceData ID -> unlocked social emote
+LEVEL_REWARD_CONFIG = {} # LevelRewardData ID -> milestone claim definitions
+LEVEL_PACKAGE_CONFIG = {} # LevelPackageData ID -> level-up item bundle
+DAILY_ACTIVE_CONFIG = {} # DailyActiveData ID -> activity score/count/unlock values
+DAILY_ACTIVE_REWARD_CONFIG = {} # DailyActiveRewardData ID -> level/score/drop definition
 
 try:
     script_dir = os.path.dirname(__file__)
@@ -1168,6 +1174,69 @@ try:
                 for index, key in enumerate(table_header)
             }
         print(f"[{table_name.upper()} LOADED] count={len(target_table)}")
+
+    # Level rewards have two separate client flows: the milestone page
+    # (LevelRewardData) and the level-up popup (LevelPackageData). Keep their
+    # rows data-driven so item, currency, price, and profession variants all
+    # come from the same APK TextAssets as the client.
+    for table_name, target_table in (
+            ("LevelRewardData", LEVEL_REWARD_CONFIG),
+            ("LevelPackageData", LEVEL_PACKAGE_CONFIG)):
+        table_path = os.path.join(text_asset_root, table_name)
+        if not os.path.exists(table_path):
+            continue
+        with open(table_path, "r", encoding="utf-8") as table_file:
+            table_rows = [line.strip().split(",") for line in table_file if line.strip()]
+        table_header = next((row[1:] for row in table_rows
+                             if len(row) > 1 and row[0] == "*" and row[1] == "ID"), [])
+        for row in table_rows:
+            if len(row) < 3 or row[0] != "*" or not row[1].strip().isdigit():
+                continue
+            values = row[1:]
+            target_table[row[1].strip()] = {
+                key.strip(): values[index].strip() if index < len(values) else ""
+                for index, key in enumerate(table_header)
+            }
+        print(f"[{table_name.upper()} LOADED] count={len(target_table)}")
+
+    # Daily activity and claim thresholds are also client-authored tables.
+    # DailyActiveData has three legacy/unexported columns before Score, Count,
+    # Title and Desc, so read those known column offsets rather than treating
+    # the duplicate UnExport headers as unique field names.
+    daily_active_path = os.path.join(text_asset_root, "DailyActiveData")
+    if os.path.exists(daily_active_path):
+        with open(daily_active_path, "r", encoding="utf-8") as table_file:
+            for row in (line.strip().split(",") for line in table_file if line.strip()):
+                if len(row) < 10 or row[0] != "*" or not row[1].strip().isdigit():
+                    continue
+                def _daily_active_int(index, default=0):
+                    value = row[index].strip() if index < len(row) else ""
+                    return int(value) if value.lstrip("-").isdigit() else default
+                DAILY_ACTIVE_CONFIG[row[1].strip()] = {
+                    "Type": _daily_active_int(2),
+                    "UnlockLevel": _daily_active_int(5),
+                    "Score": _daily_active_int(6),
+                    "Count": _daily_active_int(7),
+                    "Title": row[8].strip(),
+                    "Desc": row[9].strip(),
+                }
+        print(f"[DAILY ACTIVE CONFIG LOADED] count={len(DAILY_ACTIVE_CONFIG)}")
+
+    daily_active_reward_path = os.path.join(text_asset_root, "DailyActiveRewardData")
+    if os.path.exists(daily_active_reward_path):
+        with open(daily_active_reward_path, "r", encoding="utf-8") as table_file:
+            table_rows = [line.strip().split(",") for line in table_file if line.strip()]
+        table_header = next((row[1:] for row in table_rows
+                             if len(row) > 1 and row[0] == "*" and row[1] == "ID"), [])
+        for row in table_rows:
+            if len(row) < 8 or row[0] != "*" or not row[1].strip().isdigit():
+                continue
+            values = row[1:]
+            DAILY_ACTIVE_REWARD_CONFIG[row[1].strip()] = {
+                key.strip(): values[index].strip() if index < len(values) else ""
+                for index, key in enumerate(table_header)
+            }
+        print(f"[DAILY ACTIVE REWARD CONFIG LOADED] count={len(DAILY_ACTIVE_REWARD_CONFIG)}")
 
     # Load FunctionData (feature unlock gates by level)
     func_path = os.path.join(text_asset_root, "FunctionData")
@@ -3362,6 +3431,14 @@ def ensure_dance_runtime(char, now=None):
     except (TypeError, ValueError):
         runtime.update({'free_duration': free_duration, 'speaker_end_time': 0,
                         'speaker_start_time': 0, 'paid_end_time': 0, 'cur_use': '10001'})
+    paid_dances = runtime.get('paid_dances')
+    if not isinstance(paid_dances, dict):
+        paid_dances = {}
+        runtime['paid_dances'] = paid_dances
+    # Migrate the original single paid choreography field while retaining it
+    # for old persisted characters and older clients.
+    if int(runtime.get('paid_end_time', 0)) > now:
+        paid_dances.setdefault('10002', int(runtime['paid_end_time']))
     if runtime['speaker_end_time'] <= now:
         runtime['speaker_end_time'] = 0
         runtime['speaker_start_time'] = 0
@@ -3434,26 +3511,39 @@ def dance_choice_data(char, now=None):
         now = int(time.time())
     runtime = ensure_dance_runtime(char, now)
     records = {}
-    paid_enabled = False
+    paid_dances = runtime.get('paid_dances', {})
     for dance_id, cfg in sorted(DANCE_CONFIG.items()):
         try:
             use_type = int(cfg.get('UseType', 0))
             price = int(cfg.get('Price', 0))
-            price_type = int(cfg.get('PriceType', 0))
         except (TypeError, ValueError):
             continue
-        enabled = price == 0 or (dance_id == '10002'
-                                 and int(runtime.get('paid_end_time', 0)) > now)
-        if dance_id == '10002':
-            paid_enabled = enabled
+        try:
+            end_time = max(0, int(paid_dances.get(dance_id, 0)))
+        except (TypeError, ValueError):
+            end_time = 0
+        enabled = price == 0 or end_time > now
         records[dance_id] = encode_sproto([
             (0, dance_id), (1, bool(enabled)), (2, use_type),
-            (3, int(runtime.get('paid_end_time', 0)) if dance_id == '10002' and enabled else 0)
+            (3, end_time if price > 0 and enabled else 0)
         ])
-    if runtime.get('cur_use') == '10002' and not paid_enabled:
-        runtime['cur_use'] = '10001'
+    current_info = DANCE_CONFIG.get(runtime.get('cur_use', ''), {})
+    try:
+        current_price = int(current_info.get('Price', 0))
+    except (TypeError, ValueError):
+        current_price = 0
+    try:
+        current_end = int(paid_dances.get(runtime.get('cur_use', ''), 0) or 0)
+    except (TypeError, ValueError):
+        current_end = 0
+    if current_price > 0 and current_end <= now:
+        runtime['cur_use'] = next((dance_id for dance_id, cfg in sorted(DANCE_CONFIG.items())
+                                   if int(cfg.get('Price', 0) or 0) == 0),
+                                  next(iter(records), ''))
     if runtime.get('cur_use') not in records:
-        runtime['cur_use'] = '10001' if '10001' in records else next(iter(records), '')
+        runtime['cur_use'] = next((dance_id for dance_id, cfg in sorted(DANCE_CONFIG.items())
+                                   if dance_id in records and int(cfg.get('Price', 0) or 0) == 0),
+                                  next(iter(records), ''))
     return runtime.get('cur_use', '10001'), records
 
 def dance_selection_payload(char, requested_type=0, now=None):
@@ -3464,6 +3554,219 @@ def dance_selection_payload(char, requested_type=0, now=None):
         (1, records),
         (2, int(requested_type))
     ])
+
+def level_reward_state_map(char):
+    """Serialize persisted LevelRewardData claim bits for tags 674/675."""
+    claims = char.get('level_reward_claims')
+    if not isinstance(claims, dict):
+        claims = {}
+        char['level_reward_claims'] = claims
+    records = {}
+    for reward_id in sorted(LEVEL_REWARD_CONFIG, key=lambda value: (len(value), value)):
+        try:
+            state = max(0, int(claims.get(reward_id, 0)))
+        except (TypeError, ValueError):
+            state = 0
+        claims[reward_id] = state
+        records[reward_id] = encode_sproto([(0, reward_id), (1, state)])
+    return records
+
+def level_package_state_payload(char):
+    """Build tag 644 using the APK's 0=locked, 1=claimable, 2=claimed state."""
+    claims = char.get('level_package_claims')
+    if not isinstance(claims, dict):
+        claims = {}
+        char['level_package_claims'] = claims
+    try:
+        player_level = max(1, int(char.get('level', 1)))
+    except (TypeError, ValueError):
+        player_level = 1
+    records = {}
+    for package_id, cfg in LEVEL_PACKAGE_CONFIG.items():
+        try:
+            target_level = int(cfg.get('LvTarget', 0))
+            claimed = bool(claims.get(package_id, False))
+        except (TypeError, ValueError):
+            target_level, claimed = 0, False
+        state = 2 if claimed else (1 if target_level > 0 and player_level >= target_level else 0)
+        records[package_id] = encode_sproto([(0, package_id), (1, state)])
+    return encode_sproto([(0, records)])
+
+def level_package_reward_list(package_id):
+    """Read all configured item slots from the client's LevelPackageData row."""
+    cfg = LEVEL_PACKAGE_CONFIG.get(str(package_id))
+    if not cfg:
+        return []
+    rewards = []
+    for slot in range(1, 6):
+        item_id = str(cfg.get(f'ItemID{slot}', '') or '').strip()
+        try:
+            amount = int(cfg.get(f'ItemCount{slot}', 0) or 0)
+            quality = int(cfg.get(f'Quality{slot}', 0) or 0)
+        except (TypeError, ValueError):
+            return []
+        if item_id and amount > 0:
+            rewards.append((item_id, quality, amount))
+    return rewards
+
+def ensure_daily_active_state(char):
+    """Return per-character daily activity counters, rolling them at the client reset."""
+    state = char.get('daily_active_state')
+    stamp = current_daily_stamp()
+    if not isinstance(state, dict) or state.get('date') != stamp:
+        state = {'date': stamp, 'counts': {}, 'claimed_rewards': []}
+        char['daily_active_state'] = state
+    if not isinstance(state.get('counts'), dict):
+        state['counts'] = {}
+    claimed = state.get('claimed_rewards')
+    if not isinstance(claimed, list):
+        state['claimed_rewards'] = []
+    return state
+
+def daily_active_snapshot(char):
+    """Build tag 649 activity rows, threshold states, and the exact client score."""
+    state = ensure_daily_active_state(char)
+    counts = state['counts']
+    try:
+        level = max(1, int(char.get('level', 1)))
+    except (TypeError, ValueError):
+        level = 1
+
+    active_rows = {}
+    score = 0
+    for active_id, cfg in sorted(DAILY_ACTIVE_CONFIG.items(),
+                                 key=lambda pair: (len(pair[0]), pair[0])):
+        try:
+            active_type = int(cfg.get('Type', 0))
+            target = max(0, int(cfg.get('Count', 0)))
+            points = max(0, int(cfg.get('Score', 0)))
+            unlock_level = max(0, int(cfg.get('UnlockLevel', 0)))
+            count = max(0, min(target, int(counts.get(active_id, 0))))
+        except (TypeError, ValueError):
+            continue
+        if level < unlock_level:
+            count = 0
+        score += count * points
+        active_rows[active_id] = encode_sproto([
+            (0, active_id), (1, count), (2, active_type)
+        ])
+
+    claimed_ids = {str(value) for value in state.get('claimed_rewards', [])}
+    reward_rows = {}
+    for reward_id, cfg in sorted(DAILY_ACTIVE_REWARD_CONFIG.items(),
+                                 key=lambda pair: (len(pair[0]), pair[0])):
+        try:
+            min_level = int(cfg.get('LvMin', 1))
+            max_level = int(cfg.get('LvMax', 80))
+            threshold = int(cfg.get('Score', 0))
+        except (TypeError, ValueError):
+            continue
+        if not min_level <= level <= max_level:
+            continue
+        reward_state = 2 if reward_id in claimed_ids else (1 if score >= threshold else 0)
+        reward_rows[reward_id] = encode_sproto([
+            (0, reward_id), (1, reward_state)
+        ])
+    return encode_sproto([(0, active_rows), (1, reward_rows), (2, score)])
+
+def daily_active_rewards_for_level(drop_key, level):
+    """Resolve a reward tier's AdaptData key through the APK ShowRewardData table."""
+    levels = STREET_RACE_REWARD_BY_KEY_LEVEL.get(str(drop_key or ''), {})
+    if not levels:
+        return []
+    try:
+        level = max(1, min(80, int(level)))
+    except (TypeError, ValueError):
+        level = 1
+    reward_id = levels.get(level)
+    if not reward_id:
+        eligible = [configured_level for configured_level in levels
+                    if configured_level <= level]
+        reward_id = levels[max(eligible)] if eligible else ''
+    return [
+        (str(item_id), int(quality), int(amount))
+        for item_id, quality, amount in SHOW_REWARD_CONFIG.get(str(reward_id), [])
+        if str(item_id) and int(amount) > 0
+    ]
+
+def record_daily_active_event(char, activity_type, send_rpc_push):
+    """Advance an APK daily-activity type once up to each configured target."""
+    if not char or not DAILY_ACTIVE_CONFIG:
+        return False
+    changed = False
+    payload = None
+    with get_character_transaction_lock(char):
+        state = ensure_daily_active_state(char)
+        counts = state['counts']
+        try:
+            level = max(1, int(char.get('level', 1)))
+            activity_type = int(activity_type)
+        except (TypeError, ValueError):
+            return False
+        for active_id, cfg in DAILY_ACTIVE_CONFIG.items():
+            try:
+                if (int(cfg.get('Type', -1)) != activity_type
+                        or level < int(cfg.get('UnlockLevel', 0))):
+                    continue
+                target = max(0, int(cfg.get('Count', 0)))
+                current = max(0, int(counts.get(active_id, 0)))
+            except (TypeError, ValueError):
+                continue
+            if current < target:
+                counts[active_id] = current + 1
+                changed = True
+        if changed:
+            save_chars(all_accounts_chars)
+            payload = daily_active_snapshot(char)
+    if changed and send_rpc_push and payload is not None:
+        send_rpc_push(649, payload)
+    return changed
+
+def level_reward_claim_definition(char, reward_id, claim_index):
+    """Resolve one eligible milestone reward from LevelRewardData/ShowRewardData."""
+    cfg = LEVEL_REWARD_CONFIG.get(str(reward_id))
+    if not cfg:
+        return None
+    try:
+        player_level = int(char.get('level', 1))
+        claim_index = int(claim_index)
+    except (TypeError, ValueError):
+        return None
+
+    if claim_index == 3:
+        try:
+            target_level = int(cfg.get('TargetLevel', 0))
+            item_id = str(cfg.get('RewardItem', '') or '').strip()
+            amount = int(cfg.get('RewardNum', 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        if target_level <= 0 or player_level < target_level or not item_id or amount <= 0:
+            return None
+        return ([(item_id, 0, amount)], None, 0)
+
+    if claim_index not in (0, 1, 2):
+        return None
+    tier = claim_index + 1
+    try:
+        target_level = int(cfg.get(f'TargetLevel{tier}', 0))
+        get_type = int(cfg.get(f'GetType{tier}', 0))
+        price_type = int(cfg.get(f'PriceType{tier}', 0))
+        price = int(cfg.get(f'PriceNum{tier}', 0))
+        profession = int(char.get('prof', 0))
+    except (TypeError, ValueError):
+        return None
+    if target_level <= 0 or player_level < target_level or get_type not in (0, 1):
+        return None
+    if get_type == 1 and (price < 0 or not 0 <= price_type < len(MONEY_FIELDS)):
+        return None
+    profession_prefix = {0: 'XD', 1: 'QJ', 2: 'NQS'}.get(profession)
+    if not profession_prefix:
+        return None
+    show_reward_id = str(cfg.get(f'{profession_prefix}ShowReward{tier}', '') or '').strip()
+    rewards = list(SHOW_REWARD_CONFIG.get(show_reward_id, []))
+    if not rewards:
+        return None
+    return (rewards, price_type if get_type == 1 else None, price if get_type == 1 else 0)
 
 def get_full_char(c):
     gen = get_general(c)
@@ -5367,13 +5670,18 @@ def download_reward_catalog():
     return list(DOWNLOAD_REWARD_FALLBACK)
 
 def ensure_download_rewards_granted(picked_char):
-    """Grant the optional-download rewards once, repairing old incomplete claims.
-
-    Old server versions could persist download_complete after granting only the
-    fallback EXP items and world-chat tickets. For those legacy records, keep any
-    of the four APK reward IDs already in the bag and grant the missing IDs once.
-    """
+    """Grant optional-download rewards once; never infer an old claim from bag contents."""
     if not isinstance(picked_char, dict) or picked_char.get('download_rewards_granted'):
+        return False
+
+    # A completed account from before the explicit marker is ambiguous: the
+    # rewards may already have been consumed. Treat completion as the claim
+    # record unless this server explicitly marked the grant as pending because
+    # the first attempt had no backpack capacity.
+    if picked_char.get('download_complete') and not picked_char.get('download_rewards_pending'):
+        picked_char['download_rewards_granted'] = True
+        picked_char['download_rewards_version'] = DOWNLOAD_REWARD_VERSION
+        print(f"[DOWNLOAD REWARD] migrated completed claim char={picked_char.get('id')}; no regrant")
         return False
 
     catalog = download_reward_catalog()
@@ -5382,15 +5690,6 @@ def ensure_download_rewards_granted(picked_char):
         return False
 
     ensure_backpack_state(picked_char)
-    legacy_claim = bool(picked_char.get('download_complete'))
-    existing_counts = {}
-    if legacy_claim:
-        for bucket, _tag in BACKPACKS.values():
-            for item in picked_char.get(bucket, []):
-                item_id = str(item.get('id', ''))
-                existing_counts[item_id] = existing_counts.get(item_id, 0) + max(
-                    0, int(item.get('amount', 0)))
-
     pending = []
     for item_id, count, quality in catalog:
         item_id = str(item_id)
@@ -5399,8 +5698,6 @@ def ensure_download_rewards_granted(picked_char):
         if count <= 0 or item_id not in ITEM_CONFIG:
             print(f"[DOWNLOAD REWARD] invalid item={item_id} char={picked_char.get('id')}")
             return False
-        if legacy_claim and existing_counts.get(item_id, 0) > 0:
-            continue
         pending.append((item_id, quality, count))
 
     if pending and not can_add_reward_list_to_inventory(picked_char, pending):
@@ -5417,7 +5714,8 @@ def ensure_download_rewards_granted(picked_char):
 
     picked_char['download_rewards_granted'] = True
     picked_char['download_rewards_version'] = DOWNLOAD_REWARD_VERSION
-    print(f"[DOWNLOAD REWARD] granted char={picked_char.get('id')} legacy={legacy_claim} "
+    picked_char.pop('download_rewards_pending', None)
+    print(f"[DOWNLOAD REWARD] granted char={picked_char.get('id')} "
           f"items={[(item_id, count) for item_id, _quality, count in pending]}")
     return True
 
@@ -5846,6 +6144,7 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None,
             new_level = picked_char.get('level', 1)
             smap = build_skills_map(picked_char.get('prof', 0), new_level, picked_char.get('skill_levels', {}))
             send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
+            send_rpc_push(644, level_package_state_payload(picked_char))
 
     for field, amount in currency_gains.items():
         if amount > 0:
@@ -6255,6 +6554,7 @@ def init_character_fields(c):
         'equipped_mount_id': '',
         'mount_riding': False,
         'daily_copy_state': {},
+        'daily_active_state': {},
         'dance_runtime': {},
         'active_copy_id': None,
         'pre_copy_pos': None,
@@ -6736,6 +7036,9 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         # SceneManager only requests tag 313 on the first scene load; without
         # this push, a reconnect or return to map 101 can keep stale duration.
         send_rpc_push(686, dance_state_info_payload(picked_char))
+        # Level-package state is character-wide. Send it again after reconnect
+        # and scene transitions so level-up gift availability is never stale.
+        send_rpc_push(644, level_package_state_payload(picked_char))
 
         # TAG 505: aoi_add (NPCs)
         spawn_map_npcs(conn, target_map_id, picked_char)
@@ -6932,6 +7235,7 @@ def client_handler(conn, addr):
     global server_session_counter, ALL_CONNECTIONS, MAIL_ID_COUNTER, TEAM_ID_COUNTER, EXP_RUN_COUNTER
     conn_id = id(conn)
     street_race_result_restore_pending = False
+    download_bag_resynced = False
     # ALL_CONNECTIONS will be updated when character is picked
     send_lock = threading.Lock()
 
@@ -7141,13 +7445,22 @@ def client_handler(conn, addr):
                     picked_char['last_played'] = int(time.time())
                     print(f"[CHARACTER PICK] id={picked_char['id']} level={picked_char.get('level')}")
                     init_character_fields(picked_char)
-                    # Repair old completed downloads that were marked done by
-                    # builds whose fallback omitted the car, revive, and heal
-                    # rewards. Do it before the initial bag snapshots are sent.
+                    # Completion from older versions is an ambiguous claim and
+                    # must never trigger another payout. Only retry automatically
+                    # when this server persisted an explicit capacity-pending
+                    # marker for a new claim.
                     if (picked_char.get('download_complete')
                             and not picked_char.get('download_rewards_granted')):
-                        if ensure_download_rewards_granted(picked_char):
+                        if picked_char.get('download_rewards_pending'):
+                            with get_character_transaction_lock(picked_char):
+                                if ensure_download_rewards_granted(picked_char):
+                                    picked_char.pop('download_rewards_pending', None)
+                                    save_chars(all_accounts_chars)
+                        else:
+                            picked_char['download_rewards_granted'] = True
+                            picked_char['download_rewards_version'] = DOWNLOAD_REWARD_VERSION
                             save_chars(all_accounts_chars)
+                            print(f"[DOWNLOAD REWARD] migrated prior claim char={picked_char.get('id')}; no regrant")
                     reconcile_exp_stage_login(picked_char)
                     picked_char.pop('_street_race_return_reconnect', None)
                     active_copy_id = str(picked_char.get('active_copy_id') or '')
@@ -7414,6 +7727,12 @@ def client_handler(conn, addr):
                         ]))
                         print(f"[MAIN PLAYER CREATE SEND] map_id={mid}")
 
+                        # Character-pick builds the first map inline instead of
+                        # using start_map_transition. Seed the level-package
+                        # cache here so the APK can show packages earned at a
+                        # level-up during this login session.
+                        send_rpc_push(644, level_package_state_payload(picked_char))
+
                         # TAG 505: aoi_add (NPCs)
                         spawn_map_npcs(conn, mid, picked_char)
                         if is_exp_map(mid): sync_exp_team_aoi(picked_char)
@@ -7448,6 +7767,23 @@ def client_handler(conn, addr):
                 if picked_char:
                     mid = picked_char.get('map_id', '11')
                     print(f"[MAP READY RECEIVED] map_id={mid}")
+                    # Login sends the backpack before the client finishes
+                    # creating its first map player. Re-send the claimed
+                    # download inventory once the client confirms map-ready,
+                    # so the four DownloadRewardData items are present in its
+                    # live ITEM_BACKPACK after scene initialization.
+                    if (not download_bag_resynced
+                            and picked_char.get('download_rewards_granted')
+                            and is_current_character_connection(conn, picked_char)):
+                        ensure_backpack_state(picked_char)
+                        item_map = _backpack_map(picked_char, 'inventory')
+                        send_rpc_push(611, encode_sproto([(0, item_map)]))
+                        download_bag_resynced = True
+                        item_summary = [(str(item.get('id', '')),
+                                         int(item.get('amount', 1)))
+                                        for item in picked_char.get('inventory', [])]
+                        print(f"[DOWNLOAD REWARD] post-map item bag sync "
+                              f"player={picked_char.get('id')} items={item_summary}")
                     if is_exp_map(mid):
                         exp_state = picked_char.get('exp_stage_state')
                         if exp_state:
@@ -7792,6 +8128,11 @@ def client_handler(conn, addr):
                                     (2, 0),
                                     (3, next_own_bytes)
                                 ]))
+                            # The level-up UI reads WelfareData's level-package
+                            # cache as soon as the attribute update triggers its
+                            # animation, so refresh that cache first.
+                            if mission_leveled_up:
+                                send_rpc_push(644, level_package_state_payload(picked_char))
                             sync_char_attrs_rpc(conn, picked_char)               # Stats update
                             # Sync skills if leveled up from mission rewards
                             if mission_leveled_up:
@@ -9084,7 +9425,10 @@ def client_handler(conn, addr):
                             try:
                                 price = max(0, int(dance_cfg.get('Price', 0)))
                                 price_type = int(dance_cfg.get('PriceType', 0))
-                                paid_end = int(runtime.get('paid_end_time', 0))
+                                paid_dances = runtime.setdefault('paid_dances', {})
+                                paid_end = int(paid_dances.get(dance_id, 0))
+                                if dance_id == '10002':
+                                    paid_end = max(paid_end, int(runtime.get('paid_end_time', 0)))
                             except (TypeError, ValueError):
                                 price, price_type, paid_end = -1, -1, 0
                             if price >= 0 and 0 <= price_type < len(MONEY_FIELDS):
@@ -9094,7 +9438,10 @@ def client_handler(conn, addr):
                                     duration = int(activity.get('DurationTime', 1800) or 1800)
                                     set_currency_balance(picked_char, price_type,
                                                          get_currency_balance(picked_char, price_type) - price)
-                                    runtime['paid_end_time'] = now + max(1, duration)
+                                    paid_end = now + max(1, duration)
+                                    runtime.setdefault('paid_dances', {})[dance_id] = paid_end
+                                    if dance_id == '10002':
+                                        runtime['paid_end_time'] = paid_end
                                     accepted = True
                                 if accepted:
                                     current, _dance_infos = dance_choice_data(picked_char, now)
@@ -9102,6 +9449,7 @@ def client_handler(conn, addr):
                                         runtime['cur_use'] = dance_id
                                     runtime['running'] = True
                                     runtime['running_since'] = now
+                                    runtime['free_started_at'] = now
                                     if int(dance_cfg.get('Price', 0)) > 0:
                                         # Paid choreography has its own absolute expiry. Do not
                                         # burn the player's separate free-dance allowance while
@@ -9121,8 +9469,11 @@ def client_handler(conn, addr):
                         broadcast_aoi_attribute(picked_char)
                         advance_missions(picked_char, send_rpc_push, 'dance',
                                          target_id='101', map_id='101')
-                    elif dance_id == '10002' and dance_cfg and get_currency_balance(
-                            picked_char, int(dance_cfg.get('PriceType', 1))) < int(dance_cfg.get('Price', 0)):
+                        # DailyActiveData Type 17 is the APK's personal-dance
+                        # objective (one successful dance start, once per day).
+                        record_daily_active_event(picked_char, 17, send_rpc_push)
+                    elif dance_cfg and int(dance_cfg.get('Price', 0)) > 0 and get_currency_balance(
+                            picked_char, int(dance_cfg.get('PriceType', 0))) < int(dance_cfg.get('Price', 0)):
                         send_rpc_push(529, encode_sproto([(0, 'Not enough gold for this dance.'), (1, True)]))
                 send_rpc_response(session)
 
@@ -10885,10 +11236,17 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 270: # download_finish
-                if picked_char:
+                if picked_char and is_current_character_connection(conn, picked_char):
                     with get_character_transaction_lock(picked_char):
                         granted = ensure_download_rewards_granted(picked_char)
                         picked_char['download_complete'] = True
+                        if granted or picked_char.get('download_rewards_granted'):
+                            picked_char.pop('download_rewards_pending', None)
+                        else:
+                            # Preserve a retryable first claim if the inventory
+                            # was full. Legacy completed claims are marked as
+                            # already paid inside ensure_download_rewards_granted.
+                            picked_char['download_rewards_pending'] = True
                         save_chars(all_accounts_chars)
 
                         # The APK applies tag 611 to its live item container.
@@ -10905,6 +11263,8 @@ def client_handler(conn, addr):
                         # Keep the current client session consistent with the
                         # persisted completion state if MSG 270 repeats.
                         send_rpc_push(654, encode_sproto([(0, 1)])) # start_enter_game state=1
+                elif picked_char:
+                    print(f"[DOWNLOAD REWARD] ignored stale finish request player={picked_char.get('id')}")
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -11388,7 +11748,7 @@ def client_handler(conn, addr):
                 if session is not None:
                     ph=encode_sproto([(1,session)]);pf=sproto_pack(ph+encode_sproto([]));conn.sendall(struct.pack('>H',len(pf))+pf)
 
-            elif msg in [118, 218, 145, 202, 210, 225, 242, 252, 253, 254, 255, 257, 258, 261, 266, 278, 296, 299, 313, 319]:
+            elif msg in [118, 218, 145, 202, 210, 225, 242, 252, 253, 254, 255, 256, 257, 258, 261, 262, 265, 266, 278, 296, 297, 299, 313, 319]:
                 resp_data = encode_sproto([])
                 if msg == 118:
                     # Check if this is a random name request (body has field 0 = type)
@@ -11500,13 +11860,86 @@ def client_handler(conn, addr):
                     send_rpc_push(646, encode_sproto([(0, d_buys)]))
 
                 elif msg == 261 and picked_char: # request_daily_active
-                    # ret_request_daily_active expects:
-                    # tag 0: Dictionary<string, daily_active> where daily_active has ID(string), count(long), Type(long)
-                    # tag 1: Dictionary<string, daily_reward> where daily_reward has ID(string), state(long)
-                    # tag 2: score(long)
-                    d_acts = {}
-                    d_rews = {}
-                    send_rpc_push(649, encode_sproto([(0, d_acts), (1, d_rews), (2, 0)]))
+                    with get_character_transaction_lock(picked_char):
+                        send_rpc_push(649, daily_active_snapshot(picked_char))
+
+                elif msg == 265 and picked_char: # require_daily_active_reward
+                    reward_id = get_val_str(body, 0, '')
+                    reward_items = []
+                    claimed = False
+                    failure_reason = 'invalid or unavailable daily reward'
+                    with get_character_transaction_lock(picked_char):
+                        state = ensure_daily_active_state(picked_char)
+                        try:
+                            player_level = max(1, int(picked_char.get('level', 1)))
+                        except (TypeError, ValueError):
+                            player_level = 1
+                        score = 0
+                        for active_id, active_cfg in DAILY_ACTIVE_CONFIG.items():
+                            try:
+                                target = max(0, int(active_cfg.get('Count', 0)))
+                                points = max(0, int(active_cfg.get('Score', 0)))
+                                unlock_level = max(0, int(active_cfg.get('UnlockLevel', 0)))
+                                count = max(0, min(target, int(state['counts'].get(active_id, 0))))
+                            except (TypeError, ValueError):
+                                continue
+                            if player_level >= unlock_level:
+                                score += count * points
+
+                        reward_cfg = DAILY_ACTIVE_REWARD_CONFIG.get(reward_id, {})
+                        try:
+                            reward_level_ok = (
+                                bool(reward_cfg)
+                                and int(reward_cfg.get('LvMin', 1)) <= player_level
+                                <= int(reward_cfg.get('LvMax', 80))
+                            )
+                            score_required = int(reward_cfg.get('Score', 0))
+                        except (TypeError, ValueError):
+                            reward_level_ok, score_required = False, 0
+                        claimed_ids = {str(value) for value in state.get('claimed_rewards', [])}
+                        if not is_current_character_connection(conn, picked_char):
+                            failure_reason = 'stale character connection'
+                        elif not reward_level_ok:
+                            failure_reason = 'reward is outside the character level bracket'
+                        elif reward_id in claimed_ids:
+                            failure_reason = 'reward was already claimed today'
+                        elif score < score_required:
+                            failure_reason = 'daily activity score is too low'
+                        else:
+                            reward_list = daily_active_rewards_for_level(
+                                reward_cfg.get('DropID', ''), player_level
+                            )
+                            valid_rewards = bool(reward_list) and all(
+                                item_id in ITEM_CONFIG and amount > 0
+                                for item_id, _quality, amount in reward_list
+                            )
+                            if valid_rewards and can_add_reward_list_to_inventory(picked_char, reward_list):
+                                grant_item_rewards(picked_char, reward_list, conn, send_rpc_push, save=False)
+                                state['claimed_rewards'].append(reward_id)
+                                save_chars(all_accounts_chars)
+                                reward_items = [encode_sproto([
+                                    (0, item_id), (1, amount), (3, quality)
+                                ]) for item_id, quality, amount in reward_list]
+                                claimed = True
+                                print(f"[DAILY ACTIVE] claimed player={picked_char.get('id')} id={reward_id} "
+                                      f"score={score} rewards={len(reward_items)}")
+                            elif not valid_rewards:
+                                failure_reason = 'reward table is missing or invalid'
+                            else:
+                                failure_reason = 'reward would exceed backpack capacity'
+
+                    # CommercailTYPE.DAILYACTIVE is enum value 5. The APK uses
+                    # this packet to show the level-adapted drop and mark the
+                    # matching DailyActiveRewardData row claimed.
+                    send_rpc_push(650, encode_sproto([
+                        (0, reward_items), (1, 5), (3, reward_id),
+                        (7, 0 if claimed else 1)
+                    ]))
+                    if not claimed:
+                        print(f"[DAILY ACTIVE] claim rejected player={picked_char.get('id')} "
+                              f"id={reward_id} reason={failure_reason}")
+                    with get_character_transaction_lock(picked_char):
+                        send_rpc_push(649, daily_active_snapshot(picked_char))
 
                 elif msg == 225 and picked_char: # request_activity_info
                     now_ts = int(time.time())
@@ -11536,8 +11969,90 @@ def client_handler(conn, addr):
                 elif msg == 257 and picked_char: # request_invest_pack
                     send_rpc_push(645, encode_sproto([(0, {})]))
 
+                elif msg == 256 and picked_char: # request_level_pack
+                    send_rpc_push(644, level_package_state_payload(picked_char))
+
+                elif msg == 262 and picked_char: # require_level_reward (level-up package)
+                    package_id = get_val_str(body, 0, '')
+                    package_claimed = False
+                    package_rewards = []
+                    if is_current_character_connection(conn, picked_char):
+                        with get_character_transaction_lock(picked_char):
+                            package_cfg = LEVEL_PACKAGE_CONFIG.get(package_id, {})
+                            claims = picked_char.setdefault('level_package_claims', {})
+                            try:
+                                eligible = (bool(package_cfg)
+                                            and int(picked_char.get('level', 1)) >= int(package_cfg.get('LvTarget', 0))
+                                            and not bool(claims.get(package_id, False)))
+                            except (TypeError, ValueError):
+                                eligible = False
+                            package_rewards = level_package_reward_list(package_id) if eligible else []
+                            if (package_rewards
+                                    and can_add_reward_list_to_inventory(picked_char, package_rewards)):
+                                grant_item_rewards(picked_char, package_rewards, conn, send_rpc_push, save=False)
+                                claims[package_id] = True
+                                save_chars(all_accounts_chars)
+                                package_claimed = True
+                                print(f"[LEVEL PACKAGE] claimed player={picked_char.get('id')} id={package_id} "
+                                      f"items={len(package_rewards)}")
+                            elif eligible:
+                                print(f"[LEVEL PACKAGE] claim deferred player={picked_char.get('id')} id={package_id} "
+                                      f"(empty rewards or backpack capacity)")
+                    package_reward_items = [encode_sproto([
+                        (0, item_id), (1, amount), (3, quality)
+                    ]) for item_id, quality, amount in package_rewards] if package_claimed else []
+                    # The level-gift UI consumes tag 650 to display the rewards
+                    # and set its claim state; tag 644 below refreshes the
+                    # complete level-package state map as well.
+                    send_rpc_push(650, encode_sproto([
+                        (0, package_reward_items), (1, 0), (3, package_id),
+                        (7, 0 if package_claimed else 1)
+                    ]))
+                    send_rpc_push(644, level_package_state_payload(picked_char))
+
                 elif msg == 296 and picked_char: # req_level_reward
-                    send_rpc_push(674, encode_sproto([(0, {})]))
+                    send_rpc_push(674, encode_sproto([(0, level_reward_state_map(picked_char))]))
+
+                elif msg == 297 and picked_char: # receive_level_reward (milestone claim)
+                    reward_id = get_val_str(body, 0, '')
+                    claim_index = get_val_int(body, 1, -1)
+                    claimed_rewards = []
+                    if is_current_character_connection(conn, picked_char):
+                        with get_character_transaction_lock(picked_char):
+                            claims = picked_char.setdefault('level_reward_claims', {})
+                            try:
+                                state = max(0, int(claims.get(reward_id, 0)))
+                            except (TypeError, ValueError):
+                                state = 0
+                            claim_bit = (1 << claim_index) if claim_index in (0, 1, 2, 3) else 0
+                            definition = level_reward_claim_definition(picked_char, reward_id, claim_index)
+                            if (definition and claim_bit and not (state & claim_bit)
+                                    and (claim_index != 3 or (state & 0x7) == 0x7)):
+                                reward_list, money_type, money_cost = definition
+                                can_pay = (money_type is None or get_currency_balance(picked_char, money_type) >= money_cost)
+                                if can_pay and can_add_reward_list_to_inventory(picked_char, reward_list):
+                                    if money_type is not None and money_cost > 0:
+                                        set_currency_balance(
+                                            picked_char, money_type,
+                                            get_currency_balance(picked_char, money_type) - money_cost
+                                        )
+                                    grant_item_rewards(picked_char, reward_list, conn, send_rpc_push, save=False)
+                                    claims[reward_id] = state | claim_bit
+                                    save_chars(all_accounts_chars)
+                                    # A paid tier may contain only inventory
+                                    # items; grant_item_rewards would not then
+                                    # refresh the currency we just deducted.
+                                    sync_char_attrs_rpc(conn, picked_char)
+                                    claimed_rewards = [encode_sproto([
+                                        (0, str(item_id)), (1, int(amount)), (3, int(quality))
+                                    ]) for item_id, quality, amount in reward_list]
+                                    print(f"[LEVEL REWARD] claimed player={picked_char.get('id')} "
+                                          f"id={reward_id} index={claim_index} items={len(claimed_rewards)}")
+                    response = encode_sproto([
+                        (0, level_reward_state_map(picked_char)),
+                        (1, claimed_rewards)
+                    ])
+                    send_rpc_push(675, response)
 
             elif msg == 310:  # request_domin_info
                 if session is not None:
