@@ -69,6 +69,7 @@ MONSTER_DATA = {} # mapId -> list of monster spawns
 STATIC_NPC_DATA = {} # mapId -> list of static NPC spawns
 NPC_CONFIG = {}   # npcId -> npc info template
 MAP_CONFIG = {}   # mapId -> map info
+MAP_AREA_CONFIG = {} # MapAreaInfoData geometry used by client gather/safe areas
 MAP_CONNECT_DATA = {} # (src_id, target_id) -> PosX, PosY, PosZ
 GUILD_CAPTURE_DATA = {} # id -> mapId
 KILL_TARGET_SPAWNS = {} # logicId -> list of spawns
@@ -115,11 +116,29 @@ BADGE_CONFIG = {} # badgeId -> BadgeData fields used by merge and display logic
 REFINE_CONFIG = {} # refineId -> client RefineData row
 REFINE_BY_PART_LEVEL = {} # (profession, part, level) -> RefineData row
 DOWNLOAD_REWARD_DATA = [] # list of (itemId, count, quality) tuples
+DOWNLOAD_REWARD_FALLBACK = [
+    # Exact DownloadRewardData row in the APK. Keep this fallback aligned with
+    # the client table so a missing TextAsset never substitutes EXP packages.
+    ('9301', 1, 0),   # Vehicle exchange voucher
+    ('9011', 10, 2),  # Revive item
+    ('9001', 20, 0),  # Healing potion
+    ('5026', 5, 1),   # World-channel tickets
+]
+DOWNLOAD_REWARD_FALLBACK_ITEM_CONFIG = {
+    '9301': {'type': 19, 'quality': 0, 'max_stack': 99999999},
+    '9011': {'type': 14, 'quality': 2, 'max_stack': 99999999},
+    '9001': {'type': 3, 'quality': 0, 'max_stack': 99999999},
+    '5026': {'type': 1, 'quality': 1, 'max_stack': 99999999},
+}
+DOWNLOAD_REWARD_VERSION = 1
 SKILL_UPGRADE_DATA = {} # level -> {price_type, price_value}
 RELIFE_DATA = [] # list of {min_count, max_count, use_count}
 SERVER_DATA_LIST = [] # list of server dicts from ServerData
 GAME_CONFIG = {} # key -> value (from ConfigData)
 DAILY_EXP_CONFIG = {} # copy_id -> DailyExpData fields (wave_count, group_npc_count, etc.)
+DANCE_CONFIG = {} # DanceData ID -> free/paid choreography definition
+CITY_DANCE_CONFIG = {} # CityDanceData ID -> city dance activity definition
+SOCIAL_DANCE_CONFIG = {} # SocialDanceData ID -> unlocked social emote
 
 try:
     script_dir = os.path.dirname(__file__)
@@ -345,9 +364,29 @@ try:
                         'exit_pos': parts[11] if len(parts) > 11 else '',
                         'relife_type': int(parts[22]) if len(parts) > 22 and parts[22].lstrip('-').isdigit() else 0,
                         'relife_cost': int(parts[23]) if len(parts) > 23 and parts[23].isdigit() else 0,
+                        'gather_area_id': parts[25] if len(parts) > 25 else '',
                         'open_lv': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 0
                     }
         print(f"[MAP CONFIG LOADED] count={len(MAP_CONFIG)}")
+
+    # Match SceneManager.IsInGatherArea for server-validated dance requests.
+    map_area_path = os.path.join(text_asset_root, "MapAreaInfoData")
+    if os.path.exists(map_area_path):
+        with open(map_area_path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) < 12 or parts[0] != "*" or not parts[1].isdigit():
+                    continue
+                try:
+                    MAP_AREA_CONFIG[parts[1]] = {
+                        'type': int(parts[2]),
+                        'points': [(int(parts[i]), int(parts[i + 1]))
+                                   for i in (3, 5, 7, 9)],
+                        'range': int(parts[11]) if parts[11] else 0,
+                    }
+                except (TypeError, ValueError):
+                    continue
+        print(f"[MAP AREA CONFIG LOADED] count={len(MAP_AREA_CONFIG)}")
 
     # Load MapConnectInfoData
     conn_path = os.path.join(text_asset_root, "MapConnectInfoData")
@@ -1105,6 +1144,30 @@ try:
                 reward_id = STREET_RACE_REWARD_BY_LEVEL[lv]
                 rewards = SHOW_REWARD_CONFIG.get(str(reward_id), [])
                 print(f"[STREET RACE] Level {lv} -> Reward ID {reward_id}: {rewards}")
+
+    # Dance protocol ids and purchase/activity rules come directly from the
+    # same tables consumed by DanceChooseRootLogic, DanceBtnRootLogic and the
+    # social-emote client handlers.
+    for table_name, target_table in (
+            ("DanceData", DANCE_CONFIG),
+            ("CityDanceData", CITY_DANCE_CONFIG),
+            ("SocialDanceData", SOCIAL_DANCE_CONFIG)):
+        table_path = os.path.join(text_asset_root, table_name)
+        if not os.path.exists(table_path):
+            continue
+        with open(table_path, "r", encoding="utf-8") as table_file:
+            table_rows = [line.strip().split(",") for line in table_file if line.strip()]
+        table_header = next((row[1:] for row in table_rows
+                             if len(row) > 1 and row[0] == "*" and row[1] == "ID"), [])
+        for row in table_rows:
+            if len(row) < 3 or row[0] != "*" or not row[1].strip().isdigit():
+                continue
+            values = row[1:]
+            target_table[row[1].strip()] = {
+                key.strip(): values[index].strip() if index < len(values) else ""
+                for index, key in enumerate(table_header)
+            }
+        print(f"[{table_name.upper()} LOADED] count={len(target_table)}")
 
     # Load FunctionData (feature unlock gates by level)
     func_path = os.path.join(text_asset_root, "FunctionData")
@@ -2992,14 +3055,18 @@ def character_refine_levels(character):
     return levels
 
 def character_attribute_other_fields(character, stats, hp_cur):
-    """Build the player's full attribute_other payload, including refine stars."""
+    """Build the player's full attribute_other payload, including dance state."""
     levels = character_refine_levels(character)
+    dance = ensure_dance_runtime(character)
+    dance_active = bool(dance.get('running') and str(character.get('map_id')) == '101')
     return [
         (0, hp_cur), (1, stats['exp']), (2, stats['lv']), (3, stats['power']),
         (4, int(character.get('title_level', 0))),
         (5, int(character.get('title_exp', 0))),
         (9, levels[1]), (10, levels[2]), (11, levels[3]), (12, levels[4]),
-        (13, sum(levels.values())), (15, 1)
+        (13, sum(levels.values())), (15, 1),
+        (17, 1 if dance_active else 0),
+        (18, str(dance.get('dance_id', '')) if dance_active else '')
     ]
 
 def get_character_stats(c):
@@ -3224,6 +3291,179 @@ def set_currency_balance(char, money_type, amount):
         return False
     char[MONEY_FIELDS[money_type]] = max(0, int(amount))
     return True
+
+def is_in_map_gather_area(map_id, position):
+    """Mirror the APK's SceneManager.IsInGatherArea check in server coordinates."""
+    try:
+        map_cfg = MAP_CONFIG.get(str(map_id), {})
+        area_id = str(map_cfg.get('gather_area_id', ''))
+        area = MAP_AREA_CONFIG.get(area_id)
+        if not area or not isinstance(position, (list, tuple)):
+            return False
+        if len(position) >= 3:
+            x, z = float(position[0]), float(position[2])
+        elif len(position) == 2:
+            x, z = float(position[0]), float(position[1])
+        else:
+            return False
+
+        points = area.get('points', [])
+        if int(area.get('type', 0)) != 0:
+            center_x, center_z = points[0]
+            radius = max(0, int(area.get('range', 0)))
+            return radius > 0 and (x - center_x) ** 2 + (z - center_z) ** 2 <= radius ** 2
+
+        if len(points) != 4:
+            return False
+        inside = False
+        for index, (x1, z1) in enumerate(points):
+            x2, z2 = points[(index + 1) % len(points)]
+            cross = (x - x1) * (z2 - z1) - (z - z1) * (x2 - x1)
+            if abs(cross) <= 1e-6 and min(x1, x2) <= x <= max(x1, x2) and min(z1, z2) <= z <= max(z1, z2):
+                return True
+            if (z1 > z) != (z2 > z):
+                edge_x = (x2 - x1) * (z - z1) / (z2 - z1) + x1
+                if x < edge_x:
+                    inside = not inside
+        return inside
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return False
+
+def ensure_dance_runtime(char, now=None):
+    """Create/reset the character's personal-dance state from client config."""
+    if now is None:
+        now = int(time.time())
+    runtime = char.get('dance_runtime')
+    if not isinstance(runtime, dict):
+        runtime = {}
+        char['dance_runtime'] = runtime
+    activity = CITY_DANCE_CONFIG.get('101', {})
+    try:
+        free_duration = max(0, int(activity.get('DurationTime', 0)))
+    except (TypeError, ValueError):
+        free_duration = 0
+    stamp = current_daily_stamp()
+    if runtime.get('free_day') != stamp:
+        runtime.update({
+            'free_day': stamp,
+            'free_duration': free_duration,
+            'free_started_at': 0,
+            'running': False,
+            'running_since': 0,
+            'running_source': '',
+            'dance_id': '',
+        })
+    try:
+        runtime['free_duration'] = max(0, min(free_duration, int(runtime.get('free_duration', free_duration))))
+        runtime['speaker_end_time'] = max(0, int(runtime.get('speaker_end_time', 0)))
+        runtime['speaker_start_time'] = max(0, int(runtime.get('speaker_start_time', 0)))
+        runtime['paid_end_time'] = max(0, int(runtime.get('paid_end_time', 0)))
+        runtime['cur_use'] = str(runtime.get('cur_use') or '10001')
+    except (TypeError, ValueError):
+        runtime.update({'free_duration': free_duration, 'speaker_end_time': 0,
+                        'speaker_start_time': 0, 'paid_end_time': 0, 'cur_use': '10001'})
+    if runtime['speaker_end_time'] <= now:
+        runtime['speaker_end_time'] = 0
+        runtime['speaker_start_time'] = 0
+    return runtime
+
+def settle_personal_dance(char, now=None, stop=False):
+    """Charge only the free-dance seconds actually spent dancing."""
+    if now is None:
+        now = int(time.time())
+    runtime = ensure_dance_runtime(char, now)
+    if runtime.get('running'):
+        try:
+            started = int(runtime.get('running_since', now))
+            elapsed = max(0, min(86400, now - started))
+        except (TypeError, ValueError):
+            elapsed = 0
+        if runtime.get('running_source') == 'free':
+            runtime['free_duration'] = max(0, int(runtime.get('free_duration', 0)) - elapsed)
+        if stop or runtime.get('free_duration', 0) <= 0 and runtime.get('running_source') == 'free':
+            runtime['running'] = False
+            runtime['running_since'] = 0
+            runtime['running_source'] = ''
+            runtime['dance_id'] = ''
+        else:
+            runtime['running_since'] = now
+    elif stop:
+        runtime['running'] = False
+        runtime['running_since'] = 0
+        runtime['running_source'] = ''
+        runtime['dance_id'] = ''
+    return runtime
+
+def dance_state_info_payload(char, now=None):
+    """Build sync_dance_state_info (686) exactly as the client schema expects."""
+    if now is None:
+        now = int(time.time())
+    runtime = ensure_dance_runtime(char, now)
+    entries = {}
+    city_dance = CITY_DANCE_CONFIG.get('101', {})
+    try:
+        unlocked = (str(char.get('map_id')) == str(city_dance.get('MapId', '101'))
+                    and int(char.get('level', 1)) >= int(city_dance.get('UnlockLevel', 8)))
+        duration = max(0, int(city_dance.get('DurationTime', 0)))
+    except (TypeError, ValueError):
+        unlocked, duration = False, 0
+    if unlocked and duration > 0:
+        runtime['free_duration'] = max(0, min(duration, int(runtime.get('free_duration', duration))))
+        reset_at = now + max(0, int(runtime['free_duration']))
+        free_uuid = int(char.get('id', 0)) * 100 + 101
+        entries[str(free_uuid)] = encode_sproto([
+            (0, free_uuid), (1, '101'), (2, int(runtime.get('free_started_at', 0))),
+            (3, reset_at), (4, 1 if runtime.get('free_duration', 0) > 0 else 0),
+            (5, 0), (6, int(runtime.get('free_duration', 0))),
+            (7, reset_at),
+            (8, 0)
+        ])
+        speaker_end = int(runtime.get('speaker_end_time', 0))
+        if speaker_end > now:
+            speaker_uuid = int(char.get('id', 0)) * 100 + 102
+            entries[str(speaker_uuid)] = encode_sproto([
+                (0, speaker_uuid), (1, '102'), (2, int(runtime.get('speaker_start_time', 0))),
+                (3, speaker_end), (4, 1), (5, 0), (6, speaker_end - now),
+                (7, speaker_end), (8, 0)
+            ])
+    return encode_sproto([(0, 1 if entries else 0), (1, 1 if entries else 0), (2, entries)])
+
+def dance_choice_data(char, now=None):
+    """Return the current dance selection and configured choices."""
+    if now is None:
+        now = int(time.time())
+    runtime = ensure_dance_runtime(char, now)
+    records = {}
+    paid_enabled = False
+    for dance_id, cfg in sorted(DANCE_CONFIG.items()):
+        try:
+            use_type = int(cfg.get('UseType', 0))
+            price = int(cfg.get('Price', 0))
+            price_type = int(cfg.get('PriceType', 0))
+        except (TypeError, ValueError):
+            continue
+        enabled = price == 0 or (dance_id == '10002'
+                                 and int(runtime.get('paid_end_time', 0)) > now)
+        if dance_id == '10002':
+            paid_enabled = enabled
+        records[dance_id] = encode_sproto([
+            (0, dance_id), (1, bool(enabled)), (2, use_type),
+            (3, int(runtime.get('paid_end_time', 0)) if dance_id == '10002' and enabled else 0)
+        ])
+    if runtime.get('cur_use') == '10002' and not paid_enabled:
+        runtime['cur_use'] = '10001'
+    if runtime.get('cur_use') not in records:
+        runtime['cur_use'] = '10001' if '10001' in records else next(iter(records), '')
+    return runtime.get('cur_use', '10001'), records
+
+def dance_selection_payload(char, requested_type=0, now=None):
+    """Build tag 623's owned free/paid dance choices, including paid expiry."""
+    current, records = dance_choice_data(char, now)
+    return encode_sproto([
+        (0, current),
+        (1, records),
+        (2, int(requested_type))
+    ])
 
 def get_full_char(c):
     gen = get_general(c)
@@ -5043,8 +5283,12 @@ def add_to_inventory(picked_char, item_id, amount, quality=None):
     while remaining > 0 and len(records) < 100:
         stack = min(remaining, max_stack)
         parms = [0] * 8
+        index_id = allocate_backpack_index(picked_char)
+        # allocate_backpack_index normalizes the character and may replace the
+        # backpack lists; reacquire the target list before appending the item.
+        records = picked_char[bucket]
         new_item = {
-            'index_id': allocate_backpack_index(picked_char), 'id': item_id,
+            'index_id': index_id, 'id': item_id,
             'amount': stack, 'bindflag': True, 'level': 0, 'quality': quality,
             'appraise': 0, 'parm': parms, 'random_attri': {}, 'inlay': {}
         }
@@ -5110,6 +5354,71 @@ def can_add_reward_list_to_inventory(picked_char, rewards):
         bucket = BACKPACKS[container_type][0]
         if slots_needed > max(0, 100 - len(picked_char[bucket])):
             return False
+    return True
+
+def download_reward_catalog():
+    """Return the four rewards shown by the APK's DownloadRewardData table."""
+    if len(DOWNLOAD_REWARD_DATA) >= len(DOWNLOAD_REWARD_FALLBACK):
+        return list(DOWNLOAD_REWARD_DATA)
+    # ItemData normally supplies these values. Seed only missing rows from the
+    # APK-confirmed constants so rewards remain stackable if that asset is absent.
+    for item_id, config in DOWNLOAD_REWARD_FALLBACK_ITEM_CONFIG.items():
+        ITEM_CONFIG.setdefault(item_id, dict(config))
+    return list(DOWNLOAD_REWARD_FALLBACK)
+
+def ensure_download_rewards_granted(picked_char):
+    """Grant the optional-download rewards once, repairing old incomplete claims.
+
+    Old server versions could persist download_complete after granting only the
+    fallback EXP items and world-chat tickets. For those legacy records, keep any
+    of the four APK reward IDs already in the bag and grant the missing IDs once.
+    """
+    if not isinstance(picked_char, dict) or picked_char.get('download_rewards_granted'):
+        return False
+
+    catalog = download_reward_catalog()
+    if len(catalog) < len(DOWNLOAD_REWARD_FALLBACK):
+        print(f"[DOWNLOAD REWARD] incomplete catalog char={picked_char.get('id')}")
+        return False
+
+    ensure_backpack_state(picked_char)
+    legacy_claim = bool(picked_char.get('download_complete'))
+    existing_counts = {}
+    if legacy_claim:
+        for bucket, _tag in BACKPACKS.values():
+            for item in picked_char.get(bucket, []):
+                item_id = str(item.get('id', ''))
+                existing_counts[item_id] = existing_counts.get(item_id, 0) + max(
+                    0, int(item.get('amount', 0)))
+
+    pending = []
+    for item_id, count, quality in catalog:
+        item_id = str(item_id)
+        count = int(count)
+        quality = int(quality)
+        if count <= 0 or item_id not in ITEM_CONFIG:
+            print(f"[DOWNLOAD REWARD] invalid item={item_id} char={picked_char.get('id')}")
+            return False
+        if legacy_claim and existing_counts.get(item_id, 0) > 0:
+            continue
+        pending.append((item_id, quality, count))
+
+    if pending and not can_add_reward_list_to_inventory(picked_char, pending):
+        print(f"[DOWNLOAD REWARD] pending bag capacity char={picked_char.get('id')} "
+              f"items={[item_id for item_id, _quality, _count in pending]}")
+        return False
+
+    for item_id, quality, count in pending:
+        if not add_to_inventory(picked_char, item_id, count, quality=quality):
+            # The preflight above should make this unreachable. Leave the claim
+            # marker unset so a later login/request can retry without loss.
+            print(f"[DOWNLOAD REWARD] add failed item={item_id} char={picked_char.get('id')}")
+            return False
+
+    picked_char['download_rewards_granted'] = True
+    picked_char['download_rewards_version'] = DOWNLOAD_REWARD_VERSION
+    print(f"[DOWNLOAD REWARD] granted char={picked_char.get('id')} legacy={legacy_claim} "
+          f"items={[(item_id, count) for item_id, _quality, count in pending]}")
     return True
 
 def resolve_item_package_rewards(item_id):
@@ -5726,6 +6035,12 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                 for s in KILL_TARGET_SPAWNS[spawn_key]:
                     spawn_nids.add(str(s['nid']))
             matched = not target or target == target_value or str(cfg.get('logic_id', '')) == target_value or target_value in spawn_nids
+        elif logic_type == 132 and event == 'dance':
+            # Mission 1009 is the client-authored "participate in personal
+            # dance" objective. Complete it only after a successful dance
+            # start in its configured personal-dance map.
+            matched = (str(mid) == '1009' and str(map_id) == '101'
+                       and target_value == '101')
         elif logic_type in [102, 103, 105, 106, 107, 108, 110, 113, 114, 117, 119, 120, 132] and event in ['dungeon', 'car_copy']:
             # Dungeon/Guide entry missions advance on specific 'dungeon' or 'car_copy' events
             logic_id_str = str(cfg.get('logic_id'))
@@ -5934,10 +6249,13 @@ def init_character_fields(c):
         'tutorial': 0,
         'death_count': 0,
         'download_complete': False,
+        'download_rewards_granted': False,
+        'download_rewards_version': 0,
         'mounts': {},
         'equipped_mount_id': '',
         'mount_riding': False,
         'daily_copy_state': {},
+        'dance_runtime': {},
         'active_copy_id': None,
         'pre_copy_pos': None,
         'pre_copy_map': None,
@@ -5966,6 +6284,13 @@ def init_character_fields(c):
     # Ensure map_id is never None or "None" string — default to city map "11"
     if c.get('map_id') is None or str(c.get('map_id', '')) == 'None':
         c['map_id'] = "11"
+    # A saved dance animation cannot survive a new login/socket session.
+    # Keep the daily free-time and paid unlocks, but clear the transient pose.
+    dance = ensure_dance_runtime(c)
+    dance['running'] = False
+    dance['running_since'] = 0
+    dance['running_source'] = ''
+    dance['dance_id'] = ''
 
 def init_social_data(c):
     """Initialize social data (friends, enemies, mails) for a character."""
@@ -6323,9 +6648,13 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
 
     src_map = str(picked_char.get('map_id') or '11')
     target_map_id = str(target_map_id) or '11'
+    if src_map == '101' and target_map_id != '101':
+        settle_personal_dance(picked_char, stop=True)
     if src_map != target_map_id: broadcast_aoi_remove(picked_char.get('id', 0), src_map)
     NPC_SPAWNED_MAPS.setdefault(id(conn), set()).discard(target_map_id)
     picked_char['map_id'] = target_map_id
+    if target_map_id == '101' and int(picked_char.get('level', 1)) >= int(CITY_DANCE_CONFIG.get('101', {}).get('UnlockLevel', 8) or 8):
+        ensure_dance_runtime(picked_char)
     scene_name = "Unknown"
 
     # Update position
@@ -6402,6 +6731,11 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
             (1, get_movement(picked_char['pos'][0], picked_char['pos'][1], picked_char['pos'][2], picked_char['pos'][3]))
         ]))
         print(f"[MAIN PLAYER CREATE SEND] map_id={target_map_id}")
+
+        # Refresh the client's cached dance activity state on every map entry.
+        # SceneManager only requests tag 313 on the first scene load; without
+        # this push, a reconnect or return to map 101 can keep stale duration.
+        send_rpc_push(686, dance_state_info_payload(picked_char))
 
         # TAG 505: aoi_add (NPCs)
         spawn_map_npcs(conn, target_map_id, picked_char)
@@ -6622,6 +6956,49 @@ def client_handler(conn, addr):
         with send_lock:
             conn.sendall(struct.pack(">H", len(pf_r)) + pf_r)
 
+    def use_personal_dance_speaker(index_id, x, z, consume_item=False):
+        """Activate the configured personal speaker without consuming on failure."""
+        if not picked_char or not is_current_character_connection(conn, picked_char):
+            return False
+        now = int(time.time())
+        success = False
+        with get_character_transaction_lock(picked_char):
+            found = find_backpack_item(picked_char, index_id, 2)
+            if not found:
+                return False
+            item = found['item']
+            item_id = str(item.get('id', ''))
+            item_cfg = ITEM_CONFIG.get(item_id, {})
+            activity = CITY_DANCE_CONFIG.get('102', {})
+            try:
+                required_level = int(activity.get('UnlockLevel', 8))
+                duration = int(activity.get('DurationTime', 0))
+                px, pz = int((picked_char.get('pos') or [])[0]), int((picked_char.get('pos') or [0, 0, 0])[2])
+                requested_x, requested_z = int(x), int(z)
+                in_map = str(picked_char.get('map_id')) == str(activity.get('MapId', '101'))
+                in_range = math.hypot(requested_x - px, requested_z - pz) <= 500
+                in_gather_area = (is_in_map_gather_area(activity.get('MapId', '101'), picked_char.get('pos'))
+                                  and is_in_map_gather_area(activity.get('MapId', '101'), [requested_x, requested_z]))
+                item_is_personal_speaker = item_id == '6001' and int(item_cfg.get('type', -1)) == 28
+            except (TypeError, ValueError, IndexError):
+                return False
+            runtime = ensure_dance_runtime(picked_char, now)
+            if (item_is_personal_speaker and in_map and in_range and in_gather_area
+                    and int(picked_char.get('level', 1)) >= required_level
+                    and duration > 0 and int(runtime.get('speaker_end_time', 0)) <= now):
+                runtime['speaker_start_time'] = now
+                runtime['speaker_end_time'] = now + duration
+                if consume_item:
+                    item['amount'] = int(item.get('amount', 1)) - 1
+                    if item['amount'] <= 0:
+                        picked_char['inventory'].remove(item)
+                    send_rpc_push(526, encode_sproto([(0, 1), (1, int(index_id))]))
+                    save_chars(all_accounts_chars)
+                success = True
+        if success:
+            send_rpc_push(686, dance_state_info_payload(picked_char, now))
+        return success
+
     def schedule_domin_return(restore_hp=False):
         """Return after the Capture mission's APK-localized five-second exit notice."""
         if not picked_char or picked_char.get('domin_return_scheduled'):
@@ -6764,6 +7141,13 @@ def client_handler(conn, addr):
                     picked_char['last_played'] = int(time.time())
                     print(f"[CHARACTER PICK] id={picked_char['id']} level={picked_char.get('level')}")
                     init_character_fields(picked_char)
+                    # Repair old completed downloads that were marked done by
+                    # builds whose fallback omitted the car, revive, and heal
+                    # rewards. Do it before the initial bag snapshots are sent.
+                    if (picked_char.get('download_complete')
+                            and not picked_char.get('download_rewards_granted')):
+                        if ensure_download_rewards_granted(picked_char):
+                            save_chars(all_accounts_chars)
                     reconcile_exp_stage_login(picked_char)
                     picked_char.pop('_street_race_return_reconnect', None)
                     active_copy_id = str(picked_char.get('active_copy_id') or '')
@@ -7170,6 +7554,8 @@ def client_handler(conn, addr):
                     picked_char = reconnect_char
                     ALL_CONNECTIONS[reconnect_char_id] = (conn, picked_char)
                     CONNECTION_LOCKS[reconnect_char_id] = send_lock
+                    if isinstance(picked_char.get('dance_runtime'), dict) and picked_char['dance_runtime'].get('running'):
+                        settle_personal_dance(picked_char, stop=True)
                     _sync_friend_online_state(reconnect_char_id, 1)
                     if is_street_race_reconnect:
                         # Rebind the authenticated character before route recovery;
@@ -8668,6 +9054,119 @@ def client_handler(conn, addr):
                     sync_all_backpacks(picked_char, send_rpc_push)
                 send_rpc_response(session, encode_sproto([(0, state)]))
 
+            elif msg == 227: # request_dance_info
+                if picked_char:
+                    requested_type = get_val_int(body, 0, 0)
+                    payload = dance_selection_payload(picked_char, requested_type)
+                    send_rpc_response(session)
+                    send_rpc_push(623, payload)
+
+            elif msg == 229: # use_dance
+                dance_id = get_val_str(body, 0, '')
+                accepted = False
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    now = int(time.time())
+                    activity = CITY_DANCE_CONFIG.get('101', {})
+                    dance_cfg = DANCE_CONFIG.get(dance_id)
+                    try:
+                        in_dance_scene = (str(picked_char.get('map_id')) == str(activity.get('MapId', '101'))
+                                          and int(picked_char.get('level', 1)) >= int(activity.get('UnlockLevel', 8))
+                                          and is_in_map_gather_area(activity.get('MapId', '101'), picked_char.get('pos')))
+                    except (TypeError, ValueError):
+                        in_dance_scene = False
+                    with get_character_transaction_lock(picked_char):
+                        runtime = ensure_dance_runtime(picked_char, now)
+                        if (in_dance_scene and dance_cfg
+                                and int(dance_cfg.get('UseType', 0)) == 0
+                                and (int(runtime.get('free_duration', 0)) > 0
+                                     or int(runtime.get('speaker_end_time', 0)) > now)
+                                and not runtime.get('running')):
+                            try:
+                                price = max(0, int(dance_cfg.get('Price', 0)))
+                                price_type = int(dance_cfg.get('PriceType', 0))
+                                paid_end = int(runtime.get('paid_end_time', 0))
+                            except (TypeError, ValueError):
+                                price, price_type, paid_end = -1, -1, 0
+                            if price >= 0 and 0 <= price_type < len(MONEY_FIELDS):
+                                if price == 0 or paid_end > now:
+                                    accepted = True
+                                elif get_currency_balance(picked_char, price_type) >= price:
+                                    duration = int(activity.get('DurationTime', 1800) or 1800)
+                                    set_currency_balance(picked_char, price_type,
+                                                         get_currency_balance(picked_char, price_type) - price)
+                                    runtime['paid_end_time'] = now + max(1, duration)
+                                    accepted = True
+                                if accepted:
+                                    current, _dance_infos = dance_choice_data(picked_char, now)
+                                    if current != dance_id:
+                                        runtime['cur_use'] = dance_id
+                                    runtime['running'] = True
+                                    runtime['running_since'] = now
+                                    if int(dance_cfg.get('Price', 0)) > 0:
+                                        # Paid choreography has its own absolute expiry. Do not
+                                        # burn the player's separate free-dance allowance while
+                                        # they are using a paid selection.
+                                        runtime['running_source'] = 'paid'
+                                    elif int(runtime.get('free_duration', 0)) > 0:
+                                        runtime['running_source'] = 'free'
+                                    else:
+                                        runtime['running_source'] = 'speaker'
+                                    runtime['dance_id'] = dance_id
+                                    save_chars(all_accounts_chars)
+                    if accepted:
+                        current, dance_infos = dance_choice_data(picked_char, now)
+                        send_rpc_push(624, encode_sproto([(0, current), (1, dance_infos)]))
+                        send_rpc_push(686, dance_state_info_payload(picked_char, now))
+                        sync_char_attrs_rpc(conn, picked_char, conn_id)
+                        broadcast_aoi_attribute(picked_char)
+                        advance_missions(picked_char, send_rpc_push, 'dance',
+                                         target_id='101', map_id='101')
+                    elif dance_id == '10002' and dance_cfg and get_currency_balance(
+                            picked_char, int(dance_cfg.get('PriceType', 1))) < int(dance_cfg.get('Price', 0)):
+                        send_rpc_push(529, encode_sproto([(0, 'Not enough gold for this dance.'), (1, True)]))
+                send_rpc_response(session)
+
+            elif msg == 228: # pause_participate_dance
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    settle_personal_dance(picked_char, stop=True)
+                    if str(picked_char.get('map_id')) == '101':
+                        send_rpc_push(686, dance_state_info_payload(picked_char))
+                        sync_char_attrs_rpc(conn, picked_char, conn_id)
+                        broadcast_aoi_attribute(picked_char)
+                    save_chars(all_accounts_chars)
+                send_rpc_response(session)
+
+            elif msg == 275: # play_social_dance
+                sender_id = get_val_int(body, 0, 0)
+                dance_id = get_val_str(body, 1, '')
+                social_cfg = SOCIAL_DANCE_CONFIG.get(dance_id, {})
+                try:
+                    allowed = (picked_char and is_current_character_connection(conn, picked_char)
+                               and sender_id == int(picked_char.get('id', 0))
+                               and int(picked_char.get('level', 1)) >= int(social_cfg.get('Level', 9999))
+                               and dance_id in SOCIAL_DANCE_CONFIG
+                               and not is_single_player_map(picked_char.get('map_id'))
+                               and not is_exp_map(picked_char.get('map_id'))
+                               and not street_race_config_for_map(picked_char.get('map_id')))
+                except (TypeError, ValueError):
+                    allowed = False
+                if allowed:
+                    emote_payload = encode_sproto([(0, sender_id), (1, dance_id)])
+                    for peer_id, (_peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
+                        if peer_char and can_aoi_exchange(picked_char, peer_char):
+                            send_push_to_char(peer_id, 657, emote_payload)
+                send_rpc_response(session)
+
+            elif msg == 314: # use_dance_sound_box (alternate client protocol)
+                index_id = get_val_int(body, 0, -1)
+                success = use_personal_dance_speaker(index_id,
+                                                     get_val_int(body, 1, None),
+                                                     get_val_int(body, 2, None),
+                                                     consume_item=True)
+                if not success:
+                    send_rpc_push(526, encode_sproto([(0, 0), (1, index_id)]))
+                send_rpc_response(session)
+
             elif msg == 115: # use_item, including vehicle exchange vouchers
                 index_id = get_val_int(body, 0, -1)
                 success = 0
@@ -8765,15 +9264,18 @@ def client_handler(conn, addr):
                                         and int(cfg.get('level', 0)) <= int(picked_char.get('level', 1))):
                                     success = 1
                             elif item_type == 28:
-                                # Dance tools require the separate dance-state,
-                                # participation, and reward flow (protocols
-                                # 624/686); acknowledging this item here would
-                                # consume it without starting that activity.
-                                print(f"[BACKPACK] rejected dance tool item={item_id}; dance activity handler is unavailable")
-                                send_rpc_push(529, encode_sproto([
-                                    (0, 'Dance speaker activity is not available on this server.'),
-                                    (1, True)
-                                ]))
+                                # Item 6001 starts the configured personal
+                                # activity, and only consumes after all map,
+                                # level, cooldown and coordinate checks pass.
+                                if item_id == '6001':
+                                    success = int(use_personal_dance_speaker(
+                                        index_id,
+                                        get_val_int(body, 1, None),
+                                        get_val_int(body, 2, None),
+                                        consume_item=False
+                                    ))
+                                else:
+                                    print(f"[BACKPACK] rejected unsupported guild dance tool item={item_id}")
                             if success:
                                 item['amount'] = int(item.get('amount', 1)) - 1
                                 if item['amount'] <= 0:
@@ -10385,24 +10887,21 @@ def client_handler(conn, addr):
             elif msg == 270: # download_finish
                 if picked_char:
                     with get_character_transaction_lock(picked_char):
-                        if not picked_char.get('download_complete'):
-                            picked_char['download_complete'] = True
-                            # Expansion Rewards from DownloadRewardData
-                            if DOWNLOAD_REWARD_DATA:
-                                for item_id, count, quality in DOWNLOAD_REWARD_DATA:
-                                    add_to_inventory(picked_char, item_id, count)
-                            else:
-                                # Fallback - only items that exist in ItemData
-                                add_to_inventory(picked_char, "5011", 1)   # EXP*100000
-                                add_to_inventory(picked_char, "5012", 1)   # EXP*1000000
-                                add_to_inventory(picked_char, "5026", 5)   # World Channel Speak
-                            save_chars(all_accounts_chars)
+                        granted = ensure_download_rewards_granted(picked_char)
+                        picked_char['download_complete'] = True
+                        save_chars(all_accounts_chars)
 
-                            # Sync items and finalize client state
-                            sync_all_backpacks(picked_char, send_rpc_push)
-                            print(f"[REWARD] Expansion finalized and rewards granted for player {picked_char['id']}")
+                        # The APK applies tag 611 to its live item container.
+                        # Always resend the bag here, including duplicate finish
+                        # requests, so a stale UI/session is repaired as well.
+                        sync_all_backpacks(picked_char, send_rpc_push)
+                        if granted:
+                            print(f"[REWARD] Expansion finalized for player {picked_char['id']}")
+                        elif picked_char.get('download_rewards_granted'):
+                            print(f"[REWARD] Expansion already claimed by player {picked_char['id']}; bag resynced")
                         else:
-                            print(f"[REWARD] Player {picked_char['id']} already claimed expansion rewards.")
+                            print(f"[REWARD] Expansion claim pending bag space for player {picked_char['id']}")
+
                         # Keep the current client session consistent with the
                         # persisted completion state if MSG 270 repeats.
                         send_rpc_push(654, encode_sproto([(0, 1)])) # start_enter_game state=1
@@ -10942,6 +11441,9 @@ def client_handler(conn, addr):
                     send_rpc_push(555, sync_copy_scenes(picked_char))
                     print(f"[COPY] sent daily copy state level={picked_char.get('level', 1)}")
 
+                elif msg == 313 and picked_char: # request_dance_state_info
+                    send_rpc_push(686, dance_state_info_payload(picked_char))
+
                 elif msg == 253 and picked_char: # request_sign_week_info
                     sign_calendar = current_sign_calendar()
                     day = int(sign_calendar['week_day'])
@@ -11009,7 +11511,13 @@ def client_handler(conn, addr):
                 elif msg == 225 and picked_char: # request_activity_info
                     now_ts = int(time.time())
                     acts = {
-                        "1": encode_sproto([(0, 1), (1, now_ts - 3600), (2, now_ts + 86400 * 30), (3, 0), (4, 86400), (5, 1)])
+                        # activity_info schema: ID, CurNum, Type, State,
+                        # Parm, Parmstr, sign, time, next. Type 3 maps to
+                        # CityDanceData 101, the player's level-8 solo dance.
+                        "101": encode_sproto([
+                            (0, "101"), (1, 0), (2, 3), (3, 1),
+                            (4, 0), (5, ""), (6, 0), (7, now_ts), (8, 0)
+                        ])
                     }
                     send_rpc_push(619, encode_sproto([(0, acts)]))
 
@@ -12154,6 +12662,11 @@ def client_handler(conn, addr):
             is_current_connection = bool(picked_char and ALL_CONNECTIONS.get(char_id, (None, None))[0] is conn)
             if picked_char:
                 if is_current_connection:
+                    if isinstance(picked_char.get('dance_runtime'), dict) and picked_char['dance_runtime'].get('running'):
+                        settle_personal_dance(picked_char, stop=True)
+                        if str(picked_char.get('map_id')) == '101':
+                            broadcast_aoi_attribute(picked_char)
+                        save_chars(all_accounts_chars)
                     broadcast_aoi_remove(char_id, picked_char.get('map_id', '11'))
             RANDOM_NAME_CALLED.discard(conn_id)
             if picked_char:
