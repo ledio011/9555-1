@@ -35,6 +35,9 @@ CHAR_DB_SAVE_LOCK = threading.Lock() # serialize atomic snapshots to the shared 
 TEAM_ID_COUNTER_LOCK = threading.Lock()
 EXP_RUN_COUNTER_LOCK = threading.Lock()
 MAIL_ID_COUNTER_LOCK = threading.Lock()
+DANCE_REWARD_TIMER_LOCK = threading.Lock()
+DANCE_REWARD_TIMERS = {}  # character ID -> active personal-dance reward timer
+DANCE_SERVER_EPOCH = str(time.time_ns())  # do not credit offline time across a restart
 
 def next_global_inst_id():
     global GLOBAL_INST_COUNTER
@@ -3413,6 +3416,10 @@ def ensure_dance_runtime(char, now=None):
         free_duration = 0
     stamp = current_daily_stamp()
     if runtime.get('free_day') != stamp:
+        try:
+            next_run_id = int(runtime.get('dance_run_id', 0)) + 1
+        except (TypeError, ValueError):
+            next_run_id = 1
         runtime.update({
             'free_day': stamp,
             'free_duration': free_duration,
@@ -3421,16 +3428,24 @@ def ensure_dance_runtime(char, now=None):
             'running_since': 0,
             'running_source': '',
             'dance_id': '',
+            'reward_elapsed_seconds': 0,
+            'reward_dance_id': '',
+            'dance_run_id': next_run_id,
+            'server_epoch': DANCE_SERVER_EPOCH,
         })
     try:
         runtime['free_duration'] = max(0, min(free_duration, int(runtime.get('free_duration', free_duration))))
         runtime['speaker_end_time'] = max(0, int(runtime.get('speaker_end_time', 0)))
         runtime['speaker_start_time'] = max(0, int(runtime.get('speaker_start_time', 0)))
         runtime['paid_end_time'] = max(0, int(runtime.get('paid_end_time', 0)))
+        runtime['reward_elapsed_seconds'] = max(0, int(runtime.get('reward_elapsed_seconds', 0)))
+        runtime['dance_run_id'] = max(0, int(runtime.get('dance_run_id', 0)))
+        runtime['reward_dance_id'] = str(runtime.get('reward_dance_id', '') or '')
         runtime['cur_use'] = str(runtime.get('cur_use') or '10001')
     except (TypeError, ValueError):
         runtime.update({'free_duration': free_duration, 'speaker_end_time': 0,
-                        'speaker_start_time': 0, 'paid_end_time': 0, 'cur_use': '10001'})
+                        'speaker_start_time': 0, 'paid_end_time': 0,
+                        'reward_elapsed_seconds': 0, 'dance_run_id': 0, 'cur_use': '10001'})
     paid_dances = runtime.get('paid_dances')
     if not isinstance(paid_dances, dict):
         paid_dances = {}
@@ -3444,31 +3459,206 @@ def ensure_dance_runtime(char, now=None):
         runtime['speaker_start_time'] = 0
     return runtime
 
-def settle_personal_dance(char, now=None, stop=False):
-    """Charge only the free-dance seconds actually spent dancing."""
+def personal_dance_reward_interval(activity=None):
+    """CityDanceData RewardDuration is a minute count; DurationTime is seconds."""
+    activity = activity or CITY_DANCE_CONFIG.get('101', {})
+    try:
+        return max(1, int(activity.get('RewardDuration', 1) or 1) * 60)
+    except (TypeError, ValueError):
+        return 60
+
+def personal_dance_reward_list(char, dance_id):
+    """Resolve level-adapted dance rewards and apply DanceData.RewardScale."""
+    activity = CITY_DANCE_CONFIG.get('101', {})
+    try:
+        level = max(1, int(char.get('level', 1)))
+    except (TypeError, ValueError):
+        level = 1
+    drop_key = str(activity.get('DropId') or '_drop_jh')
+    rewards = daily_active_rewards_for_level(drop_key, level)
+    # The shipped AdaptData points levels 2+ to 30302+, but this client bundle
+    # only includes ShowRewardData 30301 for personal dance. Use its configured
+    # EXP reward instead of silently returning no reward for those levels.
+    if not rewards:
+        rewards = list(SHOW_REWARD_CONFIG.get(str(activity.get('ShowRewardId') or ''), []))
+    try:
+        scale = max(0, int(DANCE_CONFIG.get(str(dance_id), {}).get('RewardScale', 100) or 100))
+    except (TypeError, ValueError):
+        scale = 100
+    scaled = []
+    for item_id, quality, amount in rewards:
+        try:
+            scaled_amount = max(0, int(amount)) * scale // 100
+        except (TypeError, ValueError):
+            continue
+        if item_id and scaled_amount > 0:
+            scaled.append((str(item_id), int(quality), scaled_amount))
+    return scaled
+
+def cancel_personal_dance_reward_timer(char_id):
+    try:
+        char_id = int(char_id)
+    except (TypeError, ValueError):
+        return
+    with DANCE_REWARD_TIMER_LOCK:
+        timer = DANCE_REWARD_TIMERS.pop(char_id, None)
+    if timer:
+        timer.cancel()
+
+def schedule_personal_dance_reward(char, run_id=None):
+    """Schedule the next configured personal-dance reward interval."""
+    if not char:
+        return False
+    try:
+        char_id = int(char.get('id', 0))
+    except (TypeError, ValueError):
+        return False
+    with get_character_transaction_lock(char):
+        runtime = ensure_dance_runtime(char)
+        current_run_id = int(runtime.get('dance_run_id', 0))
+        if (not runtime.get('running')
+                or str(runtime.get('server_epoch', '')) != DANCE_SERVER_EPOCH
+                or (run_id is not None and int(run_id) != current_run_id)):
+            return False
+        interval = personal_dance_reward_interval()
+        progress = int(runtime.get('reward_elapsed_seconds', 0)) % interval
+        timer = threading.Timer(max(0.25, interval - progress),
+                                personal_dance_reward_timer_tick,
+                                args=(char_id, current_run_id))
+        timer.daemon = True
+        with DANCE_REWARD_TIMER_LOCK:
+            old_timer = DANCE_REWARD_TIMERS.get(char_id)
+            if old_timer:
+                old_timer.cancel()
+            DANCE_REWARD_TIMERS[char_id] = timer
+            timer.start()
+    return True
+
+def personal_dance_reward_timer_tick(char_id, run_id):
+    current_timer = threading.current_thread()
+    with DANCE_REWARD_TIMER_LOCK:
+        if DANCE_REWARD_TIMERS.get(int(char_id)) is not current_timer:
+            return
+        DANCE_REWARD_TIMERS.pop(int(char_id), None)
+    conn, char = ALL_CONNECTIONS.get(int(char_id), (None, None))
+    if not conn or not char or int(char.get('id', 0)) != int(char_id):
+        return
+    try:
+        runtime = settle_personal_dance(char, stop=False, expected_run_id=run_id)
+        if str(char.get('map_id')) == '101':
+            send_push_to_char(char_id, 686, dance_state_info_payload(char))
+        if runtime.get('running') and int(runtime.get('dance_run_id', 0)) == int(run_id):
+            schedule_personal_dance_reward(char, run_id)
+        else:
+            current = ALL_CONNECTIONS.get(int(char_id), (None, None))
+            if current[0] is conn and current[1] is char:
+                sync_char_attrs_rpc(conn, char, int(char_id))
+                save_chars(all_accounts_chars)
+    except Exception as exc:
+        print(f"[DANCE REWARD] timer failed char={char_id}: {exc}")
+
+def settle_personal_dance(char, now=None, stop=False, expected_run_id=None):
+    """Accrue validated dance time and grant completed reward intervals once."""
     if now is None:
         now = int(time.time())
+    try:
+        char_id = int(char.get('id', 0) or 0)
+    except (TypeError, ValueError):
+        char_id = 0
     runtime = ensure_dance_runtime(char, now)
-    if runtime.get('running'):
-        try:
-            started = int(runtime.get('running_since', now))
-            elapsed = max(0, min(86400, now - started))
-        except (TypeError, ValueError):
-            elapsed = 0
-        if runtime.get('running_source') == 'free':
-            runtime['free_duration'] = max(0, int(runtime.get('free_duration', 0)) - elapsed)
-        if stop or runtime.get('free_duration', 0) <= 0 and runtime.get('running_source') == 'free':
+    earned_intervals = 0
+    earned_rewards = []
+    earned_dance_id = ''
+    accrued = False
+    with get_character_transaction_lock(char):
+        runtime = ensure_dance_runtime(char, now)
+        if expected_run_id is not None and int(runtime.get('dance_run_id', 0)) != int(expected_run_id):
+            return runtime
+        if runtime.get('running') and str(runtime.get('server_epoch', '')) != DANCE_SERVER_EPOCH:
             runtime['running'] = False
             runtime['running_since'] = 0
             runtime['running_source'] = ''
             runtime['dance_id'] = ''
-        else:
-            runtime['running_since'] = now
-    elif stop:
-        runtime['running'] = False
-        runtime['running_since'] = 0
-        runtime['running_source'] = ''
-        runtime['dance_id'] = ''
+            runtime['dance_run_id'] = int(runtime.get('dance_run_id', 0)) + 1
+            runtime['server_epoch'] = DANCE_SERVER_EPOCH
+        elif runtime.get('running'):
+            try:
+                started = int(runtime.get('running_since', now))
+                elapsed = max(0, min(86400, int(now) - started))
+            except (TypeError, ValueError):
+                started, elapsed = int(now), 0
+            source = str(runtime.get('running_source', ''))
+            active_until = 0
+            if source == 'free':
+                active_until = started + max(0, int(runtime.get('free_duration', 0)))
+            elif source == 'paid':
+                paid_dances = runtime.get('paid_dances', {})
+                active_until = int(paid_dances.get(str(runtime.get('dance_id', '')), 0)
+                                   or runtime.get('paid_end_time', 0) or 0)
+            elif source == 'speaker':
+                active_until = int(runtime.get('speaker_end_time', 0))
+            activity = CITY_DANCE_CONFIG.get('101', {})
+            area_valid = (str(char.get('map_id')) == str(activity.get('MapId', '101'))
+                          and is_in_map_gather_area(activity.get('MapId', '101'), char.get('pos')))
+            effective_elapsed = min(elapsed, max(0, active_until - started)) if active_until else elapsed
+            if not area_valid or (source in ('paid', 'speaker') and active_until <= 0):
+                effective_elapsed = 0
+            if source == 'free':
+                runtime['free_duration'] = max(0, int(runtime.get('free_duration', 0)) - effective_elapsed)
+
+            interval = personal_dance_reward_interval(activity)
+            earned_dance_id = str(runtime.get('dance_id', ''))
+            runtime['reward_elapsed_seconds'] = max(0, int(runtime.get('reward_elapsed_seconds', 0))) + effective_elapsed
+            rewards = personal_dance_reward_list(char, runtime.get('dance_id', ''))
+            if rewards:
+                earned_intervals, remainder = divmod(runtime['reward_elapsed_seconds'], interval)
+                runtime['reward_elapsed_seconds'] = remainder
+                earned_rewards = rewards
+            should_stop = (stop or not area_valid or effective_elapsed < elapsed
+                           or (source == 'free' and runtime.get('free_duration', 0) <= 0)
+                           or (source in ('paid', 'speaker') and active_until > 0 and int(now) >= active_until))
+            if should_stop:
+                runtime['running'] = False
+                runtime['running_since'] = 0
+                runtime['running_source'] = ''
+                runtime['dance_id'] = ''
+                runtime['dance_run_id'] = int(runtime.get('dance_run_id', 0)) + 1
+            else:
+                runtime['running_since'] = int(now)
+            accrued = effective_elapsed > 0
+        elif stop:
+            runtime['running'] = False
+            runtime['running_since'] = 0
+            runtime['running_source'] = ''
+            runtime['dance_id'] = ''
+            runtime['dance_run_id'] = int(runtime.get('dance_run_id', 0)) + 1
+
+        if earned_intervals:
+            if earned_rewards:
+                reward_entries = [entry for _ in range(earned_intervals) for entry in earned_rewards]
+                active = ALL_CONNECTIONS.get(char_id, (None, None))
+                reward_conn = active[0] if active[1] is char else None
+                reward_push = lambda tag, payload: send_push_to_char(char_id, tag, payload)
+                grant_item_rewards(char, reward_entries, reward_conn, reward_push, save=False)
+                # The client displays periodic activity payouts through
+                # show_reward_items_tips (638). Attribute/inventory sync above
+                # applies the reward but does not show it to the player.
+                popup_totals = {}
+                for item_id, quality, amount in reward_entries:
+                    key = (str(item_id), int(quality))
+                    popup_totals[key] = popup_totals.get(key, 0) + int(amount)
+                popup_items = [
+                    encode_sproto([(0, item_id), (1, amount), (3, quality)])
+                    for (item_id, quality), amount in popup_totals.items()
+                    if amount > 0
+                ]
+                if popup_items:
+                    reward_push(638, encode_sproto([(0, popup_items)]))
+                print(f"[DANCE REWARD] char={char_id} dance={earned_dance_id} intervals={earned_intervals} rewards={reward_entries}")
+        if accrued or stop or not runtime.get('running'):
+            save_chars(all_accounts_chars)
+    if stop or not runtime.get('running'):
+        cancel_personal_dance_reward_timer(char_id)
     return runtime
 
 def dance_state_info_payload(char, now=None):
@@ -3486,12 +3676,25 @@ def dance_state_info_payload(char, now=None):
         unlocked, duration = False, 0
     if unlocked and duration > 0:
         runtime['free_duration'] = max(0, min(duration, int(runtime.get('free_duration', duration))))
-        reset_at = now + max(0, int(runtime['free_duration']))
+        remaining = max(0, int(runtime['free_duration']))
+        if runtime.get('running'):
+            try:
+                if runtime.get('running_source') == 'free':
+                    remaining = max(0, remaining - max(0, now - int(runtime.get('running_since', now))))
+                elif runtime.get('running_source') == 'paid':
+                    paid_end = int(runtime.get('paid_dances', {}).get(str(runtime.get('dance_id', '')), 0)
+                                   or runtime.get('paid_end_time', 0) or 0)
+                    remaining = max(0, paid_end - now)
+                elif runtime.get('running_source') == 'speaker':
+                    remaining = max(0, int(runtime.get('speaker_end_time', 0)) - now)
+            except (TypeError, ValueError):
+                remaining = 0
+        reset_at = now + remaining
         free_uuid = int(char.get('id', 0)) * 100 + 101
         entries[str(free_uuid)] = encode_sproto([
             (0, free_uuid), (1, '101'), (2, int(runtime.get('free_started_at', 0))),
-            (3, reset_at), (4, 1 if runtime.get('free_duration', 0) > 0 else 0),
-            (5, 0), (6, int(runtime.get('free_duration', 0))),
+            (3, reset_at), (4, 1 if remaining > 0 else 0),
+            (5, 0), (6, remaining),
             (7, reset_at),
             (8, 0)
         ])
@@ -9417,10 +9620,22 @@ def client_handler(conn, addr):
                         in_dance_scene = False
                     with get_character_transaction_lock(picked_char):
                         runtime = ensure_dance_runtime(picked_char, now)
+                        try:
+                            requested_price = max(0, int(dance_cfg.get('Price', 0))) if dance_cfg else -1
+                            requested_price_type = int(dance_cfg.get('PriceType', 0)) if dance_cfg else -1
+                            existing_paid_end = int(runtime.setdefault('paid_dances', {}).get(dance_id, 0) or 0)
+                            if dance_id == '10002':
+                                existing_paid_end = max(existing_paid_end, int(runtime.get('paid_end_time', 0)))
+                            dance_has_time = (int(runtime.get('free_duration', 0)) > 0
+                                              or int(runtime.get('speaker_end_time', 0)) > now
+                                              or (requested_price > 0 and 0 <= requested_price_type < len(MONEY_FIELDS)
+                                                  and (existing_paid_end > now
+                                                       or get_currency_balance(picked_char, requested_price_type) >= requested_price)))
+                        except (TypeError, ValueError):
+                            dance_has_time = False
                         if (in_dance_scene and dance_cfg
                                 and int(dance_cfg.get('UseType', 0)) == 0
-                                and (int(runtime.get('free_duration', 0)) > 0
-                                     or int(runtime.get('speaker_end_time', 0)) > now)
+                                and dance_has_time
                                 and not runtime.get('running')):
                             try:
                                 price = max(0, int(dance_cfg.get('Price', 0)))
@@ -9447,9 +9662,14 @@ def client_handler(conn, addr):
                                     current, _dance_infos = dance_choice_data(picked_char, now)
                                     if current != dance_id:
                                         runtime['cur_use'] = dance_id
+                                    if str(runtime.get('reward_dance_id', '')) != dance_id:
+                                        runtime['reward_elapsed_seconds'] = 0
+                                    runtime['reward_dance_id'] = dance_id
                                     runtime['running'] = True
                                     runtime['running_since'] = now
                                     runtime['free_started_at'] = now
+                                    runtime['dance_run_id'] = int(runtime.get('dance_run_id', 0)) + 1
+                                    runtime['server_epoch'] = DANCE_SERVER_EPOCH
                                     if int(dance_cfg.get('Price', 0)) > 0:
                                         # Paid choreography has its own absolute expiry. Do not
                                         # burn the player's separate free-dance allowance while
@@ -9467,6 +9687,7 @@ def client_handler(conn, addr):
                         send_rpc_push(686, dance_state_info_payload(picked_char, now))
                         sync_char_attrs_rpc(conn, picked_char, conn_id)
                         broadcast_aoi_attribute(picked_char)
+                        schedule_personal_dance_reward(picked_char, runtime.get('dance_run_id'))
                         advance_missions(picked_char, send_rpc_push, 'dance',
                                          target_id='101', map_id='101')
                         # DailyActiveData Type 17 is the APK's personal-dance
