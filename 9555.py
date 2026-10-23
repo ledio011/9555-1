@@ -110,6 +110,8 @@ WEAPON_DROP_CONFIG = {} # WeaponDrop ID -> weighted random weapon skill definiti
 QUALITY_CONFIG = {} # QualityData ID -> ordered quality score/modulus rows
 EQUIPMENT_UPGRADE_CONFIG = {} # equipment position -> level -> profession quality coefficients
 BADGE_CONFIG = {} # badgeId -> BadgeData fields used by merge and display logic
+REFINE_CONFIG = {} # refineId -> client RefineData row
+REFINE_BY_PART_LEVEL = {} # (profession, part, level) -> RefineData row
 DOWNLOAD_REWARD_DATA = [] # list of (itemId, count, quality) tuples
 SKILL_UPGRADE_DATA = {} # level -> {price_type, price_value}
 RELIFE_DATA = [] # list of {min_count, max_count, use_count}
@@ -1006,6 +1008,33 @@ try:
                         'upgrade_cost': _badge_int(10, 0), 'upgrade_count': max(1, _badge_int(11, 4))
                     }
         print(f"[BADGE CONFIG LOADED] badges={len(BADGE_CONFIG)}")
+
+    # RefineData is the source of truth for star-refine levels, costs,
+    # protection materials, chances, and the attributes awarded per part.
+    refine_path = os.path.join(text_asset_root, "RefineData")
+    if os.path.exists(refine_path):
+        with open(refine_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(',')
+                if len(parts) < 23 or parts[0] != '*' or not parts[1].isdigit():
+                    continue
+                def _refine_int(index, default=0):
+                    value = parts[index].strip() if index < len(parts) else ''
+                    return int(value) if value.lstrip('-').isdigit() else default
+                row = {
+                    'id': parts[1].strip(), 'job': _refine_int(2, -1),
+                    'part': _refine_int(3, -1), 'level': _refine_int(4, -1),
+                    'stats': [(_refine_int(i), _refine_int(i + 1))
+                              for i in (5, 7, 9, 11)],
+                    'cost_id1': parts[13].strip(), 'cost1': _refine_int(14),
+                    'cost_id2': parts[15].strip(), 'cost2': _refine_int(16),
+                    'money_type': _refine_int(17, -1), 'money_cost': _refine_int(18),
+                    'safety_id': parts[19].strip(), 'safety_cost': _refine_int(20),
+                    'chance': _refine_int(21), 'icon': parts[22].strip()
+                }
+                REFINE_CONFIG[row['id']] = row
+                REFINE_BY_PART_LEVEL[(row['job'], row['part'], row['level'])] = row
+        print(f"[REFINE CONFIG LOADED] rows={len(REFINE_CONFIG)}")
 
     # Street Race's actual reward preview is resolved by AdaptData's
     # _drop_bc key, then ShowRewardData.  Read those client tables rather
@@ -1951,13 +1980,9 @@ def build_aoi_add_packet(char):
         visual_bytes = get_visual(char.get('name', 'Hero'), char.get('prof', 0), character=char)
         gen_bytes = get_general(char)
         stats = get_character_stats(char)
-        attr_oth = encode_sproto([
-            (0, current_character_hp(char, stats)),
-            (1, stats['exp']),
-            (2, stats['lv']),
-            (3, stats['power']),
-            (15, 1)
-        ])
+        attr_oth = encode_sproto(character_attribute_other_fields(
+            char, stats, current_character_hp(char, stats)
+        ))
         mv_bytes = get_movement(pos[0], pos[1], pos[2], pos[3])
         runtime_bytes = get_runtime_aoi(char)
         char_aoi = encode_sproto([
@@ -2198,9 +2223,7 @@ def broadcast_aoi_attribute(char):
     stats = get_character_stats(char)
     try:
         hp_cur = current_character_hp(char, stats)
-        attr_oth = encode_sproto([
-            (0, hp_cur), (1, stats['exp']), (2, stats['lv']), (3, stats['power']), (15, 1)
-        ])
+        attr_oth = encode_sproto(character_attribute_other_fields(char, stats, hp_cur))
         attr_base = encode_sproto(character_attribute_fields(stats))
         attr_all = encode_sproto(character_attribute_fields(stats))
         prop = encode_sproto([(13, get_currency_balance(char, 0)),
@@ -2951,6 +2974,32 @@ def equipment_enhance_sproto(character):
         for slot, level in equipment_enhance_levels(character).items()
     }
 
+def character_refine_levels(character):
+    """Return and normalize the four refine-star levels stored for a character."""
+    raw = character.get('refine_levels', {})
+    if not isinstance(raw, dict):
+        raw = {}
+    levels = {}
+    for part in range(1, 5):
+        try:
+            value = raw.get(str(part), raw.get(part, 0))
+            levels[part] = max(0, min(10, int(value)))
+        except (TypeError, ValueError):
+            levels[part] = 0
+    character['refine_levels'] = {str(part): level for part, level in levels.items()}
+    return levels
+
+def character_attribute_other_fields(character, stats, hp_cur):
+    """Build the player's full attribute_other payload, including refine stars."""
+    levels = character_refine_levels(character)
+    return [
+        (0, hp_cur), (1, stats['exp']), (2, stats['lv']), (3, stats['power']),
+        (4, int(character.get('title_level', 0))),
+        (5, int(character.get('title_exp', 0))),
+        (9, levels[1]), (10, levels[2]), (11, levels[3]), (12, levels[4]),
+        (13, sum(levels.values())), (15, 1)
+    ]
+
 def get_character_stats(c):
     """Calculate player attributes from BaseLvData and currently equipped items."""
     lv = c.get('level', 1)
@@ -3056,6 +3105,19 @@ def get_character_stats(c):
             add_item_attribute(badge_cfg.get('status2'), badge_cfg.get('value2', 0))
             add_extra_combat_power(badge_cfg.get('status1'), badge_cfg.get('value1', 0))
             add_extra_combat_power(badge_cfg.get('status2'), badge_cfg.get('value2', 0))
+
+    # RefineData's four parts (neck, ring 1, ring 2, belt) are part of the
+    # client's combat attributes and displayed combat power, even though they
+    # are not stored as gameitems in one of the backpack maps.
+    refine_levels = character_refine_levels(c)
+    for part, level in refine_levels.items():
+        refine_row = REFINE_BY_PART_LEVEL.get((int(prof), part, level))
+        if not refine_row:
+            continue
+        for attribute_id, value in refine_row.get('stats', []):
+            if attribute_id:
+                add_item_attribute(attribute_id, value)
+                add_extra_combat_power(attribute_id, value)
 
     # Percentage bonuses are additive and are applied once to the complete
     # level + equipment totals, matching the client's 1/10000 percentage scale.
@@ -3167,15 +3229,7 @@ def get_full_char(c):
 
     hp_cur = current_character_hp(c, stats)
 
-    attr_oth = encode_sproto([
-        (0, hp_cur),
-        (1, stats['exp']),
-        (2, stats['lv']),
-        (3, stats['power']),
-        (4, int(c.get('title_level', 0))),
-        (5, int(c.get('title_exp', 0))),
-        (15, 1)
-    ])
+    attr_oth = encode_sproto(character_attribute_other_fields(c, stats, hp_cur))
 
     prop = encode_sproto([(13, get_currency_balance(c, 0)), (14, get_currency_balance(c, 1)),
                           (15, get_currency_balance(c, 2)), (16, get_currency_balance(c, 3)),
@@ -3232,11 +3286,7 @@ def sync_char_attrs_rpc(conn, picked_char, conn_id=None):
     hp_cur = current_character_hp(picked_char, stats)
 
     # attribute_other (Tag 1 in character_aoi_attribute)
-    attr_oth = encode_sproto([
-        (0, hp_cur), (1, stats['exp']), (2, stats['lv']), (3, stats['power']),
-        (4, int(picked_char.get('title_level', 0))),
-        (5, int(picked_char.get('title_exp', 0))), (15, 1)
-    ])
+    attr_oth = encode_sproto(character_attribute_other_fields(picked_char, stats, hp_cur))
 
     # attribute (Tag 2 in character_aoi_attribute)
     attr_base = encode_sproto(character_attribute_fields(stats))
@@ -5259,6 +5309,77 @@ def copy_attempts_remaining(picked_char, copy_id, cfg):
     if copy_id not in remaining:
         remaining[copy_id] = int(cfg.get('max_plays', 3))
     return max(0, int(remaining[copy_id]))
+
+def record_pending_exp_ticket(picked_char, copy_id):
+    """Remember the provisional EXP-stage attempt until team selection names its copy."""
+    copy_id = str(copy_id)
+    credits = picked_char.get('pending_exp_ticket_credits')
+    if not isinstance(credits, list):
+        credits = []
+    else:
+        # Persisted character state can outlive code versions. Ignore malformed
+        # records rather than letting a damaged ticket entry break item use.
+        credits = [entry for entry in credits if isinstance(entry, dict)]
+    day = current_daily_stamp()
+    existing = next((entry for entry in credits
+                     if str(entry.get('copy_id', '')) == copy_id
+                     and str(entry.get('day', '')) == day), None)
+    if existing is not None:
+        try:
+            existing_count = max(0, int(existing.get('count', 0)))
+        except (TypeError, ValueError):
+            existing_count = 0
+        existing['count'] = existing_count + 1
+    else:
+        credits.append({'copy_id': copy_id, 'day': day, 'count': 1})
+    picked_char['pending_exp_ticket_credits'] = credits
+
+def apply_pending_exp_tickets(picked_char, target_copy_id):
+    """Move provisional ticket attempts to the EXP copy selected by the client."""
+    credits = picked_char.get('pending_exp_ticket_credits')
+    if not isinstance(credits, list) or not credits:
+        return False
+    target_copy_id = str(target_copy_id or '')
+    target_cfg = COPY_SCENE_CONFIG.get(target_copy_id, {})
+    if (target_cfg.get('type') != 1 or int(target_cfg.get('subtype', -1)) != 12):
+        return False
+
+    day = current_daily_stamp()
+    moved = False
+    resolved = False
+    state = ensure_daily_copy_state(picked_char)
+    for entry in credits:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get('day', '')) != day:
+            continue
+        source_copy_id = str(entry.get('copy_id', ''))
+        source_cfg = COPY_SCENE_CONFIG.get(source_copy_id, {})
+        if (source_cfg.get('type') != 1 or int(source_cfg.get('subtype', -1)) != 12):
+            continue
+        try:
+            count = max(0, int(entry.get('count', 0)))
+        except (TypeError, ValueError):
+            count = 0
+        if count <= 0:
+            continue
+        resolved = True
+        if source_copy_id != target_copy_id:
+            source_remaining = copy_attempts_remaining(picked_char, source_copy_id, source_cfg)
+            state['remaining'][source_copy_id] = max(0, source_remaining - count)
+            target_remaining = copy_attempts_remaining(picked_char, target_copy_id, target_cfg)
+            state['remaining'][target_copy_id] = target_remaining + count
+            moved = True
+
+    # Every valid same-day credit has now been resolved to the selected copy;
+    # expired or malformed records must not be able to alter a later daily reset.
+    had_pending = 'pending_exp_ticket_credits' in picked_char
+    picked_char.pop('pending_exp_ticket_credits', None)
+    if had_pending:
+        save_chars(all_accounts_chars)
+    if moved:
+        print(f"[TICKET] assigned EXP ticket credit player={picked_char.get('id')} copy={target_copy_id}")
+    return moved
 
 def street_race_rewards(level, copy_id=None):
     """Resolve the active route's configured DropId through the client's AdaptData."""
@@ -7479,6 +7600,202 @@ def client_handler(conn, addr):
                                         print(f"[BACKPACK] enhanced slot={subtype} item={item_id} level={current_level}->{target_level} material={total_material} cash={total_cash}")
                 send_rpc_response(session)
 
+            elif msg == 183: # equip_refine: refine neck/ring/belt stars from RefineData
+                refine_id = field_text(body, 0)
+                pre_id = field_text(body, 1)
+                current_id = field_text(body, 2)
+                part = get_val_int(body, 3, -1)
+                requested_level = get_val_int(body, 4, -1)
+                use_safety = bool(get_val_int(body, 5, 0))
+                response_state = 1
+                response_part = part if 1 <= part <= 4 else 1
+                response_level = 0
+                response_allstar = 0
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    with get_character_transaction_lock(picked_char):
+                        levels = character_refine_levels(picked_char)
+                        current_level = levels.get(part, 0) if 1 <= part <= 4 else 0
+                        response_level = current_level
+                        response_allstar = sum(levels.values())
+                        profession = int(picked_char.get('prof', 0))
+                        current_row = REFINE_BY_PART_LEVEL.get((profession, part, current_level))
+                        target_row = REFINE_BY_PART_LEVEL.get((profession, part, current_level + 1))
+                        prior_row = (REFINE_BY_PART_LEVEL.get((profession, part, current_level - 1))
+                                     if current_level > 0 else None)
+                        request_matches = (
+                            current_row is not None and target_row is not None
+                            and target_row['id'] == refine_id
+                            and current_row['id'] == current_id
+                            and (prior_row['id'] if prior_row else '') == pre_id
+                            and int(target_row['level']) == requested_level
+                            and 1 <= part <= 4 and requested_level == current_level + 1
+                            and requested_level <= 10
+                        )
+                        if request_matches:
+                            money_type = int(current_row.get('money_type', -1))
+                            money_cost = max(0, int(current_row.get('money_cost', 0)))
+                            requirements = {}
+                            for item_key, amount_key in (('cost_id1', 'cost1'), ('cost_id2', 'cost2')):
+                                item_id = str(current_row.get(item_key, '') or '')
+                                amount = max(0, int(current_row.get(amount_key, 0)))
+                                if item_id and amount:
+                                    requirements[item_id] = requirements.get(item_id, 0) + amount
+                            safety_id = str(current_row.get('safety_id', '') or '')
+                            safety_cost = max(0, int(current_row.get('safety_cost', 0)))
+                            if use_safety:
+                                if current_level < 3 or not safety_id or safety_cost <= 0:
+                                    request_matches = False
+                                else:
+                                    requirements[safety_id] = requirements.get(safety_id, 0) + safety_cost
+                            if not (0 <= money_type < len(MONEY_FIELDS)):
+                                request_matches = False
+                            for item_id, amount in requirements.items():
+                                available = sum(
+                                    max(0, int(entry.get('amount', 0)))
+                                    for entry in picked_char.get('inventory', [])
+                                    if str(entry.get('id', '')) == item_id
+                                )
+                                if available < amount:
+                                    request_matches = False
+                                    break
+                            if (not request_matches or
+                                    get_currency_balance(picked_char, money_type) < money_cost):
+                                request_matches = False
+                            if request_matches:
+                                power_before = get_character_stats(picked_char)['power']
+                                # All material balances were preflighted together so consuming
+                                # multiple configured costs cannot leave a partial upgrade.
+                                consumed = all(
+                                    consume_backpack_item(picked_char, item_id, amount, send_rpc_push, 2)
+                                    for item_id, amount in requirements.items()
+                                )
+                                if consumed:
+                                    set_currency_balance(
+                                        picked_char, money_type,
+                                        get_currency_balance(picked_char, money_type) - money_cost
+                                    )
+                                    chance = max(0, min(100, int(current_row.get('chance', 0))))
+                                    succeeded = random.randint(1, 100) <= chance
+                                    if succeeded:
+                                        current_level += 1
+                                        response_state = 0
+                                    elif use_safety:
+                                        response_state = 2
+                                    else:
+                                        # The client has a separate "safe" option from +4.
+                                        # Unprotected failure drops one star; protected failure
+                                        # keeps the current level while still consuming costs.
+                                        current_level = max(0, current_level - 1)
+                                        response_state = 1
+                                    levels[part] = current_level
+                                    picked_char['refine_levels'] = {
+                                        str(key): value for key, value in levels.items()
+                                    }
+                                    response_level = current_level
+                                    response_allstar = sum(levels.values())
+                                    save_chars(all_accounts_chars)
+                                    sync_char_attrs_rpc(conn, picked_char)
+                                    send_combat_power_gain_tip(
+                                        send_rpc_push, power_before,
+                                        get_character_stats(picked_char)['power']
+                                    )
+                                    sync_equipment_status_to_peers(picked_char)
+                                    print(f"[BACKPACK] refine part={part} level={current_level} "
+                                          f"state={response_state} protected={use_safety}")
+                response_data = encode_sproto([
+                    (0, response_state), (1, response_part),
+                    (2, response_level), (3, response_allstar)
+                ])
+                send_rpc_response(session, response_data)
+
+            elif msg == 184: # equip_inhert: transfer stored equipment XP between same-slot gear
+                source_index = get_val_int(body, 0, -1)
+                source_type = get_val_int(body, 1, -1)
+                target_index = get_val_int(body, 2, -1)
+                target_type = get_val_int(body, 3, -1)
+                result = None
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    with get_character_transaction_lock(picked_char):
+                        ensure_backpack_state(picked_char)
+                        source_found = find_backpack_item(picked_char, source_index, source_type)
+                        target_found = find_backpack_item(picked_char, target_index, target_type)
+                        if (source_found and target_found and source_index != target_index
+                                and source_type in (0, 1) and target_type in (0, 1)):
+                            source_item = source_found['item']
+                            target_item = target_found['item']
+                            source_id = str(source_item.get('id', ''))
+                            target_id = str(target_item.get('id', ''))
+                            source_cfg = EQUIP_CONFIG.get(source_id, {})
+                            target_cfg = EQUIP_CONFIG.get(target_id, {})
+                            source_subtype = equipment_subtype(source_item)
+                            target_subtype = equipment_subtype(target_item)
+                            target_job = int(target_cfg.get('job', -1)) if target_cfg else -1
+                            target_level = max(0, int(target_item.get('level', 0)))
+                            source_parm = list(source_item.get('parm') or [0] * 8)
+                            source_parm.extend([0] * (8 - len(source_parm)))
+                            try:
+                                source_exp = max(0, int(source_parm[0]))
+                            except (TypeError, ValueError):
+                                source_exp = 0
+                            max_level = max(EQUIPMENT_UPGRADE_CONFIG.get(
+                                int(target_cfg.get('position', -1)), {}).keys(), default=target_level)
+                            result_level = target_level
+                            consumed_exp = 0
+                            upgrade_rows = EQUIPMENT_UPGRADE_CONFIG.get(
+                                int(target_cfg.get('position', -1)), {}) if target_cfg else {}
+                            while source_exp - consumed_exp > 0 and result_level < max_level:
+                                upgrade_row = upgrade_rows.get(result_level + 1)
+                                if not upgrade_row:
+                                    break
+                                threshold = max(0, math.floor(
+                                    int(upgrade_row.get('level_exp_b', 0))
+                                    + int(upgrade_row.get('level_exp_k', 0))
+                                    * result_level * result_level * 3.0
+                                ))
+                                if source_exp - consumed_exp < threshold:
+                                    break
+                                consumed_exp += threshold
+                                result_level += 1
+                            valid = (
+                                int(ITEM_CONFIG.get(source_id, {}).get('type', -1)) == 2
+                                and int(ITEM_CONFIG.get(target_id, {}).get('type', -1)) == 2
+                                and bool(source_cfg) and bool(target_cfg)
+                                and source_subtype == target_subtype
+                                and target_job in (-1, int(picked_char.get('prof', 0)))
+                                and source_exp > 0 and consumed_exp > 0
+                                and result_level > target_level
+                                and get_currency_balance(picked_char, 0) >= consumed_exp
+                            )
+                            if valid:
+                                power_before = get_character_stats(picked_char)['power']
+                                source_parm[0] = source_exp - consumed_exp
+                                source_item['parm'] = source_parm[:8]
+                                target_item['level'] = result_level
+                                set_currency_balance(
+                                    picked_char, 0,
+                                    get_currency_balance(picked_char, 0) - consumed_exp
+                                )
+                                save_chars(all_accounts_chars)
+                                sync_char_attrs_rpc(conn, picked_char)
+                                send_combat_power_gain_tip(
+                                    send_rpc_push, power_before,
+                                    get_character_stats(picked_char)['power']
+                                )
+                                sync_equipment_status_to_peers(picked_char)
+                                result = encode_sproto([
+                                    (0, 0), (1, source_type), (2, target_type),
+                                    (3, _gameitem_sproto(source_item)),
+                                    (4, _gameitem_sproto(target_item))
+                                ])
+                                print(f"[BACKPACK] equipment XP inherit source={source_index} "
+                                      f"target={target_index} level={target_level}->{result_level} "
+                                      f"xp={consumed_exp}")
+                if result is None:
+                    result = encode_sproto([(0, 1)])
+                    print(f"[BACKPACK] rejected equipment XP inheritance source={source_index} "
+                          f"target={target_index}")
+                send_rpc_response(session, result)
+
             elif msg in (302, 305): # inherit one configured armor attribute or weapon skill
                 source_index = get_val_int(body, 0, -1)
                 target_index = get_val_int(body, 1, -1)
@@ -8096,11 +8413,38 @@ def client_handler(conn, addr):
                                         state['remaining'][race_copy_id] = current + 1
                                         ticket_use_valid = True
                                 else:
-                                    matches = [(copy_id, sc_cfg) for copy_id, sc_cfg in COPY_SCENE_CONFIG.items()
-                                               if int(sc_cfg.get('subtype', -1)) == subtype]
-                                    for copy_id, sc_cfg in matches:
-                                        state['remaining'][copy_id] = sc_cfg['max_plays']
-                                    ticket_use_valid = bool(matches)
+                                    matches = [(str(copy_id), sc_cfg) for copy_id, sc_cfg in COPY_SCENE_CONFIG.items()
+                                               if int(sc_cfg.get('type', 0)) == 1
+                                               and int(sc_cfg.get('subtype', -1)) == subtype]
+                                    if subtype in (11, 16) and matches:
+                                        # CopyData.SyncTimeslocal and the equipment
+                                        # wipeout UI treat these subtype attempts
+                                        # as shared across their configured maps.
+                                        # A ticket grants one extra attempt; it must
+                                        # not refill every difficulty back to its
+                                        # daily maximum.
+                                        for copy_id, sc_cfg in matches:
+                                            state['remaining'][copy_id] = (
+                                                copy_attempts_remaining(picked_char, copy_id, sc_cfg) + 1
+                                            )
+                                        ticket_use_valid = True
+                                    elif subtype == 12 and matches:
+                                        # The client selects the EXP copy whose
+                                        # level range matches the character (and
+                                        # falls back to the first configured row
+                                        # before any range is unlocked).
+                                        player_level = int(picked_char.get('level', 1))
+                                        target_copy_id = matches[0][0]
+                                        for copy_id, sc_cfg in matches:
+                                            if (int(sc_cfg.get('min_level', 1)) <= player_level
+                                                    <= int(sc_cfg.get('max_level', 80))):
+                                                target_copy_id = copy_id
+                                        target_cfg = COPY_SCENE_CONFIG[target_copy_id]
+                                        state['remaining'][target_copy_id] = (
+                                            copy_attempts_remaining(picked_char, target_copy_id, target_cfg) + 1
+                                        )
+                                        record_pending_exp_ticket(picked_char, target_copy_id)
+                                        ticket_use_valid = True
                                 if ticket_use_valid:
                                     success = 1
                                     send_rpc_push(555, sync_copy_scenes(picked_char))
@@ -9101,6 +9445,7 @@ def client_handler(conn, addr):
                         elif player_lv > max_lv:
                             print(f"[EXP STAGE] denied id={copy_id}; level {player_lv} > max {max_lv}")
                         else:
+                            apply_pending_exp_tickets(picked_char, copy_id)
                             remaining = copy_attempts_remaining(picked_char, copy_id, cfg or {'max_plays': 3})
                             use_time_item = msg == 107 and bool(body.get(1, False))
                             extra_item_used = False
@@ -9447,10 +9792,9 @@ def client_handler(conn, addr):
                             picked_char['pos'] = pos
                             picked_char.pop('_pending_relife', None)
                             sync_char_attrs_rpc(conn, picked_char)
-                            attr_oth = encode_sproto([
-                                (0, stats['hp_max']), (1, stats['exp']),
-                                (2, stats['lv']), (3, stats['power']), (15, 1)
-                            ])
+                            attr_oth = encode_sproto(character_attribute_other_fields(
+                                picked_char, stats, stats['hp_max']
+                            ))
                             relife_char = encode_sproto([
                                 (0, picked_char['id']),
                                 (1, attr_oth),
@@ -9549,13 +9893,9 @@ def client_handler(conn, addr):
 
                     # Build Tag 512 (aoi_relife_player) with correct nested structure
                     # character_relife: id(0), attribute_other(1), movement(2)
-                    attr_oth = encode_sproto([
-                        (0, p_stats['hp_max']),
-                        (1, p_stats['exp']),
-                        (2, p_stats['lv']),
-                        (3, p_stats['power']),
-                        (15, 1)
-                    ])
+                    attr_oth = encode_sproto(character_attribute_other_fields(
+                        picked_char, p_stats, p_stats['hp_max']
+                    ))
                     mv_bytes = get_movement(pos[0], pos[1], pos[2], pos[3])
                     relife_char = encode_sproto([
                         (0, picked_char['id']),
@@ -9930,6 +10270,8 @@ def client_handler(conn, addr):
                             ok=True
                         if ok:
                             picked_char['team_goal_copy']=goal
+                            if apply_pending_exp_tickets(picked_char, goal):
+                                send_rpc_push(555, sync_copy_scenes(picked_char))
                             send_team_update(team['id'])
                         send_rpc_push(517,encode_sproto([(0,1 if ok else 0),(1,cid)]))
                     else:
@@ -9996,7 +10338,12 @@ def client_handler(conn, addr):
                         team['recruit']=get_val_int(body,4,team.get('recruit',team.get('recruit',0)))
                         for member_id in team.get('members',[]):
                             member=ALL_CONNECTIONS.get(int(member_id),(None,team.get('char_refs',{}).get(int(member_id))))[1]
-                            if member: member['team_goal_copy']=goal
+                            if member:
+                                member['team_goal_copy']=goal
+                                if apply_pending_exp_tickets(member, goal):
+                                    copy_update=sync_copy_scenes(member)
+                                    if int(member_id)==cid: send_rpc_push(555,copy_update)
+                                    else: send_push_to_char(member_id,555,copy_update)
                         send_team_update(team['id'])
                 elif picked_char and msg==164:
                     team=get_team_for_char(cid); target=get_val_int(body,0)
@@ -10030,7 +10377,12 @@ def client_handler(conn, addr):
                             picked_char['team_goal_copy']=goal
                             for member_id in team.get('members',[]):
                                 member=ALL_CONNECTIONS.get(int(member_id),(None,team.get('char_refs',{}).get(int(member_id))))[1]
-                                if member: member['team_goal_copy']=goal
+                                if member:
+                                    member['team_goal_copy']=goal
+                                    if apply_pending_exp_tickets(member, goal):
+                                        copy_update=sync_copy_scenes(member)
+                                        if int(member_id)==cid: send_rpc_push(555,copy_update)
+                                        else: send_push_to_char(member_id,555,copy_update)
                             queue_team_match(team,goal,goal_type); send_team_update(team['id'])
                 elif picked_char and msg==216:
                     goal=get_val_str(body,0,''); goal_type=get_val_int(body,1,1)
@@ -10042,6 +10394,12 @@ def client_handler(conn, addr):
                     cfg=COPY_SCENE_CONFIG.get(copy_id)
                     if (team and team.get('leader_id')==cid and str(team.get('goal_id',''))==copy_id
                             and get_val_int(body,1,1)==1 and cfg and not team.get('active_run') and not team.get('pending_run')):
+                        for member_id in team.get('members',[]):
+                            member=ALL_CONNECTIONS.get(int(member_id),(None,team.get('char_refs',{}).get(int(member_id))))[1]
+                            if member and apply_pending_exp_tickets(member,copy_id):
+                                copy_update=sync_copy_scenes(member)
+                                if int(member_id)==cid: send_rpc_push(555,copy_update)
+                                else: send_push_to_char(member_id,555,copy_update)
                         ids=list(team['members']); minm=max(2,int(cfg.get('min_member',2)))
                         valid=minm<=len(ids)<=int(cfg.get('max_member',4)) and all(ALL_CONNECTIONS.get(x,(None,None))[0] is not None and ALL_CONNECTIONS.get(x,(None,None))[1] is not None for x in ids)
                         if valid:
