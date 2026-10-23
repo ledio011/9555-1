@@ -3468,19 +3468,31 @@ def personal_dance_reward_interval(activity=None):
         return 60
 
 def personal_dance_reward_list(char, dance_id):
-    """Resolve level-adapted dance rewards and apply DanceData.RewardScale."""
+    """Resolve solo-dance rewards and apply DanceData.RewardScale."""
     activity = CITY_DANCE_CONFIG.get('101', {})
     try:
-        level = max(1, int(char.get('level', 1)))
+        level = max(1, min(80, int(char.get('level', 1))))
     except (TypeError, ValueError):
         level = 1
-    drop_key = str(activity.get('DropId') or '_drop_jh')
-    rewards = daily_active_rewards_for_level(drop_key, level)
-    # The shipped AdaptData points levels 2+ to 30302+, but this client bundle
-    # only includes ShowRewardData 30301 for personal dance. Use its configured
-    # EXP reward instead of silently returning no reward for those levels.
+    try:
+        unlock_level = max(1, int(activity.get('UnlockLevel', 8) or 8))
+    except (TypeError, ValueError):
+        unlock_level = 8
+    if level < unlock_level:
+        return []
+
+    # CityDanceData 101 identifies 30301 as the solo-dance reward preview.
+    # AdaptData's _drop_jh points at 30308/30309/... for playable levels, but
+    # those rows are absent from this client bundle; 30302 is a guild-dance
+    # preview and must not be mistaken for the solo reward. Keep the solo
+    # reward item list from 30301 and resolve its level amount explicitly.
+    rewards = list(SHOW_REWARD_CONFIG.get(str(activity.get('ShowRewardId') or ''), []))
     if not rewards:
-        rewards = list(SHOW_REWARD_CONFIG.get(str(activity.get('ShowRewardId') or ''), []))
+        return []
+    # The reward amounts are missing from the client tables. Use the supplied
+    # level-10/11 amounts (5/10 EXP) and continue by +5 per level; levels below
+    # 10 retain a one-EXP minimum so low-level characters still receive a tick.
+    exp_amount = max(1, (level - 9) * 5)
     try:
         scale = max(0, int(DANCE_CONFIG.get(str(dance_id), {}).get('RewardScale', 100) or 100))
     except (TypeError, ValueError):
@@ -3488,7 +3500,8 @@ def personal_dance_reward_list(char, dance_id):
     scaled = []
     for item_id, quality, amount in rewards:
         try:
-            scaled_amount = max(0, int(amount)) * scale // 100
+            base_amount = exp_amount if str(item_id) == '2001' else max(0, int(amount))
+            scaled_amount = base_amount * scale // 100
         except (TypeError, ValueError):
             continue
         if item_id and scaled_amount > 0:
