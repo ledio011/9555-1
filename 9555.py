@@ -5944,6 +5944,73 @@ def init_social_data(c):
         c['friend_requests_sent'] = []
     if 'friend_requests_received' not in c:
         c['friend_requests_received'] = []
+    if 'offline_chat' not in c:
+        c['offline_chat'] = []
+
+def numeric_id_value(value):
+    """Normalize IDs loaded from JSON, where older records may store numbers as strings."""
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+def numeric_id_matches(left, right):
+    left_id = numeric_id_value(left)
+    right_id = numeric_id_value(right)
+    return left_id is not None and right_id is not None and left_id == right_id
+
+def social_relation_id(relation):
+    if not isinstance(relation, dict):
+        return None
+    for key in ('friendId', 'characterId'):
+        relation_id = numeric_id_value(relation.get(key))
+        if relation_id is not None and relation_id > 0:
+            return relation_id
+    return None
+
+def social_candidate_friend_type(viewer, target_id):
+    """Return the client add-list visibility type for an online character.
+
+    APK FriendInfo.FilterRandomFriendDic/FilterSearchFriend drops friendType=1.
+    Use that existing client contract for confirmed friends and either direction
+    of pending friend requests so refresh/search cannot offer duplicate requests.
+    """
+    try:
+        target_id = int(target_id)
+        viewer_id = int((viewer or {}).get('id', 0))
+    except (TypeError, ValueError):
+        return 1
+    if target_id <= 0 or target_id == viewer_id:
+        return 1
+
+    for friend in (viewer or {}).get('friends', []):
+        if social_relation_id(friend) == target_id:
+            return 1
+
+    for request_key in ('friend_requests_sent', 'friend_requests_received'):
+        for request_id in (viewer or {}).get(request_key, []):
+            if numeric_id_matches(request_id, target_id):
+                return 1
+    return 0
+
+def online_social_friend_info(viewer, character):
+    """Encode online player data while letting the APK hide ineligible add rows."""
+    target_id = int(character.get('id', 0))
+    fi = {
+        'characterId': target_id,
+        'friendId': target_id,
+        'name': character.get('name', f'Player{target_id}'),
+        'level': character.get('level', 1),
+        'profession': character.get('prof', 0),
+        'combValue': get_character_stats(character)['power'],
+        'state': 1,
+        'timeInfo': int(time.time()),
+        'friendType': social_candidate_friend_type(viewer, target_id),
+        'guildId': character.get('guildId', 0),
+        'guildName': character.get('guildName', ''),
+        'friendScore': 0
+    }
+    return encode_friend_info(fi)
 
 def encode_friend_info(fi, is_enemy=False):
     """Encode a friend_info dict as sproto bytes.
@@ -5969,6 +6036,156 @@ def encode_friend_info(fi, is_enemy=False):
         (10, fi.get('guildName', '')),
         (11, fi.get('friendScore', 0))
     ])
+
+def find_social_character(char_id):
+    """Return the current online or persisted character record for a social ID."""
+    try:
+        char_id = int(char_id)
+    except (TypeError, ValueError):
+        return None
+    online_entry = ALL_CONNECTIONS.get(char_id)
+    if online_entry and online_entry[1]:
+        return online_entry[1]
+    for area_chars in all_accounts_chars.values():
+        for char_list in area_chars.values():
+            for character in char_list:
+                try:
+                    if int(character.get('id', 0)) == char_id:
+                        return character
+                except (TypeError, ValueError):
+                    continue
+    return None
+
+def build_social_friend_update(character):
+    """Build the APK's full friends-plus-incoming-requests tag 534 payload."""
+    friend_dict = {}
+    friend_ids = set()
+    for friend in character.get('friends', []):
+        friend_id = social_relation_id(friend)
+        if friend_id is None:
+            continue
+        friend_payload = encode_social_relation(friend, 0)
+        if friend_payload is None:
+            continue
+        friend_dict[friend_id] = friend_payload
+        friend_ids.add(friend_id)
+
+    for request_id in character.get('friend_requests_received', []):
+        request_id = numeric_id_value(request_id)
+        if request_id is None:
+            continue
+        if request_id <= 0 or request_id in friend_ids:
+            continue
+        requester = find_social_character(request_id)
+        requester = requester or {}
+        pending = {
+            'characterId': request_id,
+            'friendId': request_id,
+            'name': requester.get('name', f'Player{request_id}'),
+            'level': requester.get('level', 1),
+            'profession': requester.get('prof', requester.get('profession', 0)),
+            'combValue': get_character_stats(requester)['power'] if requester else 0,
+            'state': 1 if request_id in ALL_CONNECTIONS else 0,
+            'timeInfo': int(time.time()),
+            'friendType': 2,
+            'guildId': requester.get('guildId', 0),
+            'guildName': requester.get('guildName', ''),
+            'friendScore': 0
+        }
+        friend_dict[request_id] = encode_friend_info(pending)
+    return encode_sproto([(0, friend_dict), (1, 0)])
+
+def encode_social_relation(relation, friend_type, is_enemy=False):
+    """Refresh relationship profile/presence from the current character record."""
+    if not isinstance(relation, dict):
+        return None
+    try:
+        target_id = int(relation.get('friendId', relation.get('characterId', 0)))
+    except (TypeError, ValueError):
+        return None
+    if target_id <= 0:
+        return None
+
+    friend_copy = dict(relation)
+    friend_copy['characterId'] = target_id
+    friend_copy['friendId'] = target_id
+    friend_copy['friendType'] = friend_type
+    friend_copy['state'] = 1 if target_id in ALL_CONNECTIONS else 0
+    profile = find_social_character(target_id)
+    if profile:
+        friend_copy.update({
+            'name': profile.get('name', friend_copy.get('name', f'Player{target_id}')),
+            'level': profile.get('level', friend_copy.get('level', 1)),
+            'profession': profile.get('prof', profile.get('profession', friend_copy.get('profession', 0))),
+            'combValue': get_character_stats(profile)['power'],
+            'guildId': profile.get('guildId', friend_copy.get('guildId', 0)),
+            'guildName': profile.get('guildName', friend_copy.get('guildName', ''))
+        })
+    return encode_friend_info(friend_copy, is_enemy=is_enemy)
+
+def build_social_enemy_update(character):
+    """Build the APK's type-1 tag 534 payload for the Enemy tab."""
+    enemy_dict = {}
+    for enemy in (character or {}).get('enemies', []):
+        enemy_id = social_relation_id(enemy)
+        enemy_payload = encode_social_relation(enemy, 6, is_enemy=True)
+        if enemy_id is not None and enemy_payload is not None:
+            enemy_dict[enemy_id] = enemy_payload
+    return encode_sproto([(0, enemy_dict), (1, 1)])
+
+def push_stale_foe_friend_cleanup(character, send_push):
+    """Remove foe-only IDs previously misrouted into the APK's Friend cache."""
+    friend_ids = set()
+    for friend in (character or {}).get('friends', []):
+        friend_id = social_relation_id(friend)
+        if friend_id is not None:
+            friend_ids.add(friend_id)
+
+    foe_ids = set()
+    for enemy in (character or {}).get('enemies', []):
+        if not isinstance(enemy, dict):
+            continue
+        enemy_id = social_relation_id(enemy) or 0
+        # Before the enemy presence fix, the server sent an enemy through
+        # syn_friend_info (538) using the Enemy wire-field swap. That handler
+        # inserts directly into the Friend cache, so the stale Friend key was
+        # the enemy record's timeInfo (the swapped wire friendId), not its real
+        # character ID. Remove both possible legacy keys, while protecting any
+        # ID that is a real persisted friend.
+        legacy_swapped_id = numeric_id_value(enemy.get('timeInfo')) or 0
+        for stale_id in (enemy_id, legacy_swapped_id):
+            if stale_id > 0 and stale_id not in friend_ids:
+                foe_ids.add(stale_id)
+
+    for enemy_id in foe_ids:
+        # The APK's be_deleted_friend (537) handler removes from its Friend
+        # cache. This is idempotent, and confirmed friend+foe entries are kept.
+        send_push(537, encode_sproto([(0, enemy_id)]))
+
+def social_friend_count(character):
+    friend_ids = set()
+    for friend in (character or {}).get('friends', []):
+        friend_id = social_relation_id(friend)
+        if friend_id is not None:
+            friend_ids.add(friend_id)
+    return len(friend_ids)
+
+def social_enemy_count(character):
+    enemy_ids = {
+        social_relation_id(enemy)
+        for enemy in (character or {}).get('enemies', [])
+    }
+    enemy_ids.discard(None)
+    return len(enemy_ids)
+
+def is_social_enemy(character, target_id):
+    target_id = numeric_id_value(target_id)
+    if target_id is None:
+        return False
+    for enemy in (character or {}).get('enemies', []):
+        if social_relation_id(enemy) == target_id:
+            return True
+    return False
 
 def build_mail_update(mi):
     """Build a mail_update message (msg 531) from a mail entry dict.
@@ -6261,29 +6478,52 @@ def serve_resource_http(conn, initial_data):
 def _sync_friend_online_state(char_id, state):
     """Update the online state of a character in all other players' friend/enemy lists.
     state=1 for login, state=0 for logout.
-    Pushes syn_friend_info to online friends/enemies who have this player.
-    Uses the EXISTING stored friend record, only updating the state field."""
+    Refresh the displayed friend profile and push the response each APK tab expects."""
+    source_char = ALL_CONNECTIONS.get(int(char_id), (None, None))[1]
+    if source_char is None:
+        for area_chars in all_accounts_chars.values():
+            for char_list in area_chars.values():
+                source_char = next((candidate for candidate in char_list
+                                    if int(candidate.get('id', 0)) == int(char_id)), None)
+                if source_char:
+                    break
+            if source_char:
+                break
+    current_profile = None
+    if source_char:
+        current_profile = {
+            'name': source_char.get('name', f'Player{char_id}'),
+            'level': source_char.get('level', 1),
+            'profession': source_char.get('prof', 0),
+            'combValue': get_character_stats(source_char)['power'],
+            'guildId': source_char.get('guildId', 0),
+            'guildName': source_char.get('guildName', '')
+        }
     for area_key, area_chars in all_accounts_chars.items():
         for acc_key, char_list in area_chars.items():
             for ch in char_list:
-                if ch.get('id', 0) == char_id:
+                if numeric_id_matches(ch.get('id', 0), char_id):
                     continue
                 updated_friends = []
                 updated_enemies = []
                 # Check friends - update state in place and collect for push
                 for fi in ch.get('friends', []):
-                    if fi.get('friendId') == char_id:
+                    if social_relation_id(fi) == numeric_id_value(char_id):
                         fi['state'] = state
+                        if current_profile:
+                            fi.update(current_profile)
                         updated_friends.append(fi)
                 # Check enemies - update state in place and collect for push
                 for ei in ch.get('enemies', []):
-                    if ei.get('friendId') == char_id:
+                    if social_relation_id(ei) == numeric_id_value(char_id):
                         ei['state'] = state
+                        if current_profile:
+                            ei.update(current_profile)
                         updated_enemies.append(ei)
                 if updated_friends or updated_enemies:
                     # Push syn_friend_info to this player if they're online
                     for cid, (c, conn_ch) in list(ALL_CONNECTIONS.items()):
-                        if conn_ch and conn_ch.get('id', 0) == ch.get('id', 0):
+                        if conn_ch and numeric_id_matches(conn_ch.get('id', 0), ch.get('id', 0)):
                             try:
                                 # Use the existing stored friend record, not a fake one
                                 for fi in updated_friends:
@@ -6298,18 +6538,15 @@ def _sync_friend_online_state(char_id, state):
                                     else:
                                         c.sendall(syn_pkt)
                                     print(f"[FRIEND] Online state sync: {char_id} state={state} to {ch.get('id', 0)} (friend)")
-                                for ei in updated_enemies:
-                                    ei_bytes = encode_friend_info(dict(ei), is_enemy=True)
-                                    ph_p = encode_sproto([(0, 538)])
-                                    pf_p = sproto_pack(ph_p + encode_sproto([(0, ei_bytes)]))
-                                    syn_pkt = struct.pack(">H", len(pf_p)) + pf_p
-                                    c_lock = CONNECTION_LOCKS.get(cid)
-                                    if c_lock:
-                                        with c_lock:
-                                            c.sendall(syn_pkt)
-                                    else:
-                                        c.sendall(syn_pkt)
-                                    print(f"[FRIEND] Online state sync: {char_id} state={state} to {ch.get('id', 0)} (enemy)")
+                                if updated_enemies:
+                                    # syn_friend_info (538) always calls the
+                                    # APK's UpdateFriendInfo(), which inserts
+                                    # into the FRIEND dictionary even when
+                                    # friendType=6. Refresh the foe tab using its
+                                    # real response handler (534, type=1).
+                                    enemy_update = build_social_enemy_update(ch)
+                                    if send_rpc_push_safe(c, 534, enemy_update):
+                                        print(f"[FRIEND] Enemy online state sync: {char_id} state={state} to {ch.get('id', 0)}")
                             except Exception:
                                 pass
                     break
@@ -6624,14 +6861,20 @@ def client_handler(conn, addr):
                     # 538: syn_friend_info - sync friend list on login
                     init_social_data(picked_char)
                     for fi in picked_char.get('friends', []):
-                        fi_for_sync = dict(fi)
-                        fi_for_sync['friendType'] = 0  # UpdateFriendInfo ignores friendType, but keep consistent
-                        fi_bytes = encode_friend_info(fi_for_sync)
+                        # The login sync uses tag 538, which inserts/updates
+                        # one Friend row at a time. Hydrate it from current
+                        # presence so clients do not inherit stale saved state.
+                        fi_bytes = encode_social_relation(fi, 0)
+                        if fi_bytes is None:
+                            continue
                         # syn_friend_info: tag 0 = friend_info object
                         send_rpc_push(538, encode_sproto([(0, fi_bytes)]))
 
                     # Push pending friend requests on login so they appear in Request tab
-                    for req_id in picked_char.get('friend_requests_received', []):
+                    for request_value in picked_char.get('friend_requests_received', []):
+                        req_id = numeric_id_value(request_value)
+                        if req_id is None or req_id <= 0:
+                            continue
                         # Look up requester's real info
                         requester_name = f'Player{req_id}'
                         requester_level = 1
@@ -6642,7 +6885,7 @@ def client_handler(conn, addr):
                         requester_state = 0  # Default offline
                         # Check online players first
                         for r_cid, (r_conn, ch) in list(ALL_CONNECTIONS.items()):
-                            if ch and ch.get('id', 0) == req_id:
+                            if ch and numeric_id_matches(ch.get('id', 0), req_id):
                                 requester_name = ch.get('name', f'Player{req_id}')
                                 requester_level = ch.get('level', 1)
                                 requester_prof = ch.get('prof', 0)
@@ -6656,7 +6899,7 @@ def client_handler(conn, addr):
                             for area_key, area_chars in all_accounts_chars.items():
                                 for acc_key, char_list in area_chars.items():
                                     for ch in char_list:
-                                        if ch.get('id', 0) == req_id:
+                                        if numeric_id_matches(ch.get('id', 0), req_id):
                                             requester_name = ch.get('name', f'Player{req_id}')
                                             requester_level = ch.get('level', 1)
                                             requester_prof = ch.get('prof', 0)
@@ -6683,6 +6926,12 @@ def client_handler(conn, addr):
                         }
                         notice_data = encode_sproto([(0, encode_friend_info(sender_friend_info))])
                         send_rpc_push(536, notice_data)
+
+                    # Older server builds sent foe state through tag 538, whose
+                    # APK handler adds it to the Friend cache. Clear only those
+                    # stale foe-only rows on reconnect; real friend+foe entries
+                    # are preserved.
+                    push_stale_foe_friend_cleanup(picked_char, send_rpc_push)
 
                     # Enemies are NOT synced via syn_friend_info on login because
                     # the client handler routes ALL syn_friend_info to UpdateFriendInfo
@@ -10212,6 +10461,152 @@ def client_handler(conn, addr):
                         print(f"[CHAT] world from={picked_char.get('name')} consumed WorldSpeak item=5026")
                     elif reject_reason:
                         send_rpc_push(529, encode_sproto([(0, reject_reason), (1, True)]))
+                elif picked_char and chat_type in (1, 3, 4, 5):
+                    # Friend/private, local, team, and guild chat use the same
+                    # ret_chat response shape as World chat. The APK sends
+                    # these through msg 120 and only updates its history after
+                    # receiving tag 528.
+                    if not is_current_character_connection(conn, picked_char):
+                        reject_reason = 'This character connection is no longer active.'
+                    elif not chat_text or len(chat_text) > 256:
+                        reject_reason = 'Message must contain 1–256 characters.'
+                    else:
+                        sender_id = int(picked_char.get('id', 0))
+                        now = time.time()
+                        with get_character_transaction_lock(picked_char):
+                            try:
+                                last_sent = float(picked_char.get('last_chat_sent_at', 0))
+                            except (TypeError, ValueError):
+                                last_sent = 0.0
+                            if last_sent > now:
+                                last_sent = now
+                            if now - last_sent <= 5.0:
+                                reject_reason = 'Please wait before sending another message.'
+                            else:
+                                picked_char['last_chat_sent_at'] = now
+
+                        if not reject_reason:
+                            tell_id = get_val_int(body, 0, 0)
+                            tell_name = get_val_str(body, 1, '')
+                            recipient_ids = set()
+                            offline_target = None
+
+                            if chat_type == 1:  # local/map
+                                current_map = str(picked_char.get('map_id', '11'))
+                                recipient_ids = {
+                                    int(online_id)
+                                    for online_id, (_, online_char) in list(ALL_CONNECTIONS.items())
+                                    if online_char and str(online_char.get('map_id', '11')) == current_map
+                                }
+                            elif chat_type == 3:  # team
+                                team_id = CHAR_TEAM.get(sender_id)
+                                team = TEAM_STATES.get(team_id) if team_id is not None else None
+                                if not team:
+                                    reject_reason = 'You are not in a team.'
+                                else:
+                                    recipient_ids = {int(cid) for cid in team.get('members', [])}
+                            elif chat_type == 4:  # guild
+                                try:
+                                    guild_id = int(picked_char.get('guildId', 0) or 0)
+                                except (TypeError, ValueError):
+                                    guild_id = 0
+                                if guild_id <= 0:
+                                    reject_reason = 'You are not in a guild.'
+                                else:
+                                    recipient_ids = {
+                                        int(online_id)
+                                        for online_id, (_, online_char) in list(ALL_CONNECTIONS.items())
+                                        if online_char and int(online_char.get('guildId', 0) or 0) == guild_id
+                                    }
+                            elif chat_type == 5:  # private
+                                if tell_id <= 0 or tell_id == sender_id:
+                                    reject_reason = 'The selected player is unavailable.'
+                                else:
+                                    target_entry = ALL_CONNECTIONS.get(tell_id)
+                                    if target_entry and target_entry[1]:
+                                        offline_target = target_entry[1]
+                                        tell_name = offline_target.get('name', tell_name)
+                                        recipient_ids.add(tell_id)
+                                    else:
+                                        for area_chars in all_accounts_chars.values():
+                                            for char_list in area_chars.values():
+                                                offline_target = next((ch for ch in char_list
+                                                                       if int(ch.get('id', 0)) == tell_id), None)
+                                                if offline_target:
+                                                    break
+                                            if offline_target:
+                                                break
+                                        if offline_target:
+                                            tell_name = offline_target.get('name', tell_name)
+                                        else:
+                                            reject_reason = 'The selected player is unavailable.'
+                                    recipient_ids.add(sender_id)
+
+                            if not reject_reason:
+                                chat_fields = [
+                                    (0, sender_id),
+                                    (1, str(picked_char.get('name', ''))),
+                                    (2, tell_id),
+                                    (3, tell_name),
+                                    (4, chat_text),
+                                    (5, chat_type),
+                                    (6, get_val_int(body, 4, -1)),
+                                    (9, int(picked_char.get('prof', 0))),
+                                    (10, int(picked_char.get('level', 1))),
+                                    (11, int(get_character_stats(picked_char)['power'])),
+                                    (12, int(picked_char.get('guildId', 0) or 0)),
+                                    (13, str(picked_char.get('guildName', ''))),
+                                    (14, chat_text)
+                                ]
+                                intdata = body.get(5)
+                                stringdata = body.get(6)
+                                if isinstance(intdata, (list, bytes, bytearray)) and intdata:
+                                    chat_fields.append((7, intdata))
+                                if isinstance(stringdata, (list, bytes, bytearray)) and stringdata:
+                                    chat_fields.append((8, stringdata))
+                                chat_item = encode_sproto(chat_fields)
+
+                                if chat_type == 5 and tell_id not in ALL_CONNECTIONS:
+                                    # Store the already-encoded client item so
+                                    # linked item/NPC data survives JSON storage
+                                    # and is returned byte-for-byte on msg 168.
+                                    queued = offline_target.setdefault('offline_chat', [])
+                                    queued.append(chat_item.hex())
+                                    offline_target['offline_chat'] = queued[-20:]
+                                    save_chars(all_accounts_chars)
+                                    print(f"[CHAT] queued private message sender={sender_id} recipient={tell_id}")
+
+                                push_data = encode_sproto([(0, [chat_item])])
+                                for recipient_id in recipient_ids:
+                                    if recipient_id == sender_id:
+                                        send_rpc_push_safe(conn, 528, push_data)
+                                    else:
+                                        send_push_to_char(recipient_id, 528, push_data)
+                                print(f"[CHAT] type={chat_type} from={sender_id} recipients={len(recipient_ids)}")
+
+                    if reject_reason:
+                        send_rpc_push(529, encode_sproto([(0, reject_reason), (1, True)]))
+                if session is not None:
+                    send_rpc_response(session)
+
+            elif msg == 168: # req_offline_chat
+                if picked_char:
+                    queued = picked_char.get('offline_chat', [])
+                    chat_list = []
+                    for item_hex in queued:
+                        try:
+                            if isinstance(item_hex, str):
+                                chat_list.append(bytes.fromhex(item_hex))
+                            elif isinstance(item_hex, (bytes, bytearray)):
+                                chat_list.append(bytes(item_hex))
+                        except ValueError:
+                            continue
+                    response = encode_sproto([(0, chat_list)])
+                    if send_rpc_push_safe(conn, 579, response):
+                        if queued:
+                            picked_char['offline_chat'] = []
+                            save_chars(all_accounts_chars)
+                        print(f"[CHAT] offline messages returned count={len(chat_list)} player={picked_char.get('id')}")
                 if session is not None:
                     send_rpc_response(session)
 
@@ -10886,7 +11281,7 @@ def client_handler(conn, addr):
                     sender_name = picked_char.get('name', 'Player')
                     mail_entry = {
                         'mailId': mail_id,
-                        'sendertype': 4,  # USER type (client MailSenderType.USER=4)
+                        'sendertype': 5,  # FriendInfo.MailSenderType.USER in the APK enum
                         'title': f'{sender_name}',
                         'senderTime': int(time.time()),
                         'receiveId': receive_id,
@@ -10902,14 +11297,14 @@ def client_handler(conn, addr):
                     for area_key, area_chars in all_accounts_chars.items():
                         for acc_key, char_list in area_chars.items():
                             for ch in char_list:
-                                if ch.get('id', 0) == receive_id:
+                                if numeric_id_matches(ch.get('id', 0), receive_id):
                                     if 'mails' not in ch:
                                         ch['mails'] = []
                                     ch['mails'].append(mail_entry)
                                     save_chars(all_accounts_chars)
                                     # If target is online, push mail_update to them
                                     for t_cid, (t_conn, t_char) in list(ALL_CONNECTIONS.items()):
-                                        if t_char and t_char.get('id', 0) == receive_id:
+                                        if t_char and numeric_id_matches(t_char.get('id', 0), receive_id):
                                             try:
                                                 mi_bytes = build_mail_update(mail_entry)
                                                 ph_p = encode_sproto([(0, 531)])
@@ -10926,7 +11321,7 @@ def client_handler(conn, addr):
                                                 print(f"[MAIL] Failed to push mail_update to receiver={receive_id}")
                                             break
                                     break
-                            if ch.get('id', 0) == receive_id:
+                            if numeric_id_matches(ch.get('id', 0), receive_id):
                                 break
                     print(f"[MAIL] send_mail from={picked_char.get('id', 0)} to={receive_id} id={mail_id}")
                 if session is not None:
@@ -10940,20 +11335,22 @@ def client_handler(conn, addr):
                     print(f"[MAIL] operation={operation} mailId={mail_id}")
                     if operation == 0: # read
                         for mi in picked_char.get('mails', []):
-                            if mi.get('mailId') == mail_id:
+                            if numeric_id_matches(mi.get('mailId'), mail_id):
                                 mi['mailState'] = 1
                                 mi['readTime'] = int(time.time())
                                 break
                         save_chars(all_accounts_chars)
                     elif operation == 1: # delete
                         mails = picked_char.get('mails', [])
-                        picked_char['mails'] = [m for m in mails if m.get('mailId') != mail_id]
+                        picked_char['mails'] = [m for m in mails if not numeric_id_matches(m.get('mailId'), mail_id)]
                         save_chars(all_accounts_chars)
                         send_rpc_push(532, encode_sproto([(0, mail_id)]))
                     elif operation == 2: # get items
                         with get_character_transaction_lock(picked_char):
                             for mi in picked_char.get('mails', []):
-                                if mi.get('mailId') == mail_id and mi.get('mailState', 0) != 3:
+                                if (numeric_id_matches(mi.get('mailId'), mail_id)
+                                        and mi.get('mailState', 0) != 3
+                                        and mi.get('items')):
                                     mi['mailState'] = 3  # GETITEM - client IsGetItem() checks mailstate==3
                                     for it in mi.get('items', []):
                                         add_to_inventory(picked_char, str(it.get('itemId', 0)), it.get('count', 1))
@@ -10966,7 +11363,7 @@ def client_handler(conn, addr):
                     elif operation == 3: # get all items
                         with get_character_transaction_lock(picked_char):
                             for mi in picked_char.get('mails', []):
-                                if mi.get('mailState', 0) != 3:  # Skip already claimed
+                                if mi.get('mailState', 0) != 3 and mi.get('items'):
                                     mi['mailState'] = 3  # GETITEM - client IsGetItem() checks mailstate==3
                                     for it in mi.get('items', []):
                                         add_to_inventory(picked_char, str(it.get('itemId', 0)), it.get('count', 1))
@@ -10995,24 +11392,40 @@ def client_handler(conn, addr):
                     add_type = get_val_int(body, 1)
                     my_id = picked_char.get('id', 0)
                     print(f"[FRIEND] add_friend target={target_id} type={add_type}")
+                    if add_type not in (0, 1):
+                        print(f"[FRIEND] Rejected unsupported add type={add_type} target={target_id}")
+                        continue
                     # Reject self-add (fast, in-memory check)
-                    if target_id == my_id:
+                    if numeric_id_matches(target_id, my_id):
                         print(f"[FRIEND] Rejected self-add: target={target_id} == my_id={my_id}")
                         continue
+                    if add_type == 0:
+                        # The APK's Add Friend entry points enforce this limit in
+                        # the UI, but requests can be stale or forged. Keep the
+                        # persisted relationship list within its client limit.
+                        friend_count = social_friend_count(picked_char)
+                        if friend_count >= 100:
+                            print(f"[FRIEND] Rejected add_friend: friend limit reached for {my_id}")
+                            continue
+                        if social_candidate_friend_type(picked_char, target_id) == 1:
+                            print(f"[FRIEND] Rejected add_friend: target={target_id} is already linked or pending")
+                            continue
                     # Quick in-memory check: is target already in friend_requests_sent?
-                    already_sent = False
-                    for fr in picked_char.get('friend_requests_sent', []):
-                        if fr == target_id:
-                            already_sent = True
-                            break
+                    already_sent = add_type == 0 and any(
+                        int(fr) == target_id for fr in picked_char.get('friend_requests_sent', [])
+                        if str(fr).lstrip('-').isdigit()
+                    )
                     if already_sent:
                         print(f"[FRIEND] add_friend skipped: already sent request to {target_id}")
                         continue
                     # Quick in-memory check: is target already in enemies?
                     if add_type == 1:
+                        if social_enemy_count(picked_char) >= 30:
+                            print(f"[FRIEND] Rejected add_enemy: enemy limit reached for {my_id}")
+                            continue
                         already_enemy = False
                         for ei in picked_char.get('enemies', []):
-                            if ei.get('friendId') == target_id:
+                            if social_relation_id(ei) == target_id:
                                 already_enemy = True
                                 break
                         if already_enemy:
@@ -11028,8 +11441,13 @@ def client_handler(conn, addr):
                     sender_guildId = picked_char.get('guildId', 0)
                     sender_guildName = picked_char.get('guildName', '')
 
-                    def _add_friend_async():
+                    def _add_friend_async(target_id=target_id, add_type=add_type, my_id=my_id,
+                                          sender_char=picked_char, sender_name=sender_name,
+                                          sender_level=sender_level, sender_prof=sender_prof,
+                                          sender_combat=sender_combat, sender_guildId=sender_guildId,
+                                          sender_guildName=sender_guildName):
                         """Handle all database operations for add_friend in a background thread."""
+                        picked_char = sender_char
                         try:
                             # Verify target character exists in the database
                             target_exists = False
@@ -11037,7 +11455,7 @@ def client_handler(conn, addr):
                             for area_key, area_chars in all_accounts_chars.items():
                                 for acc_key, char_list in area_chars.items():
                                     for ch in char_list:
-                                        if ch.get('id', 0) == target_id:
+                                        if numeric_id_matches(ch.get('id', 0), target_id):
                                             target_exists = True
                                             target_char_data = ch
                                             break
@@ -11049,9 +11467,18 @@ def client_handler(conn, addr):
                                 print(f"[FRIEND] Rejected add_friend: target={target_id} does not exist")
                                 return
 
+                            if add_type == 0:
+                                with get_character_transaction_lock(picked_char):
+                                    init_social_data(picked_char)
+                                    if (social_friend_count(picked_char) >= 100
+                                            or social_candidate_friend_type(picked_char, target_id) == 1):
+                                        print(f"[FRIEND] Rejected duplicate/full add_friend target={target_id} from={my_id}")
+                                        return
+                                    picked_char['friend_requests_sent'].append(target_id)
+                                    save_chars(all_accounts_chars)
+
                             if add_type == 1: # enemy/foe
-                                if 'enemies' not in picked_char:
-                                    picked_char['enemies'] = []
+                                init_social_data(picked_char)
                                 # Look up actual target player info
                                 target_name = f'Player{target_id}'
                                 target_level = 1
@@ -11061,7 +11488,7 @@ def client_handler(conn, addr):
                                 target_guildId = 0
                                 target_guildName = ''
                                 for t_cid, (t_conn, ch) in list(ALL_CONNECTIONS.items()):
-                                    if ch and ch.get('id', 0) == target_id:
+                                    if ch and numeric_id_matches(ch.get('id', 0), target_id):
                                         target_name = ch.get('name', f'Player{target_id}')
                                         target_level = ch.get('level', 1)
                                         target_prof = ch.get('prof', 0)
@@ -11093,14 +11520,32 @@ def client_handler(conn, addr):
                                     'guildName': target_guildName,
                                     'friendScore': 0
                                 }
-                                picked_char['enemies'].append(enemy_info)
-                                save_chars(all_accounts_chars)
+                                with get_character_transaction_lock(picked_char):
+                                    init_social_data(picked_char)
+                                    if (social_enemy_count(picked_char) >= 30
+                                            or any(social_relation_id(e) == target_id for e in picked_char.get('enemies', []))):
+                                        print(f"[FRIEND] Rejected duplicate/full add_enemy target={target_id} from={my_id}")
+                                        return
+                                    picked_char['enemies'].append(enemy_info)
+                                    save_chars(all_accounts_chars)
+                                # The APK's ret_add_friend_handler routes
+                                # friendType=6 through AddEnemy(). Unlike the
+                                # enemy tab refresh (msg 126), adding a foe does
+                                # not update the local list, so acknowledge it
+                                # with the exact client push the handler expects.
+                                send_push_to_char(my_id, 533, encode_sproto([
+                                    (0, encode_friend_info(enemy_info, is_enemy=True))
+                                ]))
                                 print(f"[FRIEND] Enemy added: {target_id} by {my_id}")
                             else: # friend request
-                                if 'friend_requests_sent' not in picked_char:
-                                    picked_char['friend_requests_sent'] = []
-                                picked_char['friend_requests_sent'].append(target_id)
-                                save_chars(all_accounts_chars)
+                                # Persist the receiver's pending entry before notifying
+                                # their client, so a fast accept cannot race the write.
+                                with get_character_transaction_lock(target_char_data):
+                                    init_social_data(target_char_data)
+                                    if not any(numeric_id_matches(request_id, my_id)
+                                               for request_id in target_char_data['friend_requests_received']):
+                                        target_char_data['friend_requests_received'].append(my_id)
+                                        save_chars(all_accounts_chars)
                                 # Send notice_add_friend (msg 536) to target if online
                                 sender_friend_info = {
                                     'characterId': my_id,
@@ -11125,7 +11570,7 @@ def client_handler(conn, addr):
                                 for t_cid, (t_conn, t_char) in list(ALL_CONNECTIONS.items()):
                                     if t_char:
                                         print(f"[FRIEND] Checking connection: id={t_char.get('id', 0)} name={t_char.get('name', '')}")
-                                    if t_char and t_char.get('id', 0) == target_id:
+                                    if t_char and numeric_id_matches(t_char.get('id', 0), target_id):
                                         target_found = True
                                         try:
                                             t_lock = CONNECTION_LOCKS.get(t_cid)
@@ -11142,21 +11587,7 @@ def client_handler(conn, addr):
                                         break
                                 if not target_found:
                                     print(f"[FRIEND] Target={target_id} NOT FOUND online - request persisted for next login")
-                                # Add sender to target's friend_requests_received for persistence
-                                for area_key, area_chars in all_accounts_chars.items():
-                                    for acc_key, char_list in area_chars.items():
-                                        for ch in char_list:
-                                            if ch.get('id', 0) == target_id:
-                                                if 'friend_requests_received' not in ch:
-                                                    ch['friend_requests_received'] = []
-                                                if my_id not in ch['friend_requests_received']:
-                                                    ch['friend_requests_received'].append(my_id)
-                                                save_chars(all_accounts_chars)
-                                                print(f"[FRIEND] add_friend persistence completed for target={target_id}")
-                                                break
-                                    else:
-                                        continue
-                                    break
+                                print(f"[FRIEND] add_friend persistence completed for target={target_id}")
                         except Exception as e:
                             print(f"[FRIEND] ERROR in add_friend async: {e}")
                             traceback.print_exc()
@@ -11176,9 +11607,12 @@ def client_handler(conn, addr):
                     target_id = get_val_int(body, 0)
                     del_type = get_val_int(body, 1)
                     print(f"[FRIEND] del_friend target={target_id} type={del_type}")
-                    if del_type == 1: # enemy/foe
+                    if (del_type not in (0, 1) or target_id <= 0
+                            or numeric_id_matches(target_id, picked_char.get('id', 0))):
+                        print(f"[FRIEND] Ignored invalid del_friend target={target_id} type={del_type}")
+                    elif del_type == 1: # enemy/foe
                         enemies = picked_char.get('enemies', [])
-                        picked_char['enemies'] = [e for e in enemies if e.get('friendId') != target_id]
+                        picked_char['enemies'] = [e for e in enemies if social_relation_id(e) != target_id]
                         save_chars(all_accounts_chars)
                         # Client already calls RemoveEnemy() locally in EnemyItemLogic.OnClickDeleteBtn()
                         # Do NOT send ret_del_friend (535) - it calls RemoveFriend() on client,
@@ -11186,11 +11620,27 @@ def client_handler(conn, addr):
                         # Just send session acknowledgment.
                     else: # friend
                         friends = picked_char.get('friends', [])
-                        picked_char['friends'] = [f for f in friends if f.get('friendId') != target_id]
+                        previous_count = len(friends)
+                        picked_char['friends'] = [f for f in friends if social_relation_id(f) != target_id]
                         save_chars(all_accounts_chars)
                         # For friend deletion, client ret_del_friend_handler calls RemoveFriend()
                         # which is correct - the client does NOT remove friend locally before sending
                         send_rpc_push(535, encode_sproto([(0, target_id)]))
+                        if len(picked_char['friends']) < previous_count:
+                            # The APK also registers be_deleted_friend (tag 537) to remove
+                            # this relationship from the other player's live Friend UI.
+                            other_char = find_social_character(target_id)
+                            if other_char is not None:
+                                other_char['friends'] = [
+                                    friend for friend in other_char.get('friends', [])
+                                    if social_relation_id(friend) != numeric_id_value(picked_char.get('id', 0))
+                                ]
+                                save_chars(all_accounts_chars)
+                                send_push_to_char(
+                                    target_id,
+                                    537,
+                                    encode_sproto([(0, picked_char.get('id', 0))])
+                                )
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -11205,79 +11655,19 @@ def client_handler(conn, addr):
                     # BUG FIX: Client reads dict as value-only array, extracts key from value's friendId
                     # The dict key in Python is ignored by encode_sproto (value-only wire format)
                     # The client extracts the key from each decoded friend_info.friendId
-                    friend_dict = {}
-                    if req_type == 0: # friends
-                        # CRITICAL: Client FilterFriend skips friendType=1 entirely!
-                        # friendType==2 -> ApplyFriendDic, friendType!=1 -> MainPlayerFriendDic
-                        # So friendType=1 is ignored. Use friendType=0 for confirmed friends.
-                        for fi in picked_char.get('friends', []):
-                            fi_copy = dict(fi)
-                            fi_copy['friendType'] = 0  # Client FilterFriend: friendType=0 -> MainPlayerFriendDic
-                            fi_bytes = encode_friend_info(fi_copy)
-                            friend_dict[fi.get('friendId', 0)] = fi_bytes
-                        # Include pending friend requests so FilterFriend re-adds them to ApplyFriendDic
-                        for req_id in picked_char.get('friend_requests_received', []):
-                            # Look up requester's real info
-                            req_name = f'Player{req_id}'
-                            req_level = 1
-                            req_prof = 0
-                            req_combat = 0
-                            req_guildId = 0
-                            req_guildName = ''
-                            req_state = 0  # Default offline
-                            for r_cid, (r_conn, ch) in list(ALL_CONNECTIONS.items()):
-                                if ch and ch.get('id', 0) == req_id:
-                                    req_name = ch.get('name', f'Player{req_id}')
-                                    req_level = ch.get('level', 1)
-                                    req_prof = ch.get('prof', 0)
-                                    req_combat = get_character_stats(ch)['power']
-                                    req_guildId = ch.get('guildId', 0)
-                                    req_guildName = ch.get('guildName', '')
-                                    req_state = 1  # Online
-                                    break
-                            else:
-                                for area_key, area_chars in all_accounts_chars.items():
-                                    for acc_key, char_list in area_chars.items():
-                                        for ch in char_list:
-                                            if ch.get('id', 0) == req_id:
-                                                req_name = ch.get('name', f'Player{req_id}')
-                                                req_level = ch.get('level', 1)
-                                                req_prof = ch.get('prof', 0)
-                                                req_combat = get_character_stats(ch)['power']
-                                                req_guildId = ch.get('guildId', 0)
-                                                req_guildName = ch.get('guildName', '')
-                                                break
-                                        else:
-                                            continue
-                                        break
-                            pending_req = {
-                                'characterId': req_id,
-                                'friendId': req_id,
-                                'name': req_name,
-                                'level': req_level,
-                                'profession': req_prof,
-                                'combValue': req_combat,
-                                'state': req_state,
-                                'timeInfo': int(time.time()),
-                                'friendType': 2,
-                                'guildId': req_guildId,
-                                'guildName': req_guildName,
-                                'friendScore': 0
-                            }
-                            fi_bytes = encode_friend_info(pending_req)
-                            friend_dict[req_id] = fi_bytes
+                    if req_type == 0: # friends and incoming requests
+                        resp_data = build_social_friend_update(picked_char)
                     elif req_type == 1: # enemies
-                        for ei in picked_char.get('enemies', []):
-                            ei_copy = dict(ei)
-                            ei_copy['friendType'] = 6  # Required by client FilterEnemy
-                            ei_bytes = encode_friend_info(ei_copy, is_enemy=True)
-                            friend_dict[ei.get('friendId', 0)] = ei_bytes
-                    # ret_request_update_friend_useinfo: tag 0 = Dictionary, tag 1 = type
-                    resp_data = encode_sproto([
-                        (0, friend_dict),
-                        (1, req_type)
-                    ])
-                    send_rpc_push(534, resp_data)
+                        resp_data = build_social_enemy_update(picked_char)
+                    else:
+                        resp_data = None
+                        print(f"[FRIEND] Ignored unsupported friend-info type={req_type}")
+                    if resp_data is not None:
+                        send_rpc_push(534, resp_data)
+                    if req_type == 1:
+                        # Also repair any stale foe-only Friend rows from an
+                        # earlier 538 push before the player returns to Friend.
+                        push_stale_foe_friend_cleanup(picked_char, send_rpc_push)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -11288,14 +11678,62 @@ def client_handler(conn, addr):
                     is_agree = get_val_int(body, 1)
                     my_id = picked_char.get('id', 0)
                     print(f"[FRIEND] approve_resverve_friend target={target_id} agree={is_agree}")
+                    # This command is only valid for an actual incoming request.
+                    # Without this check a forged msg 158 could create a mutual
+                    # friendship with any character ID in the database.
+                    has_incoming_request = False
+                    has_incoming_request = any(
+                        numeric_id_matches(request_id, target_id)
+                        for request_id in picked_char.get('friend_requests_received', [])
+                    )
+                    if not has_incoming_request or is_agree not in (0, 1):
+                        print(f"[FRIEND] Ignored approval without valid incoming request target={target_id}")
+                        if session is not None:
+                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                            conn.sendall(struct.pack(">H", len(pf)) + pf)
+                        continue
+                    requester_for_limit = find_social_character(target_id) if is_agree == 1 else None
+                    if (is_agree == 1 and
+                            (social_friend_count(picked_char) >= 100 or
+                             (requester_for_limit is not None and social_friend_count(requester_for_limit) >= 100))):
+                        # Individual accepts have no client-side capacity check.
+                        # Re-add the locally removed request and leave it pending.
+                        requester = requester_for_limit or {}
+                        pending = {
+                            'characterId': target_id,
+                            'friendId': target_id,
+                            'name': requester.get('name', f'Player{target_id}'),
+                            'level': requester.get('level', 1),
+                            'profession': requester.get('prof', requester.get('profession', 0)),
+                            'combValue': get_character_stats(requester)['power'] if requester else 0,
+                            'state': 1 if target_id in ALL_CONNECTIONS else 0,
+                            'timeInfo': int(time.time()),
+                            'friendType': 2,
+                            'guildId': requester.get('guildId', 0),
+                            'guildName': requester.get('guildName', ''),
+                            'friendScore': 0
+                        }
+                        send_rpc_push(536, encode_sproto([(0, encode_friend_info(pending))]))
+                        print(f"[FRIEND] Accept denied: friend limit reached for {my_id}; request {target_id} remains pending")
+                        if session is not None:
+                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                            conn.sendall(struct.pack(">H", len(pf)) + pf)
+                        continue
                     if is_agree == 1:
                         # Remove from pending requests
                         if 'friend_requests_received' not in picked_char:
                             picked_char['friend_requests_received'] = []
                         picked_char['friend_requests_received'] = [
                             r for r in picked_char.get('friend_requests_received', [])
-                            if r != target_id
+                            if not numeric_id_matches(r, target_id)
                         ]
+                        # Clear the opposite pending direction if both players
+                        # had sent each other requests before either accepted.
+                        if 'friend_requests_sent' in picked_char:
+                            picked_char['friend_requests_sent'] = [
+                                r for r in picked_char.get('friend_requests_sent', [])
+                                if not numeric_id_matches(r, target_id)
+                            ]
                         # Add to friends list (acceptor gets requester as friend)
                         if 'friends' not in picked_char:
                             picked_char['friends'] = []
@@ -11307,7 +11745,7 @@ def client_handler(conn, addr):
                         req_guildId = 0
                         req_guildName = ''
                         for r_cid, (r_conn, ch) in list(ALL_CONNECTIONS.items()):
-                            if ch and ch.get('id', 0) == target_id:
+                            if ch and numeric_id_matches(ch.get('id', 0), target_id):
                                 req_name = ch.get('name', f'Player{target_id}')
                                 req_level = ch.get('level', 1)
                                 req_prof = ch.get('prof', 0)
@@ -11319,7 +11757,7 @@ def client_handler(conn, addr):
                             for area_key, area_chars in all_accounts_chars.items():
                                 for acc_key, char_list in area_chars.items():
                                     for ch in char_list:
-                                        if ch.get('id', 0) == target_id:
+                                        if numeric_id_matches(ch.get('id', 0), target_id):
                                             req_name = ch.get('name', f'Player{target_id}')
                                             req_level = ch.get('level', 1)
                                             req_prof = ch.get('prof', 0)
@@ -11333,12 +11771,35 @@ def client_handler(conn, addr):
                         # Check if already friends to avoid duplicates
                         already_friend = False
                         for existing in picked_char.get('friends', []):
-                            if existing.get('friendId') == target_id:
+                            if social_relation_id(existing) == target_id:
                                 already_friend = True
                                 break
                         if already_friend:
                             print(f"[FRIEND] Accept skipped: {my_id} already has {target_id} as friend")
+                            other_char = find_social_character(target_id)
+                            if other_char is not None:
+                                other_char['friend_requests_sent'] = [
+                                    r for r in other_char.get('friend_requests_sent', [])
+                                    if not numeric_id_matches(r, my_id)
+                                ]
+                                other_char['friend_requests_received'] = [
+                                    r for r in other_char.get('friend_requests_received', [])
+                                    if not numeric_id_matches(r, my_id)
+                                ]
+                                if target_id in ALL_CONNECTIONS:
+                                    other_update = build_social_friend_update(other_char)
+                                    threading.Thread(
+                                        target=lambda cid=target_id, payload=other_update:
+                                            send_push_to_char(cid, 534, payload),
+                                        daemon=True
+                                    ).start()
+                            if 'friend_requests_sent' in picked_char:
+                                picked_char['friend_requests_sent'] = [
+                                    r for r in picked_char.get('friend_requests_sent', [])
+                                    if not numeric_id_matches(r, target_id)
+                                ]
                             save_chars(all_accounts_chars)
+                            send_rpc_push(534, build_social_friend_update(picked_char))
                             if session is not None:
                                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                                 conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -11368,13 +11829,13 @@ def client_handler(conn, addr):
                         for area_key, area_chars in all_accounts_chars.items():
                             for acc_key, char_list in area_chars.items():
                                 for ch in char_list:
-                                    if ch.get('id', 0) == target_id:
+                                    if numeric_id_matches(ch.get('id', 0), target_id):
                                         if 'friends' not in ch:
                                             ch['friends'] = []
                                         # Check if already friends
                                         already_friend = False
                                         for existing in ch['friends']:
-                                            if existing.get('friendId') == my_id:
+                                            if social_relation_id(existing) == numeric_id_value(my_id):
                                                 already_friend = True
                                                 break
                                         if not already_friend:
@@ -11395,39 +11856,27 @@ def client_handler(conn, addr):
                                                 'friendScore': 0
                                             }
                                             ch['friends'].append(mutual_friend)
-                                            # Push syn_friend_info to the requester so they see the mutual friend immediately.
-                                            # Send in a background daemon thread to avoid blocking the accepter's
-                                            # connection thread. If the requester's socket is slow or stale,
-                                            # a synchronous sendall() would block the accepter's handler,
-                                            # stopping heartbeat (218) processing and causing the accepter to disconnect.
-                                            mutual_friend_copy = dict(mutual_friend)
-                                            def _send_syn_friend_info_async():
-                                                for r_cid, (r_conn, r_char) in list(ALL_CONNECTIONS.items()):
-                                                    if r_char and r_char.get('id', 0) == target_id:
-                                                        try:
-                                                            fi_bytes = encode_friend_info(mutual_friend_copy)
-                                                            ph_p = encode_sproto([(0, 538)])
-                                                            pf_p = sproto_pack(ph_p + encode_sproto([(0, fi_bytes)]))
-                                                            syn_pkt = struct.pack(">H", len(pf_p)) + pf_p
-                                                            r_lock = CONNECTION_LOCKS.get(r_cid)
-                                                            if r_lock:
-                                                                with r_lock:
-                                                                    r_conn.sendall(syn_pkt)
-                                                            else:
-                                                                r_conn.sendall(syn_pkt)
-                                                            print(f"[FRIEND] syn_friend_info pushed to requester={target_id}")
-                                                        except Exception:
-                                                            print(f"[FRIEND] Failed to push syn_friend_info to requester={target_id}")
-                                                        break
-                                            syn_thread = threading.Thread(target=_send_syn_friend_info_async, daemon=True)
-                                            syn_thread.start()
                                             print(f"[FRIEND] Mutual friendship saved for requester={target_id}")
-                                        # Remove from friend_requests_sent
-                                        if 'friend_requests_sent' in ch:
-                                            ch['friend_requests_sent'] = [r for r in ch['friend_requests_sent'] if r != my_id]
+                                        # Clear both sides of any reciprocal pending request. A full
+                                        # tag 534 refresh updates both the Friend and Request tabs.
+                                        ch['friend_requests_sent'] = [
+                                            r for r in ch.get('friend_requests_sent', [])
+                                            if not numeric_id_matches(r, my_id)
+                                        ]
+                                        ch['friend_requests_received'] = [
+                                            r for r in ch.get('friend_requests_received', [])
+                                            if not numeric_id_matches(r, my_id)
+                                        ]
                                         save_chars(all_accounts_chars)
+                                        if target_id in ALL_CONNECTIONS:
+                                            requester_update = build_social_friend_update(ch)
+                                            threading.Thread(
+                                                target=lambda cid=target_id, payload=requester_update:
+                                                    send_push_to_char(cid, 534, payload),
+                                                daemon=True
+                                            ).start()
                                         break
-                                if ch.get('id', 0) == target_id:
+                                if numeric_id_matches(ch.get('id', 0), target_id):
                                     break
                     else:
                         # Reject: remove from receiver's friend_requests_received
@@ -11435,17 +11884,18 @@ def client_handler(conn, addr):
                             picked_char['friend_requests_received'] = []
                         picked_char['friend_requests_received'] = [
                             r for r in picked_char.get('friend_requests_received', [])
-                            if r != target_id
+                            if not numeric_id_matches(r, target_id)
                         ]
                         # Also remove receiver from sender's friend_requests_sent
                         # so the sender can send another request in the future
                         for area_key, area_chars in all_accounts_chars.items():
                             for acc_key, char_list in area_chars.items():
                                 for ch in char_list:
-                                    if ch.get('id', 0) == target_id:
+                                    if numeric_id_matches(ch.get('id', 0), target_id):
                                         if 'friend_requests_sent' in ch:
                                             ch['friend_requests_sent'] = [
-                                                r for r in ch['friend_requests_sent'] if r != my_id
+                                                r for r in ch['friend_requests_sent']
+                                                if not numeric_id_matches(r, my_id)
                                             ]
                                         save_chars(all_accounts_chars)
                                         break
@@ -11502,22 +11952,8 @@ def client_handler(conn, addr):
                     online_chars = get_online_characters()
                     friend_list = []
                     for oc in online_chars:
-                        if oc.get('id', 0) != picked_char.get('id', 0):
-                            fi = {
-                                'characterId': oc.get('id', 0),
-                                'friendId': oc.get('id', 0),
-                                'name': oc.get('name', f'Player{oc.get("id", 0)}'),
-                                'level': oc.get('level', 1),
-                                'profession': oc.get('prof', 0),
-                                'combValue': get_character_stats(oc)['power'],
-                                'state': 1,
-                                'timeInfo': int(time.time()),
-                                'friendType': 0,
-                                'guildId': oc.get('guildId', 0),
-                                'guildName': oc.get('guildName', ''),
-                                'friendScore': 0
-                            }
-                            friend_list.append(encode_friend_info(fi))
+                        if not numeric_id_matches(oc.get('id', 0), picked_char.get('id', 0)):
+                            friend_list.append(online_social_friend_info(picked_char, oc))
                     # ret_random_online_character_list: tag 0 = List<friend_info>
                     resp_data = encode_sproto([(0, friend_list)])
                     send_rpc_push(570, resp_data)
@@ -11535,26 +11971,32 @@ def client_handler(conn, addr):
                         for oc in online_chars:
                             oc_name = oc.get('name', '')
                             if oc_name and search_name.lower() in oc_name.lower():
-                                if oc.get('id', 0) != picked_char.get('id', 0):
-                                    fi = {
-                                        'characterId': oc.get('id', 0),
-                                        'friendId': oc.get('id', 0),
-                                        'name': oc_name,
-                                        'level': oc.get('level', 1),
-                                        'profession': oc.get('prof', 0),
-                                        'combValue': get_character_stats(oc)['power'],
-                                        'state': 1,
-                                        'timeInfo': int(time.time()),
-                                        'friendType': 0,
-                                        'guildId': oc.get('guildId', 0),
-                                        'guildName': oc.get('guildName', ''),
-                                        'friendScore': 0
-                                    }
-                                    friend_list.append(encode_friend_info(fi))
+                                if not numeric_id_matches(oc.get('id', 0), picked_char.get('id', 0)):
+                                    friend_list.append(online_social_friend_info(picked_char, oc))
+                    match_count = len(friend_list)
+                    if not friend_list:
+                        # The APK uses an empty result to display its no-match notice,
+                        # but doesn't clear old result rows on that branch. Send the
+                        # empty result first, then a filtered row to clear the list.
+                        send_rpc_push(571, encode_sproto([(0, [])]))
+                        friend_list.append(encode_friend_info({
+                            'characterId': 0,
+                            'friendId': 0,
+                            'name': '',
+                            'level': 1,
+                            'profession': 0,
+                            'combValue': 0,
+                            'state': 0,
+                            'timeInfo': 0,
+                            'friendType': 1,
+                            'guildId': 0,
+                            'guildName': '',
+                            'friendScore': 0
+                        }))
                     # ret_search_online_character_by_name: tag 0 = List<friend_info>
                     resp_data = encode_sproto([(0, friend_list)])
                     send_rpc_push(571, resp_data)
-                    print(f"[FRIEND] search_online_character_by_name name={search_name} found={len(friend_list)}")
+                    print(f"[FRIEND] search_online_character_by_name name={search_name} found={match_count}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -11565,11 +12007,14 @@ def client_handler(conn, addr):
                     # Find target player and warp to their location
                     target_conn = None
                     target_char = None
-                    for t_cid, (t_conn, ch) in list(ALL_CONNECTIONS.items()):
-                        if ch and ch.get('id', 0) == target_id:
-                            target_conn = t_conn
-                            target_char = ch
-                            break
+                    if is_social_enemy(picked_char, target_id):
+                        for t_cid, (t_conn, ch) in list(ALL_CONNECTIONS.items()):
+                            if ch and numeric_id_matches(ch.get('id', 0), target_id):
+                                target_conn = t_conn
+                                target_char = ch
+                                break
+                    else:
+                        print(f"[GATHER] denied player={picked_char.get('id')} target={target_id}; target is not in Enemy list")
                     if target_char and 'pos' in target_char:
                         target_pos = target_char['pos']
                         target_map = target_char.get('map_id', '11')
@@ -11607,10 +12052,13 @@ def client_handler(conn, addr):
                     target_id = get_val_int(body, 0)
                     # Find target player and return their map info
                     target_char = None
-                    for t_cid, (t_conn, ch) in list(ALL_CONNECTIONS.items()):
-                        if ch and ch.get('id', 0) == target_id:
-                            target_char = ch
-                            break
+                    if is_social_enemy(picked_char, target_id):
+                        for t_cid, (t_conn, ch) in list(ALL_CONNECTIONS.items()):
+                            if ch and numeric_id_matches(ch.get('id', 0), target_id):
+                                target_char = ch
+                                break
+                    else:
+                        print(f"[RPC] update_player_map_info denied target={target_id}; not in Enemy list")
                     if target_char:
                         pos = target_char.get('pos', [0, 0, 0, 0])
                         pos_obj = encode_sproto([
