@@ -1651,9 +1651,18 @@ def get_visual(name, prof, mount_id='', mount_color='', mount_state=0, character
     v = m.get(prof, m[1])
     head_id, body_id, leg_id, weapon_id = v['h'], v['b'], v['l'], v['w']
     visual_fields = []
-    if isinstance(character, dict) and any(key in character for key in
-            ('equipped_equip', 'equipped_fashion', 'inventory')):
+    if isinstance(character, dict):
         ensure_backpack_state(character)
+        # Match the APK's GameDefine.*_DefaultModel fallback for empty player
+        # slots. Keep the original A-model defaults for non-player visuals
+        # (for example Ash Viper), whose appearance is configured separately.
+        empty_models = {
+            0: ("XD_0_T", "XD_0_S", "XD_0_X"),
+            1: ("QJ_0_T", "QJ_0_S", "QJ_0_X"),
+            2: ("NQS_0_T", "NQS_0_S", "NQS_0_X"),
+        }
+        empty_head, empty_body, empty_leg = empty_models.get(prof, empty_models[1])
+        head_id, body_id, leg_id = empty_head, empty_body, empty_leg
         for item in character.get('equipped_equip', []):
             equip = EQUIP_CONFIG.get(str(item.get('id', '')), {})
             model = str(equip.get('model') or '')
@@ -4667,8 +4676,6 @@ def ensure_backpack_state(picked_char):
                     'equipped_equip', 'equipped_badges', 'equipped_fashion')
     raw = {key: _backpack_records(picked_char.get(key)) for key in bucket_names}
     legacy_keys_to_remove = set()
-    had_equipment_state = ('equipped_equip' in picked_char or any(
-        key in picked_char for key in LEGACY_EQUIPPED_KEYS['equipped_equip']))
     for bucket in ('equipped_equip', 'equipped_badges', 'equipped_fashion'):
         legacy_keys_to_remove.update(key for key in LEGACY_EQUIPPED_KEYS[bucket]
                                      if key in picked_char)
@@ -4676,8 +4683,6 @@ def ensure_backpack_state(picked_char):
             legacy_records, _legacy_key = _legacy_equipped_records(picked_char, bucket)
             if legacy_records:
                 raw[bucket] = legacy_records
-                if bucket == 'equipped_equip':
-                    had_equipment_state = True
     # Re-route every backpack source, not only the legacy shared inventory.
     # Earlier server builds put type-16 fashion in the item bag and type-15
     # boxes in the fashion bag; this repairs those persisted records on login.
@@ -4720,24 +4725,53 @@ def ensure_backpack_state(picked_char):
     for legacy_key in legacy_keys_to_remove:
         picked_char.pop(legacy_key, None)
 
-    # Preserve the original per-profession starter weapon and its client slot
-    # index.  It is now persisted as a real equipped item instead of being
-    # fabricated anew on every character-create packet.
-    has_equipped_weapon = any(_equipment_slot_for_item(item, 'equipped_equip') == 0
-                              for item in picked_char.get('equipped_equip', []))
-    if not had_equipment_state and not has_equipped_weapon:
-        starter_ids = {0: '10001', 1: '20001', 2: '30001'}
-        starter_id = starter_ids.get(int(picked_char.get('prof', 0)), '10001')
-        # Preserve the client's legacy starter index when it is free, but do
-        # not let it collide with an item that was already in a migrated bag.
-        starter_index = 5 if 5 not in seen_ids else next_index
-        if starter_index != 5:
-            next_index += 1
-        picked_char['equipped_equip'] = [{
-            'index_id': starter_index, 'id': starter_id, 'amount': 1, 'bindflag': True,
-            'level': 1, 'quality': 1, 'appraise': 0, 'parm': [0] * 8,
-            'random_attri': {}, 'inlay': {}
-        }]
+    # The APK's default world visual uses the complete level-1 profession set
+    # (EquipData 10001..10006 / 20001..20006 / 30001..30006), but older server
+    # initialization only put the weapon in character.equip. That left the
+    # Backpack with a naked model and empty head/body/leg/belt/neck slots.
+    # Migrate only once, and only when no physical equipment exists in either
+    # the equipped pack or equipment bag. This preserves any real/custom gear
+    # and prevents removed starter items from being re-granted on reconnect.
+    starter_sets = {
+        0: ('10001', '10002', '10003', '10004', '10005', '10006'),
+        1: ('20001', '20002', '20003', '20004', '20005', '20006'),
+        2: ('30001', '30002', '30003', '30004', '30005', '30006'),
+    }
+    if not picked_char.get('starter_equipment_migrated'):
+        prof = int(picked_char.get('prof', 0))
+        starter_ids = starter_sets.get(prof, starter_sets[1])
+        equipped = picked_char.get('equipped_equip', [])
+        equipment_bag = picked_char.get('equip_inventory', [])
+        physical_items = equipped + equipment_bag
+        has_nonstarter_equipment = any(
+            str(item.get('id', '')) not in starter_ids for item in physical_items
+        )
+        has_equipment_in_bag = bool(equipment_bag)
+        if not has_nonstarter_equipment and not has_equipment_in_bag:
+            occupied_slots = {
+                slot for item in equipped
+                for slot in [_equipment_slot_for_item(item, 'equipped_equip')]
+                if slot is not None
+            }
+            for slot, starter_id in enumerate(starter_ids):
+                if slot in occupied_slots:
+                    continue
+                # Keep the original weapon index used by the APK's starter
+                # flow when available; use normal unique IDs for other pieces.
+                item_index = 5 if slot == 0 and 5 not in seen_ids else next_index
+                if item_index == 5:
+                    seen_ids.add(item_index)
+                else:
+                    next_index = max(next_index, item_index + 1)
+                    seen_ids.add(item_index)
+                equipped.append({
+                    'index_id': item_index, 'id': starter_id, 'amount': 1,
+                    'bindflag': True, 'level': 1, 'quality': 1,
+                    'appraise': 0, 'parm': [0] * 8,
+                    'random_attri': {}, 'inlay': {}
+                })
+            picked_char['equipped_equip'] = equipped
+        picked_char['starter_equipment_migrated'] = True
 
     # Keep allocation monotonic across all four backpacks and the three packs.
     for bucket in ('equipped_equip', 'equipped_badges', 'equipped_fashion'):
