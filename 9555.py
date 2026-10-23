@@ -3272,6 +3272,20 @@ def sync_char_attrs_rpc(conn, picked_char, conn_id=None):
             conn.sendall(pkt)
     except: pass
 
+def send_combat_power_gain_tip(send_rpc_push, previous_power, current_power):
+    """Open the APK's combat-power increase popup only for a real power gain."""
+    try:
+        previous_power = int(previous_power)
+        current_power = int(current_power)
+    except (TypeError, ValueError):
+        return False
+    if current_power <= previous_power:
+        return False
+    # Protocol tag 651 is comb_value_up_tip(current, next). Tag 510 updates the
+    # numeric character attributes; this separate push opens the gain UI.
+    send_rpc_push(651, encode_sproto([(0, previous_power), (1, current_power)]))
+    return True
+
 def get_npc_attr(nid, player_level=1):
     cfg = NPC_CONFIG.get(str(nid))
     if not cfg:
@@ -7304,9 +7318,11 @@ def client_handler(conn, addr):
             elif msg in (116, 117): # equip_item / unequip_item
                 index_id = get_val_int(body, 0, -1)
                 changed = False
+                power_before = None
                 if picked_char and is_current_character_connection(conn, picked_char):
                     with get_character_transaction_lock(picked_char):
                         ensure_backpack_state(picked_char)
+                        power_before = get_character_stats(picked_char)['power']
                         if msg == 116:
                             found = find_backpack_item(picked_char, index_id, 0)
                             if found:
@@ -7385,6 +7401,10 @@ def client_handler(conn, addr):
                         if changed:
                             save_chars(all_accounts_chars)
                             sync_char_attrs_rpc(conn, picked_char)
+                            send_combat_power_gain_tip(
+                                send_rpc_push, power_before,
+                                get_character_stats(picked_char)['power']
+                            )
                             sync_equipment_status_to_peers(picked_char)
                             sync_main_player_visual(picked_char, send_rpc_push)
                 send_rpc_response(session)
@@ -7395,6 +7415,7 @@ def client_handler(conn, addr):
                 if picked_char and is_current_character_connection(conn, picked_char):
                     with get_character_transaction_lock(picked_char):
                         ensure_backpack_state(picked_char)
+                        power_before = get_character_stats(picked_char)['power']
                         found = find_backpack_item(picked_char, index_id, 1)
                         if found:
                             item = found['item']
@@ -7450,6 +7471,10 @@ def client_handler(conn, addr):
                                         save_chars(all_accounts_chars)
                                         push_backpack_item_update(send_rpc_push, 1, item)
                                         sync_char_attrs_rpc(conn, picked_char)
+                                        send_combat_power_gain_tip(
+                                            send_rpc_push, power_before,
+                                            get_character_stats(picked_char)['power']
+                                        )
                                         sync_equipment_status_to_peers(picked_char)
                                         print(f"[BACKPACK] enhanced slot={subtype} item={item_id} level={current_level}->{target_level} material={total_material} cash={total_cash}")
                 send_rpc_response(session)
@@ -7567,9 +7592,11 @@ def client_handler(conn, addr):
             elif msg in (197, 198): # equip_badge / unequip_badge
                 index_id = get_val_int(body, 0, -1)
                 changed = False
+                power_before = None
                 if picked_char and is_current_character_connection(conn, picked_char):
                     with get_character_transaction_lock(picked_char):
                         ensure_backpack_state(picked_char)
+                        power_before = get_character_stats(picked_char)['power']
                         if msg == 197:
                             position = get_val_int(body, 1, -1)
                             found = find_backpack_item(picked_char, index_id, 3)
@@ -7618,15 +7645,21 @@ def client_handler(conn, addr):
                         if changed:
                             save_chars(all_accounts_chars)
                             sync_char_attrs_rpc(conn, picked_char)
+                            send_combat_power_gain_tip(
+                                send_rpc_push, power_before,
+                                get_character_stats(picked_char)['power']
+                            )
                             sync_equipment_status_to_peers(picked_char)
                 send_rpc_response(session)
 
             elif msg in (221, 222): # equip_fashion_item / unequip_fashion_item
                 index_id = get_val_int(body, 0, -1)
                 changed = False
+                power_before = None
                 if picked_char and is_current_character_connection(conn, picked_char):
                     with get_character_transaction_lock(picked_char):
                         ensure_backpack_state(picked_char)
+                        power_before = get_character_stats(picked_char)['power']
                         if msg == 221:
                             found = find_backpack_item(picked_char, index_id, 5)
                             if found:
@@ -7667,6 +7700,10 @@ def client_handler(conn, addr):
                         if changed:
                             save_chars(all_accounts_chars)
                             sync_char_attrs_rpc(conn, picked_char)
+                            send_combat_power_gain_tip(
+                                send_rpc_push, power_before,
+                                get_character_stats(picked_char)['power']
+                            )
                             sync_equipment_status_to_peers(picked_char)
                             sync_main_player_visual(picked_char, send_rpc_push)
                 send_rpc_response(session)
