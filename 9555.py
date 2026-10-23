@@ -3191,6 +3191,10 @@ def get_full_char(c):
     fashion_map = {int(item['index_id']): _gameitem_sproto(item)
                    for item in c.get('equipped_fashion', [])}
     enhance_map = equipment_enhance_sproto(c)
+    print(f"[BACKPACK SYNC] character={c.get('id')} equipped={len(equip_map)} "
+          f"badges={len(badge_map)} fashion={len(fashion_map)} "
+          f"bags={len(c.get('equip_inventory', []))}/{len(c.get('inventory', []))}/"
+          f"{len(c.get('badge_inventory', []))}/{len(c.get('fashion_inventory', []))}")
 
     # character.download: the APK treats 2 as completed.  Sending 1 again on
     # reconnect would reopen the optional download/reward UI forever, even
@@ -4540,60 +4544,146 @@ def roll_equip_random_attributes(item):
         candidates = eligible
     return rolled
 
+def _backpack_records(value):
+    """Accept list and map-shaped character saves without dropping item rows."""
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if not isinstance(value, dict):
+        return []
+    # Some older character snapshots stored a single item directly; newer
+    # snapshots may store a map keyed by slot or item index.
+    if any(key in value for key in ('id', 'itemId', 'item_id', 'itemID', 'ItemId', 'ID')):
+        return [value]
+    return [item for item in value.values() if isinstance(item, dict)]
+
+def _legacy_equipped_records(picked_char, canonical_key):
+    """Read equipment maps written before equipped_* became the save format."""
+    aliases = {
+        'equipped_equip': ('equip', 'equips', 'equippedEquip', 'Equip'),
+        'equipped_badges': ('badge_equip', 'equipped_badges_items', 'badgeEquip', 'BadgeEquip'),
+        'equipped_fashion': ('fashion_equip', 'equippedFashion', 'fashionEquip', 'FashionEquip'),
+    }.get(canonical_key, ())
+    for key in aliases:
+        records = _backpack_records(picked_char.get(key))
+        if records:
+            return records, key
+    return [], None
+
+def _is_legacy_equipped_item(item):
+    """Recognize explicit worn flags in older item records; never guess by slot."""
+    for key in ('equipped', 'is_equipped', 'isEquipped', 'worn', 'isWorn'):
+        value = item.get(key)
+        if value is True or value == 1 or (isinstance(value, str) and value.lower() in ('1', 'true', 'yes')):
+            return True
+    return False
+
+def _equipment_slot_for_item(item, bucket):
+    item_id = str(item.get('id', ''))
+    if bucket == 'equipped_badges':
+        parm = item.get('parm', [])
+        try:
+            slot = int(parm[0])
+        except (TypeError, ValueError, IndexError):
+            return None
+        return slot if 0 <= slot < 5 else None
+    try:
+        slot = int(EQUIP_CONFIG.get(item_id, {}).get('position', -1))
+    except (TypeError, ValueError):
+        slot = -1
+    limit = 4 if bucket == 'equipped_fashion' else 6
+    return slot if 0 <= slot < limit else None
+
+def _collapse_equipped_slot_duplicates(output):
+    """Keep the latest record per client slot and return displaced items to bags."""
+    for equipped_bucket, bag_bucket in (
+            ('equipped_equip', 'equip_inventory'),
+            ('equipped_badges', 'badge_inventory'),
+            ('equipped_fashion', 'fashion_inventory')):
+        items = output[equipped_bucket]
+        latest_by_slot = {}
+        unassigned = []
+        for item in items:
+            slot = _equipment_slot_for_item(item, equipped_bucket)
+            if slot is None:
+                unassigned.append(item)
+            else:
+                # Equipment handlers replace an occupied slot and append the
+                # replacement, so the final saved record is the current one.
+                latest_by_slot[slot] = item
+        kept_ids = {id(item) for item in latest_by_slot.values()}
+        output[bag_bucket].extend(item for item in items
+                                  if _equipment_slot_for_item(item, equipped_bucket) is not None
+                                  and id(item) not in kept_ids)
+        output[equipped_bucket] = unassigned + [latest_by_slot[slot]
+                                                for slot in sorted(latest_by_slot)]
+
 def _normalise_backpack_item(item, next_index):
     if not isinstance(item, dict):
         return None, next_index
-    item_id = str(item.get('id', item.get('itemId', '')))
+    item_id = str(item.get('id', item.get('itemId', item.get('item_id',
+                  item.get('itemID', item.get('ItemId', item.get('ID', '')))))))
     if not item_id:
         return None, next_index
     item['id'] = item_id
     try:
-        item['amount'] = max(1, int(item.get('amount', item.get('stack', 1))))
+        item['amount'] = max(1, int(item.get('amount', item.get('stack', item.get('StackNum', 1)))))
     except (TypeError, ValueError):
         item['amount'] = 1
     try:
-        index_id = int(item.get('index_id', item.get('indexId', -1)))
+        index_id = int(item.get('index_id', item.get('indexId', item.get('indexID', item.get('IndexId', -1)))))
     except (TypeError, ValueError):
         index_id = -1
     if index_id < 0:
         index_id = next_index
         next_index += 1
     item['index_id'] = index_id
-    item.setdefault('bindflag', bool(item.get('bind', True)))
-    item.setdefault('level', 0)
+    item.setdefault('bindflag', bool(item.get('bind', item.get('BindFlag', True))))
+    item.setdefault('level', item.get('ItemLevel', item.get('itemLevel', 0)))
     try:
-        item['quality'] = int(item.get('quality', ITEM_CONFIG.get(item_id, {}).get('quality', 0)))
+        item['quality'] = int(item.get('quality', item.get('Quality', ITEM_CONFIG.get(item_id, {}).get('quality', 0))))
     except (TypeError, ValueError):
         item['quality'] = int(ITEM_CONFIG.get(item_id, {}).get('quality', 0))
     try:
-        item['appraise'] = 1 if int(item.get('appraise', 0)) == 1 else 0
+        item['appraise'] = 1 if int(item.get('appraise', item.get('Appraise', 0))) == 1 else 0
     except (TypeError, ValueError):
         item['appraise'] = 0
     try:
-        parms = list(item.get('parm', [0] * 8))
+        parms = list(item.get('parm', item.get('Parm', [0] * 8)))
     except TypeError:
         parms = [0] * 8
     parms = [int(value) if str(value).lstrip('-').isdigit() else 0 for value in parms[:8]]
     parms.extend([0] * (8 - len(parms)))
     item['parm'] = parms
-    item.setdefault('random_attri', {})
-    item.setdefault('inlay', {})
+    if 'random_attri' not in item:
+        item['random_attri'] = item.get('Random_AttriDic', {})
+    if 'inlay' not in item:
+        item['inlay'] = item.get('InlayDic', {})
     return item, max(next_index, index_id + 1)
 
 def ensure_backpack_state(picked_char):
-    """Migrate old positional inventory records to stable, typed item slots."""
-    had_equipment_state = 'equipped_equip' in picked_char
-    raw = {key: picked_char.get(key, []) if isinstance(picked_char.get(key, []), list) else []
-           for key in ('inventory', 'equip_inventory', 'badge_inventory', 'fashion_inventory',
-                       'equipped_equip', 'equipped_badges', 'equipped_fashion')}
+    """Migrate legacy item saves into the seven containers consumed by the APK."""
+    bucket_names = ('inventory', 'equip_inventory', 'badge_inventory', 'fashion_inventory',
+                    'equipped_equip', 'equipped_badges', 'equipped_fashion')
+    raw = {key: _backpack_records(picked_char.get(key)) for key in bucket_names}
+    legacy_sources = {}
+    had_equipment_state = any(key in picked_char for key in
+                              ('equipped_equip', 'equip', 'equips', 'equippedEquip', 'Equip'))
+    for bucket in ('equipped_equip', 'equipped_badges', 'equipped_fashion'):
+        if not raw[bucket]:
+            legacy_records, legacy_key = _legacy_equipped_records(picked_char, bucket)
+            if legacy_records:
+                raw[bucket] = legacy_records
+                legacy_sources[bucket] = legacy_key
+                if bucket == 'equipped_equip':
+                    had_equipment_state = True
     # Re-route every backpack source, not only the legacy shared inventory.
     # Earlier server builds put type-16 fashion in the item bag and type-15
     # boxes in the fashion bag; this repairs those persisted records on login.
     output = {key: [] for key in raw}
     next_index = 10000
     seen_ids = set()
-    for source_bucket in ('inventory', 'equip_inventory', 'badge_inventory', 'fashion_inventory',
-                          'equipped_equip', 'equipped_badges', 'equipped_fashion'):
+    for source_bucket in ('equipped_equip', 'equipped_badges', 'equipped_fashion',
+                          'inventory', 'equip_inventory', 'badge_inventory', 'fashion_inventory'):
         for item in raw[source_bucket]:
             item, next_index = _normalise_backpack_item(item, next_index)
             if item is None:
@@ -4606,10 +4696,27 @@ def ensure_backpack_state(picked_char):
             if source_bucket in ('equipped_equip', 'equipped_badges', 'equipped_fashion'):
                 output[source_bucket].append(item)
             else:
-                target = BACKPACKS[item_backpack_type(item['id'])][0]
+                container_type = item_backpack_type(item['id'])
+                if _is_legacy_equipped_item(item):
+                    item_type = int(ITEM_CONFIG.get(str(item['id']), {}).get('type', -1))
+                    equipped_bucket = {2: 'equipped_equip', 6: 'equipped_badges',
+                                       16: 'equipped_fashion'}.get(item_type)
+                    if equipped_bucket:
+                        for flag in ('equipped', 'is_equipped', 'isEquipped', 'worn', 'isWorn'):
+                            item.pop(flag, None)
+                        if item_type == 6:
+                            item.setdefault('parm', [0] * 8)
+                        output[equipped_bucket].append(item)
+                        continue
+                target = BACKPACKS[container_type][0]
                 output[target].append(item)
 
+    _collapse_equipped_slot_duplicates(output)
     picked_char.update(output)
+    # Retire aliases after migration so a later unequip cannot be undone by an
+    # old duplicate field on the next login.
+    for legacy_key in set(legacy_sources.values()):
+        picked_char.pop(legacy_key, None)
 
     # Preserve the original per-profession starter weapon and its client slot
     # index.  It is now persisted as a real equipped item instead of being
