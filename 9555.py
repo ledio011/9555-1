@@ -89,8 +89,10 @@ COLOR_CONFIG = {} # color id -> authoritative PriceType/PriceCost from ColorData
 WILD_BOSS_CONFIG = {} # ID -> configured PVE world boss and required level band
 COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
 SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
+SHOW_REWARD_EXPLICIT_COUNT_CONFIG = {} # ShowRewardData id -> rewards with an explicit positive item count
 STREET_RACE_REWARD_BY_LEVEL = {} # level -> AdaptData _drop_bc ShowRewardData id
 STREET_RACE_REWARD_BY_KEY_LEVEL = {} # AdaptData reward key -> level -> ShowRewardData id
+DANCE_REWARD_DROP_BY_KEY_LEVEL = {} # AdaptData dance drop key -> level -> drop id
 STREET_RACE_CHECKPOINT_COUNTS = {} # copy id -> required player-car route checkpoints
 STREET_RACE_CHECKPOINTS = {} # copy id -> ordered checkpoint positions in centimeters
 STREET_RACE_START_POSITIONS = {} # copy id -> client PointType=2/BlockIndex=0 car start, in centimeters
@@ -1096,6 +1098,7 @@ try:
                 parts = line.strip().split(',')
                 if len(parts) >= 5 and parts[0] == '*' and parts[1].isdigit():
                     rewards = []
+                    explicit_count_rewards = []
                     for index in range(3, len(parts) - 2, 3):
                         item_id = parts[index].strip()
                         quality = int(parts[index + 1]) if parts[index + 1].isdigit() else 0
@@ -1104,10 +1107,17 @@ try:
 
                         if item_id:
                             rewards.append((item_id, quality, count))
+                            # Keep the client preview/default separate from an
+                            # authoritative payout. Dance's 30301 preview has
+                            # an empty ItemCount field, which is not a reward
+                            # quantity and must not be promoted to 1.
+                            if count_str.isdigit() and int(count_str) > 0:
+                                explicit_count_rewards.append((item_id, quality, int(count_str)))
                         # ShowRewardData.InitData/AddListItem in the APK ignores
                         # slots whose ItemN field is empty, regardless of the
                         # quality or count columns in that slot.
                     SHOW_REWARD_CONFIG[parts[1]] = rewards
+                    SHOW_REWARD_EXPLICIT_COUNT_CONFIG[parts[1]] = explicit_count_rewards
         print(f"[SHOW REWARD CONFIG LOADED] count={len(SHOW_REWARD_CONFIG)}")
 
     adapt_path = os.path.join(text_asset_root, "AdaptData")
@@ -1125,6 +1135,8 @@ try:
                 for index, reward_key in enumerate(header):
                     if reward_key.startswith('_') and index < len(parts) and parts[index].strip():
                         STREET_RACE_REWARD_BY_KEY_LEVEL.setdefault(reward_key, {})[lv] = parts[index].strip()
+                        if reward_key in ('_drop_jh', '_drop_jhdj'):
+                            DANCE_REWARD_DROP_BY_KEY_LEVEL.setdefault(reward_key, {})[lv] = parts[index].strip()
                 if street_reward_index >= 0 and len(parts) > street_reward_index:
                     STREET_RACE_REWARD_BY_LEVEL[lv] = parts[street_reward_index]
                 ADAPT_DATA[lv] = {
@@ -1146,6 +1158,20 @@ try:
                     'cria': int(parts[19]) if len(parts) > 19 and parts[19].isdigit() else 3158,
                 }
         print(f"[ADAPT DATA LOADED] count={len(ADAPT_DATA)}")
+        dance_drop_ids = {
+            str(drop_id)
+            for reward_key in ('_drop_jh', '_drop_jhdj')
+            for drop_id in DANCE_REWARD_DROP_BY_KEY_LEVEL.get(reward_key, {}).values()
+            if drop_id
+        }
+        missing_dance_drops = sorted(
+            drop_id for drop_id in dance_drop_ids
+            if not SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(drop_id)
+        )
+        if missing_dance_drops:
+            print("[DANCE REWARD CONFIG MISSING] no explicit ShowRewardData quantities for "
+                  f"{len(missing_dance_drops)} level drop IDs; sample={missing_dance_drops[:8]}; "
+                  "payouts will not be guessed")
         # Log street race rewards for verification
         if STREET_RACE_REWARD_BY_LEVEL:
             sample_levels = sorted(STREET_RACE_REWARD_BY_LEVEL.keys())[:5]
@@ -3336,7 +3362,7 @@ def get_char_ov(c, sort_index=None):
     ])
 
 MONEY_FIELDS = ('cash', 'gold', 'diamond', 'guild_contribute', 'battle_coin', 'activity_coin')
-MONEY_DEFAULTS = (1000, 100, 0, 0, 0, 0)
+MONEY_DEFAULTS = (1000, 100, 10, 0, 0, 0)
 CHARACTER_TRANSACTION_LOCKS = {}
 CHARACTER_TRANSACTION_LOCKS_GUARD = threading.Lock()
 
@@ -3467,13 +3493,17 @@ def personal_dance_reward_interval(activity=None):
     except (TypeError, ValueError):
         return 60
 
-def personal_dance_reward_list(char, dance_id):
-    """Resolve solo-dance rewards and apply DanceData.RewardScale."""
-    activity = CITY_DANCE_CONFIG.get('101', {})
+def personal_dance_reward_list(char, dance_id, running_source=''):
+    """Resolve an explicit character-level dance payout and apply RewardScale."""
     try:
         level = max(1, min(80, int(char.get('level', 1))))
     except (TypeError, ValueError):
         level = 1
+    dance_cfg = DANCE_CONFIG.get(str(dance_id), {})
+    # DanceData's paid choreography is the same personal-dance activity with a
+    # reward scale. Only the separate speaker-item activity uses _drop_jhdj.
+    activity_id = '102' if str(running_source) == 'speaker' else '101'
+    activity = CITY_DANCE_CONFIG.get(activity_id, CITY_DANCE_CONFIG.get('101', {}))
     try:
         unlock_level = max(1, int(activity.get('UnlockLevel', 8) or 8))
     except (TypeError, ValueError):
@@ -3481,18 +3511,18 @@ def personal_dance_reward_list(char, dance_id):
     if level < unlock_level:
         return []
 
-    # CityDanceData 101 identifies 30301 as the solo-dance reward preview.
-    # AdaptData's _drop_jh points at 30308/30309/... for playable levels, but
-    # those rows are absent from this client bundle; 30302 is a guild-dance
-    # preview and must not be mistaken for the solo reward. Keep the solo
-    # reward item list from 30301 and resolve its level amount explicitly.
-    rewards = list(SHOW_REWARD_CONFIG.get(str(activity.get('ShowRewardId') or ''), []))
+    drop_key = str(activity.get('DropId') or '')
+    level_drops = DANCE_REWARD_DROP_BY_KEY_LEVEL.get(drop_key, {})
+    drop_id = str(level_drops.get(level, '') or '')
+    if not drop_id:
+        return []
+
+    # AdaptData supplies a different drop ID for each level. The ShowRewardData
+    # row referenced by CityDanceData.ShowRewardId is only a UI preview; it is
+    # not a fallback payout for the level-specific drop.
+    rewards = list(SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(drop_id, []))
     if not rewards:
         return []
-    # The reward amounts are missing from the client tables. Use the supplied
-    # level-10/11 amounts (5/10 EXP) and continue by +5 per level; levels below
-    # 10 retain a one-EXP minimum so low-level characters still receive a tick.
-    exp_amount = max(1, (level - 9) * 5)
     try:
         scale = max(0, int(DANCE_CONFIG.get(str(dance_id), {}).get('RewardScale', 100) or 100))
     except (TypeError, ValueError):
@@ -3500,8 +3530,7 @@ def personal_dance_reward_list(char, dance_id):
     scaled = []
     for item_id, quality, amount in rewards:
         try:
-            base_amount = exp_amount if str(item_id) == '2001' else max(0, int(amount))
-            scaled_amount = base_amount * scale // 100
+            scaled_amount = max(0, int(amount)) * scale // 100
         except (TypeError, ValueError):
             continue
         if item_id and scaled_amount > 0:
@@ -3622,7 +3651,8 @@ def settle_personal_dance(char, now=None, stop=False, expected_run_id=None):
             interval = personal_dance_reward_interval(activity)
             earned_dance_id = str(runtime.get('dance_id', ''))
             runtime['reward_elapsed_seconds'] = max(0, int(runtime.get('reward_elapsed_seconds', 0))) + effective_elapsed
-            rewards = personal_dance_reward_list(char, runtime.get('dance_id', ''))
+            rewards = personal_dance_reward_list(
+                char, runtime.get('dance_id', ''), runtime.get('running_source', ''))
             if rewards:
                 earned_intervals, remainder = divmod(runtime['reward_elapsed_seconds'], interval)
                 runtime['reward_elapsed_seconds'] = remainder
