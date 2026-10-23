@@ -1,4 +1,4 @@
-import socket, struct, threading, random, json, os, time, traceback, math
+import socket, struct, threading, random, json, os, time, traceback, math, re
 
 PORT = int(os.environ.get("PORT", 15678))
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -90,9 +90,26 @@ STREET_RACE_CHECKPOINTS = {} # copy id -> ordered checkpoint positions in centim
 STREET_RACE_START_POSITIONS = {} # copy id -> client PointType=2/BlockIndex=0 car start, in centimeters
 STREET_RACE_MAX_TIME_CS = 8640000 # GameDefine.DayCentiSecond, the CAR ranking score range
 ADAPT_DATA = {} # level -> dict of std values from AdaptData
-ITEM_CONFIG = {} # itemId -> {type, function}
+ITEM_CONFIG = {} # itemId -> client ItemData fields used by backpack logic
+TITLE_CONFIG = {} # title level -> client TitleData honor threshold
+ITEM_PACKAGE_FIXED_REWARDS = {
+    # Exact ItemData Function mappings for the client-named EXP/honor boxes.
+    # Other package functions are server-owned and have no drop table in this APK.
+    '95101': [('2001', 0, 100000)],
+    '95102': [('2001', 0, 1000000)],
+    '95103': [('2001', 0, 5000000)],
+    '95201': [('2002', 0, 250)],
+    '95202': [('2002', 0, 1000)],
+    '95203': [('2002', 0, 3000)],
+}
+DIRECT_REWARD_RESOURCE_IDS = frozenset(('1001', '1002', '1003', '1004', '2001', '2002', '2003', '2004'))
 FUNCTION_DATA = {} # funcId -> {class, condition, is_download, first_open, unlock_type, side_mission}
 EQUIP_CONFIG = {} # equipId -> {name, lv, class, job, position, base_stat, base_val, model, ...}
+EQUIP_DROP_CONFIG = {} # EquipDrop ID -> weighted random equipment attribute definitions
+WEAPON_DROP_CONFIG = {} # WeaponDrop ID -> weighted random weapon skill definitions
+QUALITY_CONFIG = {} # QualityData ID -> ordered quality score/modulus rows
+EQUIPMENT_UPGRADE_CONFIG = {} # equipment position -> level -> profession quality coefficients
+BADGE_CONFIG = {} # badgeId -> BadgeData fields used by merge and display logic
 DOWNLOAD_REWARD_DATA = [] # list of (itemId, count, quality) tuples
 SKILL_UPGRADE_DATA = {} # level -> {price_type, price_value}
 RELIFE_DATA = [] # list of {min_count, max_count, use_count}
@@ -938,12 +955,53 @@ try:
         with open(item_path, "r", encoding='utf-8') as f:
             for line in f:
                 parts = line.strip().split(',')
-                if len(parts) > 11 and parts[0] == '*' and parts[1]:
+                if len(parts) > 14 and parts[0] == '*' and parts[1] and parts[1] not in ("ID",):
                     ITEM_CONFIG[parts[1]] = {
                         'type': int(parts[7]) if parts[7].isdigit() else 0,
-                        'function': int(parts[11]) if parts[11].isdigit() else 0
+                        'subtype': int(parts[9]) if len(parts) > 9 and parts[9].isdigit() else 0,
+                        'quality': int(parts[10]) if len(parts) > 10 and parts[10].isdigit() else 0,
+                        'price_type': int(parts[11]) if len(parts) > 11 and parts[11].isdigit() else 0,
+                        'price': parts[12].strip() if len(parts) > 12 else '',
+                        'max_stack': int(parts[13]) if len(parts) > 13 and parts[13].isdigit() else 1,
+                        'function': int(parts[14]) if len(parts) > 14 and parts[14].isdigit() else 0,
+                        'funlock': parts[15] if len(parts) > 15 else '',
+                        'flags': int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else 0,
+                        'level': int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
                     }
         print(f"[ITEM CONFIG LOADED] items={len(ITEM_CONFIG)}")
+
+    # TitleData is needed for the client's honor reward display and its
+    # explicit title-promotion request (Honor is attribute_other.title_exp).
+    title_path = os.path.join(text_asset_root, "TitleData")
+    if os.path.exists(title_path):
+        with open(title_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(',')
+                if len(parts) > 4 and parts[0] == '*' and parts[1].isdigit():
+                    TITLE_CONFIG[int(parts[1])] = {
+                        'exp': int(parts[4]) if parts[4].isdigit() else 0
+                    }
+        print(f"[TITLE CONFIG LOADED] levels={len(TITLE_CONFIG)}")
+
+    # BadgeData is separate from ItemData.  The APK uses it to validate the
+    # next badge tier, required stack count, currency type, and merge cost.
+    badge_path = os.path.join(text_asset_root, "BadgeData")
+    if os.path.exists(badge_path):
+        with open(badge_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(',')
+                if len(parts) > 11 and parts[0] == '*' and parts[1] and parts[1] not in ("ID",):
+                    def _badge_int(index, default=0):
+                        value = parts[index].strip() if index < len(parts) else ''
+                        return int(value) if value.lstrip('-').isdigit() else default
+                    BADGE_CONFIG[parts[1]] = {
+                        'color': _badge_int(2, -1), 'badge_type': _badge_int(3, -1),
+                        'level': _badge_int(4, -1), 'status1': _badge_int(5, -1),
+                        'value1': _badge_int(6, -1), 'status2': _badge_int(7, -1),
+                        'value2': _badge_int(8, -1), 'money_type': _badge_int(9, 0),
+                        'upgrade_cost': _badge_int(10, 0), 'upgrade_count': max(1, _badge_int(11, 4))
+                    }
+        print(f"[BADGE CONFIG LOADED] badges={len(BADGE_CONFIG)}")
 
     # Street Race's actual reward preview is resolved by AdaptData's
     # _drop_bc key, then ShowRewardData.  Read those client tables rather
@@ -1051,11 +1109,120 @@ try:
                         'stat1_val': int(parts[11]) if len(parts) > 11 and parts[11].isdigit() else 0,
                         'stat2': int(parts[12]) if len(parts) > 12 and parts[12].isdigit() else 0,
                         'stat2_val': int(parts[13]) if len(parts) > 13 and parts[13].isdigit() else 0,
+                        'ex_stat': int(parts[14]) if len(parts) > 14 and parts[14].isdigit() else 0,
+                        'ex_stat_val': int(parts[15]) if len(parts) > 15 and parts[15].isdigit() else 0,
                         'model': parts[16] if len(parts) > 16 else '',
+                        'drop_ids': [part.strip() for part in parts[17:23]],
                         'base_skills': parts[23].split('#') if len(parts) > 23 and parts[23] else [],
-                        'weapon_type': int(parts[24]) if len(parts) > 24 and parts[24].isdigit() else 0
+                        'weapon_type': int(parts[24]) if len(parts) > 24 and parts[24].isdigit() else 0,
+                        # ItemInfo/AppraiseRoot reads EquipData.identify by
+                        # item quality. QualityID links appraisal rolls to the
+                        # client QualityData score thresholds.
+                        'identify': parts[25].strip() if len(parts) > 25 else '',
+                        'quality_id': parts[26].strip() if len(parts) > 26 else ''
                     }
         print(f"[EQUIP CONFIG LOADED] count={len(EQUIP_CONFIG)}")
+
+    # EquipData.DropId1..6 select the attribute roll pool for the item's
+    # initial quality. EquipDrop stores the number of attributes and the
+    # weighted (attribute id, quality tier, value) candidates.
+    equip_drop_path = os.path.join(text_asset_root, "EquipDrop")
+    if os.path.exists(equip_drop_path):
+        with open(equip_drop_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 3 and parts[0] == "*" and parts[1].isdigit():
+                    attributes = []
+                    for offset in range(16, len(parts), 4):
+                        if offset + 3 >= len(parts):
+                            break
+                        attr_id, attr_quality, attr_value, weight = [
+                            value.strip() for value in parts[offset:offset + 4]
+                        ]
+                        if not attr_id.isdigit() or not weight.isdigit():
+                            continue
+                        if not attr_quality.lstrip('-').isdigit() or not attr_value.lstrip('-').isdigit():
+                            continue
+                        if int(attr_id) > 0 and int(weight) > 0:
+                            attributes.append({
+                                'id': int(attr_id), 'quality': int(attr_quality),
+                                'value': int(attr_value), 'weight': int(weight)
+                            })
+                    EQUIP_DROP_CONFIG[parts[1]] = {
+                        'drop_num': int(parts[3]) if parts[3].isdigit() else 0,
+                        'children': [
+                            (parts[offset].strip(), int(parts[offset + 1]))
+                            for offset in range(4, min(16, len(parts) - 1), 2)
+                            if parts[offset].strip().isdigit() and parts[offset + 1].strip().isdigit()
+                            and int(parts[offset + 1]) > 0
+                        ],
+                        'attributes': attributes
+                    }
+        print(f"[EQUIP DROP CONFIG LOADED] count={len(EQUIP_DROP_CONFIG)}")
+
+    # Weapons use skill affixes from WeaponDrop rather than stat affixes from
+    # EquipDrop. The random_attri packet has skillId for this equipment slot.
+    weapon_drop_path = os.path.join(text_asset_root, "WeaponDrop")
+    if os.path.exists(weapon_drop_path):
+        with open(weapon_drop_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 3 and parts[0] == "*" and parts[1].isdigit():
+                    skills = []
+                    for offset in range(4, min(34, len(parts)), 3):
+                        if offset + 2 >= len(parts):
+                            break
+                        skill_id, skill_quality, weight = [
+                            value.strip() for value in parts[offset:offset + 3]
+                        ]
+                        if (skill_id and skill_quality.lstrip('-').isdigit()
+                                and weight.isdigit() and int(weight) > 0):
+                            skills.append({
+                                'id': skill_id, 'quality': int(skill_quality),
+                                'weight': int(weight)
+                            })
+                    WEAPON_DROP_CONFIG[parts[1]] = {
+                        'drop_num': int(parts[3]) if parts[3].isdigit() else 0,
+                        'children': [
+                            (parts[offset].strip(), int(parts[offset + 1]))
+                            for offset in range(34, len(parts) - 1, 2)
+                            if parts[offset].strip().isdigit() and parts[offset + 1].strip().isdigit()
+                            and int(parts[offset + 1]) > 0
+                        ],
+                        'skills': skills
+                    }
+        print(f"[WEAPON DROP CONFIG LOADED] count={len(WEAPON_DROP_CONFIG)}")
+
+    # These are the same tables EquipData/GameItem use to calculate displayed
+    # quality and per-level equipment attributes in the APK.
+    quality_path = os.path.join(text_asset_root, "QualityData")
+    if os.path.exists(quality_path):
+        with open(quality_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 6 and parts[0] == "*" and parts[1].isdigit():
+                    QUALITY_CONFIG.setdefault(parts[1], []).append({
+                        'equip_quality_score': int(parts[3]) if parts[3].isdigit() else 0,
+                        'att_initial_score': int(parts[5]) if parts[5].isdigit() else 0,
+                        'modulus': int(parts[6]) if parts[6].isdigit() else 10000
+                    })
+        print(f"[QUALITY CONFIG LOADED] ids={len(QUALITY_CONFIG)}")
+
+    upgrade_path = os.path.join(text_asset_root, "EquipmentUpgradeData")
+    if os.path.exists(upgrade_path):
+        with open(upgrade_path, "r", encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) > 14 and parts[0] == "*" and parts[1].isdigit() and parts[2].isdigit():
+                    def _upgrade_values(start):
+                        return [int(parts[index]) if index < len(parts) and parts[index].lstrip('-').isdigit() else 0
+                                for index in range(start, start + 4)]
+                    EQUIPMENT_UPGRADE_CONFIG.setdefault(int(parts[1]), {})[int(parts[2])] = {
+                        'generic': _upgrade_values(3),
+                        'qj': _upgrade_values(7),
+                        'nqs': _upgrade_values(11)
+                    }
+        print(f"[EQUIPMENT UPGRADE CONFIG LOADED] positions={len(EQUIPMENT_UPGRADE_CONFIG)}")
 
     # Load DownloadRewardData (expansion download rewards)
     dl_path = os.path.join(text_asset_root, "DownloadRewardData")
@@ -1374,7 +1541,13 @@ def encode_sproto(fields, fn=None):
                     if isinstance(item, (bytes, bytearray)):
                         val_data = item
                     elif isinstance(item, dict):
-                        val_data = encode_sproto(list(item.items()))
+                        nested_fields = []
+                        for field_tag, field_value in item.items():
+                            try:
+                                nested_fields.append((int(field_tag), field_value))
+                            except (TypeError, ValueError):
+                                continue
+                        val_data = encode_sproto(nested_fields)
                     elif isinstance(item, bool):
                         val_data = b'\x01' if item else b'\x00'
                     elif isinstance(item, int):
@@ -1460,13 +1633,50 @@ def decode_sproto_list(data):
         ptr += 4 + l
     return res
 
-def get_visual(name, prof, mount_id='', mount_color='', mount_state=0):
+def get_visual(name, prof, mount_id='', mount_color='', mount_state=0, character=None):
     m = {0:{"m":"100","h":"XD_A_T","b":"XD_A_S","l":"XD_A_X","w":"XD_A_WQ"},
          1:{"m":"104","h":"QJ_A_T","b":"QJ_A_S","l":"QJ_A_X","w":"QJ_A_WQ"},
          2:{"m":"105","h":"NQS_A_T","b":"NQS_A_S","l":"NQS_A_X","w":"NQS_A_WQ"}}
     v = m.get(prof, m[1])
-    fields = [(0, name), (1, v["m"]), (2, v["h"]), (3, v["b"]),
-              (4, v["l"]), (5, v["w"]), (10, 0)]
+    head_id, body_id, leg_id, weapon_id = v['h'], v['b'], v['l'], v['w']
+    visual_fields = []
+    if isinstance(character, dict) and any(key in character for key in
+            ('equipped_equip', 'equipped_fashion', 'inventory')):
+        ensure_backpack_state(character)
+        for item in character.get('equipped_equip', []):
+            equip = EQUIP_CONFIG.get(str(item.get('id', '')), {})
+            model = str(equip.get('model') or '')
+            position = int(equip.get('position', -1))
+            if not model:
+                continue
+            if position == 0: weapon_id = model
+            elif position == 1: head_id = model
+            elif position == 2: body_id = model
+            elif position == 3: leg_id = model
+        fashion_slots = {}
+        fashion_ids = {}
+        for item in character.get('equipped_fashion', []):
+            equip = EQUIP_CONFIG.get(str(item.get('id', '')), {})
+            position = int(equip.get('position', -1))
+            model = str(equip.get('model') or '')
+            if 0 <= position <= 3 and model:
+                fashion_slots[position] = model
+                fashion_ids[position] = str(item.get('id', ''))
+        fashion_fields = {1: 6, 2: 7, 3: 8, 0: 9}
+        for position, tag in fashion_fields.items():
+            if position in fashion_slots:
+                visual_fields.append((tag, fashion_slots[position]))
+        equipped_weapon = next((str(item.get('id', '')) for item in character.get('equipped_equip', [])
+                                if int(EQUIP_CONFIG.get(str(item.get('id', '')), {}).get('position', -1)) == 0), '')
+        fashion_weapon = fashion_ids.get(0, '')
+        if equipped_weapon:
+            visual_fields.append((15, equipped_weapon))
+        if fashion_weapon:
+            visual_fields.append((16, fashion_weapon))
+    show_fashion = 1 if any(tag in (6, 7, 8, 9) for tag, _ in visual_fields) else 0
+    fields = [(0, name), (1, v["m"]), (2, head_id), (3, body_id),
+              (4, leg_id), (5, weapon_id), (10, show_fashion)]
+    fields.extend(visual_fields)
     # characterVisual uses protocol tags 12-14 for the selected vehicle.
     # MountId is required by the Street Race UI even while the player is not
     # currently driving in the city (mount_state == 0).
@@ -1494,7 +1704,7 @@ def get_equipped_mount(c):
 def build_main_player_visual(c):
     mount_id, mount_color, mount_state = get_equipped_mount(c)
     return get_visual(c.get('name', 'Hero'), c.get('prof', 0),
-                      mount_id, mount_color, mount_state)
+                      mount_id, mount_color, mount_state, character=c)
 
 def sync_main_player_visual(picked_char, send_rpc_push):
     """Push the normal APK AOI visual update after a garage change."""
@@ -1704,7 +1914,8 @@ def get_runtime_aoi(c):
         (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
         (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
         (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
-        (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
+        (12, stats['defa']), (13, stats['mov']), (14, stats['rec']),
+        (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
     ]
     attr_all = encode_sproto(attr_all_data)
     return encode_sproto([(6, attr_run), (7, attr_all)])
@@ -1718,7 +1929,7 @@ def build_aoi_add_packet(char):
     char_id = char.get('id', 0)
     pos = char.get('pos', [0, 0, 0, 0])
     try:
-        visual_bytes = get_visual(char.get('name', 'Hero'), char.get('prof', 0))
+        visual_bytes = get_visual(char.get('name', 'Hero'), char.get('prof', 0), character=char)
         gen_bytes = get_general(char)
         stats = get_character_stats(char)
         attr_oth = encode_sproto([
@@ -1976,7 +2187,8 @@ def broadcast_aoi_attribute(char):
             (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
             (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
             (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
-            (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
+            (12, stats['defa']), (13, stats['mov']), (14, stats['rec']),
+            (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
         ])
         prop = encode_sproto([(13, get_currency_balance(char, 0)),
                               (14, get_currency_balance(char, 1)),
@@ -2072,7 +2284,7 @@ def exp_member_ids(state):
     return list(dict.fromkeys(int(cid) for cid in (state.get('members') or [state.get('owner_id')]) if cid is not None))
 
 def is_current_character_connection(conn, char):
-    """Reject state-changing EXP requests from a superseded character socket."""
+    """Reject state-changing requests from a superseded character socket."""
     if not conn or not char:
         return False
     try:
@@ -2539,8 +2751,82 @@ def configured_map_relife_position(map_id):
             continue
     return [29860, 100, -17005, 0]
 
+def _random_attr_field(entry, field_tag, field_name):
+    if not isinstance(entry, dict):
+        return None
+    return entry.get(field_tag, entry.get(str(field_tag), entry.get(field_name)))
+
+def get_game_item_quality(item, equip_cfg):
+    """Match GameItem.GetItemQuality, including appraised random-attribute score."""
+    try:
+        item_quality = int(item.get('quality', 0))
+    except (TypeError, ValueError):
+        item_quality = 0
+    try:
+        is_appraised = int(item.get('appraise', 0)) == 1
+    except (TypeError, ValueError):
+        is_appraised = False
+    if not is_appraised:
+        return item_quality
+
+    quality_rows = QUALITY_CONFIG.get(str(equip_cfg.get('quality_id', '')), [])
+    random_attrs = item.get('random_attri')
+    if not quality_rows or not isinstance(random_attrs, dict) or not random_attrs:
+        return item_quality
+    score = 0
+    for roll in random_attrs.values():
+        try:
+            roll_quality = int(_random_attr_field(roll, 3, 'quality'))
+        except (TypeError, ValueError):
+            continue
+        roll_quality_id = _random_attr_field(roll, 5, 'qualityId') or equip_cfg.get('quality_id', '')
+        roll_rows = QUALITY_CONFIG.get(str(roll_quality_id), [])
+        if 0 <= roll_quality < len(roll_rows):
+            score += int(roll_rows[roll_quality].get('att_initial_score', 0))
+
+    for index, row in enumerate(quality_rows):
+        if score < int(row.get('equip_quality_score', 0)):
+            return 0 if index == 0 else index - 1
+        if index == len(quality_rows) - 1:
+            return index
+    return 0
+
+def equipment_attribute_value(equip_cfg, attribute_index, quality, item_level, is_fashion=False):
+    """Match EquipData.GetAttrValByQualityAndLevel using client resource tables."""
+    attr_fields = (
+        ('base_stat', 'base_val'), ('stat1', 'stat1_val'),
+        ('stat2', 'stat2_val'), ('ex_stat', 'ex_stat_val')
+    )
+    if not 0 <= attribute_index < len(attr_fields):
+        return 0
+    stat_key, value_key = attr_fields[attribute_index]
+    try:
+        value = int(equip_cfg.get(value_key, 0))
+        quality = int(quality)
+        item_level = max(0, int(item_level))
+    except (TypeError, ValueError):
+        return 0
+    if is_fashion:
+        return value
+
+    quality_rows = QUALITY_CONFIG.get(str(equip_cfg.get('quality_id', '')), [])
+    if 0 <= quality < len(quality_rows):
+        value = math.floor(value * int(quality_rows[quality].get('modulus', 10000)) / 10000.0)
+
+    if item_level > 0:
+        position = int(equip_cfg.get('position', -1))
+        upgrade = EQUIPMENT_UPGRADE_CONFIG.get(position, {}).get(item_level)
+        if upgrade:
+            job = int(equip_cfg.get('job', -1))
+            if job == -1:
+                job = int(equip_cfg.get('weapon_type', 0))
+            coeffs = upgrade['generic'] if job == 0 else upgrade['qj'] if job == 1 else upgrade['nqs']
+            quality_column = quality if 0 <= quality < 4 else 0
+            value = math.floor(value + coeffs[quality_column] * item_level / 100.0)
+    return value
+
 def get_character_stats(c):
-    """Calculates all character attributes and Power based on profession and level."""
+    """Calculate player attributes from BaseLvData and currently equipped items."""
     lv = c.get('level', 1)
     prof = c.get('prof', 0)
     ld = get_level_data(lv)
@@ -2554,12 +2840,64 @@ def get_character_stats(c):
     cri = ld['cri'][prof]
     res = ld['res'][prof]
 
-    # Add Weapon ATK from EquipData (starter weapon per profession)
-    starter_wids = {0: "10001", 1: "20001", 2: "30001"}
-    wid = starter_wids.get(prof, "10001")
-    equip = EQUIP_CONFIG.get(wid)
-    weapon_atk = equip['base_val'] if equip and equip.get('base_stat') == 1001 else 180
-    atk += weapon_atk
+    # The APK's CharacterAttributeData is populated by server attribute packets.
+    # Sum the exact EquipData, QualityData, EquipmentUpgradeData and BadgeData
+    # contributions so the Character panel and combat runtime follow bag actions.
+    ensure_backpack_state(c)
+    attr_fields = {
+        1001: 'atk', 1002: 'hp_max', 1003: 'def', 1004: 'hit', 1005: 'eva',
+        1006: 'cri', 1007: 'res', 1008: 'exd', 1009: 'exr', 1010: 'rec',
+        1011: 'mov', 1012: 'crd', 1013: 'crr'
+    }
+    totals = {
+        'atk': atk, 'hp_max': hp_max, 'def': df, 'hit': hit, 'eva': eva,
+        'cri': cri, 'res': res, 'exd': ld['exd'][prof], 'exr': ld['exr'][prof],
+        'crd': ld['crd'][prof], 'crr': ld['crr'][prof], 'rec': 0, 'mov': 500
+    }
+
+    def add_item_attribute(attribute_id, value):
+        try:
+            field = attr_fields.get(int(attribute_id))
+            if field:
+                totals[field] += int(value)
+        except (TypeError, ValueError):
+            pass
+
+    for bucket, is_fashion in (('equipped_equip', False), ('equipped_fashion', True)):
+        for item in c.get(bucket, []):
+            item_id = str(item.get('id', ''))
+            equip_cfg = EQUIP_CONFIG.get(item_id)
+            if not equip_cfg:
+                continue
+            item_cfg = ITEM_CONFIG.get(item_id, {})
+            quality = get_game_item_quality(item, equip_cfg)
+            for attribute_index, (stat_key, _value_key) in enumerate((
+                    ('base_stat', 'base_val'), ('stat1', 'stat1_val'),
+                    ('stat2', 'stat2_val'), ('ex_stat', 'ex_stat_val'))):
+                attribute_id = int(equip_cfg.get(stat_key, 0))
+                value = equipment_attribute_value(
+                    equip_cfg, attribute_index, quality, item.get('level', 0),
+                    is_fashion=(is_fashion or int(item_cfg.get('type', -1)) == 16)
+                )
+                if attribute_id:
+                    add_item_attribute(attribute_id, value)
+            if not is_fashion and int(item_cfg.get('type', -1)) == 2:
+                random_attrs = item.get('random_attri')
+                if isinstance(random_attrs, dict):
+                    for roll in random_attrs.values():
+                        add_item_attribute(
+                            _random_attr_field(roll, 1, 'id'),
+                            _random_attr_field(roll, 2, 'value')
+                        )
+
+    for item in c.get('equipped_badges', []):
+        badge_cfg = BADGE_CONFIG.get(str(item.get('id', '')), {})
+        if badge_cfg:
+            add_item_attribute(badge_cfg.get('status1'), badge_cfg.get('value1', 0))
+            add_item_attribute(badge_cfg.get('status2'), badge_cfg.get('value2', 0))
+
+    atk, hp_max, df = totals['atk'], totals['hp_max'], totals['def']
+    hit, eva, cri, res = totals['hit'], totals['eva'], totals['cri'], totals['res']
 
     # Profession-specific coefficients from GameDefine.cs
     # XD (0), QJ (1), NQS (2)
@@ -2581,7 +2919,8 @@ def get_character_stats(c):
         'power': power, 'lv': lv, 'exp': c.get('exp', 0),
         'defa': ld['defa'], 'dgea': ld['dgea'], 'resa': ld['resa'],
         'hita': ld['hita'], 'cria': ld['cria'],
-        'exd': ld['exd'][prof], 'exr': ld['exr'][prof], 'crd': ld['crd'][prof], 'crr': ld['crr'][prof],
+        'exd': totals['exd'], 'exr': totals['exr'], 'crd': totals['crd'], 'crr': totals['crr'],
+        'rec': totals['rec'], 'mov': totals['mov'],
         'satp': 0, 'satm': 0, 'satc': 0
     }
 
@@ -2596,7 +2935,7 @@ def get_char_ov(c, sort_index=None):
         (0, c['id']),
         (1, gen),
         (2, attr),
-        (3, get_visual(c.get('name', 'Hero'), c.get('prof', 0))),
+        (3, get_visual(c.get('name', 'Hero'), c.get('prof', 0), character=c)),
         (4, ctime),
         (5, 0)
     ])
@@ -2641,6 +2980,8 @@ def get_full_char(c):
         (1, stats['exp']),
         (2, stats['lv']),
         (3, stats['power']),
+        (4, int(c.get('title_level', 0))),
+        (5, int(c.get('title_exp', 0))),
         (15, 1)
     ])
 
@@ -2651,12 +2992,13 @@ def get_full_char(c):
     mv = get_movement(pos[0], pos[1], pos[2], pos[3])
 
     attr_run = encode_sproto([(0, stats['hp_max']), (2, stats['atk']), (3, stats['def'])])
-    # attr_all tags (attribute.cs): 0:max_hp, 2:atk, 3:def, 4:hit, 5:eva, 6:cri, 7:res, 8:exd, 9:exr, 10:crd, 11:crr, 12:defa, 13:mov, 17:dgea, 18:resa, 19:hita, 20:cria
+    # attr_all uses the APK's attribute.cs field tags, including equipment recovery and movement bonuses.
     attr_all_data = [
         (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
         (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
         (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
-        (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
+        (12, stats['defa']), (13, stats['mov']), (14, stats['rec']),
+        (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
     ]
     attr_all = encode_sproto(attr_all_data)
     run = encode_sproto([(6, attr_run), (7, attr_all)])
@@ -2664,12 +3006,13 @@ def get_full_char(c):
     char_level = stats['lv']
     skill_levels = c.get('skill_levels', {})
     skills_map = build_skills_map(c.get('prof', 0), char_level, skill_levels)
-    starter_wids = {0: "10001", 1: "20001", 2: "30001"}
-    wid = starter_wids.get(c.get('prof', 0), "10001")
-    equip = EQUIP_CONFIG.get(wid)
-    equip_class = equip['class'] if equip else 1
-    w1 = encode_sproto([(0, 5), (1, wid), (2, True), (3, equip_class), (5, 1), (6, 1), (7, [0]*8)])
-    equip_map = {5: w1}
+    ensure_backpack_state(c)
+    equip_map = {int(item['index_id']): _gameitem_sproto(item)
+                 for item in c.get('equipped_equip', [])}
+    badge_map = {int(item['index_id']): _gameitem_sproto(item)
+                 for item in c.get('equipped_badges', [])}
+    fashion_map = {int(item['index_id']): _gameitem_sproto(item)
+                   for item in c.get('equipped_fashion', [])}
 
     # character.download: the APK treats 2 as completed.  Sending 1 again on
     # reconnect would reopen the optional download/reward UI forever, even
@@ -2684,7 +3027,9 @@ def get_full_char(c):
         (7, mv),
         (8, skills_map),
         (9, equip_map),
-        (12, 0),
+        (10, badge_map),
+        (11, fashion_map),
+        (12, selected_potion_index(c)),
         (13, run),
         (15, download_state)
     ])
@@ -2696,7 +3041,9 @@ def sync_char_attrs_rpc(conn, picked_char, conn_id=None):
 
     # attribute_other (Tag 1 in character_aoi_attribute)
     attr_oth = encode_sproto([
-        (0, hp_cur), (1, stats['exp']), (2, stats['lv']), (3, stats['power']), (15, 1)
+        (0, hp_cur), (1, stats['exp']), (2, stats['lv']), (3, stats['power']),
+        (4, int(picked_char.get('title_level', 0))),
+        (5, int(picked_char.get('title_exp', 0))), (15, 1)
     ])
 
     # attribute (Tag 2 in character_aoi_attribute)
@@ -2707,7 +3054,8 @@ def sync_char_attrs_rpc(conn, picked_char, conn_id=None):
         (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
         (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
         (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
-        (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
+        (12, stats['defa']), (13, stats['mov']), (14, stats['rec']),
+        (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
     ])
 
     prop = encode_sproto([(13, get_currency_balance(picked_char, 0)),
@@ -3939,27 +4287,423 @@ def sync_mission_data(picked_char):
     ]
     return encode_sproto(data_list)
 
-def sync_inventory_data(picked_char):
-    items = {}
-    inv = picked_char.get('inventory', [])
-    for i in range(len(inv)):
-        item = inv[i]
-        guid = i + 10000
-        items[guid] = encode_sproto([
-            (0, guid),       # indexId
-            (1, item['id']), # itemId
-            (2, True),       # bindflag
-            (5, item['amount']) # stack
-        ])
-    return encode_sproto([(0, items)])
+BACKPACKS = {
+    2: ('inventory', 611),
+    0: ('equip_inventory', 592),
+    3: ('badge_inventory', 604),
+    5: ('fashion_inventory', 616),
+}
 
-def add_to_inventory(picked_char, item_id, amount):
-    if 'inventory' not in picked_char: picked_char['inventory'] = []
-    for item in picked_char['inventory']:
-        if item['id'] == item_id:
-            item['amount'] += amount
-            return
-    picked_char['inventory'].append({'id': item_id, 'amount': amount})
+def item_backpack_type(item_id):
+    """Return the APK ITEM_CONTAINER_TYPE used by ItemData.GetContainerType."""
+    item_type = int(ITEM_CONFIG.get(str(item_id), {}).get('type', 0))
+    if item_type == 2:
+        return 0
+    if item_type == 16:
+        return 5
+    if item_type == 6:
+        return 3
+    return 2
+
+def roll_equip_random_attributes(item):
+    """Roll the APK's configured weapon-skill or equipment-stat affix pool."""
+    item_id = str(item.get('id', item.get('itemId', '')))
+    equip_cfg = EQUIP_CONFIG.get(item_id)
+    if not equip_cfg:
+        return None
+    try:
+        quality = int(item.get('quality', ITEM_CONFIG.get(item_id, {}).get('quality', 0)))
+    except (TypeError, ValueError):
+        return None
+    drop_ids = equip_cfg.get('drop_ids', [])
+    if quality < 0 or quality >= len(drop_ids):
+        return None
+    drop_id = str(drop_ids[quality]).strip()
+    is_weapon = int(equip_cfg.get('position', -1)) == 0
+    drop_table = WEAPON_DROP_CONFIG if is_weapon else EQUIP_DROP_CONFIG
+    drop_cfg = drop_table.get(drop_id)
+    if not drop_cfg or drop_cfg.get('children'):
+        # The current APK's referenced WeaponDrop/EquipDrop entries are direct
+        # weighted pools. Do not invent a result if a future table points to an
+        # unparsed child pool.
+        return None
+    drop_num = max(0, int(drop_cfg.get('drop_num', 0)))
+    pool_key = 'skills' if is_weapon else 'attributes'
+    candidates = [dict(entry) for entry in drop_cfg.get(pool_key, [])
+                  if int(entry.get('id', 0)) > 0 and int(entry.get('weight', 0)) > 0]
+    if drop_num <= 0 or len(candidates) < drop_num:
+        return None
+
+    rolled = {}
+    chosen_ids = set()
+    for index in range(1, drop_num + 1):
+        eligible = [entry for entry in candidates if entry['id'] not in chosen_ids]
+        total_weight = sum(entry['weight'] for entry in eligible)
+        if total_weight <= 0:
+            return None
+        ticket = random.randint(1, total_weight)
+        selected = None
+        for entry in eligible:
+            ticket -= entry['weight']
+            if ticket <= 0:
+                selected = entry
+                break
+        if selected is None:
+            return None
+        chosen_ids.add(selected['id'])
+        # random_attri Sproto fields: index=0, id=1, value=2, quality=3,
+        # skillId=4, qualityId=5. WeaponDrop sets skillId; EquipDrop sets id
+        # and value. The client derives each map key from its one-based index.
+        if is_weapon:
+            rolled[index] = {
+                0: index, 3: selected['quality'], 4: selected['id'],
+                5: str(equip_cfg.get('quality_id', ''))
+            }
+        else:
+            rolled[index] = {
+                0: index, 1: selected['id'], 2: selected['value'],
+                3: selected['quality'], 5: str(equip_cfg.get('quality_id', ''))
+            }
+        candidates = eligible
+    return rolled
+
+def _normalise_backpack_item(item, next_index):
+    if not isinstance(item, dict):
+        return None, next_index
+    item_id = str(item.get('id', item.get('itemId', '')))
+    if not item_id:
+        return None, next_index
+    item['id'] = item_id
+    try:
+        item['amount'] = max(1, int(item.get('amount', item.get('stack', 1))))
+    except (TypeError, ValueError):
+        item['amount'] = 1
+    try:
+        index_id = int(item.get('index_id', item.get('indexId', -1)))
+    except (TypeError, ValueError):
+        index_id = -1
+    if index_id < 0:
+        index_id = next_index
+        next_index += 1
+    item['index_id'] = index_id
+    item.setdefault('bindflag', bool(item.get('bind', True)))
+    item.setdefault('level', 0)
+    try:
+        item['quality'] = int(item.get('quality', ITEM_CONFIG.get(item_id, {}).get('quality', 0)))
+    except (TypeError, ValueError):
+        item['quality'] = int(ITEM_CONFIG.get(item_id, {}).get('quality', 0))
+    try:
+        item['appraise'] = 1 if int(item.get('appraise', 0)) == 1 else 0
+    except (TypeError, ValueError):
+        item['appraise'] = 0
+    try:
+        parms = list(item.get('parm', [0] * 8))
+    except TypeError:
+        parms = [0] * 8
+    parms = [int(value) if str(value).lstrip('-').isdigit() else 0 for value in parms[:8]]
+    parms.extend([0] * (8 - len(parms)))
+    item['parm'] = parms
+    item.setdefault('random_attri', {})
+    item.setdefault('inlay', {})
+    return item, max(next_index, index_id + 1)
+
+def ensure_backpack_state(picked_char):
+    """Migrate old positional inventory records to stable, typed item slots."""
+    had_equipment_state = 'equipped_equip' in picked_char
+    raw = {key: picked_char.get(key, []) if isinstance(picked_char.get(key, []), list) else []
+           for key in ('inventory', 'equip_inventory', 'badge_inventory', 'fashion_inventory',
+                       'equipped_equip', 'equipped_badges', 'equipped_fashion')}
+    # Re-route every backpack source, not only the legacy shared inventory.
+    # Earlier server builds put type-16 fashion in the item bag and type-15
+    # boxes in the fashion bag; this repairs those persisted records on login.
+    output = {key: [] for key in raw}
+    next_index = 10000
+    seen_ids = set()
+    for source_bucket in ('inventory', 'equip_inventory', 'badge_inventory', 'fashion_inventory',
+                          'equipped_equip', 'equipped_badges', 'equipped_fashion'):
+        for item in raw[source_bucket]:
+            item, next_index = _normalise_backpack_item(item, next_index)
+            if item is None:
+                continue
+            index_id = int(item['index_id'])
+            if index_id in seen_ids:
+                item['index_id'] = index_id = next_index
+                next_index += 1
+            seen_ids.add(index_id)
+            if source_bucket in ('equipped_equip', 'equipped_badges', 'equipped_fashion'):
+                output[source_bucket].append(item)
+            else:
+                target = BACKPACKS[item_backpack_type(item['id'])][0]
+                output[target].append(item)
+
+    picked_char.update(output)
+
+    # Preserve the original per-profession starter weapon and its client slot
+    # index.  It is now persisted as a real equipped item instead of being
+    # fabricated anew on every character-create packet.
+    if not had_equipment_state:
+        starter_ids = {0: '10001', 1: '20001', 2: '30001'}
+        starter_id = starter_ids.get(int(picked_char.get('prof', 0)), '10001')
+        # Preserve the client's legacy starter index when it is free, but do
+        # not let it collide with an item that was already in a migrated bag.
+        starter_index = 5 if 5 not in seen_ids else next_index
+        if starter_index != 5:
+            next_index += 1
+        picked_char['equipped_equip'] = [{
+            'index_id': starter_index, 'id': starter_id, 'amount': 1, 'bindflag': True,
+            'level': 1, 'quality': 1, 'appraise': 0, 'parm': [0] * 8,
+            'random_attri': {}, 'inlay': {}
+        }]
+
+    # Keep allocation monotonic across all four backpacks and the three packs.
+    for bucket in ('equipped_equip', 'equipped_badges', 'equipped_fashion'):
+        for item in picked_char.get(bucket, []):
+            try:
+                next_index = max(next_index, int(item.get('index_id', -1)) + 1)
+            except (TypeError, ValueError):
+                pass
+    picked_char['next_item_index'] = max(int(picked_char.get('next_item_index', 10000)), next_index)
+
+def allocate_backpack_index(picked_char):
+    ensure_backpack_state(picked_char)
+    index_id = max(10000, int(picked_char.get('next_item_index', 10000)))
+    picked_char['next_item_index'] = index_id + 1
+    return index_id
+
+def find_backpack_item(picked_char, index_id, container_type=None):
+    ensure_backpack_state(picked_char)
+    if container_type in BACKPACKS:
+        buckets = [(container_type, BACKPACKS[container_type][0])]
+    elif container_type == 1:
+        buckets = [(1, 'equipped_equip')]
+    elif container_type == 4:
+        buckets = [(4, 'equipped_badges')]
+    elif container_type == 6:
+        buckets = [(6, 'equipped_fashion')]
+    else:
+        buckets = [(0, 'equip_inventory'), (2, 'inventory'), (3, 'badge_inventory'),
+                   (5, 'fashion_inventory'), (1, 'equipped_equip'),
+                   (4, 'equipped_badges'), (6, 'equipped_fashion')]
+    try:
+        index_id = int(index_id)
+    except (TypeError, ValueError):
+        return None
+    for actual_type, bucket in buckets:
+        for item in picked_char.get(bucket, []):
+            if int(item.get('index_id', -1)) == index_id:
+                return {'container_type': actual_type, 'bucket': bucket, 'item': item}
+    return None
+
+def selected_potion_index(picked_char):
+    """Return a still-valid item-backpack potion index for character.potionIndex."""
+    ensure_backpack_state(picked_char)
+    try:
+        index_id = int(picked_char.get('potion_index', -1))
+    except (TypeError, ValueError):
+        return -1
+    found = find_backpack_item(picked_char, index_id, 2)
+    if not found:
+        return -1
+    item = found['item']
+    cfg = ITEM_CONFIG.get(str(item.get('id', '')), {})
+    if (int(cfg.get('type', -1)) not in (3, 27)
+            or int(item.get('amount', 0)) <= 0
+            or int(cfg.get('level', 0)) > int(picked_char.get('level', 1))):
+        return -1
+    return index_id
+
+def _gameitem_sproto(item):
+    parms = item.get('parm', [0] * 8)
+    fields = [
+        (0, int(item['index_id'])), (1, str(item['id'])),
+        (2, bool(item.get('bindflag', True))), (3, int(item.get('level', 0))),
+        (4, int(item.get('flags', 0))), (5, int(item.get('amount', 1))),
+        (6, int(item.get('quality', 0))), (7, [int(v) for v in parms[:8]]),
+        (8, int(item.get('appraise', 0)))
+    ]
+    random_attri = item.get('random_attri')
+    inlay = item.get('inlay')
+    if isinstance(random_attri, dict) and random_attri:
+        fields.append((9, random_attri))
+    if isinstance(inlay, dict) and inlay:
+        fields.append((10, inlay))
+    return encode_sproto(fields)
+
+def _backpack_map(picked_char, bucket):
+    ensure_backpack_state(picked_char)
+    return {int(item['index_id']): _gameitem_sproto(item)
+            for item in picked_char.get(bucket, [])}
+
+def sync_inventory_data(picked_char):
+    return encode_sproto([(0, _backpack_map(picked_char, 'inventory'))])
+
+def sync_all_backpacks(picked_char, send_rpc_push):
+    """Send each backpack via the exact packet consumed by its APK container."""
+    ensure_backpack_state(picked_char)
+    for container_type, bucket_and_tag in BACKPACKS.items():
+        bucket, tag = bucket_and_tag
+        send_rpc_push(tag, encode_sproto([(0, _backpack_map(picked_char, bucket))]))
+
+def push_backpack_item_update(send_rpc_push, container_type, item_or_none, index_id=None):
+    if item_or_none is not None:
+        index_id = int(item_or_none['index_id'])
+    if index_id is None:
+        return
+    fields = [(0, int(container_type)), (1, int(index_id))]
+    if item_or_none is not None:
+        fields.append((2, _gameitem_sproto(item_or_none)))
+    send_rpc_push(525, encode_sproto(fields))
+
+def consume_backpack_item(picked_char, item_id, amount, send_rpc_push, container_type=2):
+    """Consume a known item stack safely and send the client's item update."""
+    try:
+        amount = int(amount)
+    except (TypeError, ValueError):
+        return False
+    if amount <= 0 or container_type not in BACKPACKS:
+        return False
+    ensure_backpack_state(picked_char)
+    bucket = BACKPACKS[container_type][0]
+    matching = [item for item in picked_char.get(bucket, [])
+                if str(item.get('id', '')) == str(item_id)]
+    if sum(max(0, int(item.get('amount', 0))) for item in matching) < amount:
+        return False
+    remaining = amount
+    for item in matching:
+        if remaining <= 0:
+            break
+        available = max(0, int(item.get('amount', 0)))
+        used = min(available, remaining)
+        if used <= 0:
+            continue
+        index_id = int(item['index_id'])
+        item['amount'] = available - used
+        remaining -= used
+        if item['amount'] <= 0:
+            picked_char[bucket].remove(item)
+            push_backpack_item_update(send_rpc_push, container_type, None, index_id)
+        else:
+            push_backpack_item_update(send_rpc_push, container_type, item)
+    return remaining == 0
+
+def add_to_inventory(picked_char, item_id, amount, quality=None):
+    item_id = str(item_id)
+    try:
+        remaining = int(amount)
+    except (TypeError, ValueError):
+        return False
+    if remaining <= 0:
+        return False
+    ensure_backpack_state(picked_char)
+    container_type = item_backpack_type(item_id)
+    bucket = BACKPACKS[container_type][0]
+    cfg = ITEM_CONFIG.get(item_id, {})
+    quality = int(cfg.get('quality', 0) if quality is None else quality)
+    max_stack = max(1, int(cfg.get('max_stack', 1)))
+    if container_type in (0, 5):
+        max_stack = 1
+    records = picked_char[bucket]
+    # Preflight all stack room and free slots before changing anything. The
+    # client rejects an add when its fixed 100-slot container cannot fit it.
+    stack_room = 0
+    if max_stack > 1:
+        stack_room = sum(max(0, max_stack - int(item.get('amount', 0)))
+                         for item in records if str(item.get('id')) == item_id)
+    free_slots = max(0, 100 - len(records))
+    slots_needed = max(0, remaining - stack_room + max_stack - 1) // max_stack
+    if slots_needed > free_slots:
+        print(f"[BACKPACK] capacity full; skipped {remaining} of item={item_id} char={picked_char.get('id')}")
+        return False
+    if max_stack > 1:
+        for item in records:
+            if (item['id'] == item_id
+                    and int(item.get('amount', 0)) < max_stack):
+                moved = min(remaining, max_stack - int(item['amount']))
+                item['amount'] += moved
+                remaining -= moved
+                if remaining <= 0:
+                    return True
+    while remaining > 0 and len(records) < 100:
+        stack = min(remaining, max_stack)
+        parms = [0] * 8
+        new_item = {
+            'index_id': allocate_backpack_index(picked_char), 'id': item_id,
+            'amount': stack, 'bindflag': True, 'level': 0, 'quality': quality,
+            'appraise': 0, 'parm': parms, 'random_attri': {}, 'inlay': {}
+        }
+        if container_type == 0:
+            new_item['random_attri'] = roll_equip_random_attributes(new_item) or {}
+        records.append(new_item)
+        remaining -= stack
+    return True
+
+def can_add_to_inventory(picked_char, item_id, amount, quality=None, extra_free_slots=0):
+    """Check client backpack capacity without mutating its items or indices."""
+    item_id = str(item_id)
+    try:
+        remaining = int(amount)
+    except (TypeError, ValueError):
+        return False
+    if remaining <= 0:
+        return False
+    ensure_backpack_state(picked_char)
+    container_type = item_backpack_type(item_id)
+    records = picked_char[BACKPACKS[container_type][0]]
+    cfg = ITEM_CONFIG.get(item_id, {})
+    max_stack = max(1, int(cfg.get('max_stack', 1)))
+    if container_type in (0, 5):
+        max_stack = 1
+    stack_room = 0
+    if max_stack > 1:
+        stack_room = sum(max(0, max_stack - int(item.get('amount', 0)))
+                         for item in records if str(item.get('id')) == item_id)
+    free_slots = max(0, 100 - len(records) + max(0, int(extra_free_slots)))
+    slots_needed = max(0, remaining - stack_room + max_stack - 1) // max_stack
+    return slots_needed <= free_slots
+
+def can_add_reward_list_to_inventory(picked_char, rewards):
+    """Preflight all inventory rewards together, including shared free slots."""
+    ensure_backpack_state(picked_char)
+    requested = {}
+    for item_id, _quality, amount in rewards:
+        item_id = str(item_id)
+        if item_id in DIRECT_REWARD_RESOURCE_IDS:
+            continue
+        if item_id not in ITEM_CONFIG or int(amount) <= 0:
+            return False
+        requested[item_id] = requested.get(item_id, 0) + int(amount)
+
+    slots_needed_by_container = {}
+    for item_id, amount in requested.items():
+        container_type = item_backpack_type(item_id)
+        bucket = BACKPACKS[container_type][0]
+        cfg = ITEM_CONFIG.get(item_id, {})
+        max_stack = max(1, int(cfg.get('max_stack', 1)))
+        if container_type in (0, 5):
+            max_stack = 1
+        records = picked_char[bucket]
+        stack_room = 0
+        if max_stack > 1:
+            stack_room = sum(max(0, max_stack - int(item.get('amount', 0)))
+                             for item in records if str(item.get('id')) == item_id)
+        slots = max(0, amount - stack_room + max_stack - 1) // max_stack
+        slots_needed_by_container[container_type] = slots_needed_by_container.get(container_type, 0) + slots
+
+    for container_type, slots_needed in slots_needed_by_container.items():
+        bucket = BACKPACKS[container_type][0]
+        if slots_needed > max(0, 100 - len(picked_char[bucket])):
+            return False
+    return True
+
+def resolve_item_package_rewards(item_id):
+    """Return exact client package rewards when their source data exists."""
+    cfg = ITEM_CONFIG.get(str(item_id), {})
+    function_id = str(cfg.get('function', 0))
+    rewards = ITEM_PACKAGE_FIXED_REWARDS.get(function_id)
+    if rewards is None:
+        rewards = SHOW_REWARD_CONFIG.get(function_id, [])
+    return [(str(reward[0]), int(reward[1]), int(reward[2]))
+            for reward in rewards if len(reward) >= 3 and str(reward[0])]
 
 def build_mount_info(picked_char):
     """Build the exact mount map consumed by the APK garage handlers.
@@ -4260,7 +5004,8 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None,
               Caller is responsible for saving at appropriate intervals.
     """
     exp_gained = 0
-    cash_gained = 0
+    honor_gained = 0
+    currency_gains = {field: 0 for field in MONEY_FIELDS}
     inv_changed = False
 
     for entry in rewards_list:
@@ -4268,10 +5013,17 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None,
         amount = int(entry[2]) if len(entry) > 2 else int(entry[1])
         if item_id == "2001":  # EXP
             exp_gained += amount
-        elif item_id == "1001":  # Cash
-            cash_gained += amount
+        elif item_id == "2002":  # ADD_HONOR: attribute_other.title_exp, not a bag item
+            honor_gained += amount
+        elif item_id in ('1001', '1002', '1003', '1004', '2003', '2004'):
+            currency_index = {
+                '1001': 0, '1002': 1, '1003': 2, '1004': 3,
+                '2003': 4, '2004': 5
+            }[item_id]
+            currency_gains[MONEY_FIELDS[currency_index]] += amount
         else:  # Inventory items / currency
-            add_to_inventory(picked_char, item_id, amount)
+            reward_quality = int(entry[1]) if len(entry) > 2 else None
+            add_to_inventory(picked_char, item_id, amount, quality=reward_quality)
             inv_changed = True
 
     if exp_gained > 0:
@@ -4298,17 +5050,20 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None,
             smap = build_skills_map(picked_char.get('prof', 0), new_level, picked_char.get('skill_levels', {}))
             send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
 
-    if cash_gained > 0:
-        picked_char['cash'] = picked_char.get('cash', 0) + cash_gained
+    for field, amount in currency_gains.items():
+        if amount > 0:
+            picked_char[field] = get_currency_balance(picked_char, MONEY_FIELDS.index(field)) + amount
+    if honor_gained > 0:
+        picked_char['title_exp'] = max(0, int(picked_char.get('title_exp', 0))) + honor_gained
 
     if save:
         save_chars(all_accounts_chars)
 
-    if (exp_gained > 0 or cash_gained > 0) and conn:
+    if (exp_gained > 0 or honor_gained > 0 or any(currency_gains.values())) and conn:
         sync_char_attrs_rpc(conn, picked_char)
 
     if inv_changed and send_rpc_push:
-        send_rpc_push(611, sync_inventory_data(picked_char))
+        sync_all_backpacks(picked_char, send_rpc_push)
 
 def give_mission_rewards(picked_char, mid):
     """Resolves rewards by profession and calculates level ups using BaseLvData."""
@@ -4680,6 +5435,7 @@ def validate_car_mission_report(picked_char, die_type):
 def init_character_fields(c):
     fields = {
         'level': 1, 'exp': 0, 'cash': 1000,
+        'title_level': 0, 'title_exp': 0,
         'skill_levels': {},
         'active_missions': {},
         'completed_side_missions': [],
@@ -4716,6 +5472,8 @@ def init_character_fields(c):
     if 'hp' not in c or (c.get('hp', 0) <= 0 and not pending_relife_valid):
         c['hp'] = stats['hp_max']
         c.pop('_pending_relife', None)
+
+    ensure_backpack_state(c)
 
     # Ensure map_id is never None or "None" string — default to city map "11"
     if c.get('map_id') is None or str(c.get('map_id', '')) == 'None':
@@ -5126,6 +5884,14 @@ def client_handler(conn, addr):
             print(f"[!] FAILED TO SEND PUSH TAG={tag}")
             traceback.print_exc()
 
+    def send_rpc_response(response_session, response_data=None):
+        if response_session is None:
+            return
+        ph_r = encode_sproto([(1, response_session)])
+        pf_r = sproto_pack(ph_r + (response_data if response_data is not None else encode_sproto([])))
+        with send_lock:
+            conn.sendall(struct.pack(">H", len(pf_r)) + pf_r)
+
     def schedule_domin_return(restore_hp=False):
         """Return after the Capture mission's APK-localized five-second exit notice."""
         if not picked_char or picked_char.get('domin_return_scheduled'):
@@ -5388,14 +6154,9 @@ def client_handler(conn, addr):
                         (0, int(time.time())), (2, 0), (4, 10000), (9, funcs), (12, random.randint(1, 10000)), (13, 1), (14, int(time.time()))
                     ]))
 
-                    # 611: inventory_sync
-                    send_rpc_push(611, sync_inventory_data(picked_char))
-
-                    # 592: backpack_sync
-                    send_rpc_push(592, encode_sproto([(0, {})]))
-
-                    # 616: fashion_sync
-                    send_rpc_push(616, encode_sproto([(0, {})]))
+                    # Sync every player bag through its client-owned container
+                    # protocol: item 611, equipment 592, badge 604, fashion 616.
+                    sync_all_backpacks(picked_char, send_rpc_push)
 
                     # 510: initial stats sync
                     sync_char_attrs_rpc(conn, picked_char)
@@ -5912,7 +6673,7 @@ def client_handler(conn, addr):
                             if popup_items:
                                 send_rpc_push(638, encode_sproto([(0, popup_items)]))
                             if items_add:
-                                send_rpc_push(611, sync_inventory_data(picked_char)) # Inventory sync
+                                sync_all_backpacks(picked_char, send_rpc_push) # Inventory and typed bags sync
                             if mid == '1003' and picked_char.get('map_id') == '502':
                                 # Tag 521 invokes the APK's MissionPassShowRoot path. Start
                                 # the exit sequence only after that response has been pushed.
@@ -6222,98 +6983,606 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif msg in (116, 117): # equip_item / unequip_item
+                index_id = get_val_int(body, 0, -1)
+                changed = False
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    with get_character_transaction_lock(picked_char):
+                        ensure_backpack_state(picked_char)
+                        if msg == 116:
+                            found = find_backpack_item(picked_char, index_id, 0)
+                            if found:
+                                item = found['item']
+                                item_id = str(item['id'])
+                                item_cfg = ITEM_CONFIG.get(item_id, {})
+                                equip_cfg = EQUIP_CONFIG.get(item_id, {})
+                                minimum_level = max(int(item_cfg.get('level', 0)), int(equip_cfg.get('lv', 0)))
+                                required_job = int(equip_cfg.get('job', -1))
+                                position = int(equip_cfg.get('position', -1))
+                                if (int(item_cfg.get('type', -1)) == 2 and equip_cfg
+                                        and 0 <= position < 6
+                                        and picked_char.get('level', 1) >= minimum_level
+                                        and required_job in (-1, int(picked_char.get('prof', 0)))):
+                                    bag = picked_char['equip_inventory']
+                                    equipped = picked_char['equipped_equip']
+                                    previous = next((entry for entry in equipped
+                                                     if int(EQUIP_CONFIG.get(str(entry.get('id', '')), {}).get('position', -1)) == position), None)
+                                    bag.remove(item)
+                                    if previous:
+                                        equipped.remove(previous)
+                                        bag.append(previous)
+                                        push_backpack_item_update(send_rpc_push, 1, None, previous['index_id'])
+                                        push_backpack_item_update(send_rpc_push, 0, previous)
+                                    equipped.append(item)
+                                    push_backpack_item_update(send_rpc_push, 0, None, item['index_id'])
+                                    push_backpack_item_update(send_rpc_push, 1, item)
+                                    changed = True
+                        else:
+                            found = find_backpack_item(picked_char, index_id, 1)
+                            if found and len(picked_char['equip_inventory']) < 100:
+                                item = found['item']
+                                picked_char['equipped_equip'].remove(item)
+                                picked_char['equip_inventory'].append(item)
+                                push_backpack_item_update(send_rpc_push, 1, None, item['index_id'])
+                                push_backpack_item_update(send_rpc_push, 0, item)
+                                changed = True
+                        if changed:
+                            save_chars(all_accounts_chars)
+                            sync_char_attrs_rpc(conn, picked_char)
+                            sync_main_player_visual(picked_char, send_rpc_push)
+                send_rpc_response(session)
+
+            elif msg in (197, 198): # equip_badge / unequip_badge
+                index_id = get_val_int(body, 0, -1)
+                changed = False
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    with get_character_transaction_lock(picked_char):
+                        ensure_backpack_state(picked_char)
+                        if msg == 197:
+                            position = get_val_int(body, 1, -1)
+                            found = find_backpack_item(picked_char, index_id, 3)
+                            if found and 0 <= position < 5:
+                                source = found['item']
+                                cfg = ITEM_CONFIG.get(str(source['id']), {})
+                                equipped = picked_char['equipped_badges']
+                                bag = picked_char['badge_inventory']
+                                previous = next((entry for entry in equipped
+                                                 if int((entry.get('parm') or [0])[0]) == position), None)
+                                split_source = int(source.get('amount', 1)) > 1
+                                if (int(cfg.get('type', -1)) == 6
+                                        and str(source.get('id')) in BADGE_CONFIG
+                                        and not (split_source and previous and len(bag) >= 100)):
+                                    if previous:
+                                        equipped.remove(previous)
+                                        previous.setdefault('parm', [0] * 8)[0] = position
+                                        bag.append(previous)
+                                        push_backpack_item_update(send_rpc_push, 4, None, previous['index_id'])
+                                        push_backpack_item_update(send_rpc_push, 3, previous)
+                                    if split_source:
+                                        source['amount'] -= 1
+                                        item = dict(source)
+                                        item['index_id'] = allocate_backpack_index(picked_char)
+                                        item['amount'] = 1
+                                        item['parm'] = list(source.get('parm', [0] * 8))
+                                        push_backpack_item_update(send_rpc_push, 3, source)
+                                    else:
+                                        bag.remove(source)
+                                        item = source
+                                        push_backpack_item_update(send_rpc_push, 3, None, source['index_id'])
+                                    item.setdefault('parm', [0] * 8)[0] = position
+                                    item['amount'] = 1
+                                    equipped.append(item)
+                                    push_backpack_item_update(send_rpc_push, 4, item)
+                                    changed = True
+                        else:
+                            found = find_backpack_item(picked_char, index_id, 4)
+                            if found and len(picked_char['badge_inventory']) < 100:
+                                item = found['item']
+                                picked_char['equipped_badges'].remove(item)
+                                picked_char['badge_inventory'].append(item)
+                                push_backpack_item_update(send_rpc_push, 4, None, item['index_id'])
+                                push_backpack_item_update(send_rpc_push, 3, item)
+                                changed = True
+                        if changed:
+                            save_chars(all_accounts_chars)
+                            sync_char_attrs_rpc(conn, picked_char)
+                send_rpc_response(session)
+
+            elif msg in (221, 222): # equip_fashion_item / unequip_fashion_item
+                index_id = get_val_int(body, 0, -1)
+                changed = False
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    with get_character_transaction_lock(picked_char):
+                        ensure_backpack_state(picked_char)
+                        if msg == 221:
+                            found = find_backpack_item(picked_char, index_id, 5)
+                            if found:
+                                item = found['item']
+                                item_id = str(item['id'])
+                                item_cfg = ITEM_CONFIG.get(item_id, {})
+                                equip_cfg = EQUIP_CONFIG.get(item_id, {})
+                                position = int(equip_cfg.get('position', -1))
+                                minimum_level = max(int(item_cfg.get('level', 0)), int(equip_cfg.get('lv', 0)))
+                                required_job = int(equip_cfg.get('job', -1))
+                                if (int(item_cfg.get('type', -1)) == 16 and equip_cfg
+                                        and 0 <= position < 4
+                                        and picked_char.get('level', 1) >= minimum_level
+                                        and required_job in (-1, int(picked_char.get('prof', 0)))):
+                                    bag = picked_char['fashion_inventory']
+                                    equipped = picked_char['equipped_fashion']
+                                    previous = next((entry for entry in equipped
+                                                     if int(EQUIP_CONFIG.get(str(entry.get('id', '')), {}).get('position', -1)) == position), None)
+                                    bag.remove(item)
+                                    if previous:
+                                        equipped.remove(previous)
+                                        bag.append(previous)
+                                        push_backpack_item_update(send_rpc_push, 6, None, previous['index_id'])
+                                        push_backpack_item_update(send_rpc_push, 5, previous)
+                                    equipped.append(item)
+                                    push_backpack_item_update(send_rpc_push, 5, None, item['index_id'])
+                                    push_backpack_item_update(send_rpc_push, 6, item)
+                                    changed = True
+                        else:
+                            found = find_backpack_item(picked_char, index_id, 6)
+                            if found and len(picked_char['fashion_inventory']) < 100:
+                                item = found['item']
+                                picked_char['equipped_fashion'].remove(item)
+                                picked_char['fashion_inventory'].append(item)
+                                push_backpack_item_update(send_rpc_push, 6, None, item['index_id'])
+                                push_backpack_item_update(send_rpc_push, 5, item)
+                                changed = True
+                        if changed:
+                            save_chars(all_accounts_chars)
+                            sync_char_attrs_rpc(conn, picked_char)
+                            sync_main_player_visual(picked_char, send_rpc_push)
+                send_rpc_response(session)
+
+            elif msg == 224: # open_item_package: open a BOX or its configured lock/key pair
+                first_index = get_val_int(body, 0, -1)
+                second_index = get_val_int(body, 1, -1)
+                open_count = get_val_int(body, 2, 0)
+                display_rewards = []
+                opened = False
+                failure_reason = 'invalid request or package configuration'
+                if picked_char and is_current_character_connection(conn, picked_char) and 1 <= open_count <= 99:
+                    with get_character_transaction_lock(picked_char):
+                        first = find_backpack_item(picked_char, first_index, 2)
+                        second = (find_backpack_item(picked_char, second_index, 2)
+                                  if second_index >= 0 else None)
+                        if first:
+                            first_item = first['item']
+                            first_id = str(first_item.get('id', ''))
+                            first_cfg = ITEM_CONFIG.get(first_id, {})
+                            first_type = int(first_cfg.get('type', -1))
+                            package_item = None
+                            partner_item = None
+                            partner_items = []
+                            package_count = open_count
+                            if first_type == 15 and second_index < 0:
+                                package_item = first_item
+                                if package_count > int(package_item.get('amount', 0)):
+                                    failure_reason = 'not enough packages in stack'
+                                    package_item = None
+                            elif first_type in (20, 21) and second:
+                                second_item = second['item']
+                                second_id = str(second_item.get('id', ''))
+                                second_cfg = ITEM_CONFIG.get(second_id, {})
+                                second_type = int(second_cfg.get('type', -1))
+                                if first_type == 20 and second_type == 21:
+                                    package_item, partner_item = first_item, second_item
+                                elif first_type == 21 and second_type == 20:
+                                    package_item, partner_item = second_item, first_item
+                                if package_item and partner_item:
+                                    package_cfg = ITEM_CONFIG.get(str(package_item.get('id', '')), {})
+                                    key_cfg = ITEM_CONFIG.get(str(partner_item.get('id', '')), {})
+                                    expected_key = str(package_cfg.get('funlock', '')).strip()
+                                    expected_box = str(key_cfg.get('funlock', '')).strip()
+                                    if (expected_key != str(partner_item.get('id', ''))
+                                            or expected_box != str(package_item.get('id', ''))):
+                                        package_item = partner_item = None
+                                        failure_reason = 'package and key do not match'
+                                    else:
+                                        # The APK sends the first matching key's
+                                        # index but computes open-all count from
+                                        # the total stack count across the bag.
+                                        # Verify that index, then consume across
+                                        # all stacks of that exact key item.
+                                        partner_items = [entry for entry in picked_char['inventory']
+                                                         if str(entry.get('id', '')) == str(partner_item.get('id', ''))]
+                                        partner_total = sum(int(entry.get('amount', 0))
+                                                            for entry in partner_items)
+                                        if (package_count > int(package_item.get('amount', 0))
+                                                or package_count > partner_total):
+                                            package_item = partner_item = None
+                                            partner_items = []
+                                            failure_reason = 'not enough matching packages and keys'
+                            if package_item:
+                                package_id = str(package_item.get('id', ''))
+                                package_cfg = ITEM_CONFIG.get(package_id, {})
+                                if int(package_cfg.get('level', 0)) > int(picked_char.get('level', 1)):
+                                    failure_reason = 'character level is too low'
+                                else:
+                                    base_rewards = resolve_item_package_rewards(package_id)
+                                    rewards = [(str(item_id), int(quality), int(amount) * package_count)
+                                               for item_id, quality, amount in base_rewards
+                                               if int(amount) > 0]
+                                    valid_rewards = bool(rewards) and all(
+                                        item_id in ITEM_CONFIG and amount > 0
+                                        for item_id, _quality, amount in rewards
+                                    )
+                                    reward_totals = {}
+                                    for item_id, quality, amount in rewards:
+                                        reward_totals[(item_id, quality)] = reward_totals.get((item_id, quality), 0) + amount
+                                    has_capacity = (valid_rewards
+                                                    and can_add_reward_list_to_inventory(picked_char, rewards))
+                                    if valid_rewards and has_capacity:
+                                        # Consume only after every reward is known and its bag capacity
+                                        # has been checked. TAG 525 removes the consumed item/keys.
+                                        consumed = [
+                                            (package_item, package_count, item_backpack_type(package_id))
+                                        ]
+                                        for consumed_item, amount, container_type in consumed:
+                                            consumed_index = int(consumed_item['index_id'])
+                                            consumed_item['amount'] = int(consumed_item.get('amount', 1)) - amount
+                                            if consumed_item['amount'] <= 0:
+                                                picked_char[BACKPACKS[container_type][0]].remove(consumed_item)
+                                                push_backpack_item_update(send_rpc_push, container_type, None, consumed_index)
+                                            else:
+                                                push_backpack_item_update(send_rpc_push, container_type, consumed_item)
+                                        if partner_item:
+                                            remaining_keys = package_count
+                                            for key_item in partner_items:
+                                                if remaining_keys <= 0:
+                                                    break
+                                                consumed_amount = min(remaining_keys, int(key_item.get('amount', 0)))
+                                                if consumed_amount <= 0:
+                                                    continue
+                                                key_index = int(key_item['index_id'])
+                                                key_item['amount'] = int(key_item.get('amount', 1)) - consumed_amount
+                                                remaining_keys -= consumed_amount
+                                                if key_item['amount'] <= 0:
+                                                    picked_char['inventory'].remove(key_item)
+                                                    push_backpack_item_update(send_rpc_push, 2, None, key_index)
+                                                else:
+                                                    push_backpack_item_update(send_rpc_push, 2, key_item)
+                                        grant_item_rewards(picked_char, rewards, conn, send_rpc_push, save=False)
+                                        save_chars(all_accounts_chars)
+                                        display_rewards = [encode_sproto([
+                                            (0, item_id), (1, amount), (3, quality)
+                                        ]) for (item_id, quality), amount in reward_totals.items()]
+                                        opened = True
+                                        print(f"[BACKPACK] opened package={package_id} count={package_count} rewards={len(display_rewards)}")
+                                    elif valid_rewards:
+                                        failure_reason = 'reward would exceed backpack capacity'
+                                    else:
+                                        failure_reason = f'no authoritative reward table for package={package_id}'
+                if not opened and picked_char:
+                    print(f"[BACKPACK] package open rejected player={picked_char.get('id')} reason={failure_reason}")
+                    if 'no authoritative reward table' in failure_reason:
+                        notice_text = 'This package reward is not configured yet.'
+                    else:
+                        notice_text = f'Cannot open package: {failure_reason}.'
+                    send_rpc_push(529, encode_sproto([(0, notice_text), (1, True)]))
+                # The client opens this result window locally before requesting;
+                # always complete its ret_open_item_package flow, with no items
+                # on rejection and no item/key consumption.
+                send_rpc_push(617, encode_sproto([(0, display_rewards)]))
+                send_rpc_response(session)
+
+            elif msg == 156: # title_req_level_up, required after honor rewards
+                if picked_char:
+                    current_level = max(0, int(picked_char.get('title_level', 0)))
+                    title_exp = max(0, int(picked_char.get('title_exp', 0)))
+                    threshold = int(TITLE_CONFIG.get(current_level, {}).get('exp', 0))
+                    if (current_level < 10 and threshold > 0 and title_exp >= threshold
+                            and current_level + 1 in TITLE_CONFIG):
+                        picked_char['title_level'] = current_level + 1
+                        save_chars(all_accounts_chars)
+                        sync_char_attrs_rpc(conn, picked_char)
+                    send_rpc_push(569, encode_sproto([
+                        (0, int(picked_char.get('title_level', 0))),
+                        (1, int(picked_char.get('title_exp', 0)))
+                    ]))
+                send_rpc_response(session)
+
+            elif msg == 185: # change_potion: persist the client's selected item-backpack potion
+                index_id = get_val_int(body, 0, -1)
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    found = find_backpack_item(picked_char, index_id, 2)
+                    if found:
+                        item = found['item']
+                        cfg = ITEM_CONFIG.get(str(item.get('id', '')), {})
+                        if (int(cfg.get('type', -1)) in (3, 27)
+                                and int(item.get('amount', 0)) > 0
+                                and int(cfg.get('level', 0)) <= int(picked_char.get('level', 1))):
+                            picked_char['potion_index'] = int(item['index_id'])
+                            save_chars(all_accounts_chars)
+                send_rpc_response(session)
+
+            elif msg == 240: # change_item_state: mark the client's new-item flag read
+                index_id = get_val_int(body, 0, -1)
+                container_type = get_val_int(body, 1, -1)
+                if picked_char and is_current_character_connection(conn, picked_char) and container_type in (0, 2, 3, 5):
+                    found = find_backpack_item(picked_char, index_id, container_type)
+                    if found:
+                        item = found['item']
+                        item.setdefault('parm', [0] * 8)[5] = 1
+                        save_chars(all_accounts_chars)
+                        push_backpack_item_update(send_rpc_push, container_type, item)
+                send_rpc_response(session)
+
+            elif msg == 303: # equip_appraise
+                index_id = get_val_int(body, 0, -1)
+                appraised = False
+                failure_reason = 'This item cannot be appraised.'
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    with get_character_transaction_lock(picked_char):
+                        found = find_backpack_item(picked_char, index_id, 0)
+                        if found:
+                            item = found['item']
+                            item_id = str(item.get('id', ''))
+                            item_cfg = ITEM_CONFIG.get(item_id, {})
+                            equip_cfg = EQUIP_CONFIG.get(item_id, {})
+                            rolls = item.get('random_attri')
+                            if (int(item_cfg.get('type', -1)) == 2 and equip_cfg
+                                    and int(item.get('appraise', 0)) != 1):
+                                if not (isinstance(rolls, dict) and rolls):
+                                    # Older inventory records were created before
+                                    # equipment used the APK's configured affix
+                                    # pools. Roll once from the same quality pool
+                                    # used for newly granted equipment.
+                                    rolls = roll_equip_random_attributes(item)
+                                if isinstance(rolls, dict) and rolls:
+                                    identify_prices = [
+                                        int(value) for value in str(equip_cfg.get('identify', '')).split('#')
+                                        if value.strip().lstrip('-').isdigit()
+                                    ]
+                                    quality = int(item.get('quality', item_cfg.get('quality', 0)))
+                                    cost = (identify_prices[quality]
+                                            if 0 <= quality < len(identify_prices) else 0)
+                                    if cost >= 0 and get_currency_balance(picked_char, 1) >= cost:
+                                        set_currency_balance(
+                                            picked_char, 1,
+                                            get_currency_balance(picked_char, 1) - cost
+                                        )
+                                        item['random_attri'] = rolls
+                                        item['appraise'] = 1
+                                        save_chars(all_accounts_chars)
+                                        push_backpack_item_update(send_rpc_push, 0, item)
+                                        sync_char_attrs_rpc(conn, picked_char)
+                                        appraised = True
+                                    else:
+                                        failure_reason = 'Not enough gold to appraise this item.'
+                                else:
+                                    # Never consume gold or mark the item as
+                                    # identified when its configured drop pool
+                                    # is missing or cannot produce its affixes.
+                                    failure_reason = 'This equipment has no valid appraisal attributes configured.'
+                if not appraised:
+                    send_rpc_push(529, encode_sproto([(0, failure_reason), (1, True)]))
+                send_rpc_response(session)
+
+            elif msg == 301: # re_name: rename with item 5024
+                # Match ReNameRootLogic.CheckNameIsRight exactly: leading or
+                # trailing spaces are validated as part of the submitted name.
+                requested_name = get_val_str(body, 0, '')
+                name_valid = bool(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9 _]{4,19}', requested_name))
+                renamed = False
+                if picked_char and is_current_character_connection(conn, picked_char) and name_valid:
+                    with get_character_transaction_lock(picked_char):
+                        if requested_name == str(picked_char.get('name', '')):
+                            # A no-op rename must not consume the card.
+                            renamed = True
+                        else:
+                            card = next((entry for entry in picked_char.get('inventory', [])
+                                         if int(entry.get('index_id', -1)) >= 0
+                                         and str(entry.get('id', '')) == '5024'
+                                         and int(entry.get('amount', 0)) > 0), None)
+                            if card:
+                                card['amount'] = int(card.get('amount', 1)) - 1
+                                picked_char['name'] = requested_name
+                                if card['amount'] <= 0:
+                                    picked_char['inventory'].remove(card)
+                                    push_backpack_item_update(send_rpc_push, 2, None, card['index_id'])
+                                else:
+                                    push_backpack_item_update(send_rpc_push, 2, card)
+                                save_chars(all_accounts_chars)
+                                renamed = True
+                # ret_re_name closes the client wait window on either result;
+                # its handler changes the local name only when state is 1.
+                send_rpc_push(680, encode_sproto([
+                    (0, requested_name if renamed else str(picked_char.get('name', '') if picked_char else '')),
+                    (1, 1 if renamed else 0)
+                ]))
+                send_rpc_response(session)
+
+            elif msg == 129: # sell_item
+                index_id = get_val_int(body, 0, -1)
+                item_count = get_val_int(body, 1, 0)
+                container_type = get_val_int(body, 2, -1)
+                sold = False
+                if picked_char and is_current_character_connection(conn, picked_char) and container_type in (0, 2) and item_count > 0:
+                    with get_character_transaction_lock(picked_char):
+                        found = find_backpack_item(picked_char, index_id, container_type)
+                        if found:
+                            item = found['item']
+                            item_cfg = ITEM_CONFIG.get(str(item['id']), {})
+                            item_type = int(item_cfg.get('type', -1))
+                            # Match ItemData.CanSell: equipment only in the
+                            # equipment bag; potions, enhancement materials,
+                            # boxes, and their keys in the item bag. Fashion
+                            # items are not sellable by the client.
+                            sellable_in_container = (
+                                (container_type == 0 and item_type == 2)
+                                or (container_type == 2 and item_type in (3, 4, 15, 20, 21))
+                            )
+                            if (sellable_in_container
+                                    and item_count <= int(item.get('amount', 0))):
+                                raw_prices = str(item_cfg.get('price', '0')).split('#')
+                                prices = [int(v) for v in raw_prices if v.strip().lstrip('-').isdigit()]
+                                quality = int(item.get('quality', item_cfg.get('quality', 0)))
+                                price = (prices[quality] if item_type == 2 and 0 <= quality < len(prices)
+                                         else prices[0] if prices else 0)
+                                money_type = int(item_cfg.get('price_type', 0))
+                                cost = price * item_count
+                                bag = picked_char[found['bucket']]
+                                if cost >= 0 and 0 <= money_type < len(MONEY_FIELDS):
+                                    bag.remove(item) if item_count == int(item.get('amount', 0)) else item.update({'amount': int(item['amount']) - item_count})
+                                    set_currency_balance(picked_char, money_type,
+                                                         get_currency_balance(picked_char, money_type) + cost)
+                                    push_backpack_item_update(send_rpc_push, container_type,
+                                                              None if item not in bag else item,
+                                                              index_id if item not in bag else None)
+                                    save_chars(all_accounts_chars)
+                                    sync_char_attrs_rpc(conn, picked_char)
+                                    sold = True
+                                    print(f"[BACKPACK] sold item={item['id']} count={item_count} price={cost} currency={money_type}")
+                send_rpc_response(session)
+
+            elif msg == 199: # badge_merge (RPC; state 0 means the merge succeeded)
+                index_id = get_val_int(body, 0, -1)
+                next_item_id = get_val_str(body, 1, '')
+                merge_count = get_val_int(body, 2, 0)
+                state = 1
+                if picked_char and is_current_character_connection(conn, picked_char) and merge_count > 0:
+                    with get_character_transaction_lock(picked_char):
+                        found = find_backpack_item(picked_char, index_id, 3)
+                        if found:
+                            source = found['item']
+                            source_id = str(source['id'])
+                            source_badge = BADGE_CONFIG.get(source_id, {})
+                            target_badge = BADGE_CONFIG.get(next_item_id, {})
+                            try:
+                                adjacent = int(next_item_id) == int(source_id) + 1
+                            except ValueError:
+                                adjacent = False
+                            required = max(1, int(source_badge.get('upgrade_count', 0))) * merge_count
+                            money_type = int(source_badge.get('money_type', 0))
+                            cost = max(0, int(source_badge.get('upgrade_cost', 0))) * merge_count
+                            same_badge_line = (source_badge and target_badge
+                                and source_badge.get('badge_type') == target_badge.get('badge_type')
+                                and source_badge.get('color') == target_badge.get('color')
+                                and int(target_badge.get('level', -1)) == int(source_badge.get('level', -1)) + 1)
+                            frees_badge_slot = int(source.get('amount', 0)) <= required
+                            if (adjacent and same_badge_line and int(source.get('amount', 0)) >= required
+                                    and 0 <= money_type < len(MONEY_FIELDS)
+                                    and get_currency_balance(picked_char, money_type) >= cost
+                                    and can_add_to_inventory(picked_char, next_item_id, merge_count,
+                                                             extra_free_slots=1 if frees_badge_slot else 0)):
+                                source['amount'] = int(source['amount']) - required
+                                if source['amount'] <= 0:
+                                    picked_char['badge_inventory'].remove(source)
+                                    push_backpack_item_update(send_rpc_push, 3, None, source['index_id'])
+                                else:
+                                    push_backpack_item_update(send_rpc_push, 3, source)
+                                set_currency_balance(picked_char, money_type,
+                                                     get_currency_balance(picked_char, money_type) - cost)
+                                # Capacity was preflighted above (including the
+                                # source slot if this merge consumes its stack).
+                                # Therefore this add cannot partially mutate or fail.
+                                add_to_inventory(picked_char, next_item_id, merge_count)
+                                for result in picked_char['badge_inventory']:
+                                    if result['id'] == next_item_id:
+                                        push_backpack_item_update(send_rpc_push, 3, result)
+                                save_chars(all_accounts_chars)
+                                sync_char_attrs_rpc(conn, picked_char)
+                                state = 0
+                if state == 0:
+                    sync_all_backpacks(picked_char, send_rpc_push)
+                send_rpc_response(session, encode_sproto([(0, state)]))
+
             elif msg == 115: # use_item, including vehicle exchange vouchers
                 index_id = get_val_int(body, 0, -1)
                 success = 0
-                race_ticket_consumed = False
-                if picked_char:
-                    inventory = picked_char.get('inventory', [])
-                    item_index = index_id - 10000
-                    if 0 <= item_index < len(inventory):
-                        item = inventory[item_index]
-                        mount_id = mount_id_from_voucher(item.get('id'))
-                        if mount_id:
-                            mount = picked_char.setdefault('mounts', {}).setdefault(mount_id, {})
-                            mount['state'] = max(1, int(mount.get('state', 0)))
-                            mount.setdefault('select', MOUNT_CONFIG[mount_id]['default_color'])
-                            mount.setdefault('unlocked_colors', [MOUNT_CONFIG[mount_id]['default_color']])
-                            item['amount'] -= 1
-                            if item['amount'] < 1:
-                                inventory.pop(item_index)
-                            success = 1
-                            save_chars(all_accounts_chars)
-                            send_rpc_push(611, sync_inventory_data(picked_char))
-                            send_rpc_push(630, encode_sproto([(0, build_mount_info(picked_char))]))
-                            print(f"[MOUNT] voucher redeemed item={item.get('id')} vehicle={mount_id}")
-                        elif item.get('id') in ITEM_CONFIG:
-                            cfg = ITEM_CONFIG[item['id']]
-                            if cfg['type'] == 18: # REMAIN ticket
-                                subtype = cfg['function']
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    with get_character_transaction_lock(picked_char):
+                        found = find_backpack_item(picked_char, index_id, 2)
+                        if found:
+                            item = found['item']
+                            item_id = str(item['id'])
+                            cfg = ITEM_CONFIG.get(item_id, {})
+                            item_type = int(cfg.get('type', -1))
+                            mount_id = mount_id_from_voucher(item_id)
+                            if mount_id:
+                                mount = picked_char.setdefault('mounts', {}).setdefault(mount_id, {})
+                                mount['state'] = max(1, int(mount.get('state', 0)))
+                                mount.setdefault('select', MOUNT_CONFIG[mount_id]['default_color'])
+                                mount.setdefault('unlocked_colors', [mount['select']])
+                                success = 1
+                                send_rpc_push(630, encode_sproto([(0, build_mount_info(picked_char))]))
+                                print(f"[MOUNT] voucher redeemed item={item_id} vehicle={mount_id}")
+                            elif item_type == 18: # REMAIN ticket
+                                subtype = int(cfg.get('function', 0))
                                 state = ensure_daily_copy_state(picked_char)
-                                ticket_use_valid = True
+                                ticket_use_valid = False
                                 if subtype == 7:
-                                    # A racing ticket grants one extra run for
-                                    # today's rotating route.  Resetting every
-                                    # subtype-7 copy to its base allowance both
-                                    # overgrants attempts and affects routes the
-                                    # client does not currently expose.
+                                    # The APK's subtype-7 item grants one extra
+                                    # play only for today's configured street race.
                                     race_copy_id = street_race_daily_copy_id()
                                     race_cfg = COPY_SCENE_CONFIG.get(race_copy_id, {})
                                     if race_cfg.get('subtype') == 7:
                                         current = copy_attempts_remaining(picked_char, race_copy_id, race_cfg)
                                         state['remaining'][race_copy_id] = current + 1
-                                    else:
-                                        ticket_use_valid = False
+                                        ticket_use_valid = True
                                 else:
-                                    # Other remaining tickets retain their
-                                    # existing configured copy reset behavior.
-                                    for copy_id, sc_cfg in COPY_SCENE_CONFIG.items():
-                                        if sc_cfg['subtype'] == subtype:
-                                            state['remaining'][copy_id] = sc_cfg['max_plays']
+                                    matches = [(copy_id, sc_cfg) for copy_id, sc_cfg in COPY_SCENE_CONFIG.items()
+                                               if int(sc_cfg.get('subtype', -1)) == subtype]
+                                    for copy_id, sc_cfg in matches:
+                                        state['remaining'][copy_id] = sc_cfg['max_plays']
+                                    ticket_use_valid = bool(matches)
                                 if ticket_use_valid:
-                                    item['amount'] -= 1
-                                    if item['amount'] < 1:
-                                        inventory.pop(item_index)
                                     success = 1
-                                    save_chars(all_accounts_chars)
                                     send_rpc_push(555, sync_copy_scenes(picked_char))
-                                    if subtype == 7:
-                                        # ret_use_item (TAG 526) decrements the
-                                        # item locally. Sending the already
-                                        # decremented inventory first would
-                                        # make that handler remove it twice.
-                                        race_ticket_consumed = True
-                                    else:
-                                        send_rpc_push(611, sync_inventory_data(picked_char))
-                                    print(f"[TICKET] used item={item.get('id')} for subtype={subtype}")
+                                    print(f"[TICKET] used item={item_id} for subtype={subtype}")
+                            elif item_type in (3, 27):
+                                # Client cooldown is exactly 20 seconds; enforce it
+                                # server-side too so reconnects cannot bypass it.
+                                now = time.time()
+                                next_use = float(picked_char.get('next_potion_use_at', 0))
+                                potion_level = int(cfg.get('level', 0))
+                                if (potion_level <= int(picked_char.get('level', 1))
+                                        and now >= next_use):
+                                    stats = get_character_stats(picked_char)
+                                    hp_before = int(picked_char.get('hp', stats['hp_max']))
+                                    heal_value = max(0, int(cfg.get('function', 0)))
+                                    if item_type == 27:
+                                        heal_value = (stats['hp_max'] * heal_value) // 10000
+                                    if heal_value > 0 and hp_before > 0:
+                                        picked_char['hp'] = min(stats['hp_max'], max(0, hp_before) + heal_value)
+                                        picked_char['next_potion_use_at'] = now + 20.0
+                                        success = 1
+                                        if int(picked_char['hp']) != hp_before:
+                                            sync_char_attrs_rpc(conn, picked_char)
+                            elif item_type == 22:
+                                # The client applies the configured EffInfo buff
+                                # locally, then TAG 526 decrements the stack.
+                                buff_id = str(cfg.get('function', 0))
+                                if (buff_id in EFF_CONFIG
+                                        and int(cfg.get('level', 0)) <= int(picked_char.get('level', 1))):
+                                    success = 1
+                            elif item_type == 28:
+                                # Dance tools require the separate dance-state,
+                                # participation, and reward flow (protocols
+                                # 624/686); acknowledging this item here would
+                                # consume it without starting that activity.
+                                print(f"[BACKPACK] rejected dance tool item={item_id}; dance activity handler is unavailable")
+                                send_rpc_push(529, encode_sproto([
+                                    (0, 'Dance speaker activity is not available on this server.'),
+                                    (1, True)
+                                ]))
+                            if success:
+                                item['amount'] = int(item.get('amount', 1)) - 1
+                                if item['amount'] <= 0:
+                                    picked_char['inventory'].remove(item)
+                                    try:
+                                        was_selected_potion = int(picked_char.get('potion_index', -1)) == index_id
+                                    except (TypeError, ValueError):
+                                        was_selected_potion = False
+                                    if was_selected_potion:
+                                        picked_char['potion_index'] = -1
+                                save_chars(all_accounts_chars)
                 send_rpc_push(526, encode_sproto([(0, success), (1, index_id)]))
-
-                # TAG 525: update_item - notify client about individual item change
-                # update_item schema: containertype(0), indexId(1), gameitem(2)
-                # gameitem schema: indexId(0), itemId(1), bindflag(2), level(3), flags(4), stack(5), quality(6), parm(7), appraise(8)
-                if success and picked_char and not race_ticket_consumed:
-                    inventory = picked_char.get('inventory', [])
-                    item_index = index_id - 10000
-                    if 0 <= item_index < len(inventory):
-                        item = inventory[item_index]
-                        gi = encode_sproto([
-                            (0, index_id),          # indexId
-                            (1, item['id']),        # itemId
-                            (2, False),             # bindflag
-                            (3, 0),                 # level
-                            (5, item.get('amount', 1)),  # stack
-                            (6, 0)                  # quality
-                        ])
-                        send_rpc_push(525, encode_sproto([
-                            (0, 1),  # containertype: ITEM_BACKPACK
-                            (1, index_id),
-                            (2, gi)
-                        ]))
-
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-
+                send_rpc_response(session)
             elif msg in (238, 239): # use_mount / unuse_mount
                 # The APK applies the visual mount/dismount locally.  Persist
                 # the packet acknowledgement so it never stalls on a request.
@@ -7283,7 +8552,7 @@ def client_handler(conn, addr):
                                     picked_char['pre_copy_map'] = str(picked_char.get('map_id', '11'))
                                 state = ensure_daily_copy_state(picked_char)
                                 if remaining > 0: state['remaining'][copy_id] = remaining - 1
-                                if extra_item_used: send_rpc_push(611, sync_inventory_data(picked_char))
+                                if extra_item_used: sync_all_backpacks(picked_char, send_rpc_push)
                                 picked_char['active_copy_id'] = copy_id
                                 picked_char['exp_members'] = [int(picked_char.get('id', 0))]
                                 picked_char['exp_team_id'] = None
@@ -7360,7 +8629,7 @@ def client_handler(conn, addr):
                                 if remaining > 0:
                                     state['remaining'][copy_id] = remaining - 1
                                 if extra_item_used:
-                                    send_rpc_push(611, sync_inventory_data(picked_char))
+                                    sync_all_backpacks(picked_char, send_rpc_push)
                                 picked_char['active_copy_id'] = copy_id
                                 picked_char['street_race_result_recorded'] = False
                                 picked_char['street_race_started_at'] = None
@@ -7581,7 +8850,7 @@ def client_handler(conn, addr):
                             if revive_stack['amount'] <= 0:
                                 inventory.remove(revive_stack)
                             picked_char['inventory'] = inventory
-                            send_rpc_push(611, sync_inventory_data(picked_char))
+                            sync_all_backpacks(picked_char, send_rpc_push)
 
                         # The client labels this free action from TAG 618's
                         # rebirth type: type 0 returns to the main city; type 1
@@ -7687,7 +8956,7 @@ def client_handler(conn, addr):
                         revive_stack['amount'] = int(revive_stack.get('amount', 1)) - revive_cost
                         if revive_stack['amount'] <= 0: inventory.remove(revive_stack)
                         picked_char['inventory'] = inventory
-                        send_rpc_push(611, sync_inventory_data(picked_char))
+                        sync_all_backpacks(picked_char, send_rpc_push)
 
                     p_stats = get_character_stats(picked_char)
                     picked_char['hp'] = p_stats['hp_max']
@@ -7930,7 +9199,7 @@ def client_handler(conn, addr):
                             save_chars(all_accounts_chars)
 
                             # Sync items and finalize client state
-                            send_rpc_push(611, sync_inventory_data(picked_char))
+                            sync_all_backpacks(picked_char, send_rpc_push)
                             print(f"[REWARD] Expansion finalized and rewards granted for player {picked_char['id']}")
                         else:
                             print(f"[REWARD] Player {picked_char['id']} already claimed expansion rewards.")
@@ -7967,6 +9236,73 @@ def client_handler(conn, addr):
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 120: # chat; world chat consumes its required speaker item
+                chat_type = get_val_int(body, 3, -1)
+                chat_text = get_val_str(body, 2, '')
+                accepted_world_chat = False
+                reject_reason = ''
+                if picked_char and chat_type == 2:
+                    if not chat_text or len(chat_text) > 256:
+                        reject_reason = 'Message must contain 1–256 characters.'
+                    elif not is_current_character_connection(conn, picked_char):
+                        reject_reason = 'This character connection is no longer active.'
+                    else:
+                        with get_character_transaction_lock(picked_char):
+                            now = time.time()
+                            try:
+                                last_sent = float(picked_char.get('last_world_chat_sent_at', 0))
+                            except (TypeError, ValueError):
+                                last_sent = 0.0
+                            if last_sent > now:
+                                last_sent = now
+                            if now - last_sent < 5.0:
+                                reject_reason = 'Please wait before sending another world message.'
+                            elif consume_backpack_item(picked_char, '5026', 1, send_rpc_push, 2):
+                                picked_char['last_world_chat_sent_at'] = now
+                                save_chars(all_accounts_chars)
+                                accepted_world_chat = True
+                            else:
+                                reject_reason = 'A World Speak item is required.'
+
+                    if accepted_world_chat:
+                        chat_fields = [
+                            (0, int(picked_char.get('id', 0))),
+                            (1, str(picked_char.get('name', ''))),
+                            (2, get_val_int(body, 0, 0)),
+                            (3, get_val_str(body, 1, '')),
+                            (4, chat_text),
+                            (5, chat_type),
+                            (6, get_val_int(body, 4, -1)),
+                            (9, int(picked_char.get('prof', 0))),
+                            (10, int(picked_char.get('level', 1))),
+                            (11, int(get_character_stats(picked_char)['power'])),
+                            (12, int(picked_char.get('guildId', 0))),
+                            (13, str(picked_char.get('guildName', ''))),
+                            (14, chat_text)
+                        ]
+                        intdata = body.get(5)
+                        stringdata = body.get(6)
+                        # The generic Sproto decoder keeps array payloads as
+                        # their raw encoded bytes. Forward those bytes unchanged
+                        # so client-side linked chat retains its data.
+                        if isinstance(intdata, (list, bytes, bytearray)):
+                            chat_fields.append((7, intdata))
+                        if isinstance(stringdata, (list, bytes, bytearray)):
+                            chat_fields.append((8, stringdata))
+                        chat_list = [encode_sproto(chat_fields)]
+                        push_data = encode_sproto([(0, chat_list)])
+                        # World messages are visible to every currently online
+                        # character. Use the registered connection writer so
+                        # this push cannot interleave with its packet stream.
+                        for online_id, (online_conn, online_char) in list(ALL_CONNECTIONS.items()):
+                            if online_conn is not None and online_char is not None:
+                                send_rpc_push_safe(online_conn, 528, push_data)
+                        print(f"[CHAT] world from={picked_char.get('name')} consumed WorldSpeak item=5026")
+                    elif reject_reason:
+                        send_rpc_push(529, encode_sproto([(0, reject_reason), (1, True)]))
+                if session is not None:
+                    send_rpc_response(session)
 
             # Keep the legacy chat-shaped 110 payload out of the team invite
             # reply path. The APK's real chat RPC is 120; ret_invite_join_team
@@ -8259,7 +9595,7 @@ def client_handler(conn, addr):
                             picked_char['cash'] = picked_char.get('cash', 0) + 10000
                             save_chars(all_accounts_chars)
                             send_rpc_push(643, encode_sproto([(0, day), (1, False)]))
-                            send_rpc_push(611, sync_inventory_data(picked_char))
+                            sync_all_backpacks(picked_char, send_rpc_push)
                             sync_char_attrs_rpc(conn, picked_char)
                         else:
                             print(f"[REWARD SECURITY] duplicate weekly sign rejected player={picked_char.get('id')}")
@@ -8692,7 +10028,7 @@ def client_handler(conn, addr):
                                     mi['mailState'] = 3  # GETITEM - client IsGetItem() checks mailstate==3
                                     for it in mi.get('items', []):
                                         add_to_inventory(picked_char, str(it.get('itemId', 0)), it.get('count', 1))
-                                    send_rpc_push(611, sync_inventory_data(picked_char))
+                                    sync_all_backpacks(picked_char, send_rpc_push)
                                     # Send updated mail_update (531) so client knows the mail state changed
                                     mi_bytes = build_mail_update(mi)
                                     send_rpc_push(531, mi_bytes)
@@ -8708,7 +10044,7 @@ def client_handler(conn, addr):
                                     # Send updated mail_update (531) for each claimed mail
                                     mi_bytes = build_mail_update(mi)
                                     send_rpc_push(531, mi_bytes)
-                            send_rpc_push(611, sync_inventory_data(picked_char))
+                            sync_all_backpacks(picked_char, send_rpc_push)
                             save_chars(all_accounts_chars)
                     elif operation == 4: # delete all
                         picked_char['mails'] = []
@@ -9318,9 +10654,18 @@ def client_handler(conn, addr):
                             # normal entry, reconnect, and exit checks.
                             print(f"[EXP STAGE] denied gather across run boundary player={picked_char.get('id')} target={target_id} map={target_map}")
                         else:
-                            print(f"[GATHER] Warping player {picked_char.get('id', 0)} to player {target_id} at map={target_map} pos={target_pos}")
-                            picked_char['pos'] = list(target_pos)
-                            start_map_transition(conn, picked_char, target_map, send_rpc_push, override_pos=list(target_pos))
+                            # The APK only sends gather_other_player from its
+                            # revenge action, after checking for EnemyWarpTool
+                            # (ItemData 5025). Require and consume that item on
+                            # the server only once the target and map are valid.
+                            with get_character_transaction_lock(picked_char):
+                                if consume_backpack_item(picked_char, '5025', 1, send_rpc_push, 2):
+                                    save_chars(all_accounts_chars)
+                                    print(f"[GATHER] Warping player {picked_char.get('id', 0)} to player {target_id} at map={target_map} pos={target_pos}; consumed EnemyWarpTool")
+                                    picked_char['pos'] = list(target_pos)
+                                    start_map_transition(conn, picked_char, target_map, send_rpc_push, override_pos=list(target_pos))
+                                else:
+                                    print(f"[GATHER] denied player={picked_char.get('id')} target={target_id}; EnemyWarpTool missing")
                     else:
                         print(f"[GATHER] Target player {target_id} not found online")
                 if session is not None:
