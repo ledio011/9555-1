@@ -6207,7 +6207,8 @@ def build_mail_update(mi):
             (0, str(it.get('itemId', 0))),   # itemId as string
             (1, it.get('count', 1)),          # itemCount as long
             (3, it.get('quality', 0)),        # quality as long (wire tag 3, NOT 2!)
-            (4, item_key)                     # id as string (dictionary key)
+            (4, item_key),                    # id as string (dictionary key)
+            (5, it.get('count2', 0))           # count2; ShowRewardItems reads this field
         ])
         items_dict[item_key] = item_obj
 
