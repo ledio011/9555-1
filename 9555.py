@@ -28,6 +28,8 @@ CAR_MISSION_EVENT_TIMES = {} # character -> last accepted generic car robbery ev
 RANDOM_NAME_CALLED = set()  # connection identities that have had their first random name request
 ALL_CONNECTIONS = {}  # char_id -> (conn, picked_char) for tracking online players
 CONNECTION_LOCKS = {}  # char_id -> threading.Lock() for per-connection send protection
+SOCIAL_PROFILE_SIGNATURES = {}  # char_id -> last social profile sent to friends/enemies
+SOCIAL_PROFILE_SIGNATURE_LOCK = threading.Lock()
 MAIL_ID_COUNTER = 1000000  # Will be initialized from max existing mailId on startup
 CHAR_DB_SAVE_LOCK = threading.Lock() # serialize atomic snapshots to the shared temp/backup files
 TEAM_ID_COUNTER_LOCK = threading.Lock()
@@ -3280,6 +3282,38 @@ def get_full_char(c):
         (15, download_state)
     ])
 
+def social_profile_signature(character, stats=None):
+    """Fields shown in Friend/Enemy rows and synchronized by tag 538/534."""
+    if stats is None:
+        stats = get_character_stats(character)
+    return (
+        str(character.get('name', '')),
+        int(character.get('level', 1)),
+        int(character.get('prof', character.get('profession', 0))),
+        int(stats.get('power', 0)),
+        int(character.get('guildId', 0) or 0),
+        str(character.get('guildName', '') or '')
+    )
+
+def sync_social_profile_if_changed(character, stats=None):
+    """Push profile changes because the Friend tab displays a local cache."""
+    try:
+        char_id = int(character.get('id', 0))
+        if char_id <= 0:
+            return
+        current = ALL_CONNECTIONS.get(char_id)
+        if not current or current[1] is not character:
+            return
+        signature = social_profile_signature(character, stats)
+        with SOCIAL_PROFILE_SIGNATURE_LOCK:
+            if SOCIAL_PROFILE_SIGNATURES.get(char_id) == signature:
+                return
+            SOCIAL_PROFILE_SIGNATURES[char_id] = signature
+        _sync_friend_online_state(char_id, 1)
+    except Exception:
+        # Social refresh is supplementary to the authoritative attribute sync.
+        pass
+
 def sync_char_attrs_rpc(conn, picked_char, conn_id=None):
     """Sends TAG 510 (aoi_update_attribute) to sync all stats."""
     stats = get_character_stats(picked_char)
@@ -3321,6 +3355,7 @@ def sync_char_attrs_rpc(conn, picked_char, conn_id=None):
         else:
             conn.sendall(pkt)
     except: pass
+    sync_social_profile_if_changed(picked_char, stats)
 
 def send_combat_power_gain_tip(send_rpc_push, previous_power, current_power):
     """Open the APK's combat-power increase popup only for a real power gain."""
@@ -6492,14 +6527,18 @@ def _sync_friend_online_state(char_id, state):
                 break
     current_profile = None
     if source_char:
+        source_stats = get_character_stats(source_char)
         current_profile = {
             'name': source_char.get('name', f'Player{char_id}'),
             'level': source_char.get('level', 1),
             'profession': source_char.get('prof', 0),
-            'combValue': get_character_stats(source_char)['power'],
+            'combValue': source_stats['power'],
             'guildId': source_char.get('guildId', 0),
             'guildName': source_char.get('guildName', '')
         }
+        if state == 1:
+            with SOCIAL_PROFILE_SIGNATURE_LOCK:
+                SOCIAL_PROFILE_SIGNATURES[int(char_id)] = social_profile_signature(source_char, source_stats)
     for area_key, area_chars in all_accounts_chars.items():
         for acc_key, char_list in area_chars.items():
             for ch in char_list:
@@ -11973,7 +12012,12 @@ def client_handler(conn, addr):
                             oc_name = oc.get('name', '')
                             if oc_name and search_name.lower() in oc_name.lower():
                                 if not numeric_id_matches(oc.get('id', 0), picked_char.get('id', 0)):
-                                    friend_list.append(online_social_friend_info(picked_char, oc))
+                                    # FriendInfo.FilterSearchFriend removes friendType=1.
+                                    # Exclude those rows before the empty-result check so
+                                    # a query with only existing/pending relations still
+                                    # follows the client's no-match path.
+                                    if social_candidate_friend_type(picked_char, oc.get('id', 0)) != 1:
+                                        friend_list.append(online_social_friend_info(picked_char, oc))
                     match_count = len(friend_list)
                     if not friend_list:
                         # The APK uses an empty result to display its no-match notice,
@@ -12119,6 +12163,8 @@ def client_handler(conn, addr):
                     # Update offline state only after the active connection
                     # has actually gone away.
                     _sync_friend_online_state(char_id, 0)
+                    with SOCIAL_PROFILE_SIGNATURE_LOCK:
+                        SOCIAL_PROFILE_SIGNATURES.pop(char_id, None)
             conn.close()
         except Exception:
             pass
