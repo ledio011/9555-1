@@ -4721,7 +4721,9 @@ def ensure_backpack_state(picked_char):
     # Preserve the original per-profession starter weapon and its client slot
     # index.  It is now persisted as a real equipped item instead of being
     # fabricated anew on every character-create packet.
-    if not had_equipment_state:
+    has_equipped_weapon = any(_equipment_slot_for_item(item, 'equipped_equip') == 0
+                              for item in picked_char.get('equipped_equip', []))
+    if not had_equipment_state and not has_equipped_weapon:
         starter_ids = {0: '10001', 1: '20001', 2: '30001'}
         starter_id = starter_ids.get(int(picked_char.get('prof', 0)), '10001')
         # Preserve the client's legacy starter index when it is free, but do
