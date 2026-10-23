@@ -280,7 +280,10 @@ try:
                         'eff2': parts[28] if len(parts) > 28 else "",
                         'cooldown_ms': int(parts[10]) if len(parts) > 10 and parts[10].isdigit() else 0,
                         'trace_distance_cm': int(parts[12]) if len(parts) > 12 and parts[12].isdigit() else 0,
-                        'priority': int(parts[29]) if len(parts) > 29 and parts[29].isdigit() else 0
+                        'priority': int(parts[29]) if len(parts) > 29 and parts[29].isdigit() else 0,
+                        # Equip inheritance groups weapon skills by SkillData.TeamID;
+                        # matching skill IDs alone rejects valid client selections.
+                        'team_id': int(parts[32]) if len(parts) > 32 and parts[32].lstrip('-').isdigit() else 0
                     }
                     # Build reverse lookup: effId -> skillId
                     for eff_key in ('eff0', 'eff1', 'eff2'):
@@ -312,6 +315,7 @@ try:
                             'exr': [int(parts[26]), int(parts[26]), int(parts[26])],
                             'crd': [int(parts[27]), int(parts[27]), int(parts[27])],
                             'crr': [int(parts[28]), int(parts[28]), int(parts[28])],
+                            'anti_stun': int(parts[29]), 'anti_knock_down': int(parts[30]),
                             'defa': int(parts[31]), 'dgea': int(parts[32]), 'resa': int(parts[33]),
                             'hita': int(parts[34]), 'cria': int(parts[35])
                         }
@@ -1203,8 +1207,11 @@ try:
                 if len(parts) > 6 and parts[0] == "*" and parts[1].isdigit():
                     QUALITY_CONFIG.setdefault(parts[1], []).append({
                         'equip_quality_score': int(parts[3]) if parts[3].isdigit() else 0,
+                        'att_quality_score': int(parts[4]) if parts[4].isdigit() else 0,
                         'att_initial_score': int(parts[5]) if parts[5].isdigit() else 0,
-                        'modulus': int(parts[6]) if parts[6].isdigit() else 10000
+                        'modulus': int(parts[6]) if parts[6].isdigit() else 10000,
+                        'equip_inherit': int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else 0,
+                        'weapon_inherit': int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else 0
                     })
         print(f"[QUALITY CONFIG LOADED] ids={len(QUALITY_CONFIG)}")
 
@@ -1220,7 +1227,11 @@ try:
                     EQUIPMENT_UPGRADE_CONFIG.setdefault(int(parts[1]), {})[int(parts[2])] = {
                         'generic': _upgrade_values(3),
                         'qj': _upgrade_values(7),
-                        'nqs': _upgrade_values(11)
+                        'nqs': _upgrade_values(11),
+                        'level_exp_k': int(parts[15]) if len(parts) > 15 and parts[15].lstrip('-').isdigit() else 0,
+                        'level_exp_b': int(parts[16]) if len(parts) > 16 and parts[16].lstrip('-').isdigit() else 0,
+                        'money_k': int(parts[17]) if len(parts) > 17 and parts[17].lstrip('-').isdigit() else 0,
+                        'money_b': int(parts[18]) if len(parts) > 18 and parts[18].lstrip('-').isdigit() else 0
                     }
         print(f"[EQUIPMENT UPGRADE CONFIG LOADED] positions={len(EQUIPMENT_UPGRADE_CONFIG)}")
 
@@ -1673,7 +1684,12 @@ def get_visual(name, prof, mount_id='', mount_color='', mount_state=0, character
             visual_fields.append((15, equipped_weapon))
         if fashion_weapon:
             visual_fields.append((16, fashion_weapon))
-    show_fashion = 1 if any(tag in (6, 7, 8, 9) for tag, _ in visual_fields) else 0
+    show_fashion = 1
+    if isinstance(character, dict):
+        try:
+            show_fashion = 1 if int(character.get('show_fashion', 1)) == 1 else 0
+        except (TypeError, ValueError):
+            show_fashion = 1
     fields = [(0, name), (1, v["m"]), (2, head_id), (3, body_id),
               (4, leg_id), (5, weapon_id), (10, show_fashion)]
     fields.extend(visual_fields)
@@ -1707,12 +1723,13 @@ def build_main_player_visual(c):
                       mount_id, mount_color, mount_state, character=c)
 
 def sync_main_player_visual(picked_char, send_rpc_push):
-    """Push the normal APK AOI visual update after a garage change."""
+    """Push the APK visual update locally and to visible players on this map."""
     character = encode_sproto([
         (0, int(picked_char['id'])),
         (4, build_main_player_visual(picked_char))
     ])
     send_rpc_push(510, encode_sproto([(0, character)]))
+    broadcast_aoi_visual(picked_char)
 
 def get_boss_char(inst_id, did, player_level=1):
     # Domin 1 boss stats and visual (XD profession)
@@ -1909,15 +1926,8 @@ def get_runtime_aoi(c):
     Matches the client's ObjInitPlayerData.InitData expectation:
     runtime.attribute (tag 6) and runtime.attribute_all (tag 7)."""
     stats = get_character_stats(c)
-    attr_run = encode_sproto([(0, stats['hp_max']), (2, stats['atk']), (3, stats['def'])])
-    attr_all_data = [
-        (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
-        (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
-        (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
-        (12, stats['defa']), (13, stats['mov']), (14, stats['rec']),
-        (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
-    ]
-    attr_all = encode_sproto(attr_all_data)
+    attr_run = encode_sproto(character_attribute_fields(stats))
+    attr_all = encode_sproto(character_attribute_fields(stats))
     return encode_sproto([(6, attr_run), (7, attr_all)])
 
 def build_aoi_add_packet(char):
@@ -1933,7 +1943,7 @@ def build_aoi_add_packet(char):
         gen_bytes = get_general(char)
         stats = get_character_stats(char)
         attr_oth = encode_sproto([
-            (0, char.get('hp', stats['hp_max'])),
+            (0, current_character_hp(char, stats)),
             (1, stats['exp']),
             (2, stats['lv']),
             (3, stats['power']),
@@ -2177,19 +2187,13 @@ def broadcast_aoi_attribute(char):
     if is_single_player_map(map_id) and not ((char.get('exp_stage_state') or {}).get('team_id')):
         return
     stats = get_character_stats(char)
-    hp_cur = char.get('hp', stats['hp_max'])
     try:
+        hp_cur = current_character_hp(char, stats)
         attr_oth = encode_sproto([
             (0, hp_cur), (1, stats['exp']), (2, stats['lv']), (3, stats['power']), (15, 1)
         ])
-        attr_base = encode_sproto([(0, stats['hp_max']), (2, stats['atk']), (3, stats['def'])])
-        attr_all = encode_sproto([
-            (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
-            (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
-            (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
-            (12, stats['defa']), (13, stats['mov']), (14, stats['rec']),
-            (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
-        ])
+        attr_base = encode_sproto(character_attribute_fields(stats))
+        attr_all = encode_sproto(character_attribute_fields(stats))
         prop = encode_sproto([(13, get_currency_balance(char, 0)),
                               (14, get_currency_balance(char, 1)),
                               (15, get_currency_balance(char, 2)),
@@ -2623,9 +2627,10 @@ def team_member_blob(char, team_id):
     goal = str(char.get('team_goal_copy', ''))
     goal_cfg = COPY_SCENE_CONFIG.get(goal, {})
     attempts = copy_attempts_remaining(char, goal, goal_cfg) if goal in DAILY_EXP_CONFIG else -1
+    hp_cur = current_character_hp(char, stats)
     return encode_sproto([(0, int(char.get('id', 0))), (1, int(team_id)), (2, str(char.get('name', 'Hero'))),
         (3, int(char.get('level', 1))), (4, int(char.get('prof', 0))), (5, int(stats.get('power', 0))),
-        (6, int(char.get('map_id', 11))), (7, 0), (8, 0), (9, max(0, int(char.get('hp', hpmax)))),
+        (6, int(char.get('map_id', 11))), (7, 0), (8, 0), (9, hp_cur),
         (10, hpmax), (14, build_main_player_visual(char)), (15, attempts),
         (16, int(char.get('guild_id', 0))), (17, str(char.get('guild_name', '')))])
 
@@ -2665,6 +2670,40 @@ def send_team_member_update(team_id, char, force=False):
     data = encode_sproto([(0, int(team_id)), (1, team_member_blob(char, team_id))])
     for cid in list(team.get('members', [])):
         send_push_to_char(cid, 575, data)
+
+def broadcast_aoi_visual(char):
+    """Refresh this character's equipment/fashion model for visible peers."""
+    if not char:
+        return
+    character = encode_sproto([
+        (0, int(char.get('id', 0))),
+        (4, build_main_player_visual(char))
+    ])
+    packet_body = encode_sproto([(0, character)])
+    packet_payload = sproto_pack(encode_sproto([(0, 510)]) + packet_body)
+    packet = struct.pack(">H", len(packet_payload)) + packet_payload
+    for cid, (peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
+        if peer_char and can_aoi_exchange(char, peer_char):
+            try:
+                lock = CONNECTION_LOCKS.get(cid)
+                if lock:
+                    with lock:
+                        peer_conn.sendall(packet)
+                else:
+                    peer_conn.sendall(packet)
+            except Exception:
+                pass
+
+def sync_equipment_status_to_peers(char):
+    """Refresh remote attributes and team power after an equipment change."""
+    if not char:
+        return
+    broadcast_aoi_attribute(char)
+    team = get_team_for_char(int(char.get('id', 0)))
+    if team:
+        send_team_update(team['id'])
+        if team.get('active_run'):
+            send_team_member_update(team['id'], char, force=True)
 
 def get_team_for_char(char_id):
     return TEAM_STATES.get(CHAR_TEAM.get(int(char_id)))
@@ -2806,12 +2845,12 @@ def equipment_attribute_value(equip_cfg, attribute_index, quality, item_level, i
         item_level = max(0, int(item_level))
     except (TypeError, ValueError):
         return 0
-    if is_fashion:
-        return value
-
-    quality_rows = QUALITY_CONFIG.get(str(equip_cfg.get('quality_id', '')), [])
-    if 0 <= quality < len(quality_rows):
-        value = math.floor(value * int(quality_rows[quality].get('modulus', 10000)) / 10000.0)
+    # EquipData.GetAttrValueByQuality leaves fashion values unscaled, but
+    # GetAttrValByQualityAndLevel still applies the slot's upgrade coefficient.
+    if not is_fashion:
+        quality_rows = QUALITY_CONFIG.get(str(equip_cfg.get('quality_id', '')), [])
+        if 0 <= quality < len(quality_rows):
+            value = math.floor(value * int(quality_rows[quality].get('modulus', 10000)) / 10000.0)
 
     if item_level > 0:
         position = int(equip_cfg.get('position', -1))
@@ -2821,9 +2860,87 @@ def equipment_attribute_value(equip_cfg, attribute_index, quality, item_level, i
             if job == -1:
                 job = int(equip_cfg.get('weapon_type', 0))
             coeffs = upgrade['generic'] if job == 0 else upgrade['qj'] if job == 1 else upgrade['nqs']
-            quality_column = quality if 0 <= quality < 4 else 0
+            # The client calls GetEquipKByQuality(targetQualityValue, job),
+            # where targetQualityValue is the attribute index (0..3), not the
+            # item's rolled quality. EquipmentUpgradeData's four K columns
+            # correspond to the four attribute rows.
+            quality_column = attribute_index
             value = math.floor(value + coeffs[quality_column] * item_level / 100.0)
     return value
+
+def equip_inherit_quality(item_cfg, roll):
+    """Match GameItem.GetEquipAttQuality for the target item's affix tier."""
+    try:
+        raw_quality = int(_random_attr_field(roll, 3, 'quality'))
+    except (TypeError, ValueError):
+        return -1
+    target_quality_id = str(item_cfg.get('quality_id', ''))
+    roll_quality_id = str(_random_attr_field(roll, 5, 'qualityId') or target_quality_id)
+    roll_rows = QUALITY_CONFIG.get(roll_quality_id, [])
+    target_rows = QUALITY_CONFIG.get(target_quality_id, [])
+    if not target_rows or not 0 <= raw_quality < len(roll_rows):
+        return -1
+    score = int(roll_rows[raw_quality].get('att_initial_score', 0))
+    for index, row in enumerate(target_rows):
+        if score < int(row.get('att_quality_score', 0)):
+            return 0 if index == 0 else index - 1
+        if index == len(target_rows) - 1:
+            return index
+    return 0
+
+def equipment_subtype(item):
+    """Return ItemData.SubType, which is the client's equipment-enhance slot."""
+    item_id = str(item.get('id', ''))
+    subtype = ITEM_CONFIG.get(item_id, {}).get('subtype')
+    if subtype is None:
+        subtype = EQUIP_CONFIG.get(item_id, {}).get('position', -1)
+    try:
+        return int(subtype)
+    except (TypeError, ValueError):
+        return -1
+
+def equipment_enhance_levels(character):
+    """Read the character's slot-based enhance levels, migrating old item levels."""
+    raw = character.get('equip_enhance_levels')
+    levels = {}
+    if isinstance(raw, dict):
+        for key, value in raw.items():
+            try:
+                slot, level = int(key), max(0, int(value))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= slot < 6:
+                levels[slot] = level
+
+    # Older saves only kept the level on the currently equipped gameitem.
+    for item in character.get('equipped_equip', []):
+        slot = equipment_subtype(item)
+        if not 0 <= slot < 6:
+            continue
+        try:
+            old_level = max(0, int(item.get('level', 0)))
+        except (TypeError, ValueError):
+            old_level = 0
+        levels[slot] = max(levels.get(slot, 0), old_level)
+
+    character['equip_enhance_levels'] = {str(slot): level for slot, level in levels.items()}
+    return levels
+
+def equipment_enhance_level(character, item):
+    slot = equipment_subtype(item)
+    if 0 <= slot < 6:
+        return equipment_enhance_levels(character).get(slot, 0)
+    try:
+        return max(0, int(item.get('level', 0)))
+    except (TypeError, ValueError):
+        return 0
+
+def equipment_enhance_sproto(character):
+    """Encode character.equip_enhance keyed by the client ItemData.SubType."""
+    return {
+        slot: encode_sproto([(0, level), (1, slot)])
+        for slot, level in equipment_enhance_levels(character).items()
+    }
 
 def get_character_stats(c):
     """Calculate player attributes from BaseLvData and currently equipped items."""
@@ -2849,17 +2966,45 @@ def get_character_stats(c):
         1006: 'cri', 1007: 'res', 1008: 'exd', 1009: 'exr', 1010: 'rec',
         1011: 'mov', 1012: 'crd', 1013: 'crr'
     }
+    # S attributes 2001..2007 are percentage bonuses for the corresponding
+    # primary attribute. The client displays these as percentages and the
+    # server protocol only has the resulting flat combat fields.
+    percent_fields = {
+        2001: 'atk', 2002: 'hp_max', 2003: 'def', 2004: 'hit',
+        2005: 'eva', 2006: 'cri', 2007: 'res'
+    }
+    percent_totals = {field: 0 for field in percent_fields.values()}
     totals = {
         'atk': atk, 'hp_max': hp_max, 'def': df, 'hit': hit, 'eva': eva,
         'cri': cri, 'res': res, 'exd': ld['exd'][prof], 'exr': ld['exr'][prof],
         'crd': ld['crd'][prof], 'crr': ld['crr'][prof], 'rec': 0, 'mov': 500
     }
+    # The APK's per-item combat value also weights secondary and elemental
+    # attributes at 5 points each. These do not map to the primary runtime
+    # fields above, so track their power contribution separately.
+    extra_combat_weights = {
+        1008: 5, 1009: 5, 1012: 5, 1013: 5,
+        2008: 5, 2009: 5, 2012: 5, 2013: 5
+    }
+    extra_combat_power = 0
 
     def add_item_attribute(attribute_id, value):
         try:
-            field = attr_fields.get(int(attribute_id))
+            attribute_id = int(attribute_id)
+            if attribute_id in percent_fields:
+                field = percent_fields[attribute_id]
+                percent_totals[field] += int(value)
+                return
+            field = attr_fields.get(attribute_id)
             if field:
                 totals[field] += int(value)
+        except (TypeError, ValueError):
+            pass
+
+    def add_extra_combat_power(attribute_id, value):
+        nonlocal extra_combat_power
+        try:
+            extra_combat_power += int(value) * extra_combat_weights.get(int(attribute_id), 0)
         except (TypeError, ValueError):
             pass
 
@@ -2871,30 +3016,42 @@ def get_character_stats(c):
                 continue
             item_cfg = ITEM_CONFIG.get(item_id, {})
             quality = get_game_item_quality(item, equip_cfg)
+            item_level = (equipment_enhance_level(c, item) if bucket == 'equipped_equip'
+                          else max(0, int(item.get('level', 0) or 0)))
             for attribute_index, (stat_key, _value_key) in enumerate((
                     ('base_stat', 'base_val'), ('stat1', 'stat1_val'),
                     ('stat2', 'stat2_val'), ('ex_stat', 'ex_stat_val'))):
                 attribute_id = int(equip_cfg.get(stat_key, 0))
                 value = equipment_attribute_value(
-                    equip_cfg, attribute_index, quality, item.get('level', 0),
+                    equip_cfg, attribute_index, quality, item_level,
                     is_fashion=(is_fashion or int(item_cfg.get('type', -1)) == 16)
                 )
                 if attribute_id:
                     add_item_attribute(attribute_id, value)
+                    add_extra_combat_power(attribute_id, value)
             if not is_fashion and int(item_cfg.get('type', -1)) == 2:
                 random_attrs = item.get('random_attri')
                 if isinstance(random_attrs, dict):
                     for roll in random_attrs.values():
+                        random_attribute_id = _random_attr_field(roll, 1, 'id')
+                        random_attribute_value = _random_attr_field(roll, 2, 'value')
                         add_item_attribute(
-                            _random_attr_field(roll, 1, 'id'),
-                            _random_attr_field(roll, 2, 'value')
+                            random_attribute_id, random_attribute_value
                         )
+                        add_extra_combat_power(random_attribute_id, random_attribute_value)
 
     for item in c.get('equipped_badges', []):
         badge_cfg = BADGE_CONFIG.get(str(item.get('id', '')), {})
         if badge_cfg:
             add_item_attribute(badge_cfg.get('status1'), badge_cfg.get('value1', 0))
             add_item_attribute(badge_cfg.get('status2'), badge_cfg.get('value2', 0))
+            add_extra_combat_power(badge_cfg.get('status1'), badge_cfg.get('value1', 0))
+            add_extra_combat_power(badge_cfg.get('status2'), badge_cfg.get('value2', 0))
+
+    # Percentage bonuses are additive and are applied once to the complete
+    # level + equipment totals, matching the client's 1/10000 percentage scale.
+    for field, bonus in percent_totals.items():
+        totals[field] += math.floor(totals[field] * bonus / 10000.0)
 
     atk, hp_max, df = totals['atk'], totals['hp_max'], totals['def']
     hit, eva, cri, res = totals['hit'], totals['eva'], totals['cri'], totals['res']
@@ -2907,10 +3064,11 @@ def get_character_stats(c):
         {"atk":7, "hp":1, "def":7.4, "hit":3, "eva":3.7, "cri":15, "res":10}
     ][prof]
 
-    # Calculate Power (ComboValue) using the real weighting system found in client coefficients
-    # Multiplied by 3.0 to match original gameplay scaling (approx 60k for starter)
+    # Primary stats use the server's established 3x combat-rating scale.
+    # Secondary/item-only stats use the APK's exact GetItemCombatVal weights.
     raw_power = (atk * coeffs['atk'] + hp_max * coeffs['hp'] + df * coeffs['def'] +
-                 hit * coeffs['hit'] + eva * coeffs['eva'] + cri * coeffs['cri'] + res * coeffs['res'])
+                 hit * coeffs['hit'] + eva * coeffs['eva'] + cri * coeffs['cri'] + res * coeffs['res'] +
+                 extra_combat_power)
     power = int(raw_power * 3.0)
 
     return {
@@ -2919,10 +3077,35 @@ def get_character_stats(c):
         'power': power, 'lv': lv, 'exp': c.get('exp', 0),
         'defa': ld['defa'], 'dgea': ld['dgea'], 'resa': ld['resa'],
         'hita': ld['hita'], 'cria': ld['cria'],
+        'anti_stun': ld.get('anti_stun', 0), 'anti_knock_down': ld.get('anti_knock_down', 0),
         'exd': totals['exd'], 'exr': totals['exr'], 'crd': totals['crd'], 'crr': totals['crr'],
         'rec': totals['rec'], 'mov': totals['mov'],
-        'satp': 0, 'satm': 0, 'satc': 0
+        'ate': 0, 'satp': 0, 'satm': 0, 'satc': 0
     }
+
+def character_attribute_fields(stats):
+    """Encode every combat attribute field defined by this APK's Sproto schema."""
+    return [
+        (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
+        (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
+        (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
+        (12, stats['defa']), (13, stats['mov']), (14, stats['rec']),
+        (15, stats['anti_stun']), (16, stats['anti_knock_down']),
+        (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria']),
+        (21, stats['ate']), (22, stats['satm']), (23, stats['satc']), (24, stats['satp'])
+    ]
+
+def current_character_hp(character, stats):
+    """Keep the current HP sent to the client inside the equipped max-HP range."""
+    try:
+        max_hp = max(0, int(stats.get('hp_max', 0)))
+        hp = max(0, min(int(character.get('hp', max_hp)), max_hp))
+    except (AttributeError, TypeError, ValueError):
+        max_hp = max(0, int(stats.get('hp_max', 0)))
+        hp = max_hp
+    if isinstance(character, dict):
+        character['hp'] = hp
+    return hp
 
 def get_char_ov(c, sort_index=None):
     gen = get_general(c)
@@ -2973,7 +3156,7 @@ def get_full_char(c):
     gen = get_general(c)
     stats = get_character_stats(c)
 
-    hp_cur = c.get('hp', stats['hp_max'])
+    hp_cur = current_character_hp(c, stats)
 
     attr_oth = encode_sproto([
         (0, hp_cur),
@@ -2991,16 +3174,10 @@ def get_full_char(c):
     pos = c.get('pos', [29860, 100, -17005, 0])
     mv = get_movement(pos[0], pos[1], pos[2], pos[3])
 
-    attr_run = encode_sproto([(0, stats['hp_max']), (2, stats['atk']), (3, stats['def'])])
-    # attr_all uses the APK's attribute.cs field tags, including equipment recovery and movement bonuses.
-    attr_all_data = [
-        (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
-        (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
-        (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
-        (12, stats['defa']), (13, stats['mov']), (14, stats['rec']),
-        (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
-    ]
-    attr_all = encode_sproto(attr_all_data)
+    attr_run = encode_sproto(character_attribute_fields(stats))
+    # Send the complete schema in both views: the APK initializes base and
+    # current combat attributes from separate copies of this structure.
+    attr_all = encode_sproto(character_attribute_fields(stats))
     run = encode_sproto([(6, attr_run), (7, attr_all)])
 
     char_level = stats['lv']
@@ -3013,6 +3190,7 @@ def get_full_char(c):
                  for item in c.get('equipped_badges', [])}
     fashion_map = {int(item['index_id']): _gameitem_sproto(item)
                    for item in c.get('equipped_fashion', [])}
+    enhance_map = equipment_enhance_sproto(c)
 
     # character.download: the APK treats 2 as completed.  Sending 1 again on
     # reconnect would reopen the optional download/reward UI forever, even
@@ -3031,13 +3209,14 @@ def get_full_char(c):
         (11, fashion_map),
         (12, selected_potion_index(c)),
         (13, run),
+        (14, enhance_map),
         (15, download_state)
     ])
 
 def sync_char_attrs_rpc(conn, picked_char, conn_id=None):
     """Sends TAG 510 (aoi_update_attribute) to sync all stats."""
     stats = get_character_stats(picked_char)
-    hp_cur = picked_char.get('hp', stats['hp_max'])
+    hp_cur = current_character_hp(picked_char, stats)
 
     # attribute_other (Tag 1 in character_aoi_attribute)
     attr_oth = encode_sproto([
@@ -3047,16 +3226,10 @@ def sync_char_attrs_rpc(conn, picked_char, conn_id=None):
     ])
 
     # attribute (Tag 2 in character_aoi_attribute)
-    attr_base = encode_sproto([(0, stats['hp_max']), (2, stats['atk']), (3, stats['def'])])
+    attr_base = encode_sproto(character_attribute_fields(stats))
 
     # attribute_all (Tag 3 in character_aoi_attribute)
-    attr_all = encode_sproto([
-        (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
-        (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
-        (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
-        (12, stats['defa']), (13, stats['mov']), (14, stats['rec']),
-        (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
-    ])
+    attr_all = encode_sproto(character_attribute_fields(stats))
 
     prop = encode_sproto([(13, get_currency_balance(picked_char, 0)),
                           (14, get_currency_balance(picked_char, 1)),
@@ -7005,18 +7178,56 @@ def client_handler(conn, addr):
                                         and required_job in (-1, int(picked_char.get('prof', 0)))):
                                     bag = picked_char['equip_inventory']
                                     equipped = picked_char['equipped_equip']
-                                    previous = next((entry for entry in equipped
-                                                     if int(EQUIP_CONFIG.get(str(entry.get('id', '')), {}).get('position', -1)) == position), None)
-                                    bag.remove(item)
-                                    if previous:
-                                        equipped.remove(previous)
-                                        bag.append(previous)
-                                        push_backpack_item_update(send_rpc_push, 1, None, previous['index_id'])
-                                        push_backpack_item_update(send_rpc_push, 0, previous)
-                                    equipped.append(item)
-                                    push_backpack_item_update(send_rpc_push, 0, None, item['index_id'])
-                                    push_backpack_item_update(send_rpc_push, 1, item)
-                                    changed = True
+                                    subtype = equipment_subtype(item)
+                                    if 0 <= subtype < 6:
+                                        item['level'] = equipment_enhance_levels(picked_char).get(subtype, 0)
+                                    auto_appraise = bool(body.get(1, False)) and int(item.get('appraise', 0)) != 1
+                                    appraisal_rolls = None
+                                    appraisal_cost = 0
+                                    if auto_appraise:
+                                        appraisal_rolls = item.get('random_attri')
+                                        if not (isinstance(appraisal_rolls, dict) and appraisal_rolls):
+                                            appraisal_rolls = roll_equip_random_attributes(item)
+                                        if isinstance(appraisal_rolls, dict) and appraisal_rolls:
+                                            prices = [
+                                                int(value) for value in str(equip_cfg.get('identify', '')).split('#')
+                                                if value.strip().lstrip('-').isdigit()
+                                            ]
+                                            quality = int(item.get('quality', item_cfg.get('quality', 0)))
+                                            appraisal_cost = (prices[quality]
+                                                              if 0 <= quality < len(prices) else 0)
+                                            if (appraisal_cost < 0 or
+                                                    get_currency_balance(picked_char, 1) < appraisal_cost):
+                                                appraisal_rolls = None
+                                                send_rpc_push(529, encode_sproto([
+                                                    (0, 'Not enough gold to appraise this item.'), (1, True)
+                                                ]))
+                                        else:
+                                            send_rpc_push(529, encode_sproto([
+                                                (0, 'This equipment has no valid appraisal attributes configured.'),
+                                                (1, True)
+                                            ]))
+
+                                    if not auto_appraise or appraisal_rolls:
+                                        if auto_appraise:
+                                            set_currency_balance(
+                                                picked_char, 1,
+                                                get_currency_balance(picked_char, 1) - appraisal_cost
+                                            )
+                                            item['random_attri'] = appraisal_rolls
+                                            item['appraise'] = 1
+                                        previous = next((entry for entry in equipped
+                                                         if int(EQUIP_CONFIG.get(str(entry.get('id', '')), {}).get('position', -1)) == position), None)
+                                        bag.remove(item)
+                                        if previous:
+                                            equipped.remove(previous)
+                                            bag.append(previous)
+                                            push_backpack_item_update(send_rpc_push, 1, None, previous['index_id'])
+                                            push_backpack_item_update(send_rpc_push, 0, previous)
+                                        equipped.append(item)
+                                        push_backpack_item_update(send_rpc_push, 0, None, item['index_id'])
+                                        push_backpack_item_update(send_rpc_push, 1, item)
+                                        changed = True
                         else:
                             found = find_backpack_item(picked_char, index_id, 1)
                             if found and len(picked_char['equip_inventory']) < 100:
@@ -7029,7 +7240,183 @@ def client_handler(conn, addr):
                         if changed:
                             save_chars(all_accounts_chars)
                             sync_char_attrs_rpc(conn, picked_char)
+                            sync_equipment_status_to_peers(picked_char)
                             sync_main_player_visual(picked_char, send_rpc_push)
+                send_rpc_response(session)
+
+            elif msg == 167: # equip_enhance: enhance the equipped item slot
+                index_id = get_val_int(body, 0, -1)
+                requested_level = get_val_int(body, 1, -1)
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    with get_character_transaction_lock(picked_char):
+                        ensure_backpack_state(picked_char)
+                        found = find_backpack_item(picked_char, index_id, 1)
+                        if found:
+                            item = found['item']
+                            item_id = str(item.get('id', ''))
+                            item_cfg = ITEM_CONFIG.get(item_id, {})
+                            equip_cfg = EQUIP_CONFIG.get(item_id, {})
+                            subtype = equipment_subtype(item)
+                            levels = equipment_enhance_levels(picked_char)
+                            current_level = levels.get(subtype, 0) if 0 <= subtype < 6 else 0
+                            target_level = requested_level if requested_level >= 0 else current_level + 1
+                            player_level = max(0, int(picked_char.get('level', 1)))
+                            valid = (int(item_cfg.get('type', -1)) == 2 and bool(equip_cfg)
+                                     and 0 <= subtype < 6 and target_level > current_level
+                                     and target_level <= player_level)
+                            if valid:
+                                position = int(equip_cfg.get('position', -1))
+                                total_material = 0
+                                total_cash = 0
+                                for level in range(current_level, target_level):
+                                    # EquipmentUpgradeData level rows are one-based;
+                                    # its list lookup uses the next level row.
+                                    upgrade = EQUIPMENT_UPGRADE_CONFIG.get(position, {}).get(level + 1)
+                                    if not upgrade:
+                                        valid = False
+                                        break
+                                    total_material += max(0, math.floor(
+                                        int(upgrade.get('level_exp_b', 0))
+                                        + int(upgrade.get('level_exp_k', 0)) / 100.0 * level * level * 3.0
+                                    ))
+                                    total_cash += max(0, math.floor(
+                                        int(upgrade.get('money_b', 0))
+                                        + int(upgrade.get('money_k', 0)) / 100.0 * level
+                                    ))
+                                material_total = sum(
+                                    max(0, int(entry.get('amount', 0)))
+                                    for entry in picked_char.get('inventory', [])
+                                    if str(entry.get('id', '')) == '3001'
+                                )
+                                if valid and material_total >= total_material and get_currency_balance(picked_char, 0) >= total_cash:
+                                    material_consumed = (total_material == 0 or consume_backpack_item(
+                                        picked_char, '3001', total_material, send_rpc_push, 2
+                                    ))
+                                    if material_consumed:
+                                        set_currency_balance(
+                                            picked_char, 0,
+                                            get_currency_balance(picked_char, 0) - total_cash
+                                        )
+                                        levels[subtype] = target_level
+                                        picked_char['equip_enhance_levels'] = {
+                                            str(slot): level for slot, level in levels.items()
+                                        }
+                                        item['level'] = target_level
+                                        save_chars(all_accounts_chars)
+                                        push_backpack_item_update(send_rpc_push, 1, item)
+                                        sync_char_attrs_rpc(conn, picked_char)
+                                        sync_equipment_status_to_peers(picked_char)
+                                        print(f"[BACKPACK] enhanced slot={subtype} item={item_id} level={current_level}->{target_level} material={total_material} cash={total_cash}")
+                send_rpc_response(session)
+
+            elif msg in (302, 305): # inherit one configured armor attribute or weapon skill
+                source_index = get_val_int(body, 0, -1)
+                target_index = get_val_int(body, 1, -1)
+                source_attr_index = get_val_int(body, 2, -1)
+                target_attr_index = get_val_int(body, 3, -1)
+                inherited = False
+                if (picked_char and is_current_character_connection(conn, picked_char)
+                        and source_attr_index > 0 and target_attr_index > 0):
+                    with get_character_transaction_lock(picked_char):
+                        ensure_backpack_state(picked_char)
+                        source_found = find_backpack_item(picked_char, source_index, 1)
+                        target_found = find_backpack_item(picked_char, target_index, 0)
+                        if source_found and target_found:
+                            source_item = source_found['item']
+                            target_item = target_found['item']
+                            source_id = str(source_item.get('id', ''))
+                            target_id = str(target_item.get('id', ''))
+                            source_cfg = EQUIP_CONFIG.get(source_id, {})
+                            target_cfg = EQUIP_CONFIG.get(target_id, {})
+                            source_attrs = source_item.get('random_attri')
+                            target_attrs = target_item.get('random_attri')
+                            source_roll = (source_attrs.get(source_attr_index,
+                                            source_attrs.get(str(source_attr_index)))
+                                           if isinstance(source_attrs, dict) else None)
+                            target_roll = (target_attrs.get(target_attr_index,
+                                            target_attrs.get(str(target_attr_index)))
+                                           if isinstance(target_attrs, dict) else None)
+                            if source_roll is None and isinstance(source_attrs, dict):
+                                source_roll = next((entry for entry in source_attrs.values()
+                                                    if int(_random_attr_field(entry, 0, 'index') or -1) == source_attr_index), None)
+                            if target_roll is None and isinstance(target_attrs, dict):
+                                target_roll = next((entry for entry in target_attrs.values()
+                                                    if int(_random_attr_field(entry, 0, 'index') or -1) == target_attr_index), None)
+                            source_subtype = equipment_subtype(source_item)
+                            target_subtype = equipment_subtype(target_item)
+                            is_weapon = msg == 305
+                            required_attr = 'skillId' if is_weapon else 'id'
+                            selected_value = _random_attr_field(source_roll, 4 if is_weapon else 1,
+                                                                required_attr)
+                            quality_id = str(target_cfg.get('quality_id', ''))
+                            quality_rows = QUALITY_CONFIG.get(quality_id, [])
+                            target_quality = equip_inherit_quality(target_cfg, target_roll)
+                            if is_weapon:
+                                source_skill_id = str(selected_value or '')
+                                target_skill_id = str(_random_attr_field(target_roll, 4, 'skillId') or '')
+                                source_skill_cfg = SKILL_CONFIG.get(source_skill_id)
+                                target_skill_cfg = SKILL_CONFIG.get(target_skill_id)
+                                same_inherit_key = bool(
+                                    source_skill_cfg and target_skill_cfg
+                                    and int(source_skill_cfg.get('team_id', 0))
+                                    == int(target_skill_cfg.get('team_id', 0))
+                                )
+                            else:
+                                try:
+                                    same_inherit_key = (
+                                        int(selected_value)
+                                        == int(_random_attr_field(target_roll, 1, 'id'))
+                                    )
+                                except (TypeError, ValueError):
+                                    same_inherit_key = False
+                            valid = (
+                                source_index != target_index
+                                and int(ITEM_CONFIG.get(source_id, {}).get('type', -1)) == 2
+                                and int(ITEM_CONFIG.get(target_id, {}).get('type', -1)) == 2
+                                and source_cfg and target_cfg
+                                and source_subtype == target_subtype
+                                and ((source_subtype == 0) if is_weapon else (source_subtype != 0))
+                                and isinstance(source_roll, dict) and isinstance(target_roll, dict)
+                                and selected_value not in (None, '', 0, '0')
+                                and same_inherit_key
+                                and 0 <= target_quality < len(quality_rows)
+                            )
+                            if valid:
+                                price_key = 'weapon_inherit' if is_weapon else 'equip_inherit'
+                                gold_cost = int(quality_rows[target_quality].get(price_key, 0))
+                                if gold_cost >= 0 and get_currency_balance(picked_char, 1) >= gold_cost:
+                                    inherited_roll = dict(source_roll)
+                                    index_key = (0 if 0 in inherited_roll else '0'
+                                                 if '0' in inherited_roll else 'index')
+                                    quality_key = (5 if 5 in inherited_roll else '5'
+                                                   if '5' in inherited_roll else 'qualityId')
+                                    inherited_roll[index_key] = target_attr_index
+                                    inherited_roll[quality_key] = quality_id
+                                    updated_attrs = dict(target_attrs)
+                                    target_key = (target_attr_index if target_attr_index in updated_attrs
+                                                  else str(target_attr_index))
+                                    updated_attrs[target_key] = inherited_roll
+                                    set_currency_balance(
+                                        picked_char, 1,
+                                        get_currency_balance(picked_char, 1) - gold_cost
+                                    )
+                                    target_item['random_attri'] = updated_attrs
+                                    target_item['appraise'] = 1
+                                    save_chars(all_accounts_chars)
+                                    push_backpack_item_update(send_rpc_push, 0, target_item)
+                                    sync_char_attrs_rpc(conn, picked_char)
+                                    inherited = True
+                if not inherited:
+                    print(f"[BACKPACK] rejected attribute inheritance player={picked_char.get('id') if picked_char else 0} source={source_index} target={target_index}")
+                send_rpc_response(session)
+
+            elif msg == 223: # change_show_type: persist whether this character displays fashion
+                show_type = get_val_int(body, 0, 1)
+                if picked_char and is_current_character_connection(conn, picked_char) and show_type in (0, 1):
+                    with get_character_transaction_lock(picked_char):
+                        picked_char['show_fashion'] = show_type
+                        save_chars(all_accounts_chars)
+                        sync_main_player_visual(picked_char, send_rpc_push)
                 send_rpc_response(session)
 
             elif msg in (197, 198): # equip_badge / unequip_badge
@@ -7086,6 +7473,7 @@ def client_handler(conn, addr):
                         if changed:
                             save_chars(all_accounts_chars)
                             sync_char_attrs_rpc(conn, picked_char)
+                            sync_equipment_status_to_peers(picked_char)
                 send_rpc_response(session)
 
             elif msg in (221, 222): # equip_fashion_item / unequip_fashion_item
@@ -7134,6 +7522,7 @@ def client_handler(conn, addr):
                         if changed:
                             save_chars(all_accounts_chars)
                             sync_char_attrs_rpc(conn, picked_char)
+                            sync_equipment_status_to_peers(picked_char)
                             sync_main_player_visual(picked_char, send_rpc_push)
                 send_rpc_response(session)
 
