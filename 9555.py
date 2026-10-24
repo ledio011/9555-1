@@ -3515,15 +3515,15 @@ def ensure_dance_runtime(char, now=None):
     return runtime
 
 def personal_dance_reward_interval(activity=None):
-    """CityDanceData RewardDuration is a minute count; DurationTime is seconds."""
+    """CityDanceData RewardDuration and DurationTime are both in seconds."""
     activity = activity or CITY_DANCE_CONFIG.get('101', {})
     try:
-        return max(1, int(activity.get('RewardDuration', 1) or 1) * 60)
+        return max(1, int(activity.get('RewardDuration', 1) or 1))
     except (TypeError, ValueError):
-        return 60
+        return 1
 
 def personal_dance_reward_list(char, dance_id, running_source='', interval_index=0):
-    """Return one minute of the level's active dance reward.
+    """Return one second of the level's active dance reward.
 
     The APK maps every level's live free/paid dance to a distinct 303xx reward
     row, but those rows contain only the EXP item ID and omit its quantity.
@@ -3776,7 +3776,7 @@ def settle_personal_dance(char, now=None, stop=False, expected_run_id=None):
                 runtime['reward_level'] = level
             elif int(runtime.get('reward_level', 0)) != level:
                 # A level-up must switch to that level's exact reward table.
-                # Keep any partial minute, but restart the distribution across
+                # Keep any partial second, but restart the distribution across
                 # the new level's 30-minute total.
                 runtime['reward_interval_count'] = 0
                 runtime['reward_level'] = level
