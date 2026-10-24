@@ -3670,6 +3670,10 @@ def personal_dance_reward_timer_tick(char_id, run_id):
         return
     try:
         runtime = settle_personal_dance(char, stop=False, expected_run_id=run_id)
+        # Keep the Daily -> Single Dance row current from the authoritative
+        # remaining duration. The phone's separate timer is client-local.
+        if str(char.get('map_id')) == '101':
+            send_push_to_char(char_id, 686, dance_state_info_payload(char))
         if not runtime.get('running') or int(runtime.get('dance_run_id', 0)) != int(run_id):
             current = ALL_CONNECTIONS.get(int(char_id), (None, None))
             if current[0] is conn and current[1] is char:
