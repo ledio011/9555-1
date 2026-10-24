@@ -2692,12 +2692,25 @@ def is_exp_map(map_id):
         if copy_id in DAILY_EXP_CONFIG
     )
 
+def is_public_world_map(map_id):
+    """MapInfoData type BIG_WORLD (1) is a shared world scene, not a copy run."""
+    map_cfg = MAP_CONFIG.get(str(map_id), {})
+    try:
+        return int(map_cfg.get('type', 0)) == 1
+    except (TypeError, ValueError):
+        return False
+
 def is_active_copy_current(char):
     """Check whether a saved copy marker still matches the character's map."""
     if not char:
         return False
     active_copy_id = str(char.get('active_copy_id') or '')
     current_map = str(char.get('map_id') or '11')
+    # CopySceneData ID 101 is the dance activity, but MapInfoData ID 101 is
+    # the shared DSJ_zhuCheng world. The map type is authoritative when IDs
+    # overlap; a saved generic-scene marker must not turn a world map into a copy.
+    if is_public_world_map(current_map):
+        return False
     # Map 11 is the city/default map, never a copy instance. Older saves can
     # contain active_copy_id=11 from code that confused the current map with
     # the active copy marker.
@@ -2719,6 +2732,8 @@ def is_active_daily_copy_current(char):
     if active_copy_id not in COPY_SCENE_CONFIG:
         return False
     current_map = str(char.get('map_id') or '11')
+    if is_public_world_map(current_map):
+        return False
     if not active_copy_id or active_copy_id == '11' or current_map == '11':
         return False
     cfg = COPY_SCENE_CONFIG[active_copy_id]
@@ -5048,7 +5063,12 @@ def spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state
     )
 
 def get_exp_stage_full_reward(char_lv):
-    """Resolve exact EXP Stage reward from ShowRewardData (21000 + char_lv)."""
+    """Resolve the configured per-level EXP amount from ShowRewardData 21001-21080.
+
+    These APK rows are labeled as EXP-copy recovery rewards. CopySceneData's
+    active-stage preview points at 30301 but contains no quantity, so the
+    client assets do not prove that this is the exact active-run payout.
+    """
     try:
         lv = max(1, min(int(char_lv), 80))
     except (TypeError, ValueError):
@@ -11750,11 +11770,20 @@ def client_handler(conn, addr):
                         # only be exited through its explicit leave/revive flow.
                         print(f"[EXP STAGE] denied generic scene entry player={picked_char.get('id')} target={mid} current={current_map}")
                     else:
-                        # Save current map and position before entering any scene/dungeon
-                        if picked_char.get('pre_copy_pos') is None:
-                            picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
-                            picked_char['pre_copy_map'] = str(picked_char.get('map_id', '11'))
-                        picked_char['active_copy_id'] = mid
+                        if is_public_world_map(mid):
+                            # Ordinary MapInfoData BIG_WORLD scenes (including
+                            # DSJ_zhuCheng/101) are not copy instances. CopySceneData
+                            # reuses 101 for dance, so retaining this marker falsely
+                            # blocks EXP entry from the city and survives reconnects.
+                            picked_char['active_copy_id'] = None
+                            picked_char['pre_copy_pos'] = None
+                            picked_char['pre_copy_map'] = None
+                        else:
+                            # Save current map and position before entering a copy scene.
+                            if picked_char.get('pre_copy_pos') is None:
+                                picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                                picked_char['pre_copy_map'] = str(picked_char.get('map_id', '11'))
+                            picked_char['active_copy_id'] = mid
                         start_map_transition(conn, picked_char, mid, send_rpc_push)
                         if msg == 201: # world_boss
                             advance_missions(picked_char, send_rpc_push, 'world_boss')
