@@ -3270,6 +3270,30 @@ def _dedupe_weapon_skill_attrs(attrs):
         result[key] = entry
     return result
 
+def _take_random_attr_index(attrs, index):
+    """Remove the selected affix slot from its source item after inheritance."""
+    if not isinstance(attrs, dict):
+        return None
+    try:
+        index = int(index)
+    except (TypeError, ValueError):
+        return None
+    remaining = {}
+    for key, entry in attrs.items():
+        try:
+            row_index = int(_random_attr_field(entry, 0, 'index'))
+        except (TypeError, ValueError):
+            try:
+                row_index = int(key)
+            except (TypeError, ValueError):
+                row_index = None
+        # The request identifies a row by its embedded client slot. Remove
+        # every malformed duplicate of that slot too; the client cannot
+        # distinguish duplicate rows with the same index.
+        if row_index != index:
+            remaining[key] = entry
+    return remaining
+
 def _replace_random_attr_index(attrs, target_key, target_index, replacement,
                                skill_team_id=0, skill_id=''):
     """Replace one affix row without duplicating its slot or inherited skill group."""
@@ -10173,7 +10197,7 @@ def client_handler(conn, addr):
                           f"target={target_index}")
                 send_rpc_response(session, result)
 
-            elif msg in (302, 305): # copy the selected backpack affix onto equipped gear
+            elif msg in (302, 305): # move the selected backpack affix onto equipped gear
                 # APK EquipInhertRootLogic.ShowInfo sets leftitem=equipped and
                 # rightitem=backpack. Its labels say left is replaced and right
                 # is the affix to get; request index1/attribute_index1 are left,
@@ -10331,13 +10355,22 @@ def client_handler(conn, addr):
                                         inherited_roll, source_team_id if is_weapon else 0,
                                         source_skill_id if is_weapon else ''
                                     )
+                                    updated_source_attrs = _take_random_attr_index(
+                                        source_attrs, source_attr_index
+                                    )
                                     set_currency_balance(
                                         picked_char, 1,
                                         get_currency_balance(picked_char, 1) - gold_cost
                                     )
+                                    source_item['random_attri'] = updated_source_attrs
                                     target_item['random_attri'] = updated_attrs
                                     target_item['appraise'] = 1
                                     save_chars(all_accounts_chars)
+                                    # Inheritance moves the selected affix out
+                                    # of the backpack source; update both sides
+                                    # so the client clears it from the right
+                                    # list and shows it in the chosen left slot.
+                                    push_backpack_item_update(send_rpc_push, 0, source_item)
                                     # index1 is the equipped item. Push its update
                                     # to EQUIPPACK so the client refreshes the
                                     # equipped skill/stat and the open inherit UI.
