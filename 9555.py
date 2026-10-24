@@ -2099,6 +2099,7 @@ def equipped_weapon_skill_rows(equipped_items):
 
     rows = []
     seen_skills = set()
+    seen_skill_teams = set()
     for key, roll in raw_rows:
         if not isinstance(roll, dict):
             continue
@@ -2108,11 +2109,18 @@ def equipped_weapon_skill_rows(equipped_items):
             affix_index = int(raw_index) if raw_index not in (None, '') else int(key)
         except (TypeError, ValueError):
             continue
+        skill_cfg = SKILL_CONFIG.get(skill_id, {})
+        try:
+            team_id = int(skill_cfg.get('team_id', 0))
+        except (TypeError, ValueError):
+            team_id = 0
         if (not skill_id or skill_id in seen_skills or not 1 <= affix_index <= 6
-                or skill_id not in SKILL_CONFIG):
+                or not skill_cfg or (team_id > 0 and team_id in seen_skill_teams)):
             continue
         rows.append((affix_index, skill_id))
         seen_skills.add(skill_id)
+        if team_id > 0:
+            seen_skill_teams.add(team_id)
     return sorted(rows)
 
 
@@ -3204,6 +3212,94 @@ def _random_attr_field(entry, field_tag, field_name):
         return None
     return entry.get(field_tag, entry.get(str(field_tag), entry.get(field_name)))
 
+def _random_attr_entry_for_index(attrs, index):
+    """Return the actual map key and affix row for the client's one-based index."""
+    if not isinstance(attrs, dict):
+        return None, None
+    try:
+        index = int(index)
+    except (TypeError, ValueError):
+        return None, None
+    matches = []
+    for key, entry in attrs.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            row_index = int(_random_attr_field(entry, 0, 'index'))
+        except (TypeError, ValueError):
+            row_index = None
+        if row_index == index:
+            matches.append((key, entry))
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        # Prefer the slot-keyed row and let the inheritance write collapse stale duplicates.
+        for key, entry in matches:
+            if str(key) == str(index):
+                return key, entry
+        return matches[0]
+    for key in (index, str(index)):
+        entry = attrs.get(key)
+        if isinstance(entry, dict):
+            return key, entry
+    return None, None
+
+def _dedupe_weapon_skill_attrs(attrs):
+    """Remove repeated skill IDs while preserving the weapon's original slots."""
+    if not isinstance(attrs, dict):
+        return attrs
+    ordered = []
+    for key, entry in attrs.items():
+        try:
+            index = int(_random_attr_field(entry, 0, 'index'))
+        except (TypeError, ValueError):
+            try:
+                index = int(key)
+            except (TypeError, ValueError):
+                index = 0
+        ordered.append((index, str(key), key, entry))
+    ordered.sort(key=lambda row: (row[0], row[1]))
+    result = {}
+    seen_skills = set()
+    for _index, _sort_key, key, entry in ordered:
+        skill_id = str(_random_attr_field(entry, 4, 'skillId') or '').strip()
+        if skill_id and skill_id in seen_skills:
+            continue
+        if skill_id:
+            seen_skills.add(skill_id)
+        result[key] = entry
+    return result
+
+def _replace_random_attr_index(attrs, target_key, target_index, replacement,
+                               skill_team_id=0, skill_id=''):
+    """Replace one affix row without duplicating its slot or inherited skill group."""
+    if not isinstance(attrs, dict) or target_key is None or not isinstance(replacement, dict):
+        return None
+    updated = {}
+    for attr_key, attr_row in attrs.items():
+        if str(attr_key) == str(target_key):
+            continue
+        try:
+            old_index = int(_random_attr_field(attr_row, 0, 'index'))
+        except (TypeError, ValueError):
+            old_index = None
+        if old_index == int(target_index):
+            continue
+        old_skill_id = str(_random_attr_field(attr_row, 4, 'skillId') or '')
+        if skill_id and old_skill_id == skill_id:
+            continue
+        if skill_team_id > 0:
+            old_skill_cfg = SKILL_CONFIG.get(old_skill_id, {})
+            try:
+                old_team_id = int(old_skill_cfg.get('team_id', 0))
+            except (TypeError, ValueError):
+                old_team_id = 0
+            if old_team_id == skill_team_id:
+                continue
+        updated[attr_key] = attr_row
+    updated[target_key] = replacement
+    return updated
+
 def get_game_item_quality(item, equip_cfg):
     """Match GameItem.GetItemQuality, including appraised random-attribute score."""
     try:
@@ -3280,16 +3376,20 @@ def equipment_attribute_value(equip_cfg, attribute_index, quality, item_level, i
 def equip_inherit_quality(item_cfg, roll):
     """Match GameItem.GetEquipAttQuality for the target item's affix tier."""
     try:
-        raw_quality = int(_random_attr_field(roll, 3, 'quality'))
+        # Sproto's client-side long fields default to zero when omitted.
+        raw_quality = int(_random_attr_field(roll, 3, 'quality') or 0)
     except (TypeError, ValueError):
-        return -1
+        raw_quality = 0
     target_quality_id = str(item_cfg.get('quality_id', ''))
     roll_quality_id = str(_random_attr_field(roll, 5, 'qualityId') or target_quality_id)
     roll_rows = QUALITY_CONFIG.get(roll_quality_id, [])
     target_rows = QUALITY_CONFIG.get(target_quality_id, [])
-    if not target_rows or not 0 <= raw_quality < len(roll_rows):
-        return -1
-    score = int(roll_rows[raw_quality].get('att_initial_score', 0))
+    # The APK returns the raw tier when the target has no QualityData list,
+    # and GetAttScoreByQuality returns zero when the source row is unavailable.
+    if not target_rows:
+        return raw_quality
+    score = (int(roll_rows[raw_quality].get('att_initial_score', 0))
+             if 0 <= raw_quality < len(roll_rows) else 0)
     for index, row in enumerate(target_rows):
         if score < int(row.get('att_quality_score', 0)):
             return 0 if index == 0 else index - 1
@@ -6406,6 +6506,8 @@ def _normalise_backpack_item(item, next_index):
     item['parm'] = parms
     if 'random_attri' not in item:
         item['random_attri'] = item.get('Random_AttriDic', {})
+    if equipment_subtype(item) == 0:
+        item['random_attri'] = _dedupe_weapon_skill_attrs(item['random_attri'])
     if 'inlay' not in item:
         item['inlay'] = item.get('InlayDic', {})
     return item, max(next_index, index_id + 1)
@@ -10070,12 +10172,19 @@ def client_handler(conn, addr):
                 source_attr_index = get_val_int(body, 2, -1)
                 target_attr_index = get_val_int(body, 3, -1)
                 inherited = False
+                inherit_debug = {
+                    'source_index': source_index, 'target_index': target_index,
+                    'source_attr': source_attr_index, 'target_attr': target_attr_index
+                }
                 if (picked_char and is_current_character_connection(conn, picked_char)
                         and source_attr_index > 0 and target_attr_index > 0):
                     with get_character_transaction_lock(picked_char):
                         ensure_backpack_state(picked_char)
                         source_found = find_backpack_item(picked_char, source_index, 1)
                         target_found = find_backpack_item(picked_char, target_index, 0)
+                        inherit_debug.update({
+                            'source_found': bool(source_found), 'target_found': bool(target_found)
+                        })
                         if source_found and target_found:
                             source_item = source_found['item']
                             target_item = target_found['item']
@@ -10085,18 +10194,12 @@ def client_handler(conn, addr):
                             target_cfg = EQUIP_CONFIG.get(target_id, {})
                             source_attrs = source_item.get('random_attri')
                             target_attrs = target_item.get('random_attri')
-                            source_roll = (source_attrs.get(source_attr_index,
-                                            source_attrs.get(str(source_attr_index)))
-                                           if isinstance(source_attrs, dict) else None)
-                            target_roll = (target_attrs.get(target_attr_index,
-                                            target_attrs.get(str(target_attr_index)))
-                                           if isinstance(target_attrs, dict) else None)
-                            if source_roll is None and isinstance(source_attrs, dict):
-                                source_roll = next((entry for entry in source_attrs.values()
-                                                    if int(_random_attr_field(entry, 0, 'index') or -1) == source_attr_index), None)
-                            if target_roll is None and isinstance(target_attrs, dict):
-                                target_roll = next((entry for entry in target_attrs.values()
-                                                    if int(_random_attr_field(entry, 0, 'index') or -1) == target_attr_index), None)
+                            source_roll_key, source_roll = _random_attr_entry_for_index(
+                                source_attrs, source_attr_index
+                            )
+                            target_roll_key, target_roll = _random_attr_entry_for_index(
+                                target_attrs, target_attr_index
+                            )
                             source_subtype = equipment_subtype(source_item)
                             target_subtype = equipment_subtype(target_item)
                             is_weapon = msg == 305
@@ -10116,7 +10219,27 @@ def client_handler(conn, addr):
                                     and int(source_skill_cfg.get('team_id', 0))
                                     == int(target_skill_cfg.get('team_id', 0))
                                 )
+                                source_team_id = (int(source_skill_cfg.get('team_id', 0))
+                                                  if source_skill_cfg else 0)
+                                duplicate_target_team = False
+                                if (source_team_id > 0 and isinstance(target_attrs, dict)
+                                        and target_roll_key is not None):
+                                    for other_key, other_roll in target_attrs.items():
+                                        if str(other_key) == str(target_roll_key):
+                                            continue
+                                        other_skill_id = str(
+                                            _random_attr_field(other_roll, 4, 'skillId') or ''
+                                        )
+                                        other_skill_cfg = SKILL_CONFIG.get(other_skill_id, {})
+                                        try:
+                                            other_team_id = int(other_skill_cfg.get('team_id', 0))
+                                        except (TypeError, ValueError):
+                                            other_team_id = 0
+                                        if other_team_id == source_team_id:
+                                            duplicate_target_team = True
+                                            break
                             else:
+                                duplicate_target_team = False
                                 try:
                                     same_inherit_key = (
                                         int(selected_value)
@@ -10134,12 +10257,29 @@ def client_handler(conn, addr):
                                 and isinstance(source_roll, dict) and isinstance(target_roll, dict)
                                 and selected_value not in (None, '', 0, '0')
                                 and same_inherit_key
-                                and 0 <= target_quality < len(quality_rows)
+                                and target_roll_key is not None
+                                and target_quality >= 0
+                                and (not quality_rows or target_quality < len(quality_rows))
                             )
+                            inherit_debug.update({
+                                'source_item': source_id, 'target_item': target_id,
+                                'source_slot': source_subtype, 'target_slot': target_subtype,
+                                'source_roll_found': source_roll is not None,
+                                'target_roll_found': target_roll is not None,
+                                'selected_value': selected_value,
+                                'same_inherit_key': same_inherit_key,
+                                'target_quality': target_quality,
+                                'target_quality_count': len(quality_rows),
+                                'duplicate_target_team': duplicate_target_team
+                            })
                             if valid:
                                 price_key = 'weapon_inherit' if is_weapon else 'equip_inherit'
-                                gold_cost = int(quality_rows[target_quality].get(price_key, 0))
-                                if gold_cost >= 0 and get_currency_balance(picked_char, 1) >= gold_cost:
+                                gold_cost = (int(quality_rows[target_quality].get(price_key, 0))
+                                             if quality_rows else 0)
+                                gold_balance = get_currency_balance(picked_char, 1)
+                                inherit_debug.update({'gold_cost': gold_cost,
+                                                      'gold_balance': gold_balance})
+                                if gold_cost >= 0 and gold_balance >= gold_cost:
                                     inherited_roll = dict(source_roll)
                                     index_key = (0 if 0 in inherited_roll else '0'
                                                  if '0' in inherited_roll else 'index')
@@ -10147,10 +10287,11 @@ def client_handler(conn, addr):
                                                    if '5' in inherited_roll else 'qualityId')
                                     inherited_roll[index_key] = target_attr_index
                                     inherited_roll[quality_key] = quality_id
-                                    updated_attrs = dict(target_attrs)
-                                    target_key = (target_attr_index if target_attr_index in updated_attrs
-                                                  else str(target_attr_index))
-                                    updated_attrs[target_key] = inherited_roll
+                                    updated_attrs = _replace_random_attr_index(
+                                        target_attrs, target_roll_key, target_attr_index,
+                                        inherited_roll, source_team_id if is_weapon else 0,
+                                        source_skill_id if is_weapon else ''
+                                    )
                                     set_currency_balance(
                                         picked_char, 1,
                                         get_currency_balance(picked_char, 1) - gold_cost
@@ -10162,7 +10303,7 @@ def client_handler(conn, addr):
                                     sync_char_attrs_rpc(conn, picked_char)
                                     inherited = True
                 if not inherited:
-                    print(f"[BACKPACK] rejected attribute inheritance player={picked_char.get('id') if picked_char else 0} source={source_index} target={target_index}")
+                    print(f"[BACKPACK] rejected attribute inheritance player={picked_char.get('id') if picked_char else 0} detail={inherit_debug}")
                 send_rpc_response(session)
 
             elif msg == 223: # change_show_type: persist whether this character displays fashion
