@@ -150,6 +150,7 @@ LEVEL_REWARD_CONFIG = {} # LevelRewardData ID -> milestone claim definitions
 LEVEL_PACKAGE_CONFIG = {} # LevelPackageData ID -> level-up item bundle
 DAILY_ACTIVE_CONFIG = {} # DailyActiveData ID -> activity score/count/unlock values
 DAILY_ACTIVE_REWARD_CONFIG = {} # DailyActiveRewardData ID -> level/score/drop definition
+RETRIEVE_CONFIG = {} # RetrieveData ID -> recovery costs/scales/level drop key
 
 try:
     script_dir = os.path.dirname(__file__)
@@ -1169,9 +1170,29 @@ try:
             if not SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(drop_id)
         )
         if missing_dance_drops:
-            print("[DANCE REWARD CONFIG MISSING] no explicit ShowRewardData quantities for "
-                  f"{len(missing_dance_drops)} level drop IDs; sample={missing_dance_drops[:8]}; "
-                  "payouts will not be guessed")
+            print("[DANCE DROP TABLE GAP] CityDanceData _drop_jh/_drop_jhdj references "
+                  f"{len(missing_dance_drops)} ShowRewardData IDs without explicit quantities; "
+                  "active dance falls back to per-level _drop_gwzh recovery amounts; "
+                  "the live-session drop table is not present in this APK export")
+        missing_daily_dance_levels = []
+        daily_dance_drops = STREET_RACE_REWARD_BY_KEY_LEVEL.get('_drop_gwzh', {})
+        for dance_level in range(1, 81):
+            reward_id = str(daily_dance_drops.get(dance_level, '') or '')
+            if not any(item_id == '2001' and amount > 0
+                       for item_id, _quality, amount
+                       in SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(reward_id, [])):
+                missing_daily_dance_levels.append(dance_level)
+        if missing_daily_dance_levels:
+            print(f"[DANCE DAILY TOTALS MISSING] levels={missing_daily_dance_levels}")
+        for reward_key in ('_drop_bc', '_drop_da_1', '_drop_da_2', '_drop_da_3', '_drop_da_4'):
+            level_map = STREET_RACE_REWARD_BY_KEY_LEVEL.get(reward_key, {})
+            missing_levels = [reward_level for reward_level in range(1, 81)
+                              if not any(item_id and amount > 0
+                                         for item_id, _quality, amount
+                                         in SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(
+                                             str(level_map.get(reward_level, '') or ''), []))]
+            if missing_levels:
+                print(f"[LEVEL REWARD DATA MISSING] key={reward_key} levels={missing_levels}")
         # Log street race rewards for verification
         if STREET_RACE_REWARD_BY_LEVEL:
             sample_levels = sorted(STREET_RACE_REWARD_BY_LEVEL.keys())[:5]
@@ -1180,13 +1201,13 @@ try:
                 rewards = SHOW_REWARD_CONFIG.get(str(reward_id), [])
                 print(f"[STREET RACE] Level {lv} -> Reward ID {reward_id}: {rewards}")
 
-    # Dance protocol ids and purchase/activity rules come directly from the
-    # same tables consumed by DanceChooseRootLogic, DanceBtnRootLogic and the
-    # social-emote client handlers.
+    # Dance and recovery IDs, prices, intervals, and activity rules come from
+    # the client tables consumed by the dance and retrieval UI handlers.
     for table_name, target_table in (
             ("DanceData", DANCE_CONFIG),
             ("CityDanceData", CITY_DANCE_CONFIG),
-            ("SocialDanceData", SOCIAL_DANCE_CONFIG)):
+            ("SocialDanceData", SOCIAL_DANCE_CONFIG),
+            ("RetrieveData", RETRIEVE_CONFIG)):
         table_path = os.path.join(text_asset_root, table_name)
         if not os.path.exists(table_path):
             continue
@@ -3456,6 +3477,9 @@ def ensure_dance_runtime(char, now=None):
             'dance_id': '',
             'reward_elapsed_seconds': 0,
             'reward_dance_id': '',
+            'reward_interval_count': 0,
+            'reward_source_key': '',
+            'reward_level': 0,
             'dance_run_id': next_run_id,
             'server_epoch': DANCE_SERVER_EPOCH,
         })
@@ -3465,13 +3489,18 @@ def ensure_dance_runtime(char, now=None):
         runtime['speaker_start_time'] = max(0, int(runtime.get('speaker_start_time', 0)))
         runtime['paid_end_time'] = max(0, int(runtime.get('paid_end_time', 0)))
         runtime['reward_elapsed_seconds'] = max(0, int(runtime.get('reward_elapsed_seconds', 0)))
+        runtime['reward_interval_count'] = max(0, int(runtime.get('reward_interval_count', 0)))
+        runtime['reward_source_key'] = str(runtime.get('reward_source_key', '') or '')
+        runtime['reward_level'] = max(0, int(runtime.get('reward_level', 0)))
         runtime['dance_run_id'] = max(0, int(runtime.get('dance_run_id', 0)))
         runtime['reward_dance_id'] = str(runtime.get('reward_dance_id', '') or '')
         runtime['cur_use'] = str(runtime.get('cur_use') or '10001')
     except (TypeError, ValueError):
         runtime.update({'free_duration': free_duration, 'speaker_end_time': 0,
                         'speaker_start_time': 0, 'paid_end_time': 0,
-                        'reward_elapsed_seconds': 0, 'dance_run_id': 0, 'cur_use': '10001'})
+                        'reward_elapsed_seconds': 0, 'reward_interval_count': 0,
+                        'reward_source_key': '', 'reward_level': 0,
+                        'dance_run_id': 0, 'cur_use': '10001'})
     paid_dances = runtime.get('paid_dances')
     if not isinstance(paid_dances, dict):
         paid_dances = {}
@@ -3493,15 +3522,25 @@ def personal_dance_reward_interval(activity=None):
     except (TypeError, ValueError):
         return 60
 
-def personal_dance_reward_list(char, dance_id, running_source=''):
-    """Resolve an explicit character-level dance payout and apply RewardScale."""
+def personal_dance_reward_list(char, dance_id, running_source='', interval_index=0):
+    """Return this minute's share of the level-specific dance recovery amount.
+
+    The personal-dance _drop_jh/_drop_jhdj rows point at 303xx ShowRewardData
+    entries that are absent (or have no quantity) in this APK export. RetrieveData
+    defines the same personal-dance activity with exact per-level recovery EXP
+    through AdaptData._drop_gwzh. The server uses this level-specific recovery
+    amount as a fallback for the missing live-session drop quantity. It is split
+    over CityDanceData's one-minute intervals; the APK export does not establish
+    that recovery and live-session totals are identical.
+    """
     try:
         level = max(1, min(80, int(char.get('level', 1))))
     except (TypeError, ValueError):
         level = 1
     dance_cfg = DANCE_CONFIG.get(str(dance_id), {})
-    # DanceData's paid choreography is the same personal-dance activity with a
-    # reward scale. Only the separate speaker-item activity uses _drop_jhdj.
+    # DanceData's paid choreography applies its configured scale to this
+    # per-level recovery fallback. Speaker sessions use the same personal
+    # recovery table and their own configured duration.
     activity_id = '102' if str(running_source) == 'speaker' else '101'
     activity = CITY_DANCE_CONFIG.get(activity_id, CITY_DANCE_CONFIG.get('101', {}))
     try:
@@ -3511,15 +3550,12 @@ def personal_dance_reward_list(char, dance_id, running_source=''):
     if level < unlock_level:
         return []
 
-    drop_key = str(activity.get('DropId') or '')
-    level_drops = DANCE_REWARD_DROP_BY_KEY_LEVEL.get(drop_key, {})
+    drop_key = '_drop_gwzh'
+    level_drops = STREET_RACE_REWARD_BY_KEY_LEVEL.get(drop_key, {})
     drop_id = str(level_drops.get(level, '') or '')
     if not drop_id:
         return []
 
-    # AdaptData supplies a different drop ID for each level. The ShowRewardData
-    # row referenced by CityDanceData.ShowRewardId is only a UI preview; it is
-    # not a fallback payout for the level-specific drop.
     rewards = list(SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(drop_id, []))
     if not rewards:
         return []
@@ -3527,14 +3563,32 @@ def personal_dance_reward_list(char, dance_id, running_source=''):
         scale = max(0, int(DANCE_CONFIG.get(str(dance_id), {}).get('RewardScale', 100) or 100))
     except (TypeError, ValueError):
         scale = 100
+    interval = personal_dance_reward_interval(activity)
+    try:
+        duration = max(0, int(activity.get('DurationTime', 0) or 0))
+    except (TypeError, ValueError):
+        duration = 0
+    interval_count = max(1, (duration + interval - 1) // interval)
+    try:
+        interval_index = max(0, int(interval_index))
+    except (TypeError, ValueError):
+        interval_index = 0
+    if interval_index >= interval_count:
+        return []
+
     scaled = []
     for item_id, quality, amount in rewards:
         try:
-            scaled_amount = max(0, int(amount)) * scale // 100
+            scaled_total = max(0, int(amount)) * scale // 100
         except (TypeError, ValueError):
             continue
-        if item_id and scaled_amount > 0:
-            scaled.append((str(item_id), int(quality), scaled_amount))
+        # Distribute the fallback total evenly over the configured session,
+        # preserving its exact sum even when it is not evenly divisible.
+        interval_start = scaled_total * interval_index // interval_count
+        interval_end = scaled_total * (interval_index + 1) // interval_count
+        interval_amount = interval_end - interval_start
+        if item_id and interval_amount > 0:
+            scaled.append((str(item_id), int(quality), interval_amount))
     return scaled
 
 def cancel_personal_dance_reward_timer(char_id):
@@ -3589,15 +3643,28 @@ def personal_dance_reward_timer_tick(char_id, run_id):
         runtime = settle_personal_dance(char, stop=False, expected_run_id=run_id)
         if str(char.get('map_id')) == '101':
             send_push_to_char(char_id, 686, dance_state_info_payload(char))
-        if runtime.get('running') and int(runtime.get('dance_run_id', 0)) == int(run_id):
-            schedule_personal_dance_reward(char, run_id)
-        else:
+        if not runtime.get('running') or int(runtime.get('dance_run_id', 0)) != int(run_id):
             current = ALL_CONNECTIONS.get(int(char_id), (None, None))
             if current[0] is conn and current[1] is char:
                 sync_char_attrs_rpc(conn, char, int(char_id))
                 save_chars(all_accounts_chars)
     except Exception as exc:
         print(f"[DANCE REWARD] timer failed char={char_id}: {exc}")
+    finally:
+        # A transient persistence/socket/config error must not silently end a
+        # still-active dance. settle_personal_dance records interval progress
+        # before sending client sync packets, so the next tick can safely catch
+        # up any elapsed interval without replaying an already-counted payout.
+        current = ALL_CONNECTIONS.get(int(char_id), (None, None))
+        if current[0] is conn and current[1] is char:
+            try:
+                runtime = char.get('dance_runtime')
+                if (isinstance(runtime, dict)
+                        and runtime.get('running')
+                        and int(runtime.get('dance_run_id', 0)) == int(run_id)):
+                    schedule_personal_dance_reward(char, run_id)
+            except Exception as exc:
+                print(f"[DANCE REWARD] timer reschedule failed char={char_id}: {exc}")
 
 def settle_personal_dance(char, now=None, stop=False, expected_run_id=None):
     """Accrue validated dance time and grant completed reward intervals once."""
@@ -3630,6 +3697,23 @@ def settle_personal_dance(char, now=None, stop=False, expected_run_id=None):
             except (TypeError, ValueError):
                 started, elapsed = int(now), 0
             source = str(runtime.get('running_source', ''))
+            dance_id = str(runtime.get('dance_id', ''))
+            try:
+                level = max(1, min(80, int(char.get('level', 1))))
+            except (TypeError, ValueError):
+                level = 1
+            reward_source_key = f"{source}:{dance_id}"
+            if runtime.get('reward_source_key') != reward_source_key:
+                runtime['reward_elapsed_seconds'] = 0
+                runtime['reward_interval_count'] = 0
+                runtime['reward_source_key'] = reward_source_key
+                runtime['reward_level'] = level
+            elif int(runtime.get('reward_level', 0)) != level:
+                # A level-up must switch to that level's exact reward table.
+                # Keep any partial minute, but restart the distribution across
+                # the new level's 30-minute total.
+                runtime['reward_interval_count'] = 0
+                runtime['reward_level'] = level
             active_until = 0
             if source == 'free':
                 active_until = started + max(0, int(runtime.get('free_duration', 0)))
@@ -3651,12 +3735,27 @@ def settle_personal_dance(char, now=None, stop=False, expected_run_id=None):
             interval = personal_dance_reward_interval(activity)
             earned_dance_id = str(runtime.get('dance_id', ''))
             runtime['reward_elapsed_seconds'] = max(0, int(runtime.get('reward_elapsed_seconds', 0))) + effective_elapsed
-            rewards = personal_dance_reward_list(
-                char, runtime.get('dance_id', ''), runtime.get('running_source', ''))
-            if rewards:
-                earned_intervals, remainder = divmod(runtime['reward_elapsed_seconds'], interval)
-                runtime['reward_elapsed_seconds'] = remainder
-                earned_rewards = rewards
+            earned_intervals, remainder = divmod(runtime['reward_elapsed_seconds'], interval)
+            if earned_intervals:
+                batches = []
+                for _ in range(earned_intervals):
+                    rewards = personal_dance_reward_list(
+                        char, runtime.get('dance_id', ''), runtime.get('running_source', ''),
+                        runtime.get('reward_interval_count', 0))
+                    if not rewards:
+                        break
+                    batches.append(rewards)
+                    runtime['reward_interval_count'] = int(runtime.get('reward_interval_count', 0)) + 1
+                if len(batches) == earned_intervals:
+                    runtime['reward_elapsed_seconds'] = remainder
+                    earned_rewards = [reward for batch in batches for reward in batch]
+                else:
+                    # Missing or exhausted exact-level data must never trigger
+                    # a lower-level substitute or repeated final-interval pay.
+                    runtime['reward_elapsed_seconds'] = min(
+                        interval - 1, runtime['reward_elapsed_seconds']
+                    )
+                    earned_intervals = 0
             should_stop = (stop or not area_valid or effective_elapsed < elapsed
                            or (source == 'free' and runtime.get('free_duration', 0) <= 0)
                            or (source in ('paid', 'speaker') and active_until > 0 and int(now) >= active_until))
@@ -3678,7 +3777,11 @@ def settle_personal_dance(char, now=None, stop=False, expected_run_id=None):
 
         if earned_intervals:
             if earned_rewards:
-                reward_entries = [entry for _ in range(earned_intervals) for entry in earned_rewards]
+                # earned_rewards already contains one separately calculated
+                # batch for each elapsed interval. Repeating it here again
+                # overpays whenever the timer catches up after a scheduling
+                # delay or reconnect.
+                reward_entries = earned_rewards
                 active = ALL_CONNECTIONS.get(char_id, (None, None))
                 reward_conn = active[0] if active[1] is char else None
                 reward_push = lambda tag, payload: send_push_to_char(char_id, tag, payload)
@@ -3696,7 +3799,8 @@ def settle_personal_dance(char, now=None, stop=False, expected_run_id=None):
                     if amount > 0
                 ]
                 if popup_items:
-                    reward_push(638, encode_sproto([(0, popup_items)]))
+                    if not reward_push(638, encode_sproto([(0, popup_items)])):
+                        print(f"[DANCE REWARD] popup delivery failed char={char_id} dance={earned_dance_id}")
                 print(f"[DANCE REWARD] char={char_id} dance={earned_dance_id} intervals={earned_intervals} rewards={reward_entries}")
         if accrued or stop or not runtime.get('running'):
             save_chars(all_accounts_chars)
@@ -3916,7 +4020,7 @@ def daily_active_snapshot(char):
     return encode_sproto([(0, active_rows), (1, reward_rows), (2, score)])
 
 def daily_active_rewards_for_level(drop_key, level):
-    """Resolve a reward tier's AdaptData key through the APK ShowRewardData table."""
+    """Resolve only the exact character-level reward configured by AdaptData."""
     levels = STREET_RACE_REWARD_BY_KEY_LEVEL.get(str(drop_key or ''), {})
     if not levels:
         return []
@@ -3926,14 +4030,83 @@ def daily_active_rewards_for_level(drop_key, level):
         level = 1
     reward_id = levels.get(level)
     if not reward_id:
-        eligible = [configured_level for configured_level in levels
-                    if configured_level <= level]
-        reward_id = levels[max(eligible)] if eligible else ''
+        return []
     return [
         (str(item_id), int(quality), int(amount))
-        for item_id, quality, amount in SHOW_REWARD_CONFIG.get(str(reward_id), [])
+        for item_id, quality, amount in SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(str(reward_id), [])
         if str(item_id) and int(amount) > 0
     ]
+
+def ensure_retrieve_state(char):
+    """Keep client RetrieveData claim state daily while retaining its price count."""
+    stamp = current_daily_stamp()
+    state = char.get('retrieve_state')
+    if not isinstance(state, dict):
+        state = {'date': stamp, 'entries': {}}
+        char['retrieve_state'] = state
+    entries = state.get('entries')
+    if not isinstance(entries, dict):
+        entries = {}
+        state['entries'] = entries
+    if state.get('date') != stamp:
+        for entry in entries.values():
+            if isinstance(entry, dict):
+                entry['state'] = 0
+        state['date'] = stamp
+    for retrieve_id, entry in list(entries.items()):
+        if not isinstance(entry, dict):
+            entries[retrieve_id] = {'state': 0, 'count': 0}
+            entry = entries[retrieve_id]
+        try:
+            entry['state'] = max(0, min(2, int(entry.get('state', 0))))
+            entry['count'] = max(0, int(entry.get('count', 0)))
+        except (TypeError, ValueError):
+            entry.update({'state': 0, 'count': 0})
+    return state
+
+def retrieve_info_payload(char):
+    """Build tag 658's per-ID retrieve_info map from client RetrieveData."""
+    state = ensure_retrieve_state(char)
+    entries = state['entries']
+    try:
+        level = max(1, min(80, int(char.get('level', 1))))
+    except (TypeError, ValueError):
+        level = 1
+    try:
+        guild_id = int(char.get('guild_id', char.get('guildId', 0)) or 0)
+    except (TypeError, ValueError):
+        guild_id = 0
+    info = {}
+    for retrieve_id, cfg in sorted(RETRIEVE_CONFIG.items(), key=lambda pair: int(pair[0])):
+        try:
+            unlock_level = int(cfg.get('UnlockLevel', 0) or 0)
+            retrieve_type = int(cfg.get('Type', 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if level < unlock_level or (retrieve_type == 9 and guild_id <= 0):
+            continue
+        record = entries.setdefault(retrieve_id, {'state': 0, 'count': 0})
+        info[retrieve_id] = encode_sproto([
+            (0, str(retrieve_id)),
+            (1, max(0, min(2, int(record.get('state', 0))))),
+            (2, max(0, int(record.get('count', 0))))
+        ])
+    return encode_sproto([(0, info)])
+
+def retrieve_reward_list(retrieve_id, level, scale):
+    """Resolve and scale one RetrieveData reward using AdaptData's exact level row."""
+    cfg = RETRIEVE_CONFIG.get(str(retrieve_id), {})
+    try:
+        scale = max(0, int(scale))
+    except (TypeError, ValueError):
+        return []
+    rewards = daily_active_rewards_for_level(cfg.get('DropID', ''), level)
+    scaled = []
+    for item_id, quality, amount in rewards:
+        value = int(amount) * scale // 100
+        if value > 0:
+            scaled.append((str(item_id), int(quality), value))
+    return scaled
 
 def record_daily_active_event(char, activity_type, send_rpc_push):
     """Advance an APK daily-activity type once up to each configured target."""
@@ -4009,7 +4182,7 @@ def level_reward_claim_definition(char, reward_id, claim_index):
     if not profession_prefix:
         return None
     show_reward_id = str(cfg.get(f'{profession_prefix}ShowReward{tier}', '') or '').strip()
-    rewards = list(SHOW_REWARD_CONFIG.get(show_reward_id, []))
+    rewards = list(SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(show_reward_id, []))
     if not rewards:
         return None
     return (rewards, price_type if get_type == 1 else None, price if get_type == 1 else 0)
@@ -4811,12 +4984,12 @@ def get_exp_stage_full_reward(char_lv):
         lv = 1
 
     reward_id = str(21000 + lv)
-    rewards = SHOW_REWARD_CONFIG.get(reward_id, [])
+    rewards = SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(reward_id, [])
     if rewards:
         for item_id, qual, count in rewards:
             if item_id == "2001":
                 return count
-    return 195000
+    return 0
 
 
 def clear_exp_active_monsters(exp_state, send_rpc_push):
@@ -6282,12 +6455,8 @@ def street_race_rewards(level, copy_id=None):
     if not reward_id and drop_key == '_drop_bc':
         reward_id = STREET_RACE_REWARD_BY_LEVEL.get(level)
     if not reward_id:
-        level_map = STREET_RACE_REWARD_BY_KEY_LEVEL.get(drop_key, {})
-        if not level_map and drop_key == '_drop_bc':
-            level_map = STREET_RACE_REWARD_BY_LEVEL
-        eligible = [lv for lv in level_map if lv <= level]
-        reward_id = level_map[max(eligible)] if eligible else ''
-    return SHOW_REWARD_CONFIG.get(str(reward_id), [])
+        return []
+    return SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(str(reward_id), [])
 
 def sync_copy_scenes(picked_char):
     """Build TAG 555 from the APK's CopySceneData definitions."""
@@ -9651,6 +9820,7 @@ def client_handler(conn, addr):
             elif msg == 229: # use_dance
                 dance_id = get_val_str(body, 0, '')
                 accepted = False
+                new_paid_period = False
                 if picked_char and is_current_character_connection(conn, picked_char):
                     now = int(time.time())
                     activity = CITY_DANCE_CONFIG.get('101', {})
@@ -9701,6 +9871,7 @@ def client_handler(conn, addr):
                                     if dance_id == '10002':
                                         runtime['paid_end_time'] = paid_end
                                     accepted = True
+                                    new_paid_period = True
                                 if accepted:
                                     current, _dance_infos = dance_choice_data(picked_char, now)
                                     if current != dance_id:
@@ -9723,6 +9894,17 @@ def client_handler(conn, addr):
                                     else:
                                         runtime['running_source'] = 'speaker'
                                     runtime['dance_id'] = dance_id
+                                    source_key = f"{runtime['running_source']}:{dance_id}"
+                                    try:
+                                        current_level = max(1, min(80, int(picked_char.get('level', 1))))
+                                    except (TypeError, ValueError):
+                                        current_level = 1
+                                    if (new_paid_period or runtime.get('reward_source_key') != source_key
+                                            or int(runtime.get('reward_level', 0)) != current_level):
+                                        runtime['reward_elapsed_seconds'] = 0
+                                        runtime['reward_interval_count'] = 0
+                                        runtime['reward_source_key'] = source_key
+                                        runtime['reward_level'] = current_level
                                     save_chars(all_accounts_chars)
                     if accepted:
                         current, dance_infos = dance_choice_data(picked_char, now)
@@ -12122,6 +12304,106 @@ def client_handler(conn, addr):
                         "3": encode_sproto([(0, "3"), (1, 0)]),
                     }
                     send_rpc_push(646, encode_sproto([(0, d_buys)]))
+
+                elif msg == 278 and picked_char: # request_retrieve_info
+                    if is_current_character_connection(conn, picked_char):
+                        with get_character_transaction_lock(picked_char):
+                            retrieve_payload = retrieve_info_payload(picked_char)
+                            save_chars(all_accounts_chars)
+                        send_rpc_response(session)
+                        send_rpc_push(658, retrieve_payload)
+
+                elif msg == 279 and picked_char: # request_retrieve
+                    retrieve_id = get_val_str(body, 0, '')
+                    requested_type = get_val_int(body, 1, -1)
+                    claimed = False
+                    claimed_items = []
+                    failure_reason = 'invalid, unavailable, or already claimed recovery'
+                    if is_current_character_connection(conn, picked_char):
+                        with get_character_transaction_lock(picked_char):
+                            cfg = RETRIEVE_CONFIG.get(retrieve_id, {})
+                            state = ensure_retrieve_state(picked_char)
+                            record = (state['entries'].setdefault(retrieve_id, {'state': 0, 'count': 0})
+                                      if cfg else {'state': 1, 'count': 0})
+                            try:
+                                level = max(1, min(80, int(picked_char.get('level', 1))))
+                                unlock_level = int(cfg.get('UnlockLevel', 0) or 0)
+                                retrieve_type = int(cfg.get('Type', 0) or 0)
+                                retrieve_state = int(record.get('state', 0))
+                                retrieve_count = max(0, int(record.get('count', 0)))
+                                guild_id = int(picked_char.get('guild_id', picked_char.get('guildId', 0)) or 0)
+                            except (TypeError, ValueError):
+                                level, unlock_level, retrieve_type = 0, 0, 0
+                                retrieve_state, retrieve_count, guild_id = 1, 0, 0
+
+                            selected = None
+                            if cfg and requested_type >= 0:
+                                for option_index in (1, 2):
+                                    try:
+                                        option_type = int(cfg.get(f'PriceType{option_index}', -1))
+                                        option_scale = int(cfg.get(f'Scale{option_index}', 0))
+                                        price_base = int(cfg.get(f'PriceCost{option_index}', 0))
+                                        price_add = int(cfg.get(f'AddCost{option_index}', 0))
+                                        price_max = int(cfg.get(f'MaxCost{option_index}', 0))
+                                    except (TypeError, ValueError):
+                                        continue
+                                    if option_type == requested_type:
+                                        selected = (option_index, option_type, option_scale,
+                                                    price_base, price_add, price_max)
+                                        break
+
+                            allowed = bool(
+                                cfg and selected and retrieve_state == 0
+                                and level >= unlock_level
+                                and (retrieve_type != 9 or guild_id > 0)
+                            )
+                            rewards = []
+                            if allowed:
+                                option_index, money_type, scale, price_base, price_add, price_max = selected
+                                cost = max(0, price_base + price_add * retrieve_count)
+                                if price_max >= 0:
+                                    cost = min(cost, price_max)
+                                rewards = retrieve_reward_list(retrieve_id, level, scale)
+                                valid_rewards = bool(rewards) and all(
+                                    item_id in DIRECT_REWARD_RESOURCE_IDS
+                                    or item_id in ITEM_CONFIG
+                                    for item_id, _quality, amount in rewards if amount > 0
+                                ) and all(amount > 0 for _item_id, _quality, amount in rewards)
+                                if not valid_rewards:
+                                    failure_reason = 'exact level reward row is missing or invalid'
+                                elif get_currency_balance(picked_char, money_type) < cost:
+                                    failure_reason = 'insufficient currency for configured recovery price'
+                                elif not can_add_reward_list_to_inventory(picked_char, rewards):
+                                    failure_reason = 'recovery reward would exceed backpack capacity'
+                                else:
+                                    set_currency_balance(
+                                        picked_char, money_type,
+                                        get_currency_balance(picked_char, money_type) - cost
+                                    )
+                                    grant_item_rewards(picked_char, rewards, conn, send_rpc_push, save=False)
+                                    record['state'] = 2 if option_index == 1 else 1
+                                    record['count'] = retrieve_count + 1
+                                    save_chars(all_accounts_chars)
+                                    sync_char_attrs_rpc(conn, picked_char)
+                                    claimed_items = [encode_sproto([
+                                        (0, item_id), (1, amount), (3, quality)
+                                    ]) for item_id, quality, amount in rewards]
+                                    claimed = True
+                                    print(f"[RETRIEVE] claimed player={picked_char.get('id')} id={retrieve_id} "
+                                          f"level={level} type={requested_type} cost={cost} rewards={rewards}")
+                            else:
+                                save_chars(all_accounts_chars)
+                    if not claimed:
+                        print(f"[RETRIEVE] rejected player={picked_char.get('id')} id={retrieve_id} "
+                              f"type={requested_type} reason={failure_reason}")
+                    send_rpc_response(session)
+                    # The APK's commercial-reward handler closes the 279 wait box
+                    # and shows item rows for any non-daily-active reward type.
+                    send_rpc_push(650, encode_sproto([
+                        (0, claimed_items), (1, 8), (3, retrieve_id),
+                        (7, 0 if claimed else 1)
+                    ]))
+                    send_rpc_push(658, retrieve_info_payload(picked_char))
 
                 elif msg == 261 and picked_char: # request_daily_active
                     with get_character_transaction_lock(picked_char):
