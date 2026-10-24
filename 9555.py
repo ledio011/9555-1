@@ -12569,6 +12569,12 @@ def client_handler(conn, addr):
                         ])
                     }
                     send_rpc_push(619, encode_sproto([(0, acts)]))
+                    # The Daily view also displays the Single Dance countdown,
+                    # which is sourced from dance_state_info (686), not from
+                    # activity_info (619). Refresh it when that view is opened
+                    # so it starts from the current remaining seconds.
+                    if str(picked_char.get('map_id')) == '101':
+                        send_rpc_push(686, dance_state_info_payload(picked_char, now_ts))
 
                 elif msg == 202 and picked_char: # request_tower_copy_info
                     t_info = encode_sproto([(0, 0), (1, 100), (2, 1), (3, 1), (4, 0), (5, 0)])
