@@ -2083,15 +2083,59 @@ def get_skill_upgrade_cost(lv):
     if lv == 26: return 18000000
     return 20000000
 
-def build_skills_map(prof, char_level, skill_levels=None):
+def equipped_weapon_skill_rows(equipped_items):
+    """Read the active weapon's rolled skills using the APK's one-based affix slots."""
+    weapon = next((item for item in (equipped_items or [])
+                   if isinstance(item, dict) and equipment_subtype(item) == 0), None)
+    if not weapon:
+        return []
+    attrs = weapon.get('random_attri')
+    if isinstance(attrs, dict):
+        raw_rows = list(attrs.items())
+    elif isinstance(attrs, list):
+        raw_rows = list(enumerate(attrs, 1))
+    else:
+        return []
+
+    rows = []
+    seen_skills = set()
+    for key, roll in raw_rows:
+        if not isinstance(roll, dict):
+            continue
+        skill_id = str(_random_attr_field(roll, 4, 'skillId') or '').strip()
+        raw_index = _random_attr_field(roll, 0, 'index')
+        try:
+            affix_index = int(raw_index) if raw_index not in (None, '') else int(key)
+        except (TypeError, ValueError):
+            continue
+        if (not skill_id or skill_id in seen_skills or not 1 <= affix_index <= 6
+                or skill_id not in SKILL_CONFIG):
+            continue
+        rows.append((affix_index, skill_id))
+        seen_skills.add(skill_id)
+    return sorted(rows)
+
+
+def equipped_weapon_skill_ids(char):
+    """Return only skills currently granted by the character's equipped weapon."""
+    if not isinstance(char, dict):
+        return set()
+    return {skill_id for _index, skill_id in
+            equipped_weapon_skill_rows(char.get('equipped_equip', []))}
+
+
+def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None):
     """Build the skill dictionary sent to the client via sync_skill_info (tag 540).
     Sends starter skills: 3 basic attacks + 1 dodge + 1 active skill.
     If skill_levels contains additional skills (e.g., boss skills), include them too.
     Additional active skills are granted by weapon skins (LabelID system), not by level."""
     prof = int(prof)
     if skill_levels is None: skill_levels = {}
+    skill_levels = {str(key): value for key, value in skill_levels.items()}
     p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
     smap = {}
+    weapon_skill_rows = equipped_weapon_skill_rows(equipped_items)
+    weapon_skill_ids = {sid for _index, sid in weapon_skill_rows}
 
     # Basic attack combo chain (101, 102, 103 / 201, 202, 203 / 301, 302, 303)
     atk_skills = p["atk"] if isinstance(p["atk"], list) else [p["atk"]]
@@ -2124,17 +2168,19 @@ def build_skills_map(prof, char_level, skill_levels=None):
     # Collect all extra skills and sort by PriorityAutoCombat descending.
     extra_skills = []
     for sid, slv in skill_levels.items():
-        if sid not in smap:
+        if sid not in smap and sid not in weapon_skill_ids:
             skill_cfg = SKILL_CONFIG.get(sid, {})
             priority = int(skill_cfg.get('priority', 0))
             extra_skills.append((sid, slv, priority))
     # Sort by priority descending so highest priority gets indexPos 4
     extra_skills.sort(key=lambda x: x[2], reverse=True)
+    used_skill_positions = {4}  # the profession starter active skill owns slot 4
+    used_skill_positions.update(affix_index + 4 for affix_index, _sid in weapon_skill_rows)
     for idx, (sid, slv, priority) in enumerate(extra_skills):
-        if idx < 3:
-            skill_idx = 4 + idx  # 4, 5, 6 (zombie AI usable)
-        else:
-            skill_idx = 7 + idx  # 7, 8, ... (won't be used by zombie AI)
+        skill_idx = 4 + idx
+        while skill_idx in used_skill_positions:
+            skill_idx += 1
+        used_skill_positions.add(skill_idx)
         smap[sid] = encode_sproto([
             (0, sid),
             (1, slv),
@@ -2142,6 +2188,22 @@ def build_skills_map(prof, char_level, skill_levels=None):
             (3, 1),           # unlockLevel
             (4, skill_idx),   # indexPos2
             (5, False)        # disable
+        ])
+
+    # WeaponDrop affix `index` is one-based. The client looks up its displayed
+    # skill level at indexPos2 == affix index + 4, and uses indexPos for the
+    # active-skill bar. Include these only while that weapon is equipped.
+    for affix_index, sid in weapon_skill_rows:
+        if sid in smap:
+            continue
+        skill_pos = affix_index + 4
+        smap[sid] = encode_sproto([
+            (0, sid),
+            (1, skill_levels.get(sid, 0)),
+            (2, skill_pos),
+            (3, 1),
+            (4, skill_pos),
+            (5, False)
         ])
 
     return smap
@@ -2596,6 +2658,7 @@ def validate_exp_skill_hit(char, state, target_id, skill_id, requested_effinfo_i
     starter_skills = PROF_SKILLS.get(prof, PROF_SKILLS[0])
     always_available = {str(value) for value in starter_skills.get('atk', [])}
     always_available.update(str(starter_skills.get(key, '')) for key in ('dodge', 'starter_active'))
+    always_available.update(equipped_weapon_skill_ids(char))
     always_available.discard('')
     if skill_id not in skill_levels and skill_id not in always_available:
         print(f"[EXP HIT] rejected unlearned skill={skill_id} attacker={char.get('id')}")
@@ -4410,8 +4473,10 @@ def get_full_char(c):
 
     char_level = stats['lv']
     skill_levels = c.get('skill_levels', {})
-    skills_map = build_skills_map(c.get('prof', 0), char_level, skill_levels)
     ensure_backpack_state(c)
+    skills_map = build_skills_map(
+        c.get('prof', 0), char_level, skill_levels, c.get('equipped_equip', [])
+    )
     equip_map = {int(item['index_id']): _gameitem_sproto(item)
                  for item in c.get('equipped_equip', [])}
     badge_map = {int(item['index_id']): _gameitem_sproto(item)
@@ -7197,7 +7262,10 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None,
             advance_missions(picked_char, send_rpc_push, 'level')
             # Sync updated skills map after level-up (new skills may unlock)
             new_level = picked_char.get('level', 1)
-            smap = build_skills_map(picked_char.get('prof', 0), new_level, picked_char.get('skill_levels', {}))
+            smap = build_skills_map(
+                picked_char.get('prof', 0), new_level,
+                picked_char.get('skill_levels', {}), picked_char.get('equipped_equip', [])
+            )
             send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
             send_rpc_push(644, level_package_state_payload(picked_char))
 
@@ -8147,9 +8215,10 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         traceback.print_exc()
     print("[DEBUG] AFTER MAP ENTER")
 
-def is_skill_locked(sid, level, prof):
-    """Check if a skill is locked. Since skills are not unlocked by level,
-    only the starter active skill is available. Additional skills come from weapon skins."""
+def is_skill_locked(sid, level, prof, owned_skill_ids=None):
+    """Check starter and currently granted weapon skills; level is not ownership."""
+    if owned_skill_ids and str(sid) in {str(skill_id) for skill_id in owned_skill_ids}:
+        return False, 0
     p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
     # Only the starter active skill is available; all others come from weapon skins
     if sid == p["starter_active"]:
@@ -8657,7 +8726,10 @@ def client_handler(conn, addr):
                     sync_char_attrs_rpc(conn, picked_char)
 
                     # 540: skill_sync
-                    smap = build_skills_map(picked_char['prof'], picked_char['level'], picked_char.get('skill_levels', {}))
+                    smap = build_skills_map(
+                        picked_char['prof'], picked_char['level'],
+                        picked_char.get('skill_levels', {}), picked_char.get('equipped_equip', [])
+                    )
                     send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
 
                     # 519: mission_sync
@@ -9284,7 +9356,10 @@ def client_handler(conn, addr):
                             sync_char_attrs_rpc(conn, picked_char)               # Stats update
                             # Sync skills if leveled up from mission rewards
                             if mission_leveled_up:
-                                smap = build_skills_map(picked_char.get('prof', 0), picked_char.get('level', 1), picked_char.get('skill_levels', {}))
+                                smap = build_skills_map(
+                                    picked_char.get('prof', 0), picked_char.get('level', 1),
+                                    picked_char.get('skill_levels', {}), picked_char.get('equipped_equip', [])
+                                )
                                 send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
                             send_rpc_push(519, sync_mission_data(picked_char))   # Mission UI update
                             if popup_items:
@@ -9379,7 +9454,10 @@ def client_handler(conn, addr):
                         picked_char['cash'] -= cost
                         skill_levels[skill_key] = server_skill_lv + 1
                         save_chars(all_accounts_chars)
-                        smap = build_skills_map(picked_char['prof'], picked_char['level'], picked_char['skill_levels'])
+                        smap = build_skills_map(
+                            picked_char['prof'], picked_char['level'],
+                            picked_char['skill_levels'], picked_char.get('equipped_equip', [])
+                        )
                         send_rpc_push(540, encode_sproto([(0, smap), (1, True)]))
                         sync_char_attrs_rpc(conn, picked_char)
                     elif not skill_matches_server:
@@ -9401,52 +9479,68 @@ def client_handler(conn, addr):
                         or int(picked_char.get('hp', 0)) <= 0):
                     print(f"[EXP SKILL] rejected downed/nonparticipant/stale player={picked_char.get('id')} map={exp_skill_map}")
                 elif picked_char:
-                    locked, req_lv = is_skill_locked(sid, picked_char.get('level', 1), picked_char.get('prof', 0))
-                    if locked:
-                        print(f"[SKILL LOCKED] sid={sid} req={req_lv}")
-                        send_rpc_push(529, encode_sproto([(0, "#{100681}"), (1, True)]))
+                    skill_levels = {str(key): value for key, value in
+                                    (picked_char.get('skill_levels') or {}).items()}
+                    prof = int(picked_char.get('prof', 0))
+                    starter_skills = PROF_SKILLS.get(prof, PROF_SKILLS[0])
+                    owned_skills = {str(value) for value in
+                                    (starter_skills.get('atk', []) if isinstance(starter_skills.get('atk'), list)
+                                     else [starter_skills.get('atk')])}
+                    owned_skills.update(str(starter_skills.get(key, ''))
+                                        for key in ('dodge', 'starter_active'))
+                    owned_skills.update(equipped_weapon_skill_ids(picked_char))
+                    owned_skills.update(skill_levels)
+                    if sid not in skill_levels and sid not in owned_skills:
+                        print(f"[SKILL SECURITY] rejected unowned skill_use sid={sid} player={picked_char.get('id')}")
                     else:
+                        locked, req_lv = is_skill_locked(
+                            sid, picked_char.get('level', 1), prof, owned_skills
+                        )
+                        if locked:
+                            print(f"[SKILL LOCKED] sid={sid} req={req_lv}")
+                            send_rpc_push(529, encode_sproto([(0, "#{100681}"), (1, True)]))
+                        else:
                         # Do not echo Tag 508 back to the casting player.
                         # The casting player executes skill effects locally on client.
                         # Broadcast TAG 508 (ret_skill_use) to other players on the same map
-                        attacker_id = picked_char.get('id', 0)
-                        attacker_map = str(picked_char.get('map_id', '11'))
-                        try:
-                            # Build attack_list from client-provided alist
-                            attack_list_data = []
-                            if isinstance(alist, list):
-                                for atk in alist:
-                                    if isinstance(atk, (int, str)):
-                                        attack_list_data.append(atk)
-                                    elif isinstance(atk, bytes):
-                                        attack_list_data.append(atk)
-                            # ret_skill_use: senderId(0), targetId(1), skillId(2), attack_list(3)
-                            skill_resp = encode_sproto([
-                                (0, attacker_id),
-                                (1, tid),
-                                (2, sid),
-                                (3, attack_list_data)
-                            ])
-                            ph_p = encode_sproto([(0, 508)])
-                            pf_p = sproto_pack(ph_p + skill_resp)
-                            skill_pkt = struct.pack(">H", len(pf_p)) + pf_p
-                            for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-                                # EXP map IDs are shared by independent solo
-                                # runs and squads. Keep visual skill broadcasts
-                                # inside the same live run instance.
-                                if ch and can_aoi_exchange(picked_char, ch):
-                                    try:
-                                        c_lock = CONNECTION_LOCKS.get(cid)
-                                        if c_lock:
-                                            with c_lock:
+                            attacker_id = picked_char.get('id', 0)
+                            attacker_map = str(picked_char.get('map_id', '11'))
+                            try:
+                                # Build attack_list from client-provided alist
+                                attack_list_data = []
+                                if isinstance(alist, list):
+                                    for atk in alist:
+                                        if isinstance(atk, (int, str)):
+                                            attack_list_data.append(atk)
+                                        elif isinstance(atk, bytes):
+                                            attack_list_data.append(atk)
+                                # ret_skill_use: senderId(0), targetId(1), skillId(2), attack_list(3)
+                                skill_resp = encode_sproto([
+                                    (0, attacker_id),
+                                    (1, tid),
+                                    (2, sid),
+                                    (3, attack_list_data)
+                                ])
+                                ph_p = encode_sproto([(0, 508)])
+                                pf_p = sproto_pack(ph_p + skill_resp)
+                                skill_pkt = struct.pack(">H", len(pf_p)) + pf_p
+                                for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
+                                    # EXP map IDs are shared by independent solo
+                                    # runs and squads. Keep visual skill broadcasts
+                                    # inside the same live run instance.
+                                    if ch and can_aoi_exchange(picked_char, ch):
+                                        try:
+                                            c_lock = CONNECTION_LOCKS.get(cid)
+                                            if c_lock:
+                                                with c_lock:
+                                                    c.sendall(skill_pkt)
+                                            else:
                                                 c.sendall(skill_pkt)
-                                        else:
-                                            c.sendall(skill_pkt)
-                                    except Exception:
-                                        pass
-                            print(f"[SKILL] Broadcast 508 skill={sid} target={tid} from={attacker_id} map={attacker_map}")
-                        except Exception as e:
-                            print(f"[SKILL] Failed to broadcast 508: {e}")
+                                        except Exception:
+                                            pass
+                                print(f"[SKILL] Broadcast 508 skill={sid} target={tid} from={attacker_id} map={attacker_map}")
+                            except Exception as e:
+                                print(f"[SKILL] Failed to broadcast 508: {e}")
 
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -9603,6 +9697,7 @@ def client_handler(conn, addr):
             elif msg in (116, 117): # equip_item / unequip_item
                 index_id = get_val_int(body, 0, -1)
                 changed = False
+                weapon_skills_changed = False
                 power_before = None
                 if picked_char and is_current_character_connection(conn, picked_char):
                     with get_character_transaction_lock(picked_char):
@@ -9674,10 +9769,12 @@ def client_handler(conn, addr):
                                         push_backpack_item_update(send_rpc_push, 0, None, item['index_id'])
                                         push_backpack_item_update(send_rpc_push, 1, item)
                                         changed = True
+                                        weapon_skills_changed = subtype == 0
                         else:
                             found = find_backpack_item(picked_char, index_id, 1)
                             if found and len(picked_char['equip_inventory']) < 100:
                                 item = found['item']
+                                weapon_skills_changed = equipment_subtype(item) == 0
                                 picked_char['equipped_equip'].remove(item)
                                 picked_char['equip_inventory'].append(item)
                                 push_backpack_item_update(send_rpc_push, 1, None, item['index_id'])
@@ -9692,6 +9789,13 @@ def client_handler(conn, addr):
                             )
                             sync_equipment_status_to_peers(picked_char)
                             sync_main_player_visual(picked_char, send_rpc_push)
+                            if weapon_skills_changed:
+                                smap = build_skills_map(
+                                    picked_char.get('prof', 0), picked_char.get('level', 1),
+                                    picked_char.get('skill_levels', {}),
+                                    picked_char.get('equipped_equip', [])
+                                )
+                                send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
                 send_rpc_response(session)
 
             elif msg == 167: # equip_enhance: enhance the equipped item slot
@@ -9913,7 +10017,7 @@ def client_handler(conn, addr):
                                     break
                                 threshold = max(0, math.floor(
                                     int(upgrade_row.get('level_exp_b', 0))
-                                    + int(upgrade_row.get('level_exp_k', 0))
+                                    + int(upgrade_row.get('level_exp_k', 0)) / 100.0
                                     * result_level * result_level * 3.0
                                 ))
                                 if source_exp - consumed_exp < threshold:
@@ -11007,12 +11111,14 @@ def client_handler(conn, addr):
                             # Verify the attacker actually has this skill learned.
                             # Starter skills (101-105 for XD, 201-205 for QJ, 301-305 for NQS)
                             # are always available at level 0, even if not in skill_levels.
-                            char_skill_levels = picked_char.get('skill_levels', {})
+                            char_skill_levels = {str(key): value for key, value in
+                                                 (picked_char.get('skill_levels') or {}).items()}
                             prof = picked_char.get('prof', 0)
                             starter_skills = PROF_SKILLS.get(prof, PROF_SKILLS[0])
                             always_available = set(starter_skills.get('atk', []))
                             always_available.add(starter_skills.get('dodge', ''))
                             always_available.add(starter_skills.get('starter_active', ''))
+                            always_available.update(equipped_weapon_skill_ids(picked_char))
                             if not is_exp and skill_id not in char_skill_levels and skill_id not in always_available:
                                 # Skill not learned by player and not a starter skill, reject
                                 skill_id = "50001"
@@ -11217,12 +11323,14 @@ def client_handler(conn, addr):
                                 # Verify the attacker actually has this skill learned.
                                 # Starter skills (101-105 for XD, 201-205 for QJ, 301-305 for NQS)
                                 # are always available at level 0, even if not in skill_levels.
-                                char_skill_levels = picked_char.get('skill_levels', {})
+                                char_skill_levels = {str(key): value for key, value in
+                                                     (picked_char.get('skill_levels') or {}).items()}
                                 prof = picked_char.get('prof', 0)
                                 starter_skills = PROF_SKILLS.get(prof, PROF_SKILLS[0])
                                 always_available = set(starter_skills.get('atk', []))
                                 always_available.add(starter_skills.get('dodge', ''))
                                 always_available.add(starter_skills.get('starter_active', ''))
+                                always_available.update(equipped_weapon_skill_ids(picked_char))
                                 if skill_id not in char_skill_levels and skill_id not in always_available:
                                     # Skill not learned by player and not a starter skill, reject
                                     skill_id = "50001"
@@ -12970,7 +13078,7 @@ def client_handler(conn, addr):
                                         and all(pending['ready'].values()))
                                     if start_this_run: pending['starting']=True
                                 if start_this_run:
-                            if not (start_team_exp_run(team,pending['copy_id'])
+                                    if not (start_team_exp_run(team,pending['copy_id'])
                                     if pending['copy_id'] in DAILY_EXP_CONFIG
                                     else start_team_equipment_run(team,pending['copy_id'])):
                                         for x in list(team.get('members',[])): send_push_to_char(x,603,encode_sproto([(0,int(cid)),(1,1)]))
