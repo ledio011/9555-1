@@ -10191,6 +10191,7 @@ def client_handler(conn, addr):
                         and 1 <= source_attr_index <= 6 and 1 <= target_attr_index <= 6):
                     with get_character_transaction_lock(picked_char):
                         ensure_backpack_state(picked_char)
+                        power_before = get_character_stats(picked_char)['power']
                         source_found = find_backpack_item(picked_char, source_index, 0)
                         target_found = find_backpack_item(picked_char, target_index, 1)
                         inherit_debug.update({
@@ -10342,7 +10343,19 @@ def client_handler(conn, addr):
                                     # equipped skill/stat and the open inherit UI.
                                     push_backpack_item_update(send_rpc_push, 1, target_item)
                                     sync_char_attrs_rpc(conn, picked_char)
+                                    send_combat_power_gain_tip(
+                                        send_rpc_push, power_before,
+                                        get_character_stats(picked_char)['power']
+                                    )
                                     sync_equipment_status_to_peers(picked_char)
+                                    if is_weapon:
+                                        smap = build_skills_map(
+                                            picked_char.get('prof', 0),
+                                            picked_char.get('level', 1),
+                                            picked_char.get('skill_levels', {}),
+                                            picked_char.get('equipped_equip', [])
+                                        )
+                                        send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
                                     inherited = True
                 if not inherited:
                     print(f"[BACKPACK] rejected attribute inheritance player={picked_char.get('id') if picked_char else 0} detail={inherit_debug}")
