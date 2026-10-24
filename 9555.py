@@ -2132,6 +2132,22 @@ def equipped_weapon_skill_ids(char):
             equipped_weapon_skill_rows(char.get('equipped_equip', []))}
 
 
+ALL_WEAPON_SKILL_IDS = frozenset(
+    str(skill.get('id'))
+    for drop in WEAPON_DROP_CONFIG.values()
+    for skill in drop.get('skills', [])
+    if skill.get('id') not in (None, '')
+)
+
+
+def learned_non_weapon_skill_ids(skill_levels):
+    """Filter weapon-granted skills out of persistent learned-skill ownership."""
+    if not isinstance(skill_levels, dict):
+        return set()
+    return {str(skill_id) for skill_id in skill_levels
+            if str(skill_id) not in ALL_WEAPON_SKILL_IDS}
+
+
 def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None):
     """Build the skill dictionary sent to the client via sync_skill_info (tag 540).
     Sends starter skills: 3 basic attacks + 1 dodge + 1 active skill.
@@ -2176,7 +2192,12 @@ def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None):
     # Collect all extra skills and sort by PriorityAutoCombat descending.
     extra_skills = []
     for sid, slv in skill_levels.items():
-        if sid not in smap and sid not in weapon_skill_ids:
+        # Old saves can retain a weapon skill in skill_levels after the weapon
+        # that granted it was swapped out. Such skills must come only from the
+        # currently equipped weapon's affixes below. Preserve profession
+        # starter skills already added to smap above.
+        if (sid not in smap and sid not in weapon_skill_ids
+                and sid not in ALL_WEAPON_SKILL_IDS):
             skill_cfg = SKILL_CONFIG.get(sid, {})
             priority = int(skill_cfg.get('priority', 0))
             extra_skills.append((sid, slv, priority))
@@ -2668,7 +2689,8 @@ def validate_exp_skill_hit(char, state, target_id, skill_id, requested_effinfo_i
     always_available.update(str(starter_skills.get(key, '')) for key in ('dodge', 'starter_active'))
     always_available.update(equipped_weapon_skill_ids(char))
     always_available.discard('')
-    if skill_id not in skill_levels and skill_id not in always_available:
+    learned_skill_ids = learned_non_weapon_skill_ids(skill_levels)
+    if skill_id not in learned_skill_ids and skill_id not in always_available:
         print(f"[EXP HIT] rejected unlearned skill={skill_id} attacker={char.get('id')}")
         return None
     try:
@@ -9622,8 +9644,8 @@ def client_handler(conn, addr):
                     owned_skills.update(str(starter_skills.get(key, ''))
                                         for key in ('dodge', 'starter_active'))
                     owned_skills.update(equipped_weapon_skill_ids(picked_char))
-                    owned_skills.update(skill_levels)
-                    if sid not in skill_levels and sid not in owned_skills:
+                    owned_skills.update(learned_non_weapon_skill_ids(skill_levels))
+                    if sid not in owned_skills:
                         print(f"[SKILL SECURITY] rejected unowned skill_use sid={sid} player={picked_char.get('id')}")
                     else:
                         locked, req_lv = is_skill_locked(
@@ -11342,13 +11364,14 @@ def client_handler(conn, addr):
                             # are always available at level 0, even if not in skill_levels.
                             char_skill_levels = {str(key): value for key, value in
                                                  (picked_char.get('skill_levels') or {}).items()}
+                            learned_skill_ids = learned_non_weapon_skill_ids(char_skill_levels)
                             prof = picked_char.get('prof', 0)
                             starter_skills = PROF_SKILLS.get(prof, PROF_SKILLS[0])
                             always_available = set(starter_skills.get('atk', []))
                             always_available.add(starter_skills.get('dodge', ''))
                             always_available.add(starter_skills.get('starter_active', ''))
                             always_available.update(equipped_weapon_skill_ids(picked_char))
-                            if not is_exp and skill_id not in char_skill_levels and skill_id not in always_available:
+                            if not is_exp and skill_id not in learned_skill_ids and skill_id not in always_available:
                                 # Skill not learned by player and not a starter skill, reject
                                 skill_id = "50001"
                                 effinfo_id = None
@@ -11554,13 +11577,14 @@ def client_handler(conn, addr):
                                 # are always available at level 0, even if not in skill_levels.
                                 char_skill_levels = {str(key): value for key, value in
                                                      (picked_char.get('skill_levels') or {}).items()}
+                                learned_skill_ids = learned_non_weapon_skill_ids(char_skill_levels)
                                 prof = picked_char.get('prof', 0)
                                 starter_skills = PROF_SKILLS.get(prof, PROF_SKILLS[0])
                                 always_available = set(starter_skills.get('atk', []))
                                 always_available.add(starter_skills.get('dodge', ''))
                                 always_available.add(starter_skills.get('starter_active', ''))
                                 always_available.update(equipped_weapon_skill_ids(picked_char))
-                                if skill_id not in char_skill_levels and skill_id not in always_available:
+                                if skill_id not in learned_skill_ids and skill_id not in always_available:
                                     # Skill not learned by player and not a starter skill, reject
                                     skill_id = "50001"
                                     effinfo_id = None
