@@ -3383,7 +3383,7 @@ def get_char_ov(c, sort_index=None):
     ])
 
 MONEY_FIELDS = ('cash', 'gold', 'diamond', 'guild_contribute', 'battle_coin', 'activity_coin')
-MONEY_DEFAULTS = (1000, 100, 0, 0, 0, 0)
+MONEY_DEFAULTS = (1000, 100, 10, 0, 0, 0)
 CHARACTER_TRANSACTION_LOCKS = {}
 CHARACTER_TRANSACTION_LOCKS_GUARD = threading.Lock()
 
@@ -3713,6 +3713,13 @@ def settle_personal_dance_if_due(char, now=None):
     except (TypeError, ValueError):
         return False
     if pending + max(0, int(now) - started) < interval:
+        # The APK's Single Dance timer is initialized from dance_state_info
+        # and only ticks locally while its main player is in PLAYER_STATE.DANCE.
+        # Re-sync the authoritative remaining duration on the client's regular
+        # heartbeat so the displayed daily timer cannot remain frozen at 30:00
+        # if the local dance state/UI tick is missed during scene transitions.
+        if str(char.get('map_id')) == '101':
+            send_push_to_char(char_id, 686, dance_state_info_payload(char, now))
         return False
 
     settled = settle_personal_dance(
