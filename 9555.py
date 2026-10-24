@@ -3383,7 +3383,7 @@ def get_char_ov(c, sort_index=None):
     ])
 
 MONEY_FIELDS = ('cash', 'gold', 'diamond', 'guild_contribute', 'battle_coin', 'activity_coin')
-MONEY_DEFAULTS = (1000, 100, 100000, 0, 0, 0)
+MONEY_DEFAULTS = (1000, 100, 0, 0, 0, 0)
 CHARACTER_TRANSACTION_LOCKS = {}
 CHARACTER_TRANSACTION_LOCKS_GUARD = threading.Lock()
 
