@@ -3669,11 +3669,23 @@ def personal_dance_reward_timer_tick(char_id, run_id):
     if not conn or not char or int(char.get('id', 0)) != int(char_id):
         return
     try:
+        # The Minimap > Daily Single Dance row is driven by CopySceneInfo 555,
+        # not the dance HUD's separate state packet 686. Remember whether this
+        # tick belongs to the free single-dance timer so that the row can be
+        # refreshed after settling, including the final 00:00 update.
+        runtime_before = char.get('dance_runtime', {})
+        update_daily_dance_time = (
+            str(char.get('map_id')) == str(CITY_DANCE_CONFIG.get('101', {}).get('MapId', '101'))
+            and isinstance(runtime_before, dict)
+            and runtime_before.get('running')
+            and runtime_before.get('running_source') == 'free'
+            and str(runtime_before.get('dance_run_id', '')) == str(run_id)
+        )
         runtime = settle_personal_dance(char, stop=False, expected_run_id=run_id)
-        # Keep the Daily -> Single Dance row current from the authoritative
-        # remaining duration. The phone's separate timer is client-local.
-        if str(char.get('map_id')) == '101':
-            send_push_to_char(char_id, 686, dance_state_info_payload(char))
+        if update_daily_dance_time:
+            current = ALL_CONNECTIONS.get(int(char_id), (None, None))
+            if current[0] is conn and current[1] is char:
+                send_push_to_char(char_id, 555, sync_copy_scenes(char))
         if not runtime.get('running') or int(runtime.get('dance_run_id', 0)) != int(run_id):
             current = ALL_CONNECTIONS.get(int(char_id), (None, None))
             if current[0] is conn and current[1] is char:
@@ -6430,6 +6442,31 @@ def copy_attempts_remaining(picked_char, copy_id, cfg):
         remaining[copy_id] = int(cfg.get('max_plays', 3))
     return max(0, int(remaining[copy_id]))
 
+def single_dance_time_remaining(picked_char, now=None):
+    """Return the remaining free-dance seconds shown in Minimap > Daily."""
+    if now is None:
+        now = int(time.time())
+    runtime = ensure_dance_runtime(picked_char, now)
+    activity = CITY_DANCE_CONFIG.get('101', {})
+    try:
+        duration = max(0, int(activity.get('DurationTime', 1800) or 1800))
+        remaining = max(0, min(duration, int(runtime.get('free_duration', duration))))
+        started = max(0, int(runtime.get('running_since', 0)))
+    except (TypeError, ValueError):
+        return 0
+    if (runtime.get('running') and runtime.get('running_source') == 'free'
+            and str(picked_char.get('map_id')) == str(activity.get('MapId', '101'))
+            and started > 0
+            and is_in_map_gather_area(activity.get('MapId', '101'), picked_char.get('pos'))):
+        remaining = max(0, remaining - max(0, int(now) - started))
+    return remaining
+
+def copy_scene_current_num(picked_char, copy_id, cfg, now=None):
+    """Return the client-visible CurNum, using seconds for Single Dance."""
+    if int(cfg.get('subtype', -1)) == 26:
+        return single_dance_time_remaining(picked_char, now)
+    return copy_attempts_remaining(picked_char, copy_id, cfg)
+
 def record_pending_exp_ticket(picked_char, copy_id):
     """Remember the provisional EXP-stage attempt until team selection names its copy."""
     copy_id = str(copy_id)
@@ -6519,6 +6556,7 @@ def street_race_rewards(level, copy_id=None):
 
 def sync_copy_scenes(picked_char):
     """Build TAG 555 from the APK's CopySceneData definitions."""
+    now = int(time.time())
     level = int(picked_char.get('level', 1))
     daily_race_id = street_race_daily_copy_id()
     # CopySceneData contains level variants and seven rotating Street Race
@@ -6551,7 +6589,7 @@ def sync_copy_scenes(picked_char):
 
         info_fields = [
             (0, str(copy_id)),
-            (1, copy_attempts_remaining(picked_char, copy_id, cfg)),
+            (1, copy_scene_current_num(picked_char, copy_id, cfg, now)),
             (3, 1),
             (5, True),
             (6, 0),
@@ -9984,9 +10022,18 @@ def client_handler(conn, addr):
 
             elif msg == 228: # pause_participate_dance
                 if picked_char and is_current_character_connection(conn, picked_char):
+                    was_free_dance = (
+                        isinstance(picked_char.get('dance_runtime'), dict)
+                        and picked_char['dance_runtime'].get('running')
+                        and picked_char['dance_runtime'].get('running_source') == 'free'
+                        and str(picked_char.get('map_id')) == str(
+                            CITY_DANCE_CONFIG.get('101', {}).get('MapId', '101'))
+                    )
                     settle_personal_dance(picked_char, stop=True)
                     if str(picked_char.get('map_id')) == '101':
                         send_rpc_push(686, dance_state_info_payload(picked_char))
+                        if was_free_dance:
+                            send_rpc_push(555, sync_copy_scenes(picked_char))
                         sync_char_attrs_rpc(conn, picked_char, conn_id)
                         broadcast_aoi_attribute(picked_char)
                     save_chars(all_accounts_chars)
