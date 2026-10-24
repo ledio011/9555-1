@@ -2148,7 +2148,117 @@ def learned_non_weapon_skill_ids(skill_levels):
             if str(skill_id) not in ALL_WEAPON_SKILL_IDS}
 
 
-def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None):
+def apply_skill_position_overrides(skills_map, skill_positions):
+    """Apply the APK's saved active-bar positions without changing skill ownership."""
+    if not isinstance(skill_positions, dict) or not skill_positions:
+        return skills_map
+
+    rows = {}
+    explicit = {}
+    for skill_id, encoded in skills_map.items():
+        if not isinstance(encoded, (bytes, bytearray)):
+            continue
+        info = decode_sproto(encoded)
+        try:
+            default_pos = int(info.get(2, 0))
+        except (TypeError, ValueError):
+            continue
+        if default_pos <= 3:
+            continue
+        rows[str(skill_id)] = (info, default_pos)
+        try:
+            requested_pos = int(skill_positions.get(str(skill_id), -1))
+        except (TypeError, ValueError):
+            continue
+        if 4 <= requested_pos <= 10:
+            explicit[str(skill_id)] = requested_pos
+
+    if not explicit:
+        return skills_map
+
+    # The client sends the displaced skill's position and the moved skill's
+    # position as two MSG 192 requests. If a disconnect interrupts that pair,
+    # keep the most recently requested skill in the contested bar slot.
+    slot_owner = {}
+    for skill_id in reversed(list(skill_positions.keys())):
+        sid = str(skill_id)
+        requested_pos = explicit.get(sid)
+        if requested_pos is not None and 4 <= requested_pos <= 9:
+            slot_owner.setdefault(requested_pos, sid)
+
+    resolved = {}
+    used_slots = set(slot_owner)
+    for skill_id, requested_pos in explicit.items():
+        if requested_pos == 10 or slot_owner.get(requested_pos) == skill_id:
+            resolved[skill_id] = requested_pos
+
+    # Preserve APK defaults for skills without a saved position. If an old or
+    # partial save gives two skills the same slot, move only the non-owner to
+    # the first free active slot; leave overflow skills in the parked slot 10.
+    for skill_id, (_info, default_pos) in rows.items():
+        if skill_id in resolved:
+            continue
+        if default_pos >= 10:
+            # Position 10 is the APK's parked/removed position; higher
+            # positions belong to other server-side skill lists.
+            resolved[skill_id] = default_pos
+            continue
+        if 4 <= default_pos <= 9 and default_pos not in used_slots:
+            resolved[skill_id] = default_pos
+            used_slots.add(default_pos)
+            continue
+        free_pos = next((pos for pos in range(4, 10) if pos not in used_slots), None)
+        if free_pos is not None:
+            resolved[skill_id] = free_pos
+            used_slots.add(free_pos)
+        elif default_pos <= 10:
+            resolved[skill_id] = 10
+
+    updated = dict(skills_map)
+    for skill_id, new_pos in resolved.items():
+        info, _default_pos = rows[skill_id]
+        info[2] = new_pos
+        updated[skill_id] = encode_sproto(list(info.items()))
+    return updated
+
+
+def store_skill_position(character, skill_id, index_pos):
+    """Persist one client-requested active skill slot after validating ownership."""
+    skill_id = str(skill_id or '').strip()
+    try:
+        index_pos = int(index_pos)
+    except (TypeError, ValueError):
+        return False
+    if not skill_id or not 4 <= index_pos <= 10:
+        return False
+
+    current_skills = build_skills_map(
+        character.get('prof', 0), character.get('level', 1),
+        character.get('skill_levels', {}), character.get('equipped_equip', []),
+        character.get('skill_positions', {})
+    )
+    encoded = current_skills.get(skill_id)
+    if not encoded:
+        return False
+    try:
+        current_pos = int(decode_sproto(encoded).get(2, 0))
+    except (TypeError, ValueError):
+        return False
+    # MSG 192 is only emitted for the six active-skill bar rows. Basic combo
+    # and dodge slots are fixed by the APK and must not be rewritten here.
+    if current_pos <= 3:
+        return False
+
+    positions = character.setdefault('skill_positions', {})
+    if not isinstance(positions, dict):
+        positions = character['skill_positions'] = {}
+    positions.pop(skill_id, None)
+    positions[skill_id] = index_pos
+    return True
+
+
+def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None,
+                     skill_positions=None):
     """Build the skill dictionary sent to the client via sync_skill_info (tag 540).
     Sends starter skills: 3 basic attacks + 1 dodge + 1 active skill.
     If skill_levels contains additional skills (e.g., boss skills), include them too.
@@ -2235,7 +2345,7 @@ def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None):
             (5, False)
         ])
 
-    return smap
+    return apply_skill_position_overrides(smap, skill_positions)
 
 def get_general(c):
     return encode_sproto([
@@ -4626,9 +4736,17 @@ def get_full_char(c):
 
     char_level = stats['lv']
     skill_levels = c.get('skill_levels', {})
+    if not isinstance(c.get('skill_positions'), dict):
+        c['skill_positions'] = {}
+    try:
+        skill_index = max(0, min(1, int(c.get('skill_index', 0) or 0)))
+    except (TypeError, ValueError):
+        skill_index = 0
+    c['skill_index'] = skill_index
     ensure_backpack_state(c)
     skills_map = build_skills_map(
-        c.get('prof', 0), char_level, skill_levels, c.get('equipped_equip', [])
+        c.get('prof', 0), char_level, skill_levels, c.get('equipped_equip', []),
+        c.get('skill_positions', {})
     )
     equip_map = {int(item['index_id']): _gameitem_sproto(item)
                  for item in c.get('equipped_equip', [])}
@@ -4660,7 +4778,8 @@ def get_full_char(c):
         (12, selected_potion_index(c)),
         (13, run),
         (14, enhance_map),
-        (15, download_state)
+        (15, download_state),
+        (16, skill_index)
     ])
 
 def social_profile_signature(character, stats=None):
@@ -7419,7 +7538,8 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None,
             new_level = picked_char.get('level', 1)
             smap = build_skills_map(
                 picked_char.get('prof', 0), new_level,
-                picked_char.get('skill_levels', {}), picked_char.get('equipped_equip', [])
+                picked_char.get('skill_levels', {}), picked_char.get('equipped_equip', []),
+                picked_char.get('skill_positions', {})
             )
             send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
             send_rpc_push(644, level_package_state_payload(picked_char))
@@ -7817,6 +7937,8 @@ def init_character_fields(c):
         'level': 1, 'exp': 0, 'cash': 1000,
         'title_level': 0, 'title_exp': 0,
         'skill_levels': {},
+        'skill_positions': {},
+        'skill_index': 0,
         'active_missions': {},
         'completed_side_missions': [],
         'last_main_mission_id': "-1",
@@ -8883,7 +9005,8 @@ def client_handler(conn, addr):
                     # 540: skill_sync
                     smap = build_skills_map(
                         picked_char['prof'], picked_char['level'],
-                        picked_char.get('skill_levels', {}), picked_char.get('equipped_equip', [])
+                        picked_char.get('skill_levels', {}), picked_char.get('equipped_equip', []),
+                        picked_char.get('skill_positions', {})
                     )
                     send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
 
@@ -9513,7 +9636,8 @@ def client_handler(conn, addr):
                             if mission_leveled_up:
                                 smap = build_skills_map(
                                     picked_char.get('prof', 0), picked_char.get('level', 1),
-                                    picked_char.get('skill_levels', {}), picked_char.get('equipped_equip', [])
+                                    picked_char.get('skill_levels', {}), picked_char.get('equipped_equip', []),
+                                    picked_char.get('skill_positions', {})
                                 )
                                 send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
                             send_rpc_push(519, sync_mission_data(picked_char))   # Mission UI update
@@ -9590,6 +9714,31 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif msg == 192: # change_skill_position
+                raw_skill_id = body.get(0, b'')
+                skill_id = (raw_skill_id.decode('utf-8', errors='ignore')
+                            if isinstance(raw_skill_id, bytes) else str(raw_skill_id or ''))
+                index_pos = get_val_int(body, 1, -1)
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    with get_character_transaction_lock(picked_char):
+                        if store_skill_position(picked_char, skill_id, index_pos):
+                            save_chars(all_accounts_chars)
+                            print(f"[SKILL POSITION] saved player={picked_char.get('id')} "
+                                  f"skill={skill_id} index={index_pos}")
+                        else:
+                            print(f"[SKILL POSITION] rejected player={picked_char.get('id')} "
+                                  f"skill={skill_id} index={index_pos}")
+                send_rpc_response(session)
+
+            elif msg == 316: # change_skill_index
+                skill_index = get_val_int(body, 0, -1)
+                if (picked_char and is_current_character_connection(conn, picked_char)
+                        and skill_index in (0, 1)):
+                    with get_character_transaction_lock(picked_char):
+                        picked_char['skill_index'] = skill_index
+                        save_chars(all_accounts_chars)
+                send_rpc_response(session)
+
             elif msg == 130: # skill_level_up
                 sid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
                 cur_lv = get_val_int(body, 1)
@@ -9611,7 +9760,8 @@ def client_handler(conn, addr):
                         save_chars(all_accounts_chars)
                         smap = build_skills_map(
                             picked_char['prof'], picked_char['level'],
-                            picked_char['skill_levels'], picked_char.get('equipped_equip', [])
+                            picked_char['skill_levels'], picked_char.get('equipped_equip', []),
+                            picked_char.get('skill_positions', {})
                         )
                         send_rpc_push(540, encode_sproto([(0, smap), (1, True)]))
                         sync_char_attrs_rpc(conn, picked_char)
@@ -9948,7 +10098,8 @@ def client_handler(conn, addr):
                                 smap = build_skills_map(
                                     picked_char.get('prof', 0), picked_char.get('level', 1),
                                     picked_char.get('skill_levels', {}),
-                                    picked_char.get('equipped_equip', [])
+                                    picked_char.get('equipped_equip', []),
+                                    picked_char.get('skill_positions', {})
                                 )
                                 send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
                 send_rpc_response(session)
@@ -10408,7 +10559,8 @@ def client_handler(conn, addr):
                                             picked_char.get('prof', 0),
                                             picked_char.get('level', 1),
                                             picked_char.get('skill_levels', {}),
-                                            picked_char.get('equipped_equip', [])
+                                            picked_char.get('equipped_equip', []),
+                                            picked_char.get('skill_positions', {})
                                         )
                                         send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
                                     inherited = True
