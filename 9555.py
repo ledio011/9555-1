@@ -3523,24 +3523,23 @@ def personal_dance_reward_interval(activity=None):
         return 60
 
 def personal_dance_reward_list(char, dance_id, running_source='', interval_index=0):
-    """Return this minute's share of the level-specific dance recovery amount.
+    """Return one minute of the level's active dance reward.
 
-    The personal-dance _drop_jh/_drop_jhdj rows point at 303xx ShowRewardData
-    entries that are absent (or have no quantity) in this APK export. RetrieveData
-    defines the same personal-dance activity with exact per-level recovery EXP
-    through AdaptData._drop_gwzh. The server uses this level-specific recovery
-    amount as a fallback for the missing live-session drop quantity. It is split
-    over CityDanceData's one-minute intervals; the APK export does not establish
-    that recovery and live-session totals are identical.
+    The APK maps every level's live free/paid dance to a distinct 303xx reward
+    row, but those rows contain only the EXP item ID and omit its quantity.
+    Use the active row to constrain the reward item, then use the matching
+    level's configured dance-recovery quantity as the server fallback for the
+    missing live-session quantity. The fallback is level-specific; the APK
+    export does not prove its live total equals the recovery total.
     """
     try:
         level = max(1, min(80, int(char.get('level', 1))))
     except (TypeError, ValueError):
         level = 1
     dance_cfg = DANCE_CONFIG.get(str(dance_id), {})
-    # DanceData's paid choreography applies its configured scale to this
-    # per-level recovery fallback. Speaker sessions use the same personal
-    # recovery table and their own configured duration.
+    # Resolve the live activity row first: free dance uses _drop_jh, paid dance
+    # uses _drop_jhdj, and sound-box dance uses CityDanceData 102's configured
+    # drop. DanceData then applies the client's configured paid multiplier.
     activity_id = '102' if str(running_source) == 'speaker' else '101'
     activity = CITY_DANCE_CONFIG.get(activity_id, CITY_DANCE_CONFIG.get('101', {}))
     try:
@@ -3550,13 +3549,43 @@ def personal_dance_reward_list(char, dance_id, running_source='', interval_index
     if level < unlock_level:
         return []
 
+    if str(running_source) == 'speaker':
+        active_drop_key = str(activity.get('DropId', '') or '').strip()
+    elif str(running_source) == 'paid' or int(dance_cfg.get('Price', 0) or 0) > 0:
+        active_drop_key = '_drop_jhdj'
+    else:
+        active_drop_key = '_drop_jh'
+    active_drop_id = str(
+        DANCE_REWARD_DROP_BY_KEY_LEVEL.get(active_drop_key, {}).get(level, '') or ''
+    )
+    # Some AdaptData levels point to 303xx IDs that are absent from this APK's
+    # ShowRewardData export. CityDanceData's ShowRewardId is the client preview
+    # row for the same active reward category and supplies the item identity.
+    active_reward_rows = (SHOW_REWARD_CONFIG.get(active_drop_id)
+                          or SHOW_REWARD_CONFIG.get(
+                              str(activity.get('ShowRewardId', '') or '').strip(), []))
+    active_items = {
+        (str(item_id), int(quality))
+        for item_id, quality, _preview_count in active_reward_rows
+        if str(item_id)
+    }
+    if not active_items:
+        return []
+
+    # The live dance row has no count. RetrieveData's _drop_gwzh row is the only
+    # client-exported per-level quantity for this same activity; retain it as
+    # the quantity fallback, while requiring the live row to authorize the item.
     drop_key = '_drop_gwzh'
     level_drops = STREET_RACE_REWARD_BY_KEY_LEVEL.get(drop_key, {})
     drop_id = str(level_drops.get(level, '') or '')
     if not drop_id:
         return []
 
-    rewards = list(SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(drop_id, []))
+    rewards = [
+        (str(item_id), int(quality), int(amount))
+        for item_id, quality, amount in SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(drop_id, [])
+        if (str(item_id), int(quality)) in active_items
+    ]
     if not rewards:
         return []
     try:
@@ -3665,6 +3694,36 @@ def personal_dance_reward_timer_tick(char_id, run_id):
                     schedule_personal_dance_reward(char, run_id)
             except Exception as exc:
                 print(f"[DANCE REWARD] timer reschedule failed char={char_id}: {exc}")
+
+def settle_personal_dance_if_due(char, now=None):
+    """Use a client heartbeat as a catch-up if a background timer was delayed."""
+    if now is None:
+        now = int(time.time())
+    runtime = char.get('dance_runtime') if isinstance(char, dict) else None
+    if not isinstance(runtime, dict) or not runtime.get('running'):
+        return False
+    try:
+        interval = personal_dance_reward_interval(
+            CITY_DANCE_CONFIG.get('101', {})
+        )
+        started = int(runtime.get('running_since', now))
+        pending = max(0, int(runtime.get('reward_elapsed_seconds', 0)))
+        run_id = int(runtime.get('dance_run_id', 0))
+        char_id = int(char.get('id', 0))
+    except (TypeError, ValueError):
+        return False
+    if pending + max(0, int(now) - started) < interval:
+        return False
+
+    settled = settle_personal_dance(
+        char, now=now, stop=False, expected_run_id=run_id
+    )
+    if str(char.get('map_id')) == '101':
+        send_push_to_char(char_id, 686, dance_state_info_payload(char, now))
+    if settled.get('running'):
+        schedule_personal_dance_reward(char, settled.get('dance_run_id'))
+    print(f"[DANCE HEARTBEAT] settled char={char_id} run={run_id} running={bool(settled.get('running'))}")
+    return True
 
 def settle_personal_dance(char, now=None, stop=False, expected_run_id=None):
     """Accrue validated dance time and grant completed reward intervals once."""
@@ -12243,7 +12302,11 @@ def client_handler(conn, addr):
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp_data)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-                if msg == 145 and picked_char:
+                if (msg == 218 and picked_char
+                        and is_current_character_connection(conn, picked_char)):
+                    settle_personal_dance_if_due(picked_char)
+
+                elif msg == 145 and picked_char:
                     send_rpc_push(555, sync_copy_scenes(picked_char))
                     print(f"[COPY] sent daily copy state level={picked_char.get('level', 1)}")
 
