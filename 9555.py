@@ -3670,8 +3670,6 @@ def personal_dance_reward_timer_tick(char_id, run_id):
         return
     try:
         runtime = settle_personal_dance(char, stop=False, expected_run_id=run_id)
-        if str(char.get('map_id')) == '101':
-            send_push_to_char(char_id, 686, dance_state_info_payload(char))
         if not runtime.get('running') or int(runtime.get('dance_run_id', 0)) != int(run_id):
             current = ALL_CONNECTIONS.get(int(char_id), (None, None))
             if current[0] is conn and current[1] is char:
@@ -3713,20 +3711,11 @@ def settle_personal_dance_if_due(char, now=None):
     except (TypeError, ValueError):
         return False
     if pending + max(0, int(now) - started) < interval:
-        # The APK's Single Dance timer is initialized from dance_state_info
-        # and only ticks locally while its main player is in PLAYER_STATE.DANCE.
-        # Re-sync the authoritative remaining duration on the client's regular
-        # heartbeat so the displayed daily timer cannot remain frozen at 30:00
-        # if the local dance state/UI tick is missed during scene transitions.
-        if str(char.get('map_id')) == '101':
-            send_push_to_char(char_id, 686, dance_state_info_payload(char, now))
         return False
 
     settled = settle_personal_dance(
         char, now=now, stop=False, expected_run_id=run_id
     )
-    if str(char.get('map_id')) == '101':
-        send_push_to_char(char_id, 686, dance_state_info_payload(char, now))
     if settled.get('running'):
         schedule_personal_dance_reward(char, settled.get('dance_run_id'))
     print(f"[DANCE HEARTBEAT] settled char={char_id} run={run_id} running={bool(settled.get('running'))}")
@@ -12569,12 +12558,6 @@ def client_handler(conn, addr):
                         ])
                     }
                     send_rpc_push(619, encode_sproto([(0, acts)]))
-                    # The Daily view also displays the Single Dance countdown,
-                    # which is sourced from dance_state_info (686), not from
-                    # activity_info (619). Refresh it when that view is opened
-                    # so it starts from the current remaining seconds.
-                    if str(picked_char.get('map_id')) == '101':
-                        send_rpc_push(686, dance_state_info_payload(picked_char, now_ts))
 
                 elif msg == 202 and picked_char: # request_tower_copy_info
                     t_info = encode_sproto([(0, 0), (1, 100), (2, 1), (3, 1), (4, 0), (5, 0)])
