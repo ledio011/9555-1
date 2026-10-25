@@ -16,9 +16,6 @@ NPC_ATTR_MAP = {} # runtime NPC payloads for reconnect replay
 TEAM_STATES = {}
 CHAR_TEAM = {}
 TEAM_INVITES = {}
-# Set to True to let teams start EXP/equipment stages even when a member is
-# outside the stage's level band (default False = original game rule).
-TEAM_IGNORE_LEVEL_BAND = False
 TEAM_MATCH_QUEUE = {}
 TEAM_ID_COUNTER = 500000
 EXP_RUN_COUNTER = 900000
@@ -1116,8 +1113,13 @@ try:
     show_reward_path = os.path.join(text_asset_root, "ShowRewardData")
     if os.path.exists(show_reward_path):
         with open(show_reward_path, "r", encoding='utf-8') as f:
+            show_reward_columns = {}
             for line in f:
                 parts = line.strip().split(',')
+                if len(parts) > 2 and parts[0] == '*' and parts[1] == 'ID':
+                    show_reward_columns = {name.strip(): index
+                                           for index, name in enumerate(parts) if name.strip()}
+                    continue
                 if len(parts) >= 5 and parts[0] == '*' and parts[1].isdigit():
                     rewards = []
                     explicit_count_rewards = []
@@ -1139,28 +1141,34 @@ try:
                         # ShowRewardData.InitData/AddListItem in the APK ignores
                         # slots whose ItemN field is empty, regardless of the
                         # quality or count columns in that slot.
-                    # ShowRewardData starts Item1 at column 6; columns 3-5 are
-                    # Exp/Money1/Money2. Keep correctly aligned item slots for
-                    # copy-result previews without changing other reward paths.
-                    for index in range(6, len(parts), 3):
+                    # Use the APK table's named columns. In this build Item1
+                    # begins at column 3; there are no Exp/Money columns before
+                    # it. The old fixed offset treated item 3001 as 3001 EXP.
+                    for slot in range(1, 9):
+                        index = show_reward_columns.get(f'Item{slot}')
+                        if index is None or index >= len(parts):
+                            continue
                         item_id = parts[index].strip()
                         if not item_id:
                             continue
-                        quality_str = parts[index + 1].strip() if index + 1 < len(parts) else ''
-                        count_str = parts[index + 2].strip() if index + 2 < len(parts) else ''
+                        quality_index = show_reward_columns.get(f'Quality{slot}', index + 1)
+                        count_index = show_reward_columns.get(f'ItemCount{slot}', index + 2)
+                        quality_str = parts[quality_index].strip() if quality_index < len(parts) else ''
+                        count_str = parts[count_index].strip() if count_index < len(parts) else ''
                         quality = int(quality_str) if quality_str.lstrip('-').isdigit() else 0
                         count = int(count_str) if count_str.lstrip('-').isdigit() else -1
                         item_slot_rewards.append((item_id, quality, count))
                     SHOW_REWARD_CONFIG[parts[1]] = rewards
                     SHOW_REWARD_EXPLICIT_COUNT_CONFIG[parts[1]] = explicit_count_rewards
                     SHOW_REWARD_ITEM_SLOT_CONFIG[parts[1]] = item_slot_rewards
-                    def _show_reward_base_value(index):
-                        value = parts[index].strip() if index < len(parts) else ''
+                    def _show_reward_base_value(field):
+                        index = show_reward_columns.get(field)
+                        value = parts[index].strip() if index is not None and index < len(parts) else ''
                         return int(value) if value.lstrip('-').isdigit() else 0
                     SHOW_REWARD_BASE_CONFIG[parts[1]] = {
-                        'exp': _show_reward_base_value(3),
-                        'money1': _show_reward_base_value(4),
-                        'money2': _show_reward_base_value(5),
+                        'exp': _show_reward_base_value('Exp'),
+                        'money1': _show_reward_base_value('Money1'),
+                        'money2': _show_reward_base_value('Money2'),
                     }
         print(f"[SHOW REWARD CONFIG LOADED] count={len(SHOW_REWARD_CONFIG)}")
 
@@ -3352,15 +3360,6 @@ def send_team_update(team_id, only_ids=None):
     payload = team_payload(team)
     if payload is None: return
     data = encode_sproto([(0, payload)])
-    try:
-        _g=str(team.get('goal_id','')); _lo=int(team.get('min_level',1)); _hi=int(team.get('max_level',80)); _rows=[]
-        for _m in team.get('members',[]):
-            _c=ALL_CONNECTIONS.get(int(_m),(None,team.get('char_refs',{}).get(int(_m))))[1] or {}
-            _lv=int(_c.get('level',0)); _att=copy_attempts_remaining(_c,_g,COPY_SCENE_CONFIG.get(_g,{})) if (_c and is_team_battle_copy(_g)) else -1
-            _rows.append(f"{_m}(lv{_lv}{'' if _lo<=_lv<=_hi else ' OUT-OF-BAND'},att={_att},map={_c.get('map_id')})")
-        print(f"[TEAM] state team={team.get('id')} leader={team.get('leader_id')} goal={_g!r} band={_lo}-{_hi} members=[{', '.join(_rows)}]")
-    except Exception as _e:
-        print(f"[TEAM] state dump failed: {_e}")
     for cid in list(team.get('members', []) if only_ids is None else only_ids):
         send_push_to_char(cid, 518, data)
 
@@ -5523,31 +5522,76 @@ def clear_equipment_active_monsters(state):
             state.get(key, {}).pop(inst_id, None)
     state['active_monsters'] = []
 
-def equipment_stage_result_items(copy_id):
+def equipment_stage_result_items(copy_id, character):
+    """Resolve one usable equipment drop from this level bracket's client pool."""
     cfg = COPY_SCENE_CONFIG.get(str(copy_id), {})
-    preview_id = str(cfg.get('drop_id') or '')
-    # CopySceneData points at ShowRewardData, which the client uses to preview
-    # the bracket's rewards.  Only an explicit positive ItemCount is an
-    # authoritative grant; blank counts and ITEM_TYPE.SHOW gear icons must not
-    # be turned into invented backpack rewards.
-    return [
-        (str(item_id), int(quality), int(count))
-        for item_id, quality, count in SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(preview_id, [])
-        if int(count) > 0 and int(ITEM_CONFIG.get(str(item_id), {}).get('type', 0)) != 13
-    ]
+    reward_id = str(cfg.get('drop_id') or cfg.get('show_reward_id') or '')
+    authored_slots = SHOW_REWARD_ITEM_SLOT_CONFIG.get(reward_id, [])
+    rewards = []
+    gear_previews = []
 
-def equipment_stage_result_preview_items(copy_id):
-    """Return the equipment-tier preview icons authored for this map bracket."""
-    cfg = COPY_SCENE_CONFIG.get(str(copy_id), {})
-    reward_id = str(cfg.get('show_reward_id') or cfg.get('drop_id') or '')
-    # These ShowRewardData entries are ITEM_TYPE.SHOW placeholders (e.g. 8002,
-    # "display white tier-2 equipment"), not backpack items. The client uses
-    # them in the copy result panel, while the actual guaranteed payout is Exp.
-    return [
-        (str(item_id), int(quality), 1)
-        for item_id, quality, _count in SHOW_REWARD_ITEM_SLOT_CONFIG.get(reward_id, [])
-        if int(ITEM_CONFIG.get(str(item_id), {}).get('type', 0)) == 13
-    ]
+    for item_id, _quality, authored_count in authored_slots:
+        item_id = str(item_id)
+        item_cfg = ITEM_CONFIG.get(item_id, {})
+        if int(item_cfg.get('type', 0)) == 13:
+            # 8002/8102/etc are UI-only "equipment of tier/quality" icons.
+            # Translate one configured outcome to a real EquipData item; never
+            # put the non-equippable icon into the player's backpack/result.
+            gear_previews.append(item_id)
+            continue
+        if item_id not in ITEM_CONFIG:
+            continue
+        # Equipment-stage ShowRewardData rows leave ItemCount blank (-1), as
+        # this client table does for its reward previews. A single material
+        # item is the fallback quantity; explicit authored counts take priority.
+        count = int(authored_count) if int(authored_count) > 0 else 1
+        rewards.append((item_id, int(item_cfg.get('quality', 0)), count))
+
+    # Exp/Money are separate ShowRewardData columns only in client data versions
+    # that actually define them. This APK's 36001..36007 tables do not have an
+    # Exp column; their first item is 3001 (equipment enhancement material).
+    base_reward = SHOW_REWARD_BASE_CONFIG.get(reward_id, {})
+    stage_exp = max(0, int(base_reward.get('exp', 0)))
+    money1 = max(0, int(base_reward.get('money1', 0)))
+    money2 = max(0, int(base_reward.get('money2', 0)))
+    if stage_exp:
+        rewards.append(('2001', 0, stage_exp))
+    if money1:
+        rewards.append(('1001', 0, money1))
+    if money2:
+        rewards.append(('1002', 0, money2))
+
+    profession = int(character.get('prof', character.get('profession', 0))) if character else 0
+    gear_outcomes = []
+    for preview_id in gear_previews:
+        try:
+            tier = int(preview_id) % 10
+        except (TypeError, ValueError):
+            continue
+        quality = int(ITEM_CONFIG.get(preview_id, {}).get('quality', 0))
+        for equip_id, equip_cfg in EQUIP_CONFIG.items():
+            equip_id = str(equip_id)
+            if (int(equip_cfg.get('class', 0)) != tier
+                    or not 0 <= int(equip_cfg.get('position', -1)) < 6
+                    or int(ITEM_CONFIG.get(equip_id, {}).get('type', -1)) != 2
+                    or int(ITEM_CONFIG.get(equip_id, {}).get('level', 1)) > int(character.get('level', 1) if character else 1)):
+                continue
+            position = int(equip_cfg.get('position', -1))
+            job = int(equip_cfg.get('job', -1))
+            if position == 0:
+                if job != -1 or int(equip_cfg.get('weapon_type', -1)) != profession:
+                    continue
+            elif job not in (-1, profession):
+                continue
+            gear_outcomes.append((equip_id, quality))
+
+    if gear_outcomes:
+        gear_id, gear_quality = random.choice(gear_outcomes)
+        rewards.append((gear_id, gear_quality, 1))
+    elif gear_previews:
+        print(f"[EQUIP STAGE REWARD] no usable EquipData outcome copy={copy_id} "
+              f"profession={profession} previews={gear_previews}")
+    return rewards
 
 def finish_equipment_stage(state, win):
     if not state:
@@ -5572,26 +5616,17 @@ def finish_equipment_stage(state, win):
                 if elapsed <= threshold:
                     grade_flag |= bit
         grade = sum(bool(grade_flag & bit) for bit in (1, 2, 4))
-        rewards = equipment_stage_result_items(copy_id) if win else []
-        # Equipment-copy brackets define their guaranteed EXP in the ShowRewardData
-        # Exp column (3001 for the authored 10–80 brackets). It is not an item
-        # slot, so it must be translated to the same resource item the client
-        # expects in copy_scene_result.items and applied to the character.
         show_reward_id = str(cfg.get('show_reward_id') or cfg.get('drop_id') or '')
         stage_exp = max(0, int(SHOW_REWARD_BASE_CONFIG.get(show_reward_id, {}).get('exp', 0)))
-        if win and stage_exp:
-            rewards.insert(0, ('2001', 0, stage_exp))
-        result_rewards = list(rewards)
-        if win:
-            result_rewards.extend(equipment_stage_result_preview_items(copy_id))
-        item_payloads = [
-            encode_sproto([(0, iid), (1, count), (3, quality)])
-            for iid, quality, count in result_rewards
-        ]
         for cid, member_conn, char in exp_participant_chars(state):
             if not char:
                 continue
             push = lambda tag, data, member_id=cid: send_push_to_char(member_id, tag, data)
+            rewards = equipment_stage_result_items(copy_id, char) if win else []
+            item_payloads = [
+                encode_sproto([(0, iid), (1, count), (3, quality)])
+                for iid, quality, count in rewards
+            ]
             if win:
                 if rewards:
                     grant_item_rewards(char, rewards, member_conn, push, save=False)
@@ -6663,34 +6698,10 @@ def sync_mission_data(picked_char):
 
     # sync_mission.request schema: missions(0), last_missionId(1), sidedone_mission(2)
     # FIX: missions must be encoded as a Sproto array of objects (concatenated length-prefixed chunks)
-    # The APK stores side-mission completion as 64-bit flags, not mission IDs.
-    side_done_flags = []
-    for completed_mid in picked_char.get('completed_side_missions', []):
-        try:
-            completed_id = int(completed_mid)
-            completed_cfg = missions_data.get(str(completed_id), {})
-            if completed_cfg.get('class') != 2:
-                continue
-            side_offset = completed_id - 40000
-            if side_offset < 0:
-                continue
-            flag_index, bit_index = divmod(side_offset, 64)
-            if len(side_done_flags) <= flag_index:
-                side_done_flags.extend([0] * (flag_index + 1 - len(side_done_flags)))
-            side_done_flags[flag_index] |= 1 << bit_index
-        except (TypeError, ValueError):
-            continue
-
-    # Python integers are unsigned-width by default; the APK stores these masks as signed long.
-    side_done_flags = [
-        value - (1 << 64) if value >= (1 << 63) else value
-        for value in side_done_flags
-    ]
-
     data_list = [
         (0, own_missions_list),
         (1, str(last_main)),
-        (2, side_done_flags)
+        (2, [int(x) for x in picked_char.get('completed_side_missions', []) if x])
     ]
     return encode_sproto(data_list)
 
@@ -8017,79 +8028,6 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
         send_rpc_push(519, sync_mission_data(picked_char))
     return updated
 
-def advance_equipment_upgrade_missions(picked_char, send_rpc_push, mission_id=None):
-    """Reconcile equipment-level missions against levels already saved on the character."""
-    mission_slots = {
-        125: (0,),       # Weapon
-        124: (1, 2, 3),  # Armor: helmet, shirt, pants
-        126: (4, 5),     # Accessories: belt, necklace
-    }
-    active = picked_char.get('active_missions', {})
-    if not isinstance(active, dict):
-        return False
-
-    levels = equipment_enhance_levels(picked_char)
-    updated = False
-    for mid, mdata in active.items():
-        if mission_id is not None and str(mid) != str(mission_id):
-            continue
-        if not isinstance(mdata, dict) or mdata.get('state') != 1:
-            continue
-
-        cfg = missions_data.get(str(mid), {})
-        logic_type = cfg.get('logic_type')
-        try:
-            required_level = int(cfg.get('logic_id') or 0)
-            if logic_type == 127:
-                # Skill-upgrade missions (42001+) require any one saved skill
-                # to reach the target; use existing skill levels on login/accept
-                # as well as after every successful skill-upgrade request.
-                raw_skill_levels = picked_char.get('skill_levels', {})
-                if not isinstance(raw_skill_levels, dict):
-                    raw_skill_levels = {}
-                current_level = max(
-                    (max(0, int(value)) for value in raw_skill_levels.values()),
-                    default=0
-                )
-            else:
-                slots = mission_slots.get(logic_type)
-                if not slots:
-                    continue
-                current_level = max(int(levels.get(slot, 0)) for slot in slots)
-        except (TypeError, ValueError):
-            continue
-        if required_level <= 0:
-            continue
-
-        parm = mdata.get('parm')
-        if not isinstance(parm, list):
-            parm = [0] * 8
-        elif len(parm) < 8:
-            parm = parm + [0] * (8 - len(parm))
-        try:
-            old_progress = int(parm[0])
-        except (TypeError, ValueError, IndexError):
-            old_progress = 0
-
-        # Cap the visible progress at the mission's target. Already-upgraded
-        # gear therefore satisfies lower-level goals without another upgrade.
-        progress = min(max(0, current_level), required_level)
-        if old_progress != progress:
-            parm[0] = progress
-            mdata['parm'] = parm
-            mdata['_last_progress'] = progress
-            if send_rpc_push:
-                send_rpc_push(524, encode_sproto([(0, str(mid)), (1, 1), (2, progress)]))
-            updated = True
-
-        if current_level >= required_level:
-            mdata['state'] = 2
-            if send_rpc_push:
-                send_rpc_push(523, encode_sproto([(0, str(mid)), (1, 2)]))
-            updated = True
-
-    return updated
-
 def claim_client_local_npc_death(picked_char, npcid, x, z):
     """Validate and de-duplicate map NPC deaths reported without a server instance ID.
 
@@ -9062,7 +9000,7 @@ def client_handler(conn, addr):
 
             raw = sproto_unpack(data); pkg = decode_sproto(raw, 0)
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
-            if msg != 101: print(f"[RX] MSG={msg} SESSION={session}")
+            print(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
 
             if msg == 2: # visitor
@@ -9291,10 +9229,6 @@ def client_handler(conn, addr):
                         picked_char.get('skill_positions', {})
                     )
                     send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
-
-                    # Reconcile equipment missions for gear upgraded before this login.
-                    if advance_equipment_upgrade_missions(picked_char, send_rpc_push):
-                        save_chars(all_accounts_chars)
 
                     # 519: mission_sync
                     send_rpc_push(519, sync_mission_data(picked_char))
@@ -9817,7 +9751,6 @@ def client_handler(conn, addr):
                     res = accept_mission_logic(picked_char, mid)
                     print(f"[MISSION ACCEPT REQ] mid={mid} result={res}")
                     if res:
-                        advance_equipment_upgrade_missions(picked_char, send_rpc_push, mission_id=mid)
                         save_chars(all_accounts_chars)
                         print(f"[MISSION ACCEPT] mission_id={mid}")
                         m_entry = picked_char.get('active_missions', {}).get(mid, {})
@@ -10036,8 +9969,6 @@ def client_handler(conn, addr):
                             picked_char, sid, cur_lv, upgrade_all
                         )
                         if upgraded:
-                            skill_mission_changed = advance_equipment_upgrade_missions(
-                                picked_char, send_rpc_push)
                             save_chars(all_accounts_chars)
                             smap = build_skills_map(
                                 picked_char['prof'], picked_char['level'],
@@ -10046,8 +9977,6 @@ def client_handler(conn, addr):
                             )
                             send_rpc_push(540, encode_sproto([(0, smap), (1, True)]))
                             sync_char_attrs_rpc(conn, picked_char)
-                            if skill_mission_changed:
-                                send_rpc_push(519, sync_mission_data(picked_char))
                         elif not request_valid:
                             print(f"[SKILL SECURITY] rejected inconsistent/unowned/non-upgradable skill "
                                   f"sid={sid} client_lv={cur_lv} server_lv={server_skill_lv}")
@@ -10447,8 +10376,6 @@ def client_handler(conn, addr):
                                             str(slot): level for slot, level in levels.items()
                                         }
                                         item['level'] = target_level
-                                        equipment_mission_changed = advance_equipment_upgrade_missions(
-                                            picked_char, send_rpc_push)
                                         save_chars(all_accounts_chars)
                                         push_backpack_item_update(send_rpc_push, 1, item)
                                         sync_char_attrs_rpc(conn, picked_char)
@@ -10457,8 +10384,6 @@ def client_handler(conn, addr):
                                             get_character_stats(picked_char)['power']
                                         )
                                         sync_equipment_status_to_peers(picked_char)
-                                        if equipment_mission_changed:
-                                            send_rpc_push(519, sync_mission_data(picked_char))
                                         print(f"[BACKPACK] enhanced slot={subtype} item={item_id} level={current_level}->{target_level} material={total_material} cash={total_cash}")
                 send_rpc_response(session)
 
@@ -13549,7 +13474,7 @@ def client_handler(conn, addr):
             # Keep the legacy chat-shaped 110 payload out of the team invite
             # reply path. The APK's real chat RPC is 120; ret_invite_join_team
             # (110) carries integer fields ok(0), id(1) and is handled below.
-            elif msg == 110 and (isinstance(body.get(1), str) or (isinstance(body.get(1), (bytes, bytearray)) and len(body.get(1)) not in (1, 4, 8))): # legacy chat-shaped payload (field 1 is text, NOT a binary int id)
+            elif msg == 110 and isinstance(body.get(1), (bytes, str)): # legacy chat-shaped payload
                 if picked_char:
                     chat_type = get_val_int(body, 0)
                     chat_msg = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1, ''))
@@ -13617,35 +13542,19 @@ def client_handler(conn, addr):
                 elif picked_char and msg==110:
                     invite=TEAM_INVITES.get(cid); ok=get_val_int(body,0,0)==1
                     reply_id=get_val_int(body,1,0)
-                    # The client echoes the INVITER's id (or the team id) in field 1,
-                    # not the invitee's own id, so accept any of those.
+                    valid=bool(invite and invite.get('expires_at',0)>=int(time.time()) and reply_id==cid)
                     inviter=int(invite.get('inviter_id',0)) if invite else 0
-                    invite_tid=int(invite.get('team_id',0)) if invite else 0
-                    valid=bool(invite and invite.get('expires_at',0)>=int(time.time())
-                               and reply_id in (inviter, invite_tid, cid))
-                    joined=False
-                    if ok and valid:
-                        team=TEAM_STATES.get(invite_tid)
-                        if (team and not team.get('active_run') and get_team_for_char(cid) is None
-                                and inviter==int(team.get('leader_id',0)) and team_join_member(team,picked_char,invited=True)):
-                            joined=True
-                            send_team_update(invite_tid)
-                            print(f"[TEAM] invite accepted via 110 team={invite_tid} member={cid}")
                     if inviter:
-                        send_push_to_char(inviter,517,encode_sproto([(0,1 if joined else 0),(1,cid)]))
-                    if not ok or not valid or joined: TEAM_INVITES.pop(cid,None)
+                        send_push_to_char(inviter,517,encode_sproto([(0,1 if ok and valid else 0),(1,cid)]))
+                    if not ok or not valid: TEAM_INVITES.pop(cid,None)
                 elif picked_char and msg==161:
                     tid=get_val_int(body,0); team=TEAM_STATES.get(tid); inv=TEAM_INVITES.get(cid,{})
                     is_invite_accept=get_val_int(body,1,0)==1
                     invited=bool(is_invite_accept and inv.get('team_id')==tid
                         and inv.get('expires_at',0)>=int(time.time())
                         and team and inv.get('inviter_id')==int(team.get('leader_id',0)))
-                    if team and is_invite_accept and cid in team.get('members',[]):
-                        TEAM_INVITES.pop(cid,None)
-                        send_team_update(tid)
-                        print(f"[TEAM] 161 accept: member={cid} already in team={tid}")
-                    elif team and not team.get('active_run') and is_invite_accept:
-                        if invited and team_join_member(team,picked_char,invited=True):
+                    if team and not team.get('active_run') and is_invite_accept:
+                        if invited and team_join_member(team,picked_char):
                             TEAM_INVITES.pop(cid,None)
                             send_team_update(tid)
                             print(f"[TEAM] invite accepted team={tid} member={cid}")
@@ -13705,13 +13614,6 @@ def client_handler(conn, addr):
                         send_rpc_push(518,encode_sproto([]))
                 elif picked_char and msg==214:
                     goal=get_val_str(body,0,''); goal_type=get_val_int(body,1,1)
-                    _t=get_team_for_char(cid); _cfg=COPY_SCENE_CONFIG.get(goal,{})
-                    _why=[]
-                    if not is_team_battle_copy(goal): _why.append(f'goal {goal!r} is not a team battle copy')
-                    if _t and _t.get('leader_id')!=cid: _why.append(f"not leader (leader={_t.get('leader_id')})")
-                    if _t and (_t.get('active_run') or _t.get('pending_run')): _why.append('run active/pending')
-                    if not _t and not is_character_available_for_team(picked_char): _why.append('you are unavailable (map/stage state)')
-                    print(f"[TEAM] 214 match request player={cid} goal={goal!r} type={goal_type} team={_t.get('id') if _t else None} members={_t.get('members') if _t else None} level_band={_cfg.get('min_level')}-{_cfg.get('max_level')} problems={_why or 'none'}")
                     if is_team_battle_copy(goal):
                         team=get_team_for_char(cid)
                         if team is None and is_character_available_for_team(picked_char):
@@ -13746,17 +13648,6 @@ def client_handler(conn, addr):
                 elif picked_char and msg==215:
                     team=get_team_for_char(cid); goal=get_val_str(body,0,''); copy_id=goal if is_team_battle_copy(goal) else ''
                     cfg=COPY_SCENE_CONFIG.get(copy_id)
-                    _why=[]
-                    if not team: _why.append('not in a team')
-                    else:
-                        if team.get('leader_id')!=cid: _why.append(f"not leader (leader={team.get('leader_id')})")
-                        if str(team.get('goal_id',''))!=copy_id: _why.append(f"goal mismatch team={team.get('goal_id')!r} req={goal!r}")
-                        if team.get('active_run') or team.get('pending_run'): _why.append('run already active/pending')
-                    if not cfg: _why.append(f'no copy config for {copy_id!r}')
-                    if get_val_int(body,1,1)!=1: _why.append(f'flag={get_val_int(body,1,1)}')
-                    print(f"[TEAM] 215 start request player={cid} goal={goal!r} team={team.get('id') if team else None} members={team.get('members') if team else None} ignored={_why or 'none'}")
-                    if _why and team and team.get('leader_id')!=cid:
-                        send_rpc_push(603,encode_sproto([(0,int(cid)),(1,1)]))
                     if (team and team.get('leader_id')==cid and str(team.get('goal_id',''))==copy_id
                             and get_val_int(body,1,1)==1 and cfg and not team.get('active_run') and not team.get('pending_run')):
                         for member_id in team.get('members',[]):
@@ -13767,19 +13658,12 @@ def client_handler(conn, addr):
                                 else: send_push_to_char(member_id,555,copy_update)
                         ids=list(team['members']); minm=max(2,int(cfg.get('min_member',2)))
                         valid=minm<=len(ids)<=int(cfg.get('max_member',4)) and all(ALL_CONNECTIONS.get(x,(None,None))[0] is not None and ALL_CONNECTIONS.get(x,(None,None))[1] is not None for x in ids)
-                        if not valid: print(f"[TEAM] 215 blocked: members={ids} need {minm}-{cfg.get('max_member',4)} members all online")
                         if valid:
-                            for x in ids:
-                                _m=ALL_CONNECTIONS[x][1]
-                                if not is_character_available_for_team(_m): print(f"[TEAM] 215 blocked: member={x} unavailable map={_m.get('map_id')}")
-                                if not team_stage_level_ok(team,_m,cfg): print(f"[TEAM] 215 blocked: LEADER {x} level {_m.get('level')} outside stage band {cfg['min_level']}-{cfg['max_level']}")
-                            valid=all(is_character_available_for_team(ALL_CONNECTIONS[x][1]) and team_stage_level_ok(team,ALL_CONNECTIONS[x][1],cfg) for x in ids)
+                            valid=all(is_character_available_for_team(ALL_CONNECTIONS[x][1]) and cfg['min_level']<=int(ALL_CONNECTIONS[x][1].get('level',1))<=cfg['max_level'] for x in ids)
                         if valid:
                             # Every participant spends their own daily attempt;
                             # do not let a ready squad carry exhausted members
                             # into a run for free.
-                            for x in ids:
-                                if copy_attempts_remaining(ALL_CONNECTIONS[x][1],copy_id,cfg)<=0: print(f"[TEAM] 215 blocked: member={x} has no daily attempts left")
                             valid=all(copy_attempts_remaining(ALL_CONNECTIONS[x][1],copy_id,cfg)>0 for x in ids)
                         if valid:
                             session_id=next_exp_run_id()
@@ -15397,31 +15281,13 @@ def client_handler(conn, addr):
         print(f"[-] Client disconnected: {addr}")
 
 
-def team_stage_level_ok(team, char, cfg):
-    """Team play: only the LEADER must be inside the stage's level band.
-    Other members may be any level. (Solo entry checks the player's own level elsewhere.)"""
-    if TEAM_IGNORE_LEVEL_BAND: return True
-    if not team or not char: return False
-    if int(char.get('id',0)) != int(team.get('leader_id',0)): return True
-    return int(cfg.get('min_level',1)) <= int(char.get('level',1)) <= int(cfg.get('max_level',80))
-
-def team_join_member(team, char, invited=False):
+def team_join_member(team, char):
     cid=int(char.get('id',0))
-    tid=int(team.get('id',0)) if team else 0
-    def _no(reason):
-        print(f"[TEAM] join blocked team={tid} member={cid} reason={reason}")
-        return False
-    if not team: return _no('no team')
-    if team.get('active_run') or team.get('pending_run'): return _no('team in run')
-    if len(team.get('members',[]))>=4: return _no('team full')
-    if cid in team.get('members',[]): return _no('already member')
-    lv=int(char.get('level',1)); lo=int(team.get('min_level',1)); hi=int(team.get('max_level',80))
-    # A direct invite from the leader overrides the recruit level band.
-    if not is_character_available_for_team(char):
-        return _no(f"unavailable map={char.get('map_id')} exp_stage={bool(char.get('exp_stage_state'))} equip_stage={bool(char.get('equipment_stage_state'))}")
-    if CHAR_TEAM.get(cid) not in (None, tid): return _no(f'in other team {CHAR_TEAM.get(cid)}')
+    if not team or team.get('active_run') or team.get('pending_run') or len(team.get('members',[]))>=4 or cid in team.get('members',[]): return False
+    if not int(team.get('min_level',1))<=int(char.get('level',1))<=int(team.get('max_level',80)): return False
+    if not is_character_available_for_team(char) or (CHAR_TEAM.get(cid) not in (None, int(team.get('id', 0)))): return False
     team.setdefault('members',[]).append(cid); team.setdefault('char_refs',{})[cid]=char
-    CHAR_TEAM[cid]=tid; char['team_goal_copy']=str(team.get('goal_id',''))
+    CHAR_TEAM[cid]=int(team['id']); char['team_goal_copy']=str(team.get('goal_id',''))
     return True
 
 def team_goal_level_bounds(copy_id, min_level=1, max_level=80):
@@ -15615,7 +15481,7 @@ def start_team_exp_run(team, copy_id):
     for cid in ids:
         conn,ch=ALL_CONNECTIONS.get(cid,(None,None))
         if conn is None or ch is None: return False
-        if not is_character_available_for_team(ch) or not team_stage_level_ok(team,ch,cfg): return False
+        if not is_character_available_for_team(ch) or not cfg['min_level']<=int(ch.get('level',1))<=cfg['max_level']: return False
         if copy_attempts_remaining(ch,copy_id,cfg)<=0: return False
         players.append((cid,conn,ch))
     leader=next((ch for cid,_conn,ch in players if int(cid)==int(team.get('leader_id',0))),None)
@@ -15671,7 +15537,7 @@ def start_team_equipment_run(team, copy_id):
         member_conn, member = ALL_CONNECTIONS.get(int(cid), (None, None))
         if (member_conn is None or member is None
                 or not is_character_available_for_team(member)
-                or not team_stage_level_ok(team, member, cfg)
+                or not int(cfg.get('min_level', 1)) <= int(member.get('level', 1)) <= int(cfg.get('max_level', 80))
                 or copy_attempts_remaining(member, copy_id, cfg) <= 0):
             return False
         players.append((int(cid), member_conn, member))
