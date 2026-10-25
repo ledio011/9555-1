@@ -13673,33 +13673,6 @@ def client_handler(conn, addr):
                 if session is not None:
                     send_rpc_response(session)
 
-            # Keep the legacy chat-shaped 110 payload out of the team invite
-            # reply path. The APK's real chat RPC is 120; ret_invite_join_team
-            # (110) carries integer fields ok(0), id(1) and is handled below.
-            elif msg == 110 and isinstance(body.get(1), (bytes, str)): # legacy chat-shaped payload
-                if picked_char:
-                    chat_type = get_val_int(body, 0)
-                    chat_msg = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1, ''))
-                    # TAG 528: ret_chat - echo chat message back to client
-                    # chat_item schema: senderId(0), senderName(1), tellId(2), tellName(3),
-                    #   chatInfo(4), chattype(5), linktype(6), intdata(7), stringdata(8),
-                    #   senderProfession(9), level(10), combValue(11), guildId(12), guildName(13), chatInfo2(14)
-                    chat_item = encode_sproto([
-                        (0, picked_char['id']),     # senderId
-                        (1, picked_char['name']),   # senderName
-                        (2, 0),                     # tellId (0 = global chat)
-                        (3, ""),                    # tellName
-                        (4, chat_msg),              # chatInfo (the message text)
-                        (5, chat_type),             # chattype
-                        (6, 0),                     # linktype
-                        (10, picked_char.get('level', 1))  # level
-                    ])
-                    send_rpc_push(528, encode_sproto([(0, [chat_item])]))
-                    print(f"[CHAT] type={chat_type} from={picked_char['name']} msg={chat_msg[:50]}")
-                if session is not None:
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-
             elif msg in (109, 110, 161, 162, 163, 164, 166, 213, 214, 215, 216, 217):
                 cid=int(picked_char.get('id',0)) if picked_char else 0
                 if picked_char and not is_current_character_connection(conn, picked_char):
