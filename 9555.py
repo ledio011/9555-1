@@ -6669,6 +6669,12 @@ def sync_mission_data(picked_char):
         except (TypeError, ValueError):
             continue
 
+    # Python integers are unsigned-width by default; the APK stores these masks as signed long.
+    side_done_flags = [
+        value - (1 << 64) if value >= (1 << 63) else value
+        for value in side_done_flags
+    ]
+
     data_list = [
         (0, own_missions_list),
         (1, str(last_main)),
