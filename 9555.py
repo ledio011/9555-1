@@ -13772,8 +13772,8 @@ def client_handler(conn, addr):
                             for x in ids:
                                 _m=ALL_CONNECTIONS[x][1]
                                 if not is_character_available_for_team(_m): print(f"[TEAM] 215 blocked: member={x} unavailable map={_m.get('map_id')}")
-                                if not TEAM_IGNORE_LEVEL_BAND and not cfg['min_level']<=int(_m.get('level',1))<=cfg['max_level']: print(f"[TEAM] 215 blocked: member={x} level {_m.get('level')} outside {cfg['min_level']}-{cfg['max_level']}")
-                            valid=all(is_character_available_for_team(ALL_CONNECTIONS[x][1]) and (TEAM_IGNORE_LEVEL_BAND or cfg['min_level']<=int(ALL_CONNECTIONS[x][1].get('level',1))<=cfg['max_level']) for x in ids)
+                                if not team_stage_level_ok(team,_m,cfg): print(f"[TEAM] 215 blocked: LEADER {x} level {_m.get('level')} outside stage band {cfg['min_level']}-{cfg['max_level']}")
+                            valid=all(is_character_available_for_team(ALL_CONNECTIONS[x][1]) and team_stage_level_ok(team,ALL_CONNECTIONS[x][1],cfg) for x in ids)
                         if valid:
                             # Every participant spends their own daily attempt;
                             # do not let a ready squad carry exhausted members
@@ -15397,6 +15397,14 @@ def client_handler(conn, addr):
         print(f"[-] Client disconnected: {addr}")
 
 
+def team_stage_level_ok(team, char, cfg):
+    """Team play: only the LEADER must be inside the stage's level band.
+    Other members may be any level. (Solo entry checks the player's own level elsewhere.)"""
+    if TEAM_IGNORE_LEVEL_BAND: return True
+    if not team or not char: return False
+    if int(char.get('id',0)) != int(team.get('leader_id',0)): return True
+    return int(cfg.get('min_level',1)) <= int(char.get('level',1)) <= int(cfg.get('max_level',80))
+
 def team_join_member(team, char, invited=False):
     cid=int(char.get('id',0))
     tid=int(team.get('id',0)) if team else 0
@@ -15409,7 +15417,6 @@ def team_join_member(team, char, invited=False):
     if cid in team.get('members',[]): return _no('already member')
     lv=int(char.get('level',1)); lo=int(team.get('min_level',1)); hi=int(team.get('max_level',80))
     # A direct invite from the leader overrides the recruit level band.
-    if not invited and not lo<=lv<=hi: return _no(f'level {lv} outside {lo}-{hi}')
     if not is_character_available_for_team(char):
         return _no(f"unavailable map={char.get('map_id')} exp_stage={bool(char.get('exp_stage_state'))} equip_stage={bool(char.get('equipment_stage_state'))}")
     if CHAR_TEAM.get(cid) not in (None, tid): return _no(f'in other team {CHAR_TEAM.get(cid)}')
@@ -15608,7 +15615,7 @@ def start_team_exp_run(team, copy_id):
     for cid in ids:
         conn,ch=ALL_CONNECTIONS.get(cid,(None,None))
         if conn is None or ch is None: return False
-        if not is_character_available_for_team(ch) or not cfg['min_level']<=int(ch.get('level',1))<=cfg['max_level']: return False
+        if not is_character_available_for_team(ch) or not team_stage_level_ok(team,ch,cfg): return False
         if copy_attempts_remaining(ch,copy_id,cfg)<=0: return False
         players.append((cid,conn,ch))
     leader=next((ch for cid,_conn,ch in players if int(cid)==int(team.get('leader_id',0))),None)
@@ -15664,7 +15671,7 @@ def start_team_equipment_run(team, copy_id):
         member_conn, member = ALL_CONNECTIONS.get(int(cid), (None, None))
         if (member_conn is None or member is None
                 or not is_character_available_for_team(member)
-                or not int(cfg.get('min_level', 1)) <= int(member.get('level', 1)) <= int(cfg.get('max_level', 80))
+                or not team_stage_level_ok(team, member, cfg)
                 or copy_attempts_remaining(member, copy_id, cfg) <= 0):
             return False
         players.append((int(cid), member_conn, member))
