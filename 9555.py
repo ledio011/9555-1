@@ -13,6 +13,28 @@ NPC_INST_MAP = {} # inst_id -> nid (to resolve rewards)
 NPC_INSTANCE_MAP = {} # inst_id -> map ID, to reject cross-map forged death reports
 NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_ATTR_MAP = {} # runtime NPC payloads for reconnect replay
+# Striped locks serialize world-NPC HP/death transitions without retaining a
+# lock object forever for every short-lived NPC instance.
+NPC_HP_LOCKS = tuple(threading.RLock() for _ in range(256))
+CLIENT_LOCAL_NPC_RESPAWN_GRACE_SECONDS = 2.0
+
+def npc_hp_lock(inst_id):
+    return NPC_HP_LOCKS[int(inst_id) % len(NPC_HP_LOCKS)]
+
+# Two shipped MonsterData rows reference NPC IDs that have no NpcData record in
+# this APK export.  Keep their logical IDs for server-side kills/missions, but
+# use the closest existing client template ID in npc_create packets so Unity
+# can resolve and render the NPC instead of leaving a missing-model ghost.
+NPC_CLIENT_ID_ALIASES = {'21209': '21206', '61303': '61302'}
+
+def npc_data_id_matches_report(logical_id, reported_id):
+    logical_id = str(logical_id or '')
+    reported_id = str(reported_id or '')
+    return logical_id == reported_id or NPC_CLIENT_ID_ALIASES.get(logical_id) == reported_id
+
+def client_owns_map_npc_simulation(map_id):
+    """The APK spawns MonsterData NPCs itself in local tutorial/low-phone scenes."""
+    return int(MAP_CONFIG.get(str(map_id), {}).get('type', -1)) in (6, 10, 51)
 TEAM_STATES = {}
 CHAR_TEAM = {}
 TEAM_INVITES = {}
@@ -495,6 +517,14 @@ try:
                         'cria_abs': int(parts[61]) if len(parts) > 61 and parts[61].isdigit() else 0,
                     }
         print(f"[NPC CONFIG LOADED] count={len(NPC_CONFIG)}")
+
+    # MonsterData is authored with two IDs absent from this APK's NpcData.
+    # Alias only their stat/template records; preserve the authored ID in the
+    # runtime instance map so kill counts and mission targets remain exact.
+    for _missing_nid, _template_nid in NPC_CLIENT_ID_ALIASES.items():
+        if _missing_nid not in NPC_CONFIG and _template_nid in NPC_CONFIG:
+            NPC_CONFIG[_missing_nid] = dict(NPC_CONFIG[_template_nid])
+            print(f"[NPC CONFIG ALIAS] logical={_missing_nid} client_template={_template_nid}")
 
     # Load AIData (AI behavior parameters for NPCs)
     ai_data_path = os.path.join(text_asset_root, "AIData")
@@ -2099,7 +2129,7 @@ PROF_SKILLS = {
 }
 
 def get_character_combat_skills(prof, equipped_items=None):
-    """Resolve the basic combo and dodge from the equipped weapon's EquipData."""
+    """Resolve the combo/dodge from equipped weapon data, falling back to its family."""
     try:
         profession = int(prof)
     except (TypeError, ValueError):
@@ -2119,6 +2149,15 @@ def get_character_combat_skills(prof, equipped_items=None):
     if not weapon:
         return resolved
     equip_cfg = EQUIP_CONFIG.get(str(weapon.get('id', '')), {})
+    try:
+        weapon_family = int(equip_cfg.get('weapon_type', -1))
+    except (TypeError, ValueError):
+        weapon_family = -1
+    family_skills = PROF_SKILLS.get(weapon_family)
+    if family_skills:
+        family_atk = family_skills.get('atk', [])
+        resolved['atk'] = [str(skill_id) for skill_id in family_atk]
+        resolved['dodge'] = str(family_skills.get('dodge', resolved['dodge']))
     base_skills = [str(skill_id).strip() for skill_id in equip_cfg.get('base_skills', [])
                    if str(skill_id).strip()]
     if (len(base_skills) >= 4
@@ -5344,7 +5383,7 @@ def build_npc_attr_sproto(nid, name, x, z, o, existing_inst_id=None):
         hp_cur = max(0, int(NPC_HP_MAP.get(inst_id, hp_max)))
         NPC_INST_MAP[inst_id] = str(nid)
 
-    final_nid = str(nid)
+    final_nid = NPC_CLIENT_ID_ALIASES.get(str(nid), str(nid))
     if ";" in final_nid:
         if "XD_A" in final_nid: final_nid = "100"
         elif "QJ_A" in final_nid: final_nid = "104"
@@ -6495,6 +6534,15 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid):
     valid_kill = npcid and npcid != "None"
 
     print(f"[EXP KILL] on_npc_killed inst_id={inst_id} npcid={npcid} valid={valid_kill} exp_state={exp_state is not None}")
+    # Normal world/copy kills are confirmed here from server HP reaching zero.
+    # Unlike map 11's client-local report path and EXP's per-wave batch flush,
+    # this path previously granted the kill but never advanced kill missions.
+    # Keep stage progress in its existing batch/result flow to avoid double
+    # crediting the same instance.
+    current_map = str(picked_char.get('map_id', ''))
+    if valid_kill and not is_exp_map(current_map) and not is_equipment_copy_map(current_map):
+        advance_missions(picked_char, send_rpc_push, 'kill', target_id=npcid)
+
     if exp_state and inst_id:
         active_monsters = exp_state.get('active_monsters', [])
         print(f"[EXP KILL] active_monsters_remaining={len(active_monsters)}")
@@ -6692,6 +6740,14 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             return inst
         spawn_exp_stage_subwave_internal(conn,push,picked_char,state,cfg,create_exp_npc)
         start_exp_stage_runtime(conn,picked_char,state)
+        return
+    if client_owns_map_npc_simulation(map_str):
+        # Tutorial scene types 6/10 and low-phone type 51 create MonsterData
+        # NPCs locally: tutorial groups are wave-driven and city NPCs are
+        # proximity-driven.
+        # Sending TAG 509 duplicates those client-owned actors and leaves a
+        # second server copy alive after the client reports the local death.
+        print(f"[NPC SPAWN] client-owned MonsterData simulation map={map_str}; suppress server duplicates")
         return
     if map_str != "11" and map_str in STATIC_NPC_DATA:
         for m in STATIC_NPC_DATA[map_str]:
@@ -8071,10 +8127,10 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
 def claim_client_local_npc_death(picked_char, npcid, x, z):
     """Validate and de-duplicate map NPC deaths reported without a server instance ID.
 
-    The APK's city NPC death request contains only NPC type and coordinates.
-    Match it against this map's MonsterData or the character's active quest
-    spawn, require the player to be nearby, and consume one configured spawn
-    slot so replayed reports cannot mint repeated kill rewards.
+    Tutorial scene maps are simulated locally by the APK. Its death request
+    contains NPC type and coordinates, but no server instance ID. Match it
+    against this map's MonsterData or active quest spawn, require the player to
+    be nearby, and apply the client's 2-3 second recycle grace per spawn slot.
     """
     try:
         map_id = str(picked_char.get('map_id', ''))
@@ -8093,13 +8149,17 @@ def claim_client_local_npc_death(picked_char, npcid, x, z):
     candidates = []
     for category in (MONSTER_DATA, STATIC_NPC_DATA):
         for slot, spawn in enumerate(category.get(map_id, [])):
-            if str(spawn.get('nid')) != nid:
+            if not npc_data_id_matches_report(spawn.get('nid'), nid):
                 continue
-            rebirth_ms = int(spawn.get('rebirth_time', -1))
-            cooldown = max(30.0, min(3600.0, rebirth_ms / 1000.0)) if rebirth_ms > 0 else 300.0
+            # In this APK ReBirthTime is not consumed by its local tutorial
+            # NPC lifecycle. NewTutorialSceneManager recycles ragdoll NPCs at
+            # 2s (the other ragdoll path uses 2.5-3s); the old 30/300s floor
+            # dropped valid repeated kills from a client-respawned slot.
+            cooldown = CLIENT_LOCAL_NPC_RESPAWN_GRACE_SECONDS
             candidates.append((math.hypot(x - int(spawn['x']), z - int(spawn['z'])),
                                int(spawn['x']), int(spawn['z']), f"{category is STATIC_NPC_DATA}:{slot}",
-                               max(1500, int(spawn.get('patrol_distance', 0)) + 1000), cooldown))
+                               max(1500, int(spawn.get('patrol_distance', 0)) + 1000), cooldown,
+                               str(spawn.get('nid', nid))))
 
     # Kill-target NPCs can be mission-spawned from their separate placement
     # table and therefore may not have a MonsterData row for the current map.
@@ -8110,14 +8170,17 @@ def claim_client_local_npc_death(picked_char, npcid, x, z):
         logic_id = str(cfg.get('logic_id', ''))
         spawn_key = logic_id if logic_id in KILL_TARGET_SPAWNS else str(mid)
         for row_index, spawn in enumerate(KILL_TARGET_SPAWNS.get(spawn_key, [])):
-            if str(spawn.get('map')) != map_id or str(spawn.get('nid')) != nid:
+            if (str(spawn.get('map')) != map_id
+                    or not npc_data_id_matches_report(spawn.get('nid'), nid)):
                 continue
             count = max(1, int(spawn.get('num', 1)))
             radius = max(1000, int(spawn.get('range', 500)) + 1000)
             distance = math.hypot(x - int(spawn['x']), z - int(spawn['z']))
             for slot in range(count):
                 candidates.append((distance, int(spawn['x']), int(spawn['z']),
-                                   f"quest:{mid}:{row_index}:{slot}", radius, 300.0))
+                                   f"quest:{mid}:{row_index}:{slot}", radius,
+                                   CLIENT_LOCAL_NPC_RESPAWN_GRACE_SECONDS,
+                                   str(spawn.get('nid', nid))))
 
     candidates = [candidate for candidate in candidates if candidate[0] <= candidate[4]]
     if not candidates:
@@ -8128,13 +8191,18 @@ def claim_client_local_npc_death(picked_char, npcid, x, z):
         # Bound memory while preserving recent replay protection.
         if len(LOCAL_NPC_DEATHS) > 10000:
             LOCAL_NPC_DEATHS.clear()
-        for _distance, sx, sz, slot_key, _radius, cooldown in candidates:
+        # The client report has no spawn-instance ID and this APK contains
+        # intentional same-ID/same-coordinate spawn rows. Claim the nearest
+        # slot that is ready; each slot has its own grace period, so one
+        # entity cannot keep consuming the same slot while co-located authored
+        # entities can still each receive kill credit.
+        for _distance, sx, sz, slot_key, _radius, cooldown, logical_nid in candidates:
             key = (char_id, map_id, nid, slot_key, sx, sz)
             last = LOCAL_NPC_DEATHS.get(key)
             if last is not None and now - last < cooldown:
                 continue
             LOCAL_NPC_DEATHS[key] = now
-            return True
+            return logical_nid
     return False
 
 def validate_arrive_target_report(picked_char, mission_id):
@@ -11924,8 +11992,14 @@ def client_handler(conn, addr):
                             # === NPC/Monster/Boss damage ===
                             # Map 11 NPCs are fully client-side - skip all server-side HP/death handling
                             # Do NOT advance missions on damage — only on actual death (tag 307)
-                            if picked_char and str(picked_char.get('map_id')) == '11':
-                                # Issue 213: TAG 514 (hit_action) client handler does nothing — skip sending
+                            if picked_char and (
+                                    str(picked_char.get('map_id')) == '11'
+                                    or client_owns_map_npc_simulation(picked_char.get('map_id'))):
+                                # Tutorial NPC combat is simulated and spawned
+                                # locally by the APK. MSG 111 targets client
+                                # instance IDs; MSG 307 is the validated death
+                                # event for these scenes, so never treat these
+                                # as server-created NPC instances.
                                 continue
 
                             cur_map = str(picked_char.get('map_id', ''))
@@ -12047,17 +12121,55 @@ def client_handler(conn, addr):
                                     hit = True
                                     calc_cri = is_cri
                             else:
-                                server_dmg, hit, calc_cri = get_combat_damage(
-                                    attacker_stats, defender_stats, skill_id, skill_lv,
-                                    effinfo_id=effinfo_id, sat_type='satm'
-                                )
-                                if not hit:
-                                    server_dmg = 0
-                                    calc_cri = False
-                                actual_dmg = server_dmg
+                                # SkillLogic applies this random result to the
+                                # client NPC before it sends MSG 111. Re-rolling
+                                # hit/crit/variance here desynchronizes HP and
+                                # leaves client-dead monsters alive on server.
+                                # Accept the reported result only when it is
+                                # possible for the validated skill/stats and
+                                # does not exceed the server-computed ceiling.
+                                eff_cfg_for_hit = EFF_CONFIG.get(effinfo_id, {'adds': {}})
+                                hit_bonus = eff_cfg_for_hit.get('adds', {}).get(3001, 0) / 10000.0
+                                hit_p = min((attacker_stats['hit'] + 1.0) /
+                                            (attacker_stats['hita'] + attacker_stats['hit'] + 1.0), 1.0)
+                                dodge_p = min((defender_stats['eva'] + 1.0) /
+                                              (defender_stats['dgea'] + defender_stats['eva'] + 1.0), 0.5)
+                                hit_prob = 1.0 + hit_p - dodge_p + hit_bonus
+                                crit_bonus = eff_cfg_for_hit.get('adds', {}).get(3002, 0) / 10000.0
+                                crit_p = min((attacker_stats['cri'] + 1.0) /
+                                             (attacker_stats['cri'] + attacker_stats['cria'] + 1.0), 0.9)
+                                resist_p = min((defender_stats['res'] + 1.0) /
+                                               (defender_stats['res'] + defender_stats['resa'] + 1.0), 0.8)
+                                crit_prob = crit_p - resist_p + crit_bonus
+                                if (client_dmg < 0 or client_cri_flag != is_cri
+                                        or (client_dmg == 0 and (client_hit_flag or is_cri))
+                                        or (client_dmg > 0 and not client_hit_flag)
+                                        or (client_hit_flag and hit_prob < 0)
+                                        or (not client_hit_flag and hit_prob >= 0.99)
+                                        or (is_cri and crit_prob < 0)
+                                        or (not is_cri and crit_prob >= 0.99)):
+                                    print(f"[COMBAT SECURITY] rejected impossible client result target={target_id} damage={client_dmg} hit={client_hit_flag} crit={is_cri}")
+                                    continue
+                                if client_dmg == 0:
+                                    server_dmg = actual_dmg = 0
+                                    hit = calc_cri = False
+                                else:
+                                    max_dmg, can_hit, possible_crit = get_combat_damage(
+                                        attacker_stats, defender_stats, skill_id, skill_lv,
+                                        effinfo_id=effinfo_id, sat_type='satm', forced_hit=True,
+                                        forced_crit=is_cri, max_variance=True
+                                    )
+                                    if (not can_hit or (is_cri and not possible_crit)
+                                            or client_dmg > max_dmg + 2):
+                                        print(f"[COMBAT SECURITY] rejected out-of-range NPC damage target={target_id} damage={client_dmg} max={max_dmg}")
+                                        continue
+                                    server_dmg = actual_dmg = client_dmg
+                                    hit = True
+                                    calc_cri = is_cri
 
                             exp_npc_died = False
                             exp_dead_target = False
+                            world_npc_died = False
                             if is_stage_combat:
                                 # EXP and equipment squads can submit hits from
                                 # different client threads at nearly the same
@@ -12090,7 +12202,22 @@ def client_handler(conn, addr):
                                             DEAD_NPC_SET.add(target_id)
                                             exp_npc_died = True
                             else:
-                                NPC_HP_MAP[target_id] -= actual_dmg
+                                # World NPCs can receive simultaneous skill
+                                # hits from multiple client requests. Check,
+                                # reduce, clamp, and claim death as one atomic
+                                # transition so an HP-zero NPC cannot take
+                                # extra damage or produce duplicate kill credit.
+                                with npc_hp_lock(target_id):
+                                    hp_now = NPC_HP_MAP.get(target_id)
+                                    if (target_id in DEAD_NPC_SET or hp_now is None
+                                            or int(hp_now) <= 0):
+                                        exp_dead_target = True
+                                    else:
+                                        hp_after = max(0, int(hp_now) - max(0, int(actual_dmg)))
+                                        NPC_HP_MAP[target_id] = hp_after
+                                        world_npc_died = hp_after == 0
+                                        if world_npc_died:
+                                            DEAD_NPC_SET.add(target_id)
 
                             if exp_dead_target:
                                 stage_label = 'EQUIP' if is_equipment else 'EXP'
@@ -12122,24 +12249,28 @@ def client_handler(conn, addr):
 
                             # Issue 213: TAG 514 (hit_action) client handler does nothing — skip sending
 
-                            npc_died = exp_npc_died if is_stage_combat else NPC_HP_MAP[target_id] <= 0
+                            npc_died = exp_npc_died if is_stage_combat else world_npc_died
                             if npc_died:
-                                # Fix: Only process death once - skip if already dead
-                                if not is_stage_combat and target_id in DEAD_NPC_SET:
-                                    print(f"[EXP MSG111] NPC already dead target_id={target_id}, skipping")
-                                    continue
-                                if not is_stage_combat:
-                                    DEAD_NPC_SET.add(target_id)
                                 print(f"[{stage_label} MSG111] NPC DEAD target_id={target_id} target_nid={target_nid} hp={NPC_HP_MAP[target_id]}")
 
                                 if not is_stage_combat:
                                     # Non-EXP despawns keep their existing AOI path.
                                     send_rpc_push(506, encode_sproto([(0, target_id)]))
-                                # EXP clients receive HP=0 above. Their ObjNPC
-                                # death handler plays the death state and
-                                # recycles the body after its native delay; an
-                                # immediate AOI remove skips that lifecycle and
-                                # can leave inconsistent visible/invisible NPCs.
+                                else:
+                                    # The APK's ObjNPC.ChangeHPVal keeps its
+                                    # death animation/body for 4 seconds before
+                                    # recycling. Let that lifecycle play, then
+                                    # send an AOI remove as a safety cleanup so
+                                    # a client that missed the local recycle
+                                    # cannot retain an untargetable ghost.
+                                    def remove_stage_npc_after_death(
+                                            stage_state=exp_state_hit,
+                                            dead_inst_id=int(target_id)):
+                                        remove_data = encode_sproto([(0, dead_inst_id)])
+                                        exp_send_push(stage_state, 506, remove_data)
+                                    cleanup_timer = threading.Timer(4.5, remove_stage_npc_after_death)
+                                    cleanup_timer.daemon = True
+                                    cleanup_timer.start()
 
                                 # BOSS DEATH HANDLING
                                 if target_id == picked_char.get('boss_inst_id'):
@@ -12204,19 +12335,18 @@ def client_handler(conn, addr):
                 npcid = None
                 inst_id = None
                 die_type = 0
+                client_local_npc_death = False
+                client_local_npc_id = None
 
                 if msg == 307:
                     val0 = body.get(0)
                     if isinstance(val0, bytes): s_val0 = val0.decode('utf-8')
                     elif val0 is not None: s_val0 = str(val0)
                     else: s_val0 = ""
-
+                    # The APK's MSG 307 field 0 is NPCData.ID (or a mission ID
+                    # for type 4), not an NPC server instance ID.
+                    npcid = s_val0 or None
                     die_type = get_val_int(body, 3)
-                    try:
-                        inst_id = int(s_val0)
-                        npcid = NPC_INST_MAP.get(inst_id)
-                    except: pass
-                    if not npcid: npcid = s_val0
                 else:
                     val0 = body.get(0)
                     if isinstance(val0, int): inst_id = val0
@@ -12248,8 +12378,11 @@ def client_handler(conn, addr):
                 report_valid = False
                 if picked_char and msg == 127:
                     # MSG 127 carries the NPC's serverId. Only accept instances
-                    # that this server actually created, with the matching type.
-                    report_valid = bool(inst_id and str(NPC_INST_MAP.get(inst_id, '')) == str(npcid)
+                    # that this server actually created, with the matching
+                    # client-resolvable NPCData template.
+                    server_npcid = str(NPC_INST_MAP.get(inst_id, '')) if inst_id else ''
+                    expected_client_npcid = NPC_CLIENT_ID_ALIASES.get(server_npcid, server_npcid)
+                    report_valid = bool(inst_id and expected_client_npcid == str(npcid)
                                          and str(NPC_INSTANCE_MAP.get(inst_id, '')) == cur_map
                                          and int(NPC_HP_MAP.get(inst_id, 1)) <= 0)
                 elif picked_char and die_type in (2, 6):
@@ -12259,11 +12392,16 @@ def client_handler(conn, addr):
                     report_valid = validate_car_mission_report(picked_char, die_type)
                 elif picked_char and die_type == 4:
                     report_valid = validate_arrive_target_report(picked_char, npcid)
-                elif picked_char and cur_map == '11':
+                elif (picked_char and msg == 307 and die_type in (0, 3)
+                      and client_owns_map_npc_simulation(cur_map)):
                     report_x = get_val_int(body, 1, None)
                     report_z = get_val_int(body, 2, None)
                     if report_x is not None and report_z is not None:
-                        report_valid = claim_client_local_npc_death(picked_char, npcid, report_x, report_z)
+                        claimed_npcid = claim_client_local_npc_death(picked_char, npcid, report_x, report_z)
+                        report_valid = bool(claimed_npcid)
+                        client_local_npc_death = report_valid
+                        if report_valid:
+                            client_local_npc_id = str(claimed_npcid)
                 elif picked_char and inst_id:
                     # Outside the city, client death reports must reference a
                     # server-created NPC instance on this map whose server HP
@@ -12299,25 +12437,17 @@ def client_handler(conn, addr):
                     if die_type in [2, 6]:
                         advance_missions(picked_char, send_rpc_push, 'car', die_type=die_type)
 
-                    # Map 11 NPCs are fully client-side — resolve NPC ID and grant kill rewards
-                    if cur_map == '11':
-                        # For client-local map 11 NPCs, the inst_id is a client-generated ID.
-                        # The client sends the npcid directly in field 0 of tag 307.
-                        # Try to resolve the actual NPC type from KILL_TARGET_SPAWNS.
-                        actual_npcid = npcid
-                        if inst_id:
-                            # Check if this instance was server-spawned
-                            if inst_id in NPC_INST_MAP:
-                                actual_npcid = NPC_INST_MAP[inst_id]
-                            else:
-                                # Client-local NPC — npcid from the packet is the NPC type ID
-                                # For mission 1001, the client sends npcid=9901 directly
-                                pass
+                    # Client-owned tutorial NPCs are simulated locally. Their
+                    # validated death report supplies kill/reward/mission credit.
+                    if client_local_npc_death:
+                        # Client-local tutorial NPC deaths carry NPCData.ID
+                        # plus world coordinates, not a server instance ID.
+                        actual_npcid = client_local_npc_id or str(npcid or '')
 
                         # Advance kill missions
                         advance_missions(picked_char, send_rpc_push, 'kill', target_id=actual_npcid)
 
-                        # Grant NPC kill rewards (EXP/cash) for map 11 — same as other maps
+                        # Grant the same kill rewards as a server-confirmed death.
                         if actual_npcid and actual_npcid != "None":
                             npc_stats_m11 = get_npc_attr(actual_npcid, picked_char.get('level', 1))
                             npc_lv_m11 = npc_stats_m11.get('lv', 1)
@@ -12333,24 +12463,27 @@ def client_handler(conn, addr):
                                 encode_sproto([(0, "1001"), (1, cash_kill_m11), (3, 0)])
                             ])]))
 
-                            # TAG 527: drop_item_info - spawn a dropped item on the ground
-                            player_pos_m11 = picked_char.get('pos', [0, 100, 0, 0])
-                            drop_x_m11 = player_pos_m11[0] + random.randint(-500, 500)
-                            drop_z_m11 = player_pos_m11[2] + random.randint(-500, 500)
-                            drop_inst_id_m11 = next_global_inst_id()
-                            drop_item_m11 = encode_sproto([
-                                (0, "1001"),
-                                (1, cash_kill_m11),
-                                (3, 0)
-                            ])
-                            send_rpc_push(527, encode_sproto([
-                                (0, drop_inst_id_m11),
-                                (1, drop_x_m11),
-                                (2, drop_z_m11),
-                                (3, 0),
-                                (4, drop_item_m11),
-                                (7, picked_char['id'])
-                            ]))
+                            if cur_map == '11':
+                                # Map 11's client-local enemy flow also shows
+                                # a cash pickup in-world. Other maps keep their
+                                # existing direct reward path.
+                                player_pos_m11 = picked_char.get('pos', [0, 100, 0, 0])
+                                drop_x_m11 = player_pos_m11[0] + random.randint(-500, 500)
+                                drop_z_m11 = player_pos_m11[2] + random.randint(-500, 500)
+                                drop_inst_id_m11 = next_global_inst_id()
+                                drop_item_m11 = encode_sproto([
+                                    (0, "1001"),
+                                    (1, cash_kill_m11),
+                                    (3, 0)
+                                ])
+                                send_rpc_push(527, encode_sproto([
+                                    (0, drop_inst_id_m11),
+                                    (1, drop_x_m11),
+                                    (2, drop_z_m11),
+                                    (3, 0),
+                                    (4, drop_item_m11),
+                                    (7, picked_char['id'])
+                                ]))
                     else:
                         # EXP combat already broadcast TAG 510 with HP=0 to
                         # every squad member. Do not immediately remove the NPC
@@ -12359,7 +12492,8 @@ def client_handler(conn, addr):
                         on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid)
 
                     if die_type == 3:
-                        advance_missions(picked_char, send_rpc_push, 'impact', target_id=npcid)
+                        advance_missions(picked_char, send_rpc_push, 'impact',
+                                         target_id=client_local_npc_id or npcid)
                     elif die_type == 4:
                         # For ARRIVE_TARGET, npcid field is the mission ID.
                         advance_missions(picked_char, send_rpc_push, 'interact', target_id=npcid, die_type=die_type)
