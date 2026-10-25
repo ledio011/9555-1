@@ -8025,12 +8025,25 @@ def advance_equipment_upgrade_missions(picked_char, send_rpc_push, mission_id=No
             continue
 
         cfg = missions_data.get(str(mid), {})
-        slots = mission_slots.get(cfg.get('logic_type'))
-        if not slots:
-            continue
+        logic_type = cfg.get('logic_type')
         try:
             required_level = int(cfg.get('logic_id') or 0)
-            current_level = max(int(levels.get(slot, 0)) for slot in slots)
+            if logic_type == 127:
+                # Skill-upgrade missions (42001+) require any one saved skill
+                # to reach the target; use existing skill levels on login/accept
+                # as well as after every successful skill-upgrade request.
+                raw_skill_levels = picked_char.get('skill_levels', {})
+                if not isinstance(raw_skill_levels, dict):
+                    raw_skill_levels = {}
+                current_level = max(
+                    (max(0, int(value)) for value in raw_skill_levels.values()),
+                    default=0
+                )
+            else:
+                slots = mission_slots.get(logic_type)
+                if not slots:
+                    continue
+                current_level = max(int(levels.get(slot, 0)) for slot in slots)
         except (TypeError, ValueError):
             continue
         if required_level <= 0:
@@ -10011,6 +10024,8 @@ def client_handler(conn, addr):
                             picked_char, sid, cur_lv, upgrade_all
                         )
                         if upgraded:
+                            skill_mission_changed = advance_equipment_upgrade_missions(
+                                picked_char, send_rpc_push)
                             save_chars(all_accounts_chars)
                             smap = build_skills_map(
                                 picked_char['prof'], picked_char['level'],
@@ -10019,6 +10034,8 @@ def client_handler(conn, addr):
                             )
                             send_rpc_push(540, encode_sproto([(0, smap), (1, True)]))
                             sync_char_attrs_rpc(conn, picked_char)
+                            if skill_mission_changed:
+                                send_rpc_push(519, sync_mission_data(picked_char))
                         elif not request_valid:
                             print(f"[SKILL SECURITY] rejected inconsistent/unowned/non-upgradable skill "
                                   f"sid={sid} client_lv={cur_lv} server_lv={server_skill_lv}")
