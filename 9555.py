@@ -713,10 +713,7 @@ try:
                 if len(parts) > 7 and parts[1].isdigit():
                     row_id = parts[1]
                     # Skip duplicate 4-digit MissionID override rows (e.g., 1001 with FlashNum=4) in favor of 1-digit LogicIDs (e.g., 1 with FlashNum=2)
-                    # Only 1001-1003 are MissionID override rows. Rows 1004+ are real
-                    # Line Mission spawn definitions (e.g. 1004 = Beat Striker x7) and
-                    # must not be dropped just because ID 4..12 exists as another row.
-                    if 1000 <= int(row_id) <= 1003 and str(int(row_id) - 1000) in KILL_TARGET_SPAWNS:
+                    if int(row_id) >= 1000 and str(int(row_id) - 1000) in KILL_TARGET_SPAWNS:
                         continue
                     if row_id not in KILL_TARGET_SPAWNS: KILL_TARGET_SPAWNS[row_id] = []
                     flash_num = int(parts[7]) if parts[7].isdigit() else 1
@@ -6619,8 +6616,8 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
             send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
-    # Map 11 skips generic server map spawns above, but mission-target NPCs
-    # still need server instances so their deaths can be validated and counted.
+    if map_str == "11":
+        return
     if picked_char:
         for mid, mdata in picked_char.get('active_missions', {}).items():
             if mdata['state'] == 1:
@@ -6660,11 +6657,7 @@ def sync_mission_data(picked_char):
         try:
             completed_id = int(completed_mid)
             completed_cfg = missions_data.get(str(completed_id), {})
-            # Class 2 are side missions; class 8 are the "Line Mission"
-            # sequence (46001+). Both are tracked in completed_side_missions
-            # by the existing completion handler and must be represented in
-            # the client's completion bitset so the UI agrees with the server.
-            if completed_cfg.get('class') not in (2, 8):
+            if completed_cfg.get('class') != 2:
                 continue
             side_offset = completed_id - 40000
             if side_offset < 0:
