@@ -8005,6 +8005,66 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
         send_rpc_push(519, sync_mission_data(picked_char))
     return updated
 
+def advance_equipment_upgrade_missions(picked_char, send_rpc_push, mission_id=None):
+    """Reconcile equipment-level missions against levels already saved on the character."""
+    mission_slots = {
+        125: (0,),       # Weapon
+        124: (1, 2, 3),  # Armor: helmet, shirt, pants
+        126: (4, 5),     # Accessories: belt, necklace
+    }
+    active = picked_char.get('active_missions', {})
+    if not isinstance(active, dict):
+        return False
+
+    levels = equipment_enhance_levels(picked_char)
+    updated = False
+    for mid, mdata in active.items():
+        if mission_id is not None and str(mid) != str(mission_id):
+            continue
+        if not isinstance(mdata, dict) or mdata.get('state') != 1:
+            continue
+
+        cfg = missions_data.get(str(mid), {})
+        slots = mission_slots.get(cfg.get('logic_type'))
+        if not slots:
+            continue
+        try:
+            required_level = int(cfg.get('logic_id') or 0)
+            current_level = max(int(levels.get(slot, 0)) for slot in slots)
+        except (TypeError, ValueError):
+            continue
+        if required_level <= 0:
+            continue
+
+        parm = mdata.get('parm')
+        if not isinstance(parm, list):
+            parm = [0] * 8
+        elif len(parm) < 8:
+            parm = parm + [0] * (8 - len(parm))
+        try:
+            old_progress = int(parm[0])
+        except (TypeError, ValueError, IndexError):
+            old_progress = 0
+
+        # Cap the visible progress at the mission's target. Already-upgraded
+        # gear therefore satisfies lower-level goals without another upgrade.
+        progress = min(max(0, current_level), required_level)
+        if old_progress != progress:
+            parm[0] = progress
+            mdata['parm'] = parm
+            mdata['_last_progress'] = progress
+            if send_rpc_push:
+                send_rpc_push(524, encode_sproto([(0, str(mid)), (1, 1), (2, progress)]))
+            updated = True
+
+        if current_level >= required_level:
+            mdata['state'] = 2
+            if send_rpc_push:
+                send_rpc_push(523, encode_sproto([(0, str(mid)), (1, 2)]))
+            updated = True
+
+    return updated
+
 def claim_client_local_npc_death(picked_char, npcid, x, z):
     """Validate and de-duplicate map NPC deaths reported without a server instance ID.
 
@@ -9207,6 +9267,10 @@ def client_handler(conn, addr):
                     )
                     send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
 
+                    # Reconcile equipment missions for gear upgraded before this login.
+                    if advance_equipment_upgrade_missions(picked_char, send_rpc_push):
+                        save_chars(all_accounts_chars)
+
                     # 519: mission_sync
                     send_rpc_push(519, sync_mission_data(picked_char))
 
@@ -9728,6 +9792,7 @@ def client_handler(conn, addr):
                     res = accept_mission_logic(picked_char, mid)
                     print(f"[MISSION ACCEPT REQ] mid={mid} result={res}")
                     if res:
+                        advance_equipment_upgrade_missions(picked_char, send_rpc_push, mission_id=mid)
                         save_chars(all_accounts_chars)
                         print(f"[MISSION ACCEPT] mission_id={mid}")
                         m_entry = picked_char.get('active_missions', {}).get(mid, {})
@@ -10353,6 +10418,8 @@ def client_handler(conn, addr):
                                             str(slot): level for slot, level in levels.items()
                                         }
                                         item['level'] = target_level
+                                        equipment_mission_changed = advance_equipment_upgrade_missions(
+                                            picked_char, send_rpc_push)
                                         save_chars(all_accounts_chars)
                                         push_backpack_item_update(send_rpc_push, 1, item)
                                         sync_char_attrs_rpc(conn, picked_char)
@@ -10361,6 +10428,8 @@ def client_handler(conn, addr):
                                             get_character_stats(picked_char)['power']
                                         )
                                         sync_equipment_status_to_peers(picked_char)
+                                        if equipment_mission_changed:
+                                            send_rpc_push(519, sync_mission_data(picked_char))
                                         print(f"[BACKPACK] enhanced slot={subtype} item={item_id} level={current_level}->{target_level} material={total_material} cash={total_cash}")
                 send_rpc_response(session)
 
