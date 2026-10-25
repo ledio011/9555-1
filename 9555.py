@@ -12490,11 +12490,11 @@ def client_handler(conn, addr):
                         reason = 'missing configured SingleMapID'
                     print(f"[EXP STAGE] denied solo entry id={copy_id}; {reason}")
                 elif picked_char and is_equipment_copy_id(copy_id):
-                    # CopySceneData marks these as EQUIP_COPY (team-only).
-                    # They must start through MSG 214/215/217 so every member
-                    # shares one isolated run and one set of enemy instances.
-                    send_rpc_push(555, sync_copy_scenes(picked_char))
-                    print(f"[EQUIP STAGE] denied direct entry id={copy_id}; team-ready flow required")
+                    if (msg != 107 or not start_solo_equipment_run(
+                            conn, picked_char, copy_id, bool(body.get(1, False)), send_rpc_push)):
+                        send_rpc_push(555, sync_copy_scenes(picked_char))
+                        print(f"[EQUIP STAGE] denied direct entry id={copy_id}; "
+                              f"request_type={msg} solo entry unavailable")
                 elif picked_char and msg == 276:
                     print(f"[EXP STAGE] denied single entry id={copy_id}; no matching DailyExpData copy for level={picked_char.get('level', 1)}")
                 elif picked_char and cfg and cfg['subtype'] == 7:
@@ -15521,6 +15521,103 @@ def start_team_equipment_run(team, copy_id):
           f"members={len(players)} groups={len(groups)} enemies={state['expected_kills']} "
           f"duration={duration}s")
     save_chars(all_accounts_chars)
+    return True
+
+def start_solo_equipment_run(conn, char, copy_id, use_time_item, send_rpc_push):
+    """Start an isolated single-player equipment copy from the APK's Single button."""
+    copy_id = str(copy_id or '')
+    cfg = COPY_SCENE_CONFIG.get(copy_id, {})
+    groups = validate_equipment_stage_config(copy_id)
+    char_id = int(char.get('id', 0)) if char else 0
+    if (not char or not conn or not is_current_character_connection(conn, char)
+            or not is_equipment_copy_id(copy_id) or not cfg or not groups
+            or str(cfg.get('map_id') or '') not in MAP_CONFIG):
+        print(f"[EQUIP STAGE] denied solo entry id={copy_id}; invalid session/config")
+        return False
+
+    reconcile_exp_stage_login(char)
+    reconcile_equipment_stage_login(char)
+    current_map = str(char.get('map_id') or '11')
+    if (char.get('exp_stage_state') or char.get('equipment_stage_state')
+            or char.get('_exp_leave_timer') or is_exp_map(current_map)
+            or is_equipment_copy_map(current_map) or is_active_daily_copy_current(char)):
+        print(f"[EQUIP STAGE] denied solo entry id={copy_id}; "
+              f"player already in a copy map={current_map}")
+        return False
+
+    team = get_team_for_char(char_id)
+    if team and (team.get('active_run') or team.get('pending_run') or team.get('matching')):
+        print(f"[EQUIP STAGE] denied solo entry id={copy_id}; player's team is active/matching")
+        return False
+
+    level = int(char.get('level', 1))
+    min_level = int(cfg.get('min_level', 1))
+    max_level = int(cfg.get('max_level', 80))
+    if not min_level <= level <= max_level:
+        print(f"[EQUIP STAGE] denied solo entry id={copy_id}; "
+              f"level={level} required={min_level}-{max_level}")
+        return False
+
+    remaining = copy_attempts_remaining(char, copy_id, cfg)
+    extra_item_used = False
+    if remaining <= 0 and use_time_item:
+        item_id = str(cfg.get('time_inc') or '')
+        inventory = char.get('inventory', [])
+        stack = next((item for item in inventory if str(item.get('id')) == item_id), None) if item_id else None
+        if stack is not None and int(stack.get('amount', 1)) > 0:
+            stack['amount'] = int(stack.get('amount', 1)) - 1
+            if stack['amount'] <= 0:
+                inventory.remove(stack)
+            char['inventory'] = inventory
+            extra_item_used = True
+        else:
+            print(f"[EQUIP STAGE] denied solo entry id={copy_id}; TimeInc ticket missing")
+    if remaining <= 0 and not extra_item_used:
+        print(f"[EQUIP STAGE] denied solo entry id={copy_id}; daily attempts exhausted")
+        return False
+
+    now = int(time.time())
+    duration = max(1, int(cfg.get('exist_time') or 900))
+    state = {
+        'stage_kind': 'equipment', 'copy_id': copy_id,
+        'map_id': str(cfg.get('map_id') or copy_id),
+        'team_id': None, 'members': [char_id], 'owner_id': char_id,
+        'char_refs': {char_id: char}, 'wave_groups': list(groups),
+        'cur_group': 1, 'wave_kills': 0, 'total_kills': 0,
+        'expected_kills': sum(
+            1 for row in MONSTER_DATA.get(copy_id, [])
+            if int(row.get('group', 0)) in groups),
+        'start_time': now, 'end_time': now + duration,
+        'active_monsters': [], 'spawned_npcs': set(), 'killed_npcs': set(),
+        'monster_pos': {}, 'monster_heading': {}, 'attack_cd': {},
+        'movement_stopped': set(), 'kill_tracker': [],
+        'player_auth_pos': {}, 'player_auth_move_at': {},
+        'ready_connections': {}, 'ai_active': True,
+        'runtime_started': False, 'timer_started': False, 'wave_started': False,
+        '_kill_lock': threading.RLock(),
+    }
+
+    if char.get('pre_copy_pos') is None:
+        char['pre_copy_pos'] = list(char.get('pos', [29860, 100, -17005, 0]))
+        char['pre_copy_map'] = current_map
+    daily = ensure_daily_copy_state(char)
+    if remaining > 0:
+        daily.setdefault('remaining', {})[copy_id] = max(0, remaining - 1)
+    if extra_item_used:
+        sync_all_backpacks(char, send_rpc_push)
+    char['active_copy_id'] = copy_id
+    char.pop('equipment_team_id', None)
+    char['equipment_stage_state'] = state
+    char['hp'] = get_character_stats(char)['hp_max']
+    state['player_auth_pos'][char_id] = list(char.get('pos', [0, 100, 0, 0]))
+    state['player_auth_move_at'][char_id] = time.monotonic()
+    sync_char_attrs_rpc(conn, char)
+    send_rpc_push(555, sync_copy_scenes(char))
+    save_chars(all_accounts_chars)
+    start_map_transition(conn, char, state['map_id'], send_rpc_push)
+    print(f"[EQUIP STAGE] solo started copy={copy_id} player={char_id} "
+          f"groups={len(groups)} enemies={state['expected_kills']} "
+          f"duration={duration}s extra_item={extra_item_used}")
     return True
 
 def start_server():
