@@ -2385,7 +2385,9 @@ def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None,
     # Candidate skill slots are Index2 5..10 (six cells in SkillInfoRootLogic).
     # Weapon skill Index2 must remain affix index + 4 because the APK also uses
     # it to display the skill level beside that weapon affix. Reserve those
-    # cells first, then place the profession starter into a free cell.
+    # cells first. Keep the legacy profession active skill only as the fallback
+    # for a weapon with no skill affixes; sending it alongside a skill-bearing
+    # weapon creates a fourth Chara > Skill entry that is not on the weapon.
     skill_list_slots = set(range(5, 11))
     candidate_slot_by_skill = {
         sid: affix_index + 4 for affix_index, sid in weapon_skill_rows
@@ -2394,17 +2396,21 @@ def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None,
     free_candidate_slots = [slot for slot in sorted(skill_list_slots)
                             if slot not in used_candidate_slots]
 
-    # Starter active skill (105 / 205 / 305) - Index 4 (first active skill slot)
+    # Starter active skill (105 / 205 / 305) - fallback for a weapon without
+    # weapon-granted skills. The regular starter attacks and dodge above remain
+    # available with every weapon.
     starter_active = p["starter_active"]
-    starter_list_slot = free_candidate_slots.pop(0) if free_candidate_slots else None
-    smap[starter_active] = encode_sproto([
-        (0, starter_active),
-        (1, skill_levels.get(starter_active, 0)),
-        (2, 4),       # indexPos - first active skill slot
-        (3, 1),       # unlockLevel - available from level 1
-        (4, starter_list_slot if starter_list_slot is not None else 5),
-        (5, False)    # disable - not disabled
-    ])
+    include_starter_active = not weapon_skill_rows
+    if include_starter_active:
+        starter_list_slot = free_candidate_slots.pop(0) if free_candidate_slots else None
+        smap[starter_active] = encode_sproto([
+            (0, starter_active),
+            (1, skill_levels.get(starter_active, 0)),
+            (2, 4),       # indexPos - first active skill slot
+            (3, 1),       # unlockLevel - available from level 1
+            (4, starter_list_slot if starter_list_slot is not None else 5),
+            (5, False)    # disable - not disabled
+        ])
 
     # Include any additional skills specified in skill_levels (e.g., boss skills 106-110)
     # The client's ObjZombiePlayer.UpdateSkillList() only accepts indexPos 4, 5, 6
@@ -2421,7 +2427,11 @@ def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None,
         # Old saves can retain a weapon skill in skill_levels after the weapon
         # that granted it was swapped out. Such skills must come only from the
         # currently equipped weapon's affixes below. Preserve profession
-        # starter skills already added to smap above.
+        # starter skills already added to smap above. Also suppress a persisted
+        # copy of the fallback active skill when the equipped weapon supplies
+        # its own skills, so it cannot reappear as a stale fourth entry.
+        if weapon_skill_rows and sid == starter_active:
+            continue
         if (sid not in smap and sid not in weapon_skill_ids
                 and sid not in ALL_WEAPON_SKILL_IDS):
             skill_cfg = SKILL_CONFIG.get(sid, {})
@@ -2429,7 +2439,7 @@ def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None,
             extra_skills.append((sid, slv, priority))
     # Sort by priority descending so highest priority gets indexPos 4
     extra_skills.sort(key=lambda x: x[2], reverse=True)
-    used_skill_positions = {4}  # the profession starter active skill owns slot 4
+    used_skill_positions = {4} if include_starter_active else set()
     used_skill_positions.update(affix_index + 4 for affix_index, _sid in weapon_skill_rows)
     for idx, (sid, slv, priority) in enumerate(extra_skills):
         if not free_candidate_slots:
