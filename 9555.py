@@ -6792,12 +6792,34 @@ def sync_mission_data(picked_char):
     last_main = picked_char.get('last_main_mission_id', "-1")
     if last_main == "" or last_main == "None": last_main = "-1"
 
+    # The client interprets sidedone_mission as packed 64-bit flags, not as
+    # mission IDs. CurMissionDictionary.SideMissionPreIndex is 40000, so
+    # completed mission 40005 is represented by bit 5 (32) in element 0.
+    side_done_flags = []
+    for completed_id in picked_char.get('completed_side_missions', []):
+        try:
+            offset = int(completed_id) - 40000
+        except (TypeError, ValueError):
+            continue
+        if offset < 0:
+            continue
+        word_index, bit_index = divmod(offset, 64)
+        while len(side_done_flags) <= word_index:
+            side_done_flags.append(0)
+        side_done_flags[word_index] |= 1 << bit_index
+    # Sproto List<long> uses signed 64-bit storage. Preserve bit 63 using its
+    # two's-complement signed representation when that bit is set.
+    side_done_flags = [
+        value if value < (1 << 63) else value - (1 << 64)
+        for value in side_done_flags
+    ]
+
     # sync_mission.request schema: missions(0), last_missionId(1), sidedone_mission(2)
     # FIX: missions must be encoded as a Sproto array of objects (concatenated length-prefixed chunks)
     data_list = [
         (0, own_missions_list),
         (1, str(last_main)),
-        (2, [int(x) for x in picked_char.get('completed_side_missions', []) if x])
+        (2, side_done_flags)
     ]
     return encode_sproto(data_list)
 
