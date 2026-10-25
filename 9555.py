@@ -2098,6 +2098,36 @@ PROF_SKILLS = {
     2: {"atk": ["301", "302", "303"], "dodge": "304", "starter_active": "305"}
 }
 
+def get_character_combat_skills(prof, equipped_items=None):
+    """Resolve the basic combo and dodge from the equipped weapon's EquipData."""
+    try:
+        profession = int(prof)
+    except (TypeError, ValueError):
+        profession = 0
+    fallback = PROF_SKILLS.get(profession, PROF_SKILLS[0])
+    fallback_atk = fallback.get('atk', [])
+    fallback_atk = list(fallback_atk) if isinstance(fallback_atk, (list, tuple)) else [fallback_atk]
+    resolved = {
+        'atk': [str(skill_id) for skill_id in fallback_atk if skill_id],
+        'dodge': str(fallback.get('dodge', '')),
+        'starter_active': str(fallback.get('starter_active', '')),
+    }
+
+    weapon = next((item for item in (equipped_items or [])
+                   if isinstance(item, dict)
+                   and int(EQUIP_CONFIG.get(str(item.get('id', '')), {}).get('position', -1)) == 0), None)
+    if not weapon:
+        return resolved
+    equip_cfg = EQUIP_CONFIG.get(str(weapon.get('id', '')), {})
+    base_skills = [str(skill_id).strip() for skill_id in equip_cfg.get('base_skills', [])
+                   if str(skill_id).strip()]
+    if (len(base_skills) >= 4
+            and len(set(base_skills[:4])) == 4
+            and all(skill_id in SKILL_CONFIG for skill_id in base_skills[:4])):
+        resolved['atk'] = base_skills[:3]
+        resolved['dodge'] = base_skills[3]
+    return resolved
+
 def get_skill_upgrade_price(current_level):
     """Return the configured currency type and price for the next skill level."""
     try:
@@ -2153,12 +2183,11 @@ def apply_skill_level_up(character, skill_id, client_level, upgrade_all=False):
     except (TypeError, ValueError):
         return 0, -1, False
 
-    profession_skills = PROF_SKILLS.get(profession, PROF_SKILLS[0])
-    owned_starter_skills = set(
-        profession_skills['atk'] if isinstance(profession_skills['atk'], list)
-        else [profession_skills['atk']]
+    combat_skills = get_character_combat_skills(
+        profession, character.get('equipped_equip', [])
     )
-    owned_starter_skills.update((profession_skills['dodge'], profession_skills['starter_active']))
+    owned_starter_skills = set(combat_skills['atk'])
+    owned_starter_skills.update((combat_skills['dodge'], combat_skills['starter_active']))
     skill_levels = character.setdefault('skill_levels', {})
     skill_key = next((key for key in skill_levels if str(key) == skill_id), skill_id)
     try:
@@ -2167,7 +2196,8 @@ def apply_skill_level_up(character, skill_id, client_level, upgrade_all=False):
         return 0, -1, False
 
     weapon_skill_ids = equipped_weapon_skill_ids(character)
-    is_weapon_skill = skill_id in ALL_WEAPON_SKILL_IDS
+    is_weapon_skill = (skill_id in ALL_WEAPON_SKILL_IDS
+                       or skill_id in ALL_EQUIPMENT_BASE_SKILL_IDS)
     skill_owned = (
         skill_id in owned_starter_skills
         or skill_id in weapon_skill_ids
@@ -2267,6 +2297,12 @@ ALL_WEAPON_SKILL_IDS = frozenset(
     for skill in drop.get('skills', [])
     if skill.get('id') not in (None, '')
 )
+ALL_EQUIPMENT_BASE_SKILL_IDS = frozenset(
+    str(skill_id)
+    for equip in EQUIP_CONFIG.values()
+    for skill_id in equip.get('base_skills', [])
+    if str(skill_id)
+)
 
 
 def learned_non_weapon_skill_ids(skill_levels):
@@ -2274,7 +2310,8 @@ def learned_non_weapon_skill_ids(skill_levels):
     if not isinstance(skill_levels, dict):
         return set()
     return {str(skill_id) for skill_id in skill_levels
-            if str(skill_id) not in ALL_WEAPON_SKILL_IDS}
+            if str(skill_id) not in ALL_WEAPON_SKILL_IDS
+            and str(skill_id) not in ALL_EQUIPMENT_BASE_SKILL_IDS}
 
 
 def apply_skill_position_overrides(skills_map, skill_positions):
@@ -2396,17 +2433,19 @@ def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None,
     if skill_levels is None: skill_levels = {}
     skill_levels = {str(key): value for key, value in skill_levels.items()}
     p = PROF_SKILLS.get(prof, PROF_SKILLS[0])
+    combat_skills = get_character_combat_skills(prof, equipped_items)
     smap = {}
     weapon_skill_rows = equipped_weapon_skill_rows(equipped_items)
     weapon_skill_ids = {sid for _index, sid in weapon_skill_rows}
 
     # Basic attack combo chain (101, 102, 103 / 201, 202, 203 / 301, 302, 303)
-    atk_skills = p["atk"] if isinstance(p["atk"], list) else [p["atk"]]
+    atk_skills = combat_skills['atk']
     for sid in atk_skills:
         smap[sid] = encode_sproto([(0, sid), (1, skill_levels.get(sid, 0)), (2, 0), (3, 1), (4, 0), (5, False)])
 
     # Dodge / Roll (104 / 204 / 304) - Index 3
-    smap[p["dodge"]] = encode_sproto([(0, p["dodge"]), (1, skill_levels.get(p["dodge"], 0)), (2, 3), (3, 1), (4, 1), (5, False)])
+    dodge_skill = combat_skills['dodge']
+    smap[dodge_skill] = encode_sproto([(0, dodge_skill), (1, skill_levels.get(dodge_skill, 0)), (2, 3), (3, 1), (4, 1), (5, False)])
 
     # Candidate skill slots are Index2 5..10 (six cells in SkillInfoRootLogic).
     # Weapon skill Index2 must remain affix index + 4 because the APK also uses
@@ -2459,7 +2498,8 @@ def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None,
         if weapon_skill_rows and sid == starter_active:
             continue
         if (sid not in smap and sid not in weapon_skill_ids
-                and sid not in ALL_WEAPON_SKILL_IDS):
+                and sid not in ALL_WEAPON_SKILL_IDS
+                and sid not in ALL_EQUIPMENT_BASE_SKILL_IDS):
             skill_cfg = SKILL_CONFIG.get(sid, {})
             priority = int(skill_cfg.get('priority', 0))
             extra_skills.append((sid, slv, priority))
@@ -2951,7 +2991,7 @@ def validate_exp_skill_hit(char, state, target_id, skill_id, requested_effinfo_i
         prof = int(prof)
     except (TypeError, ValueError):
         prof = 0
-    starter_skills = PROF_SKILLS.get(prof, PROF_SKILLS[0])
+    starter_skills = get_character_combat_skills(prof, char.get('equipped_equip', []))
     always_available = {str(value) for value in starter_skills.get('atk', [])}
     always_available.update(str(starter_skills.get(key, '')) for key in ('dodge', 'starter_active'))
     always_available.update(equipped_weapon_skill_ids(char))
@@ -10000,7 +10040,9 @@ def client_handler(conn, addr):
                     skill_levels = {str(key): value for key, value in
                                     (picked_char.get('skill_levels') or {}).items()}
                     prof = int(picked_char.get('prof', 0))
-                    starter_skills = PROF_SKILLS.get(prof, PROF_SKILLS[0])
+                    starter_skills = get_character_combat_skills(
+                        prof, picked_char.get('equipped_equip', [])
+                    )
                     owned_skills = {str(value) for value in
                                     (starter_skills.get('atk', []) if isinstance(starter_skills.get('atk'), list)
                                      else [starter_skills.get('atk')])}
@@ -11732,7 +11774,9 @@ def client_handler(conn, addr):
                                                  (picked_char.get('skill_levels') or {}).items()}
                             learned_skill_ids = learned_non_weapon_skill_ids(char_skill_levels)
                             prof = picked_char.get('prof', 0)
-                            starter_skills = PROF_SKILLS.get(prof, PROF_SKILLS[0])
+                            starter_skills = get_character_combat_skills(
+                                prof, picked_char.get('equipped_equip', [])
+                            )
                             always_available = set(starter_skills.get('atk', []))
                             always_available.add(starter_skills.get('dodge', ''))
                             always_available.add(starter_skills.get('starter_active', ''))
@@ -11945,7 +11989,9 @@ def client_handler(conn, addr):
                                                      (picked_char.get('skill_levels') or {}).items()}
                                 learned_skill_ids = learned_non_weapon_skill_ids(char_skill_levels)
                                 prof = picked_char.get('prof', 0)
-                                starter_skills = PROF_SKILLS.get(prof, PROF_SKILLS[0])
+                                starter_skills = get_character_combat_skills(
+                                    prof, picked_char.get('equipped_equip', [])
+                                )
                                 always_available = set(starter_skills.get('atk', []))
                                 always_available.add(starter_skills.get('dodge', ''))
                                 always_available.add(starter_skills.get('starter_active', ''))
