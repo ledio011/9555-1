@@ -16,6 +16,9 @@ NPC_ATTR_MAP = {} # runtime NPC payloads for reconnect replay
 TEAM_STATES = {}
 CHAR_TEAM = {}
 TEAM_INVITES = {}
+# Set to True to let teams start EXP/equipment stages even when a member is
+# outside the stage's level band (default False = original game rule).
+TEAM_IGNORE_LEVEL_BAND = False
 TEAM_MATCH_QUEUE = {}
 TEAM_ID_COUNTER = 500000
 EXP_RUN_COUNTER = 900000
@@ -13769,8 +13772,8 @@ def client_handler(conn, addr):
                             for x in ids:
                                 _m=ALL_CONNECTIONS[x][1]
                                 if not is_character_available_for_team(_m): print(f"[TEAM] 215 blocked: member={x} unavailable map={_m.get('map_id')}")
-                                if not cfg['min_level']<=int(_m.get('level',1))<=cfg['max_level']: print(f"[TEAM] 215 blocked: member={x} level {_m.get('level')} outside {cfg['min_level']}-{cfg['max_level']}")
-                            valid=all(is_character_available_for_team(ALL_CONNECTIONS[x][1]) and cfg['min_level']<=int(ALL_CONNECTIONS[x][1].get('level',1))<=cfg['max_level'] for x in ids)
+                                if not TEAM_IGNORE_LEVEL_BAND and not cfg['min_level']<=int(_m.get('level',1))<=cfg['max_level']: print(f"[TEAM] 215 blocked: member={x} level {_m.get('level')} outside {cfg['min_level']}-{cfg['max_level']}")
+                            valid=all(is_character_available_for_team(ALL_CONNECTIONS[x][1]) and (TEAM_IGNORE_LEVEL_BAND or cfg['min_level']<=int(ALL_CONNECTIONS[x][1].get('level',1))<=cfg['max_level']) for x in ids)
                         if valid:
                             # Every participant spends their own daily attempt;
                             # do not let a ready squad carry exhausted members
