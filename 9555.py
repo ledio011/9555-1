@@ -13727,6 +13727,17 @@ def client_handler(conn, addr):
                 elif picked_char and msg==215:
                     team=get_team_for_char(cid); goal=get_val_str(body,0,''); copy_id=goal if is_team_battle_copy(goal) else ''
                     cfg=COPY_SCENE_CONFIG.get(copy_id)
+                    _why=[]
+                    if not team: _why.append('not in a team')
+                    else:
+                        if team.get('leader_id')!=cid: _why.append(f"not leader (leader={team.get('leader_id')})")
+                        if str(team.get('goal_id',''))!=copy_id: _why.append(f"goal mismatch team={team.get('goal_id')!r} req={goal!r}")
+                        if team.get('active_run') or team.get('pending_run'): _why.append('run already active/pending')
+                    if not cfg: _why.append(f'no copy config for {copy_id!r}')
+                    if get_val_int(body,1,1)!=1: _why.append(f'flag={get_val_int(body,1,1)}')
+                    print(f"[TEAM] 215 start request player={cid} goal={goal!r} team={team.get('id') if team else None} members={team.get('members') if team else None} ignored={_why or 'none'}")
+                    if _why and team and team.get('leader_id')!=cid:
+                        send_rpc_push(603,encode_sproto([(0,int(cid)),(1,1)]))
                     if (team and team.get('leader_id')==cid and str(team.get('goal_id',''))==copy_id
                             and get_val_int(body,1,1)==1 and cfg and not team.get('active_run') and not team.get('pending_run')):
                         for member_id in team.get('members',[]):
