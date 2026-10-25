@@ -13717,8 +13717,11 @@ def client_handler(conn, addr):
                 elif picked_char and msg==110:
                     invite=TEAM_INVITES.get(cid); ok=get_val_int(body,0,0)==1
                     reply_id=get_val_int(body,1,0)
-                    valid=bool(invite and invite.get('expires_at',0)>=int(time.time()) and reply_id==cid)
                     inviter=int(invite.get('inviter_id',0)) if invite else 0
+                    # The APK sends CurTeamInfo.characterId here, which is
+                    # the inviter's ID, not the invited player's own ID.
+                    valid=bool(invite and invite.get('expires_at',0)>=int(time.time())
+                        and inviter and reply_id==inviter)
                     if inviter:
                         send_push_to_char(inviter,517,encode_sproto([(0,1 if ok and valid else 0),(1,cid)]))
                     if not ok or not valid: TEAM_INVITES.pop(cid,None)
