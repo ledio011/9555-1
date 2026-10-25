@@ -319,7 +319,9 @@ try:
                         'priority': int(parts[29]) if len(parts) > 29 and parts[29].isdigit() else 0,
                         # Equip inheritance groups weapon skills by SkillData.TeamID;
                         # matching skill IDs alone rejects valid client selections.
-                        'team_id': int(parts[32]) if len(parts) > 32 and parts[32].lstrip('-').isdigit() else 0
+                        'team_id': int(parts[32]) if len(parts) > 32 and parts[32].lstrip('-').isdigit() else 0,
+                        # Chara > Skills only enables upgrades when SkillData.IsUpgrade is set.
+                        'is_upgrade': int(parts[33]) if len(parts) > 33 and parts[33].lstrip('-').isdigit() else 0
                     }
                     # Build reverse lookup: effId -> skillId
                     for eff_key in ('eff0', 'eff1', 'eff2'):
@@ -1046,7 +1048,14 @@ try:
                 parts = line.strip().split(',')
                 if len(parts) > 4 and parts[0] == '*' and parts[1].isdigit():
                     TITLE_CONFIG[int(parts[1])] = {
-                        'exp': int(parts[4]) if parts[4].isdigit() else 0
+                        'exp': int(parts[4]) if parts[4].isdigit() else 0,
+                        'stats': [
+                            (int(parts[index]), int(parts[index + 1]))
+                            for index in range(5, min(25, len(parts) - 1), 2)
+                            if parts[index].strip().lstrip('-').isdigit()
+                            and parts[index + 1].strip().lstrip('-').isdigit()
+                            and int(parts[index]) > 0
+                        ]
                     }
         print(f"[TITLE CONFIG LOADED] levels={len(TITLE_CONFIG)}")
 
@@ -2063,25 +2072,116 @@ PROF_SKILLS = {
     2: {"atk": ["301", "302", "303"], "dodge": "304", "starter_active": "305"}
 }
 
-def get_skill_upgrade_cost(lv):
-    if lv < 0: return 0
-    # Data-driven: read from SkillupgradeData TextAsset
+def get_skill_upgrade_price(current_level):
+    """Return the configured currency type and price for the next skill level."""
+    try:
+        current_level = int(current_level)
+    except (TypeError, ValueError):
+        return None
+    if current_level < 0:
+        return None
+    target_level = current_level + 1
     if SKILL_UPGRADE_DATA:
-        entry = SKILL_UPGRADE_DATA.get(lv)
-        if entry:
-            return entry['price_value']
-        # Level beyond data table
-        max_lv = max(SKILL_UPGRADE_DATA.keys())
-        if lv > max_lv:
-            return SKILL_UPGRADE_DATA[max_lv]['price_value']
-        return 0
-    # Fallback: original hardcoded formula
-    if lv < 15: return (lv + 1) * 10000
-    if lv < 24: return (lv - 13) * 100000 + 100000
-    if lv == 24: return 3000000
-    if lv == 25: return 7000000
-    if lv == 26: return 18000000
-    return 20000000
+        # SkillupgradeData is keyed by the level the player is buying. The APK
+        # requests row CharacterSkillData.Level + 1; never reuse the last row.
+        entry = SKILL_UPGRADE_DATA.get(target_level)
+        if not entry:
+            return None
+        try:
+            money_type = int(entry.get('price_type', -1))
+            price = int(entry.get('price_value', -1))
+        except (TypeError, ValueError):
+            return None
+        return (money_type, price) if price >= 0 else None
+
+    # Older deployments without the TextAsset keep the previous cash curve.
+    if current_level < 15:
+        price = (current_level + 1) * 10000
+    elif current_level < 24:
+        price = (current_level - 13) * 100000 + 100000
+    elif current_level == 24:
+        price = 3000000
+    elif current_level == 25:
+        price = 7000000
+    elif current_level == 26:
+        price = 18000000
+    else:
+        price = 20000000
+    return (0, price)
+
+
+def get_skill_upgrade_cost(current_level):
+    """Compatibility helper: the price for upgrading from current_level once."""
+    price = get_skill_upgrade_price(current_level)
+    return price[1] if price else 0
+
+
+def apply_skill_level_up(character, skill_id, client_level, upgrade_all=False):
+    """Apply one or all APK-authorized levels; return (count, level, valid request)."""
+    if not isinstance(character, dict):
+        return 0, -1, False
+    skill_id = str(skill_id or '')
+    try:
+        client_level = int(client_level)
+        profession = int(character.get('prof', 0))
+    except (TypeError, ValueError):
+        return 0, -1, False
+
+    profession_skills = PROF_SKILLS.get(profession, PROF_SKILLS[0])
+    owned_starter_skills = set(
+        profession_skills['atk'] if isinstance(profession_skills['atk'], list)
+        else [profession_skills['atk']]
+    )
+    owned_starter_skills.update((profession_skills['dodge'], profession_skills['starter_active']))
+    skill_levels = character.setdefault('skill_levels', {})
+    skill_key = next((key for key in skill_levels if str(key) == skill_id), skill_id)
+    try:
+        current_level = int(skill_levels.get(skill_key, 0))
+    except (TypeError, ValueError):
+        return 0, -1, False
+
+    weapon_skill_ids = equipped_weapon_skill_ids(character)
+    is_weapon_skill = skill_id in ALL_WEAPON_SKILL_IDS
+    skill_owned = (
+        skill_id in owned_starter_skills
+        or skill_id in weapon_skill_ids
+        or (skill_key in skill_levels and not is_weapon_skill)
+    )
+    skill_cfg = SKILL_CONFIG.get(skill_id, {})
+    request_valid = (
+        skill_owned and bool(skill_cfg)
+        and int(skill_cfg.get('is_upgrade', 0)) == 1
+        and client_level == current_level and current_level >= 0
+    )
+    if not request_valid:
+        return 0, current_level, False
+
+    upgraded = 0
+    max_upgrade_level = max(SKILL_UPGRADE_DATA) if SKILL_UPGRADE_DATA else 79
+    player_level = max(0, int(character.get('level', 1)))
+    while current_level < max_upgrade_level:
+        target_level = current_level + 1
+        # APK gate: next skill level must be below player level.
+        if target_level >= player_level:
+            break
+        price = get_skill_upgrade_price(current_level)
+        if price is None:
+            break
+        money_type, cost = price
+        if (not 0 <= money_type < len(MONEY_FIELDS) or cost < 0
+                or get_currency_balance(character, money_type) < cost):
+            break
+        set_currency_balance(
+            character, money_type,
+            get_currency_balance(character, money_type) - cost
+        )
+        current_level = target_level
+        skill_levels[skill_key] = current_level
+        upgraded += 1
+        if not upgrade_all:
+            break
+    return upgraded, current_level, True
+
 
 def equipped_weapon_skill_rows(equipped_items):
     """Read the active weapon's rolled skills using the APK's one-based affix slots."""
@@ -2100,6 +2200,7 @@ def equipped_weapon_skill_rows(equipped_items):
     rows = []
     seen_skills = set()
     seen_skill_teams = set()
+    seen_affix_indices = set()
     for key, roll in raw_rows:
         if not isinstance(roll, dict):
             continue
@@ -2115,10 +2216,12 @@ def equipped_weapon_skill_rows(equipped_items):
         except (TypeError, ValueError):
             team_id = 0
         if (not skill_id or skill_id in seen_skills or not 1 <= affix_index <= 6
+                or affix_index in seen_affix_indices
                 or not skill_cfg or (team_id > 0 and team_id in seen_skill_teams)):
             continue
         rows.append((affix_index, skill_id))
         seen_skills.add(skill_id)
+        seen_affix_indices.add(affix_index)
         if team_id > 0:
             seen_skill_teams.add(team_id)
     return sorted(rows)
@@ -2279,14 +2382,27 @@ def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None,
     # Dodge / Roll (104 / 204 / 304) - Index 3
     smap[p["dodge"]] = encode_sproto([(0, p["dodge"]), (1, skill_levels.get(p["dodge"], 0)), (2, 3), (3, 1), (4, 1), (5, False)])
 
+    # Candidate skill slots are Index2 5..10 (six cells in SkillInfoRootLogic).
+    # Weapon skill Index2 must remain affix index + 4 because the APK also uses
+    # it to display the skill level beside that weapon affix. Reserve those
+    # cells first, then place the profession starter into a free cell.
+    skill_list_slots = set(range(5, 11))
+    candidate_slot_by_skill = {
+        sid: affix_index + 4 for affix_index, sid in weapon_skill_rows
+    }
+    used_candidate_slots = set(candidate_slot_by_skill.values())
+    free_candidate_slots = [slot for slot in sorted(skill_list_slots)
+                            if slot not in used_candidate_slots]
+
     # Starter active skill (105 / 205 / 305) - Index 4 (first active skill slot)
     starter_active = p["starter_active"]
+    starter_list_slot = free_candidate_slots.pop(0) if free_candidate_slots else None
     smap[starter_active] = encode_sproto([
         (0, starter_active),
         (1, skill_levels.get(starter_active, 0)),
         (2, 4),       # indexPos - first active skill slot
         (3, 1),       # unlockLevel - available from level 1
-        (4, 2),       # indexPos2 - skill bar position
+        (4, starter_list_slot if starter_list_slot is not None else 5),
         (5, False)    # disable - not disabled
     ])
 
@@ -2316,16 +2432,21 @@ def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None,
     used_skill_positions = {4}  # the profession starter active skill owns slot 4
     used_skill_positions.update(affix_index + 4 for affix_index, _sid in weapon_skill_rows)
     for idx, (sid, slv, priority) in enumerate(extra_skills):
+        if not free_candidate_slots:
+            # The client has six candidate cells; do not send an overflow
+            # Index2 that makes SkillInfoRootLogic index outside its list.
+            break
         skill_idx = 4 + idx
         while skill_idx in used_skill_positions:
             skill_idx += 1
         used_skill_positions.add(skill_idx)
+        candidate_slot = free_candidate_slots.pop(0)
         smap[sid] = encode_sproto([
             (0, sid),
             (1, slv),
             (2, skill_idx),   # indexPos
             (3, 1),           # unlockLevel
-            (4, skill_idx),   # indexPos2
+            (4, candidate_slot),   # indexPos2 - bounded candidate-list cell
             (5, False)        # disable
         ])
 
@@ -2341,7 +2462,7 @@ def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None,
             (1, skill_levels.get(sid, 0)),
             (2, skill_pos),
             (3, 1),
-            (4, skill_pos),
+            (4, candidate_slot_by_skill[sid]),
             (5, False)
         ])
 
@@ -3749,6 +3870,17 @@ def get_character_stats(c):
             add_item_attribute(badge_cfg.get('status2'), badge_cfg.get('value2', 0))
             add_extra_combat_power(badge_cfg.get('status1'), badge_cfg.get('value1', 0))
             add_extra_combat_power(badge_cfg.get('status2'), badge_cfg.get('value2', 0))
+
+    # The APK displays TitleData bonuses in Chara > Title. Apply the owned
+    # title's configured attributes through the same percentage/stat path as
+    # equipment and badges so the panel, combat values, and power stay aligned.
+    try:
+        title_level = max(0, int(c.get('title_level', 0)))
+    except (TypeError, ValueError):
+        title_level = 0
+    for attribute_id, value in TITLE_CONFIG.get(title_level, {}).get('stats', []):
+        add_item_attribute(attribute_id, value)
+        add_extra_combat_power(attribute_id, value)
 
     # RefineData's four parts (neck, ring 1, ring 2, belt) are part of the
     # client's combat attributes and displayed combat power, even though they
@@ -9742,31 +9874,24 @@ def client_handler(conn, addr):
             elif msg == 130: # skill_level_up
                 sid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
                 cur_lv = get_val_int(body, 1)
-                if picked_char:
-                    prof_skills = PROF_SKILLS.get(int(picked_char.get('prof', 0)), PROF_SKILLS[0])
-                    valid_skill_ids = set(prof_skills['atk'] if isinstance(prof_skills['atk'], list) else [prof_skills['atk']])
-                    valid_skill_ids.update((prof_skills['dodge'], prof_skills['starter_active']))
-                    skill_levels = picked_char.setdefault('skill_levels', {})
-                    skill_key = next((key for key in skill_levels if str(key) == sid), sid)
-                    server_skill_lv = int(skill_levels.get(skill_key, 0))
-                    skill_is_owned = sid in valid_skill_ids or skill_key in skill_levels
-                    skill_matches_server = skill_is_owned and cur_lv == server_skill_lv and cur_lv >= 0
-                    cost = get_skill_upgrade_cost(cur_lv) if skill_matches_server else None
-                    if (cost is not None and cost > 0
-                            and picked_char.get('cash', 0) >= cost
-                            and picked_char.get('level', 1) > server_skill_lv + 1):
-                        picked_char['cash'] -= cost
-                        skill_levels[skill_key] = server_skill_lv + 1
-                        save_chars(all_accounts_chars)
-                        smap = build_skills_map(
-                            picked_char['prof'], picked_char['level'],
-                            picked_char['skill_levels'], picked_char.get('equipped_equip', []),
-                            picked_char.get('skill_positions', {})
+                upgrade_all = bool(get_val_int(body, 2, 0))
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    with get_character_transaction_lock(picked_char):
+                        upgraded, server_skill_lv, request_valid = apply_skill_level_up(
+                            picked_char, sid, cur_lv, upgrade_all
                         )
-                        send_rpc_push(540, encode_sproto([(0, smap), (1, True)]))
-                        sync_char_attrs_rpc(conn, picked_char)
-                    elif not skill_matches_server:
-                        print(f"[SKILL SECURITY] rejected inconsistent/unknown upgrade sid={sid} client_lv={cur_lv} server_lv={server_skill_lv}")
+                        if upgraded:
+                            save_chars(all_accounts_chars)
+                            smap = build_skills_map(
+                                picked_char['prof'], picked_char['level'],
+                                picked_char['skill_levels'], picked_char.get('equipped_equip', []),
+                                picked_char.get('skill_positions', {})
+                            )
+                            send_rpc_push(540, encode_sproto([(0, smap), (1, True)]))
+                            sync_char_attrs_rpc(conn, picked_char)
+                        elif not request_valid:
+                            print(f"[SKILL SECURITY] rejected inconsistent/unowned/non-upgradable skill "
+                                  f"sid={sid} client_lv={cur_lv} server_lv={server_skill_lv}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -10829,19 +10954,20 @@ def client_handler(conn, addr):
                 send_rpc_response(session)
 
             elif msg == 156: # title_req_level_up, required after honor rewards
-                if picked_char:
-                    current_level = max(0, int(picked_char.get('title_level', 0)))
-                    title_exp = max(0, int(picked_char.get('title_exp', 0)))
-                    threshold = int(TITLE_CONFIG.get(current_level, {}).get('exp', 0))
-                    if (current_level < 10 and threshold > 0 and title_exp >= threshold
-                            and current_level + 1 in TITLE_CONFIG):
-                        picked_char['title_level'] = current_level + 1
-                        save_chars(all_accounts_chars)
-                        sync_char_attrs_rpc(conn, picked_char)
-                    send_rpc_push(569, encode_sproto([
-                        (0, int(picked_char.get('title_level', 0))),
-                        (1, int(picked_char.get('title_exp', 0)))
-                    ]))
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    with get_character_transaction_lock(picked_char):
+                        current_level = max(0, int(picked_char.get('title_level', 0)))
+                        title_exp = max(0, int(picked_char.get('title_exp', 0)))
+                        threshold = int(TITLE_CONFIG.get(current_level, {}).get('exp', 0))
+                        if (current_level < 10 and threshold > 0 and title_exp >= threshold
+                                and current_level + 1 in TITLE_CONFIG):
+                            picked_char['title_level'] = current_level + 1
+                            save_chars(all_accounts_chars)
+                            sync_char_attrs_rpc(conn, picked_char)
+                        send_rpc_push(569, encode_sproto([
+                            (0, int(picked_char.get('title_level', 0))),
+                            (1, int(picked_char.get('title_exp', 0)))
+                        ]))
                 send_rpc_response(session)
 
             elif msg == 185: # change_potion: persist the client's selected item-backpack potion
