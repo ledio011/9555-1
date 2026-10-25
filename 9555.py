@@ -6616,8 +6616,8 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
             send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
-    if map_str == "11":
-        return
+    # Map 11 skips generic server map spawns above, but mission-target NPCs
+    # still need server instances so their deaths can be validated and counted.
     if picked_char:
         for mid, mdata in picked_char.get('active_missions', {}).items():
             if mdata['state'] == 1:
