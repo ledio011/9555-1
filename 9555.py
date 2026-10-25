@@ -713,7 +713,10 @@ try:
                 if len(parts) > 7 and parts[1].isdigit():
                     row_id = parts[1]
                     # Skip duplicate 4-digit MissionID override rows (e.g., 1001 with FlashNum=4) in favor of 1-digit LogicIDs (e.g., 1 with FlashNum=2)
-                    if int(row_id) >= 1000 and str(int(row_id) - 1000) in KILL_TARGET_SPAWNS:
+                    # Only 1001-1003 are MissionID override rows. Rows 1004+ are real
+                    # Line Mission spawn definitions (e.g. 1004 = Beat Striker x7) and
+                    # must not be dropped just because ID 4..12 exists as another row.
+                    if 1000 <= int(row_id) <= 1003 and str(int(row_id) - 1000) in KILL_TARGET_SPAWNS:
                         continue
                     if row_id not in KILL_TARGET_SPAWNS: KILL_TARGET_SPAWNS[row_id] = []
                     flash_num = int(parts[7]) if parts[7].isdigit() else 1
