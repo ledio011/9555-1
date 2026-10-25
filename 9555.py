@@ -9050,7 +9050,7 @@ def client_handler(conn, addr):
 
             raw = sproto_unpack(data); pkg = decode_sproto(raw, 0)
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
-            print(f"[RX] MSG={msg} SESSION={session}")
+            if msg != 101: print(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
 
             if msg == 2: # visitor
@@ -13693,6 +13693,13 @@ def client_handler(conn, addr):
                         send_rpc_push(518,encode_sproto([]))
                 elif picked_char and msg==214:
                     goal=get_val_str(body,0,''); goal_type=get_val_int(body,1,1)
+                    _t=get_team_for_char(cid); _cfg=COPY_SCENE_CONFIG.get(goal,{})
+                    _why=[]
+                    if not is_team_battle_copy(goal): _why.append(f'goal {goal!r} is not a team battle copy')
+                    if _t and _t.get('leader_id')!=cid: _why.append(f"not leader (leader={_t.get('leader_id')})")
+                    if _t and (_t.get('active_run') or _t.get('pending_run')): _why.append('run active/pending')
+                    if not _t and not is_character_available_for_team(picked_char): _why.append('you are unavailable (map/stage state)')
+                    print(f"[TEAM] 214 match request player={cid} goal={goal!r} type={goal_type} team={_t.get('id') if _t else None} members={_t.get('members') if _t else None} level_band={_cfg.get('min_level')}-{_cfg.get('max_level')} problems={_why or 'none'}")
                     if is_team_battle_copy(goal):
                         team=get_team_for_char(cid)
                         if team is None and is_character_available_for_team(picked_char):
@@ -13748,12 +13755,19 @@ def client_handler(conn, addr):
                                 else: send_push_to_char(member_id,555,copy_update)
                         ids=list(team['members']); minm=max(2,int(cfg.get('min_member',2)))
                         valid=minm<=len(ids)<=int(cfg.get('max_member',4)) and all(ALL_CONNECTIONS.get(x,(None,None))[0] is not None and ALL_CONNECTIONS.get(x,(None,None))[1] is not None for x in ids)
+                        if not valid: print(f"[TEAM] 215 blocked: members={ids} need {minm}-{cfg.get('max_member',4)} members all online")
                         if valid:
+                            for x in ids:
+                                _m=ALL_CONNECTIONS[x][1]
+                                if not is_character_available_for_team(_m): print(f"[TEAM] 215 blocked: member={x} unavailable map={_m.get('map_id')}")
+                                if not cfg['min_level']<=int(_m.get('level',1))<=cfg['max_level']: print(f"[TEAM] 215 blocked: member={x} level {_m.get('level')} outside {cfg['min_level']}-{cfg['max_level']}")
                             valid=all(is_character_available_for_team(ALL_CONNECTIONS[x][1]) and cfg['min_level']<=int(ALL_CONNECTIONS[x][1].get('level',1))<=cfg['max_level'] for x in ids)
                         if valid:
                             # Every participant spends their own daily attempt;
                             # do not let a ready squad carry exhausted members
                             # into a run for free.
+                            for x in ids:
+                                if copy_attempts_remaining(ALL_CONNECTIONS[x][1],copy_id,cfg)<=0: print(f"[TEAM] 215 blocked: member={x} has no daily attempts left")
                             valid=all(copy_attempts_remaining(ALL_CONNECTIONS[x][1],copy_id,cfg)>0 for x in ids)
                         if valid:
                             session_id=next_exp_run_id()
