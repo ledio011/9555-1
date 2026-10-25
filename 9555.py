@@ -13839,12 +13839,24 @@ def client_handler(conn, addr):
                         ids=list(team['members']); minm=max(2,int(cfg.get('min_member',2)))
                         valid=minm<=len(ids)<=int(cfg.get('max_member',4)) and all(ALL_CONNECTIONS.get(x,(None,None))[0] is not None and ALL_CONNECTIONS.get(x,(None,None))[1] is not None for x in ids)
                         if valid:
-                            valid=all(is_character_available_for_team(ALL_CONNECTIONS[x][1]) and cfg['min_level']<=int(ALL_CONNECTIONS[x][1].get('level',1))<=cfg['max_level'] for x in ids)
+                            leader_id = int(team.get('leader_id', 0))
+                            valid=all(
+                                is_character_available_for_team(ALL_CONNECTIONS[x][1])
+                                and team_copy_level_allowed(
+                                    copy_id, ALL_CONNECTIONS[x][1].get('level', 1),
+                                    leader=(int(x) == leader_id))
+                                for x in ids)
                         if valid:
-                            # Every participant spends their own daily attempt;
-                            # do not let a ready squad carry exhausted members
-                            # into a run for free.
-                            valid=all(copy_attempts_remaining(ALL_CONNECTIONS[x][1],copy_id,cfg)>0 for x in ids)
+                            if copy_id in DAILY_EXP_CONFIG:
+                                # EXP-stage party entry is gated on the
+                                # leader's attempts only. Teammates may ready
+                                # at zero and do not spend an attempt.
+                                leader=ALL_CONNECTIONS.get(int(team.get('leader_id',0)),(None,None))[1]
+                                valid=bool(leader and copy_attempts_remaining(leader,copy_id,cfg)>0)
+                            else:
+                                # Keep the existing equipment-stage attempt
+                                # policy unchanged.
+                                valid=all(copy_attempts_remaining(ALL_CONNECTIONS[x][1],copy_id,cfg)>0 for x in ids)
                         if valid:
                             session_id=next_exp_run_id()
                             team['pending_run']={'session':session_id,'copy_id':copy_id,'ready':{x:False for x in ids}}
@@ -15464,15 +15476,27 @@ def client_handler(conn, addr):
 def team_join_member(team, char):
     cid=int(char.get('id',0))
     if not team or team.get('active_run') or team.get('pending_run') or len(team.get('members',[]))>=4 or cid in team.get('members',[]): return False
-    if not int(team.get('min_level',1))<=int(char.get('level',1))<=int(team.get('max_level',80)): return False
+    is_leader = cid == int(team.get('leader_id', 0))
+    goal_id = str(team.get('goal_id') or '')
+    if goal_id in DAILY_EXP_CONFIG:
+        if not team_copy_level_allowed(goal_id, char.get('level', 1), leader=is_leader): return False
+    elif not int(team.get('min_level',1))<=int(char.get('level',1))<=int(team.get('max_level',80)):
+        return False
     if not is_character_available_for_team(char) or (CHAR_TEAM.get(cid) not in (None, int(team.get('id', 0)))): return False
     team.setdefault('members',[]).append(cid); team.setdefault('char_refs',{})[cid]=char
     CHAR_TEAM[cid]=int(team['id']); char['team_goal_copy']=str(team.get('goal_id',''))
     return True
 
 def team_goal_level_bounds(copy_id, min_level=1, max_level=80):
-    """Use the APK copy's configured level band for EXP squads."""
+    """Return roster-join limits; EXP members have no stage max-level gate."""
     copy_id = str(copy_id or '')
+    if copy_id in DAILY_EXP_CONFIG:
+        cfg = COPY_SCENE_CONFIG.get(copy_id, {})
+        minimum = max(1, int(cfg.get('min_level', min_level)))
+        # TeamLineRoot uses these advertised limits to enable the Join button.
+        # EXP leaders are checked against the stage band separately; members
+        # can be above its max, up to the game's overall level cap.
+        return minimum, max(minimum, 80)
     if is_team_battle_copy(copy_id):
         cfg = COPY_SCENE_CONFIG.get(copy_id, {})
         minimum = max(1, int(cfg.get('min_level', min_level)))
@@ -15480,6 +15504,20 @@ def team_goal_level_bounds(copy_id, min_level=1, max_level=80):
         return minimum, maximum
     minimum = max(1, int(min_level))
     return minimum, max(minimum, int(max_level))
+
+def team_copy_level_allowed(copy_id, level, leader=False):
+    """Apply the APK's EXP-team rule: stage-band leader, minimum-only members."""
+    copy_id = str(copy_id or '')
+    cfg = COPY_SCENE_CONFIG.get(copy_id, {})
+    try:
+        level = int(level)
+        minimum = max(1, int(cfg.get('min_level', 1)))
+        maximum = max(minimum, int(cfg.get('max_level', 80)))
+    except (TypeError, ValueError):
+        return False
+    if copy_id in DAILY_EXP_CONFIG:
+        return level >= minimum and (not leader or level <= maximum)
+    return minimum <= level <= maximum
 
 def team_remove_member(team, char_id):
     cid=int(char_id)
@@ -15518,7 +15556,8 @@ def queue_team_match(team, goal_id, goal_type):
         players=[]; valid=True
         for member_id in combined:
             member=ALL_CONNECTIONS.get(int(member_id),(None,None))[1]
-            if member is None or not int(cfg.get('min_level',1))<=int(member.get('level',1))<=int(cfg.get('max_level',80)):
+            is_leader = int(member_id) == int(team.get('leader_id', 0))
+            if member is None or not team_copy_level_allowed(copy_id, member.get('level', 1), leader=is_leader):
                 valid=False; break
             players.append((int(member_id),member))
         if not valid:
@@ -15661,8 +15700,10 @@ def start_team_exp_run(team, copy_id):
     for cid in ids:
         conn,ch=ALL_CONNECTIONS.get(cid,(None,None))
         if conn is None or ch is None: return False
-        if not is_character_available_for_team(ch) or not cfg['min_level']<=int(ch.get('level',1))<=cfg['max_level']: return False
-        if copy_attempts_remaining(ch,copy_id,cfg)<=0: return False
+        is_leader = int(cid) == int(team.get('leader_id', 0))
+        if not is_character_available_for_team(ch) or not team_copy_level_allowed(
+                copy_id, ch.get('level', 1), leader=is_leader): return False
+        if is_leader and copy_attempts_remaining(ch,copy_id,cfg)<=0: return False
         players.append((cid,conn,ch))
     leader=next((ch for cid,_conn,ch in players if int(cid)==int(team.get('leader_id',0))),None)
     if leader is None: return False
@@ -15671,7 +15712,8 @@ def start_team_exp_run(team, copy_id):
             ch['pre_copy_pos']=list(ch.get('pos',[29860,100,-17005,0])); ch['pre_copy_map']=str(ch.get('map_id','11'))
         daily=ensure_daily_copy_state(ch)
         remaining=copy_attempts_remaining(ch,copy_id,cfg)
-        daily['remaining'][copy_id]=remaining-1
+        if int(cid) == int(team.get('leader_id', 0)):
+            daily['remaining'][copy_id]=max(0,remaining-1)
         ch['active_copy_id']=copy_id; ch['exp_members']=ids; ch['exp_team_id']=int(team['id']); ch['exp_defer_start']=True
         ch['hp']=get_character_stats(ch)['hp_max']; sync_char_attrs_rpc(conn,ch)
         send_push_to_char(cid,555,sync_copy_scenes(ch))
