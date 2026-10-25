@@ -13615,7 +13615,7 @@ def client_handler(conn, addr):
                     if ok and valid:
                         team=TEAM_STATES.get(invite_tid)
                         if (team and not team.get('active_run') and get_team_for_char(cid) is None
-                                and inviter==int(team.get('leader_id',0)) and team_join_member(team,picked_char)):
+                                and inviter==int(team.get('leader_id',0)) and team_join_member(team,picked_char,invited=True)):
                             joined=True
                             send_team_update(invite_tid)
                             print(f"[TEAM] invite accepted via 110 team={invite_tid} member={cid}")
@@ -13628,8 +13628,12 @@ def client_handler(conn, addr):
                     invited=bool(is_invite_accept and inv.get('team_id')==tid
                         and inv.get('expires_at',0)>=int(time.time())
                         and team and inv.get('inviter_id')==int(team.get('leader_id',0)))
-                    if team and not team.get('active_run') and is_invite_accept:
-                        if invited and team_join_member(team,picked_char):
+                    if team and is_invite_accept and cid in team.get('members',[]):
+                        TEAM_INVITES.pop(cid,None)
+                        send_team_update(tid)
+                        print(f"[TEAM] 161 accept: member={cid} already in team={tid}")
+                    elif team and not team.get('active_run') and is_invite_accept:
+                        if invited and team_join_member(team,picked_char,invited=True):
                             TEAM_INVITES.pop(cid,None)
                             send_team_update(tid)
                             print(f"[TEAM] invite accepted team={tid} member={cid}")
@@ -15356,13 +15360,24 @@ def client_handler(conn, addr):
         print(f"[-] Client disconnected: {addr}")
 
 
-def team_join_member(team, char):
+def team_join_member(team, char, invited=False):
     cid=int(char.get('id',0))
-    if not team or team.get('active_run') or team.get('pending_run') or len(team.get('members',[]))>=4 or cid in team.get('members',[]): return False
-    if not int(team.get('min_level',1))<=int(char.get('level',1))<=int(team.get('max_level',80)): return False
-    if not is_character_available_for_team(char) or (CHAR_TEAM.get(cid) not in (None, int(team.get('id', 0)))): return False
+    tid=int(team.get('id',0)) if team else 0
+    def _no(reason):
+        print(f"[TEAM] join blocked team={tid} member={cid} reason={reason}")
+        return False
+    if not team: return _no('no team')
+    if team.get('active_run') or team.get('pending_run'): return _no('team in run')
+    if len(team.get('members',[]))>=4: return _no('team full')
+    if cid in team.get('members',[]): return _no('already member')
+    lv=int(char.get('level',1)); lo=int(team.get('min_level',1)); hi=int(team.get('max_level',80))
+    # A direct invite from the leader overrides the recruit level band.
+    if not invited and not lo<=lv<=hi: return _no(f'level {lv} outside {lo}-{hi}')
+    if not is_character_available_for_team(char):
+        return _no(f"unavailable map={char.get('map_id')} exp_stage={bool(char.get('exp_stage_state'))} equip_stage={bool(char.get('equipment_stage_state'))}")
+    if CHAR_TEAM.get(cid) not in (None, tid): return _no(f'in other team {CHAR_TEAM.get(cid)}')
     team.setdefault('members',[]).append(cid); team.setdefault('char_refs',{})[cid]=char
-    CHAR_TEAM[cid]=int(team['id']); char['team_goal_copy']=str(team.get('goal_id',''))
+    CHAR_TEAM[cid]=tid; char['team_goal_copy']=str(team.get('goal_id',''))
     return True
 
 def team_goal_level_bounds(copy_id, min_level=1, max_level=80):
