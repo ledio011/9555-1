@@ -6651,10 +6651,28 @@ def sync_mission_data(picked_char):
 
     # sync_mission.request schema: missions(0), last_missionId(1), sidedone_mission(2)
     # FIX: missions must be encoded as a Sproto array of objects (concatenated length-prefixed chunks)
+    # The APK stores side-mission completion as 64-bit flags, not mission IDs.
+    side_done_flags = []
+    for completed_mid in picked_char.get('completed_side_missions', []):
+        try:
+            completed_id = int(completed_mid)
+            completed_cfg = missions_data.get(str(completed_id), {})
+            if completed_cfg.get('class') != 2:
+                continue
+            side_offset = completed_id - 40000
+            if side_offset < 0:
+                continue
+            flag_index, bit_index = divmod(side_offset, 64)
+            if len(side_done_flags) <= flag_index:
+                side_done_flags.extend([0] * (flag_index + 1 - len(side_done_flags)))
+            side_done_flags[flag_index] |= 1 << bit_index
+        except (TypeError, ValueError):
+            continue
+
     data_list = [
         (0, own_missions_list),
         (1, str(last_main)),
-        (2, [int(x) for x in picked_char.get('completed_side_missions', []) if x])
+        (2, side_done_flags)
     ]
     return encode_sproto(data_list)
 
