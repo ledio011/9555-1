@@ -6657,7 +6657,11 @@ def sync_mission_data(picked_char):
         try:
             completed_id = int(completed_mid)
             completed_cfg = missions_data.get(str(completed_id), {})
-            if completed_cfg.get('class') != 2:
+            # Class 2 are side missions; class 8 are the "Line Mission"
+            # sequence (46001+). Both are tracked in completed_side_missions
+            # by the existing completion handler and must be represented in
+            # the client's completion bitset so the UI agrees with the server.
+            if completed_cfg.get('class') not in (2, 8):
                 continue
             side_offset = completed_id - 40000
             if side_offset < 0:
