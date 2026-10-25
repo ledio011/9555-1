@@ -3349,6 +3349,15 @@ def send_team_update(team_id, only_ids=None):
     payload = team_payload(team)
     if payload is None: return
     data = encode_sproto([(0, payload)])
+    try:
+        _g=str(team.get('goal_id','')); _lo=int(team.get('min_level',1)); _hi=int(team.get('max_level',80)); _rows=[]
+        for _m in team.get('members',[]):
+            _c=ALL_CONNECTIONS.get(int(_m),(None,team.get('char_refs',{}).get(int(_m))))[1] or {}
+            _lv=int(_c.get('level',0)); _att=copy_attempts_remaining(_c,_g,COPY_SCENE_CONFIG.get(_g,{})) if (_c and is_team_battle_copy(_g)) else -1
+            _rows.append(f"{_m}(lv{_lv}{'' if _lo<=_lv<=_hi else ' OUT-OF-BAND'},att={_att},map={_c.get('map_id')})")
+        print(f"[TEAM] state team={team.get('id')} leader={team.get('leader_id')} goal={_g!r} band={_lo}-{_hi} members=[{', '.join(_rows)}]")
+    except Exception as _e:
+        print(f"[TEAM] state dump failed: {_e}")
     for cid in list(team.get('members', []) if only_ids is None else only_ids):
         send_push_to_char(cid, 518, data)
 
