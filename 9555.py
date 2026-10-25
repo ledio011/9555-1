@@ -13537,7 +13537,7 @@ def client_handler(conn, addr):
             # Keep the legacy chat-shaped 110 payload out of the team invite
             # reply path. The APK's real chat RPC is 120; ret_invite_join_team
             # (110) carries integer fields ok(0), id(1) and is handled below.
-            elif msg == 110 and isinstance(body.get(1), (bytes, str)): # legacy chat-shaped payload
+            elif msg == 110 and (isinstance(body.get(1), str) or (isinstance(body.get(1), (bytes, bytearray)) and len(body.get(1)) not in (1, 4, 8))): # legacy chat-shaped payload (field 1 is text, NOT a binary int id)
                 if picked_char:
                     chat_type = get_val_int(body, 0)
                     chat_msg = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1, ''))
@@ -13605,11 +13605,23 @@ def client_handler(conn, addr):
                 elif picked_char and msg==110:
                     invite=TEAM_INVITES.get(cid); ok=get_val_int(body,0,0)==1
                     reply_id=get_val_int(body,1,0)
-                    valid=bool(invite and invite.get('expires_at',0)>=int(time.time()) and reply_id==cid)
+                    # The client echoes the INVITER's id (or the team id) in field 1,
+                    # not the invitee's own id, so accept any of those.
                     inviter=int(invite.get('inviter_id',0)) if invite else 0
+                    invite_tid=int(invite.get('team_id',0)) if invite else 0
+                    valid=bool(invite and invite.get('expires_at',0)>=int(time.time())
+                               and reply_id in (inviter, invite_tid, cid))
+                    joined=False
+                    if ok and valid:
+                        team=TEAM_STATES.get(invite_tid)
+                        if (team and not team.get('active_run') and get_team_for_char(cid) is None
+                                and inviter==int(team.get('leader_id',0)) and team_join_member(team,picked_char)):
+                            joined=True
+                            send_team_update(invite_tid)
+                            print(f"[TEAM] invite accepted via 110 team={invite_tid} member={cid}")
                     if inviter:
-                        send_push_to_char(inviter,517,encode_sproto([(0,1 if ok and valid else 0),(1,cid)]))
-                    if not ok or not valid: TEAM_INVITES.pop(cid,None)
+                        send_push_to_char(inviter,517,encode_sproto([(0,1 if joined else 0),(1,cid)]))
+                    if not ok or not valid or joined: TEAM_INVITES.pop(cid,None)
                 elif picked_char and msg==161:
                     tid=get_val_int(body,0); team=TEAM_STATES.get(tid); inv=TEAM_INVITES.get(cid,{})
                     is_invite_accept=get_val_int(body,1,0)==1
