@@ -96,7 +96,13 @@ NPC_CONFIG = {}   # npcId -> npc info template
 MAP_CONFIG = {}   # mapId -> map info
 MAP_AREA_CONFIG = {} # MapAreaInfoData geometry used by client gather/safe areas
 MAP_CONNECT_DATA = {} # (src_id, target_id) -> PosX, PosY, PosZ
-GUILD_CAPTURE_DATA = {} # id -> mapId
+GUILD_CAPTURE_DATA = {} # id -> mapId (kept for existing Gang-city map routing)
+GUILD_CAPTURE_CONFIG = {} # id -> schedule metadata from GuildCaptureData
+GUILD_LEVEL_DATA = {} # guild level -> cumulative exp/max members/daily donation count
+GUILD_DONATE_DATA = {} # donation id -> authoritative cost and reward
+GUILD_SKILL_DATA = {} # skill type -> ordered level rows
+GUILD_SHOP_DATA = {} # shop item ID -> ShopData row for Guild shop
+GUILD_BOSS_DATA = {} # guild boss/activity rows shown by the Gang activity panel
 KILL_TARGET_SPAWNS = {} # logicId -> list of spawns
 TARGET_CAR_SPAWNS = {}  # logicId -> list of car spawns
 MISSION_REQUIRE_DATA = {} # logicId -> dict
@@ -451,7 +457,93 @@ try:
                 parts = line.strip().split(",")
                 if len(parts) > 2 and parts[1].isdigit():
                     GUILD_CAPTURE_DATA[parts[1]] = parts[2]
+                    try:
+                        GUILD_CAPTURE_CONFIG[parts[1]] = {
+                            "map_id": parts[2], "duration": int(parts[4] or 0),
+                            "week": int(parts[5] or 0), "start_time": int(parts[6] or 0)
+                        }
+                    except (IndexError, TypeError, ValueError):
+                        continue
         print(f"[GUILD CAPTURE DATA LOADED] count={len(GUILD_CAPTURE_DATA)}")
+
+    # Guild UI tables are authoritative for capacity, donations, skill cost,
+    # and guild-shop inventory. Keep these separate from unrelated shop logic.
+    for asset_name, target, parser in (
+        ("GuildLevelData", GUILD_LEVEL_DATA,
+         lambda p: (int(p[1]), {"exp": int(p[2]), "max_player": int(p[3]), "donate_count": int(p[4])})),
+        ("GuildDonateData", GUILD_DONATE_DATA,
+         lambda p: (str(p[1]), {"item_id": str(p[2]), "item_count": int(p[3]),
+                                "contribute": int(p[4]), "exp": int(p[5]),
+                                "donate_count": int(p[6])})),
+    ):
+        table_path = os.path.join(text_asset_root, asset_name)
+        if os.path.exists(table_path):
+            with open(table_path, "r", encoding="utf-8") as table_file:
+                for row in table_file:
+                    parts = row.strip().split(",")
+                    if not parts or parts[0] != "*":
+                        continue
+                    try:
+                        key, value = parser(parts)
+                        target[key] = value
+                    except (IndexError, TypeError, ValueError):
+                        continue
+    guild_skill_path = os.path.join(text_asset_root, "GuildSkillData")
+    if os.path.exists(guild_skill_path):
+        with open(guild_skill_path, "r", encoding="utf-8") as table_file:
+            for row in table_file:
+                parts = row.strip().split(",")
+                if not parts or parts[0] != "*":
+                    continue
+                try:
+                    skill_type = int(parts[1])
+                    GUILD_SKILL_DATA.setdefault(skill_type, []).append({
+                        "level_limit": int(parts[2]), "skill_id": str(parts[3]),
+                        "desc": parts[4], "level": int(parts[5]),
+                        "cost": int(parts[6]), "parm1": int(parts[7]),
+                        "parm2": int(parts[8]), "icon": parts[9], "name": parts[10]
+                    })
+                except (IndexError, TypeError, ValueError):
+                    continue
+        for rows in GUILD_SKILL_DATA.values():
+            rows.sort(key=lambda entry: entry["level"])
+    guild_shop_path = os.path.join(text_asset_root, "ShopData")
+    if os.path.exists(guild_shop_path):
+        with open(guild_shop_path, "r", encoding="utf-8") as table_file:
+            for row in table_file:
+                parts = row.strip().split(",")
+                if len(parts) < 17 or parts[0] != "*":
+                    continue
+                try:
+                    if int(parts[2]) != 3:
+                        continue
+                    GUILD_SHOP_DATA[str(parts[1])] = {
+                        "id": str(parts[1]), "item_id": str(parts[3]),
+                        "quality": int(parts[4] or 0), "profession": int(parts[5] or -1),
+                        "price_type": int(parts[6] or 0), "price": int(parts[7] or 0),
+                        "reset_cycle": int(parts[8] or 0), "limit": int(parts[9] or 0),
+                        "single_limit": int(parts[10] or 0), "discount": int(parts[11] or 0),
+                        "weight": int(parts[12] or 0), "min_level": int(parts[15] or 0),
+                        "max_level": int(parts[16] or 80),
+                        "class": int(parts[21] or 0) if len(parts) > 21 and parts[21] else 0
+                    }
+                except (TypeError, ValueError):
+                    continue
+    guild_boss_path = os.path.join(text_asset_root, "GuildBossData")
+    if os.path.exists(guild_boss_path):
+        with open(guild_boss_path, "r", encoding="utf-8") as table_file:
+            for row in table_file:
+                parts = row.strip().split(",")
+                if len(parts) < 13 or parts[0] != "*":
+                    continue
+                try:
+                    GUILD_BOSS_DATA[str(parts[1])] = {
+                        "map_id": str(parts[2]), "start_time": int(parts[6]),
+                        "duration": int(parts[7]), "level_min": int(parts[11]),
+                        "level_max": int(parts[12])
+                    }
+                except (TypeError, ValueError):
+                    continue
 
     # Load NpcData
     npc_path = os.path.join(text_asset_root, "NpcData")
@@ -1749,6 +1841,39 @@ def _save_chars_atomic(data):
         print(f"[ERROR] Failed atomic save_chars: {e}")
 
 all_accounts_chars = load_chars()
+
+# Guild data is persisted separately so it survives the leader logging out or
+# leaving the server. It contains only guild-owned state; character balances
+# and membership fields remain in the existing character database.
+GUILD_DB_PATH = os.path.join(SCRIPT_DIR, "guilds.json")
+GUILD_DB_LOCK = threading.RLock()
+def _load_guild_states():
+    try:
+        with open(GUILD_DB_PATH, "r", encoding="utf-8") as guild_file:
+            loaded = json.load(guild_file)
+        if isinstance(loaded, dict):
+            return {str(key): value for key, value in loaded.items() if isinstance(value, dict)}
+    except FileNotFoundError:
+        pass
+    except Exception as guild_error:
+        print(f"[GUILD] failed to read {GUILD_DB_PATH}: {guild_error}")
+    return {}
+
+def _save_guild_states():
+    with GUILD_DB_LOCK:
+        temp_path = GUILD_DB_PATH + ".tmp"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as guild_file:
+                json.dump(GUILD_STATES, guild_file, ensure_ascii=False, indent=2)
+                guild_file.flush()
+                os.fsync(guild_file.fileno())
+            os.replace(temp_path, GUILD_DB_PATH)
+        except Exception as guild_error:
+            print(f"[GUILD] failed to save {GUILD_DB_PATH}: {guild_error}")
+
+GUILD_STATES = _load_guild_states()
+GUILD_ID_COUNTER = max([99999] + [int(key) for key in GUILD_STATES if str(key).isdigit()]) + 1
+print(f"[GUILD] loaded guilds={len(GUILD_STATES)} next_id={GUILD_ID_COUNTER}")
 
 # Initialize MAIL_ID_COUNTER from max existing mailId to avoid collisions after restart
 for area_key, area_chars in all_accounts_chars.items():
@@ -8993,6 +9118,774 @@ def _sync_friend_online_state(char_id, state):
     # Save updated friend/enemy state
     save_chars(all_accounts_chars)
 
+def _guild_id_for_character(char):
+    try:
+        return int(char.get('guildId', char.get('guild_id', 0)) or 0)
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+def _guild_level(guild):
+    exp = max(0, int(guild.get('exp', 0) or 0))
+    level = 1
+    for row_level in sorted(GUILD_LEVEL_DATA):
+        if row_level <= level and exp >= int(GUILD_LEVEL_DATA[row_level].get('exp', 0)):
+            level = min(max(GUILD_LEVEL_DATA), row_level + 1) if GUILD_LEVEL_DATA else level
+    return max(1, level)
+
+def _guild_max_player(guild):
+    level = _guild_level(guild)
+    row = GUILD_LEVEL_DATA.get(level) or GUILD_LEVEL_DATA.get(max(GUILD_LEVEL_DATA, default=1), {})
+    return max(1, int(row.get('max_player', 30) or 30))
+
+def _guild_char_by_id(char_id):
+    try:
+        cid = int(char_id)
+    except (TypeError, ValueError):
+        return None
+    online = ALL_CONNECTIONS.get(cid)
+    if online and online[1]:
+        return online[1]
+    for area_chars in all_accounts_chars.values():
+        if not isinstance(area_chars, dict):
+            continue
+        for char_list in area_chars.values():
+            if not isinstance(char_list, list):
+                continue
+            for char in char_list:
+                try:
+                    if int(char.get('id', 0)) == cid:
+                        return char
+                except (AttributeError, TypeError, ValueError):
+                    continue
+    return None
+
+def _guild_member_id(guild, char_id):
+    try:
+        key = str(int(char_id))
+    except (TypeError, ValueError):
+        return None
+    members = guild.setdefault('members', {})
+    return members.get(key)
+
+def _guild_member_count(guild, include_candidates=False):
+    members = guild.get('members', {}) if guild else {}
+    if not isinstance(members, dict):
+        return 0
+    if include_candidates:
+        return len(members)
+    return sum(1 for member in members.values() if int(member.get('job', 3)) != 4)
+
+def _guild_member_info_bytes(guild, member_id, member):
+    char = _guild_char_by_id(member_id) or {}
+    try:
+        power = int(get_character_stats(char).get('power', 0)) if char else 0
+    except Exception:
+        power = 0
+    online = int(int(member_id) in ALL_CONNECTIONS)
+    return encode_sproto([
+        (0, int(guild.get('id', 0))), (1, int(member_id)),
+        (2, str(char.get('name', member.get('name', '')))),
+        (3, int(char.get('vip_level', char.get('vip', 0)) or 0)),
+        (4, int(char.get('prof', member.get('profession', 0)) or 0)),
+        (5, int(char.get('level', member.get('level', 1)) or 1)),
+        (6, int(member.get('contribute', 0) or 0)),
+        (7, int(member.get('last_logout', 0) or 0)), (8, online),
+        (9, int(member.get('job', 3) or 3)), (10, power),
+        (11, int(member.get('all_contribute', 0) or 0)),
+        (12, int(member.get('battle', 0) or 0))
+    ])
+
+def _guild_skill_map(guild):
+    skill_map = {}
+    for skill_type in sorted(GUILD_SKILL_DATA):
+        level = int((guild.get('skills') or {}).get(str(skill_type), 0) or 0)
+        # guild_skill: tag 0 is skillType, tag 1 is level.
+        skill_map[str(skill_type)] = encode_sproto([(0, int(skill_type)), (1, level)])
+    return skill_map
+
+def _guild_info_bytes(guild, player=None):
+    level = _guild_level(guild)
+    members = guild.setdefault('members', {})
+    applicants = sum(1 for member in members.values() if int(member.get('job', 3)) == 4)
+    chief_id = int(guild.get('chief_id', 0) or 0)
+    chief = _guild_char_by_id(chief_id) or {}
+    member = _guild_member_id(guild, player.get('id', 0)) if player else None
+    player_job = int(member.get('job', 3)) if member else -1
+    vice_count = sum(1 for entry in members.values() if int(entry.get('job', 3)) == 1)
+    elder_count = sum(1 for entry in members.values() if int(entry.get('job', 3)) == 2)
+    # guild_info has a reserved wire tag 15; subsequent fields are tags 16-22.
+    return encode_sproto([
+        (0, int(guild.get('id', 0))), (1, str(guild.get('name', ''))),
+        (2, str(chief.get('name', guild.get('chief_name', '')))), (3, chief_id),
+        (4, int(guild.get('exp', 0) or 0)), (5, int(guild.get('skill_point', 0) or 0)),
+        # Client Guild.Init computes visible members as guildMemberNum - guildApplyNum,
+        # so guildMemberNum must include pending candidates as well as members.
+        (6, level), (7, _guild_member_count(guild, include_candidates=True)), (8, int(guild.get('combo', 0) or 0)),
+        (9, applicants), (10, max(30, _guild_max_player(guild))),
+        (11, _guild_max_player(guild)), (12, str(guild.get('notice', ''))[:150]),
+        (13, bool(guild.get('need_approval', True))),
+        (14, int(guild.get('create_time', 0) or 0)),
+        (16, False), (17, False), (18, vice_count), (19, elder_count),
+        (20, player_job), (21, max(0, min(7, int(guild.get('icon', 0) or 0)))),
+        (22, 0)
+    ])
+
+def _guild_donate_records(char, guild):
+    member = _guild_member_id(guild, char.get('id', 0)) or {}
+    stamp = str(current_daily_stamp())
+    if str(member.get('donate_stamp', '')) != stamp:
+        member['donate_stamp'] = stamp
+        member['donate_remaining'] = {
+            str(donation_id): int(row.get('donate_count', 0))
+            for donation_id, row in GUILD_DONATE_DATA.items()
+        }
+    remaining = member.setdefault('donate_remaining', {})
+    result = {}
+    for donation_id, row in GUILD_DONATE_DATA.items():
+        remaining.setdefault(str(donation_id), int(row.get('donate_count', 0)))
+        record = encode_sproto([(0, str(donation_id)), (1, max(0, int(remaining[str(donation_id)])))])
+        result[str(donation_id)] = record
+    return result
+
+def _guild_info_response(char, guild=None):
+    if not guild:
+        return encode_sproto([(3, False), (4, int(get_currency_balance(char, 3)) if char else 0)])
+    member = _guild_member_id(guild, char.get('id', 0)) or {}
+    return encode_sproto([
+        (0, _guild_info_bytes(guild, char)),
+        (1, _guild_donate_records(char, guild)),
+        (2, int(member.get('all_contribute', 0) or 0)),
+        (3, True), (4, int(get_currency_balance(char, 3)))
+    ])
+
+def _guild_member_list_response(guild):
+    members = {}
+    for member_id, member in (guild.get('members') or {}).items():
+        try:
+            members[str(member_id)] = _guild_member_info_bytes(guild, member_id, member)
+        except (TypeError, ValueError):
+            continue
+    return encode_sproto([(0, members)])
+
+def _guild_set_character(char, guild):
+    if guild:
+        char['guildId'] = int(guild.get('id', 0))
+        char['guild_id'] = int(guild.get('id', 0))
+        char['guildName'] = str(guild.get('name', ''))
+        char['guild_name'] = str(guild.get('name', ''))
+    else:
+        char['guildId'] = 0
+        char['guild_id'] = 0
+        char['guildName'] = ''
+        char['guild_name'] = ''
+
+def _guild_log(guild, text):
+    logs = guild.setdefault('logs', [])
+    logs.insert(0, f"{int(time.time())}|{text}")
+    del logs[50:]
+
+def _guild_refresh_members(guild, send_rpc_push=None, include_info=True):
+    if not guild:
+        return
+    gid = int(guild.get('id', 0))
+    for member_id in list((guild.get('members') or {}).keys()):
+        try:
+            cid = int(member_id)
+        except (TypeError, ValueError):
+            continue
+        connection, char = ALL_CONNECTIONS.get(cid, (None, None))
+        if connection is None or char is None:
+            continue
+        try:
+            broadcast_aoi_attribute(char)
+        except Exception:
+            pass
+        if include_info:
+            payload = _guild_info_response(char, guild)
+            send_rpc_push_safe(connection, 563, payload)
+        send_rpc_push_safe(connection, 581, _guild_member_list_response(guild))
+
+def _guild_shop_item_bytes(row, purchased=0):
+    fields = [
+        (0, str(row.get('id', ''))), (1, str(row.get('item_id', ''))),
+        (2, int(row.get('quality', 0))), (3, int(row.get('price_type', 0))),
+        (4, int(row.get('price', 0))), (5, int(row.get('limit', 0))),
+        # shop_item fields are curNum=6, Discount=7 and Class=8.
+        (6, max(0, int(purchased))), (7, int(row.get('discount', 0))),
+        (8, int(row.get('class', 0)))
+    ]
+    return encode_sproto(fields)
+
+def _guild_shop_purchase_count(char, item_id, row):
+    purchases = char.setdefault('guild_shop_purchases', {})
+    cycle = max(0, int(row.get('reset_cycle', 0) or 0))
+    stamp = str(current_daily_stamp()) if cycle > 0 else 'never'
+    record = purchases.get(str(item_id), {})
+    if not isinstance(record, dict) or str(record.get('stamp', '')) != stamp:
+        record = {'stamp': stamp, 'count': 0}
+        purchases[str(item_id)] = record
+    return max(0, int(record.get('count', 0) or 0))
+
+def _guild_boss_activity_state(row, now=None):
+    now = int(time.time()) if now is None else int(now)
+    seconds_today = now % 86400
+    start = max(0, int(row.get('start_time', 0) or 0)) % 86400
+    duration = max(0, int(row.get('duration', 0) or 0))
+    elapsed = (seconds_today - start) % 86400
+    if duration and elapsed < duration:
+        return 1, duration - elapsed
+    until = (start - seconds_today) % 86400
+    return 0, until if until else 86400
+
+def _guild_battle_info_bytes(guild=None):
+    # -1 is the client's configured, not-yet-open state. It displays the
+    # GuildBattleData schedule and keeps the future rounds out of the UI.
+    return encode_sproto([
+        (0, -1), (5, '1501'),
+        (6, int(guild.get('id', 0)) if guild else 0), (7, '')
+    ])
+
+def _guild_daily_activity_window(now, start_time, duration):
+    now = int(now)
+    start_time = max(0, int(start_time)) % 86400
+    duration = max(0, int(duration))
+    day_start = now - (now % 86400)
+    start = day_start + start_time
+    if start + duration <= now:
+        start += 86400
+    return start, int(start <= now < start + duration)
+
+def _guild_weekly_activity_window(now, week, start_time, duration):
+    now = int(now)
+    week = int(week)
+    start_time = max(0, int(start_time)) % 86400
+    duration = max(0, int(duration))
+    if week < 1 or week > 7:
+        return 0
+    day_start = now - (now % 86400)
+    current_weekday = time.gmtime(now).tm_wday + 1  # client table: Monday=1 ... Sunday=7
+    start = day_start + ((week - current_weekday) % 7) * 86400 + start_time
+    if start + duration <= now:
+        start += 7 * 86400
+    return int(start <= now < start + duration)
+
+def _guild_dance_activity_info(guild=None, now=None):
+    now = int(time.time()) if now is None else int(now)
+    row = CITY_DANCE_CONFIG.get('103', {})  # CityDanceData Type=2 (GANG)
+    starts = []
+    for value in str(row.get('StartTime', '')).split('#'):
+        try:
+            starts.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    if not starts:
+        starts = [39600]
+    try:
+        slot = int((guild or {}).get('dance_slot', 1) or 1)
+    except (TypeError, ValueError):
+        slot = 1
+    slot = min(max(1, slot), len(starts))
+    duration = max(0, int(row.get('DurationTime', 1800) or 1800))
+    start_time, state = _guild_daily_activity_window(now, starts[slot - 1], duration)
+    changed_until = max(0, int((guild or {}).get('dance_change_until', 0) or 0))
+    return encode_sproto([
+        (0, 0), (1, '103'), (2, start_time), (3, start_time + duration),
+        (4, state), (5, slot), (6, duration), (7, changed_until), (8, 0)
+    ])
+
+def _guild_capture_activity_map(now=None):
+    now = int(time.time()) if now is None else int(now)
+    result = {}
+    for capture_id, row in sorted(GUILD_CAPTURE_CONFIG.items(), key=lambda item: int(item[0])):
+        state = _guild_weekly_activity_window(
+            now, row.get('week', 0), row.get('start_time', 0), row.get('duration', 0))
+        result[str(capture_id)] = encode_sproto([
+            (0, str(capture_id)), (1, 0), (2, ''), (3, 0),
+            (4, 0), (5, state)
+        ])
+    return result
+
+def _guild_activity_response(guild=None):
+    return encode_sproto([
+        (0, _guild_boss_activity_map()),
+        (1, _guild_battle_info_bytes(guild)),
+        (2, _guild_level(guild) if guild else 0),
+        (3, _guild_dance_activity_info(guild)),
+        (4, _guild_capture_activity_map())
+    ])
+
+def _guild_boss_activity_map():
+    now = int(time.time())
+    result = {}
+    for boss_id, row in sorted(GUILD_BOSS_DATA.items(), key=lambda item: int(item[0]) if item[0].isdigit() else 0):
+        state, next_time = _guild_boss_activity_state(row, now)
+        result[str(boss_id)] = encode_sproto([
+            (0, str(boss_id)), (1, state), (2, next_time), (3, 0), (4, [])
+        ])
+    return result
+
+def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response, session):
+    """Handle only the Gang/Guild UI protocols confirmed in the bundled APK."""
+    global GUILD_ID_COUNTER
+    if not char or not is_current_character_connection(conn, char):
+        if session is not None:
+            send_rpc_response(session)
+        return
+    char_id = int(char.get('id', 0) or 0)
+    try:
+        current_guild_id = _guild_id_for_character(char)
+    except Exception:
+        current_guild_id = 0
+    guild = GUILD_STATES.get(str(current_guild_id)) if current_guild_id else None
+
+    if msg == 146:  # guild_create
+        name = get_val_str(body, 0, '').strip()
+        icon = get_val_int(body, 1, -1)
+        notice = get_val_str(body, 2, '')[:150]
+        cost_type = get_val_int(body, 3, -1)
+        fee = 499 if cost_type == 1 else 49 if cost_type == 2 else 0
+        valid_name = bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _]{4,14}", name))
+        success = False
+        with GUILD_DB_LOCK, get_character_transaction_lock(char):
+            name_used = any(str(item.get('name', '')).casefold() == name.casefold()
+                            for item in GUILD_STATES.values())
+            already_joined = bool(current_guild_id and guild)
+            if (valid_name and 0 <= icon < 8 and not name_used and not already_joined
+                    and fee > 0 and get_currency_balance(char, cost_type) >= fee):
+                set_currency_balance(char, cost_type, get_currency_balance(char, cost_type) - fee)
+                new_id = int(GUILD_ID_COUNTER)
+                GUILD_ID_COUNTER += 1
+                guild = {
+                    'id': new_id, 'name': name, 'icon': icon, 'notice': notice,
+                    'chief_id': char_id, 'chief_name': str(char.get('name', '')),
+                    'create_time': int(time.time()), 'exp': 0, 'skill_point': 0,
+                    'combo': 0, 'need_approval': True, 'skills': {},
+                    'members': {str(char_id): {
+                        'job': 0, 'contribute': 0, 'all_contribute': 0,
+                        'last_logout': 0, 'battle': 0,
+                        'donate_stamp': str(current_daily_stamp()), 'donate_remaining': {
+                            str(did): int(row.get('donate_count', 0))
+                            for did, row in GUILD_DONATE_DATA.items()
+                        }
+                    }}, 'logs': [], 'applications': []
+                }
+                GUILD_STATES[str(new_id)] = guild
+                _guild_set_character(char, guild)
+                _guild_log(guild, f"{char.get('name', '')} created the guild")
+                success = True
+                save_chars(all_accounts_chars)
+                _save_guild_states()
+        if success:
+            send_rpc_push(567, encode_sproto([
+                (0, _guild_info_bytes(guild, char)), (1, 1),
+                (2, _guild_donate_records(char, guild))
+            ]))
+            send_rpc_push(563, _guild_info_response(char, guild))
+            sync_char_attrs_rpc(conn, char)
+            _guild_refresh_members(guild)
+        else:
+            send_rpc_push(567, encode_sproto([(1, 0)]))
+
+    elif msg == 147:  # guild_join / apply
+        requested_id = get_val_int(body, 0, 0)
+        target_guild = GUILD_STATES.get(str(requested_id))
+        joined = False
+        with GUILD_DB_LOCK:
+            if (target_guild and _guild_id_for_character(char) == 0
+                    and _guild_member_id(target_guild, char_id) is None
+                    and _guild_member_count(target_guild) < _guild_max_player(target_guild)):
+                job = 3 if not target_guild.get('need_approval', True) else 4
+                target_guild.setdefault('members', {})[str(char_id)] = {
+                    'job': job, 'contribute': 0, 'all_contribute': 0,
+                    'last_logout': 0, 'battle': 0,
+                    'donate_stamp': str(current_daily_stamp()),
+                    'donate_remaining': {str(did): int(row.get('donate_count', 0))
+                                         for did, row in GUILD_DONATE_DATA.items()}
+                }
+                _guild_set_character(char, target_guild)
+                _guild_log(target_guild, f"{char.get('name', '')} applied to join")
+                joined = True
+                save_chars(all_accounts_chars)
+                _save_guild_states()
+        send_rpc_push(566, encode_sproto([(0, requested_id if joined else 0)]))
+        if joined:
+            sync_char_attrs_rpc(conn, char)
+            _guild_refresh_members(target_guild)
+
+    elif msg == 148:  # guild_leave
+        target_id = get_val_int(body, 1, char_id)
+        member = _guild_member_id(guild, char_id) if guild else None
+        left = bool(guild and member and int(member.get('job', 3)) != 0
+                    and target_id in (0, char_id))
+        if left:
+            with GUILD_DB_LOCK:
+                guild.setdefault('members', {}).pop(str(char_id), None)
+                _guild_set_character(char, None)
+                _guild_log(guild, f"{char.get('name', '')} left the guild")
+                save_chars(all_accounts_chars)
+                _save_guild_states()
+            send_rpc_push(565, encode_sproto([(0, int(time.time())), (1, int(guild.get('id', 0)))]))
+            send_rpc_push(563, _guild_info_response(char, None))
+            broadcast_aoi_attribute(char)
+            sync_char_attrs_rpc(conn, char)
+            _guild_refresh_members(guild)
+
+    elif msg == 149:  # guild_kick
+        target_id = get_val_int(body, 0, 0)
+        actor = _guild_member_id(guild, char_id) if guild else None
+        target = _guild_member_id(guild, target_id) if guild else None
+        actor_job = int(actor.get('job', 4)) if actor else 4
+        target_job = int(target.get('job', 0)) if target else 0
+        kicked = bool(guild and actor and target and target_id != char_id
+                      and actor_job in (0, 1) and actor_job < target_job)
+        if kicked:
+            target_char = _guild_char_by_id(target_id)
+            with GUILD_DB_LOCK:
+                guild['members'].pop(str(target_id), None)
+                if target_char:
+                    _guild_set_character(target_char, None)
+                _guild_log(guild, f"{char.get('name', '')} removed {target_char.get('name', '') if target_char else target_id}")
+                save_chars(all_accounts_chars)
+                _save_guild_states()
+            send_rpc_push(563, _guild_info_response(char, guild))
+            if target_char and target_id in ALL_CONNECTIONS:
+                target_conn = ALL_CONNECTIONS[target_id][0]
+                send_rpc_push_safe(target_conn, 563, _guild_info_response(target_char, None))
+                broadcast_aoi_attribute(target_char)
+                sync_char_attrs_rpc(target_conn, target_char)
+            _guild_refresh_members(guild)
+        send_rpc_push(590, encode_sproto([(0, target_id), (1, bool(kicked))]))
+
+    elif msg == 150:  # guild_job_change
+        job = get_val_int(body, 0, -1)
+        target_id = get_val_int(body, 1, 0)
+        actor = _guild_member_id(guild, char_id) if guild else None
+        target = _guild_member_id(guild, target_id) if guild else None
+        changed = False
+        if guild and actor and target and int(actor.get('job', 4)) == 0 and target_id != char_id:
+            old_job = int(target.get('job', 4))
+            if job in (0, 1, 2, 3) and old_job != 4 and old_job > 0:
+                with GUILD_DB_LOCK:
+                    if job == 0:
+                        actor['job'] = 3
+                        target['job'] = 0
+                        guild['chief_id'] = target_id
+                    else:
+                        target['job'] = job
+                    _guild_log(guild, f"{char.get('name', '')} changed a guild member role")
+                    _save_guild_states()
+                changed = True
+                _guild_refresh_members(guild)
+        send_rpc_push(589, encode_sproto([(0, target_id), (1, job), (2, bool(changed))]))
+
+    elif msg == 151:  # guild_skill_level
+        skill_type = get_val_int(body, 0, -1)
+        member = _guild_member_id(guild, char_id) if guild else None
+        skills = guild.setdefault('skills', {}) if guild else {}
+        current_level = int(skills.get(str(skill_type), 0) or 0)
+        rows = GUILD_SKILL_DATA.get(skill_type, [])
+        next_row = next((row for row in rows if int(row.get('level', 0)) == current_level + 1), None)
+        success = False
+        if (guild and member and int(member.get('job', 4)) != 4 and next_row and current_level < _guild_level(guild)
+                and _guild_level(guild) >= int(next_row.get('level_limit', 99))):
+            cost = max(0, int(next_row.get('cost', 0)))
+            with GUILD_DB_LOCK, get_character_transaction_lock(char):
+                if get_currency_balance(char, 0) >= cost and get_currency_balance(char, 3) >= cost:
+                    set_currency_balance(char, 0, get_currency_balance(char, 0) - cost)
+                    set_currency_balance(char, 3, get_currency_balance(char, 3) - cost)
+                    skills[str(skill_type)] = current_level + 1
+                    _guild_log(guild, f"{char.get('name', '')} upgraded guild skill {skill_type}")
+                    save_chars(all_accounts_chars)
+                    _save_guild_states()
+                    success = True
+            if success:
+                sync_char_attrs_rpc(conn, char)
+                _guild_refresh_members(guild)
+        response = encode_sproto([
+            (0, 0 if success else 1), (1, skill_type),
+            (2, int(get_currency_balance(char, 3))),
+            (3, int(skills.get(str(skill_type), 0)) if guild else 0)
+        ])
+        send_rpc_push(564, response)
+
+    elif msg == 247:  # guild_invite
+        target_id = get_val_int(body, 0, 0)
+        actor = _guild_member_id(guild, char_id) if guild else None
+        target_entry = ALL_CONNECTIONS.get(target_id)
+        target_conn, target_char = target_entry if target_entry else (None, None)
+        if (guild and actor and target_conn and target_char and target_id != char_id
+                and _guild_id_for_character(target_char) == 0
+                and _guild_member_count(guild) < _guild_max_player(guild)):
+            send_rpc_push_safe(target_conn, 639, encode_sproto([
+                (0, str(char.get('name', ''))), (1, int(guild.get('id', 0))),
+                (2, str(guild.get('name', '')))
+            ]))
+
+    elif msg == 152:  # guild_req_list
+        page = max(1, get_val_int(body, 1, 1))
+        ordered = sorted(GUILD_STATES.values(),
+                         key=lambda item: (-_guild_level(item), -int(item.get('exp', 0)), int(item.get('id', 0))))
+        # GuildListInfoRootLogic uses PAGE_NUM=10 and offsets pages by ten.
+        per_page = 10
+        max_page = max(1, (len(ordered) + per_page - 1) // per_page)
+        page = min(page, max_page)
+        page_rows = ordered[(page - 1) * per_page:page * per_page]
+        guild_map = {str(item['id']): _guild_info_bytes(item, None) for item in page_rows}
+        applied = [int(g['id']) for g in ordered
+                   if _guild_member_id(g, char_id) and int(_guild_member_id(g, char_id).get('job', 3)) == 4]
+        send_rpc_push(562, encode_sproto([
+            (0, guild_map), (1, applied), (2, page), (3, max_page), (4, 0)
+        ]))
+
+    elif msg == 153:  # guild_req_info
+        target_id = get_val_int(body, 0, char_id) or char_id
+        target_char = _guild_char_by_id(target_id) or (char if target_id == char_id else None)
+        target_guild_id = _guild_id_for_character(target_char) if target_char else 0
+        target_guild = GUILD_STATES.get(str(target_guild_id)) if target_guild_id else None
+        send_rpc_push(563, _guild_info_response(target_char or char, target_guild))
+
+    elif msg == 154:  # guild_approve_resverve
+        target_id = get_val_int(body, 1, 0)
+        agree = get_val_int(body, 0, 0)
+        actor = _guild_member_id(guild, char_id) if guild else None
+        target = _guild_member_id(guild, target_id) if guild else None
+        actor_job = int(actor.get('job', 4)) if actor else 4
+        changed = bool(guild and actor and target and int(target.get('job', 3)) == 4
+                       and actor_job in (0, 1, 2))
+        target_char = _guild_char_by_id(target_id)
+        if changed:
+            with GUILD_DB_LOCK:
+                if agree:
+                    if _guild_member_count(guild) >= _guild_max_player(guild):
+                        changed = False
+                    else:
+                        target['job'] = 3
+                        if target_char:
+                            _guild_set_character(target_char, guild)
+                if not agree:
+                    guild['members'].pop(str(target_id), None)
+                    if target_char:
+                        _guild_set_character(target_char, None)
+                if not agree or changed:
+                    _guild_log(guild, f"{char.get('name', '')} {'approved' if agree else 'declined'} a guild application")
+                    save_chars(all_accounts_chars)
+                    _save_guild_states()
+            if target_char and target_id in ALL_CONNECTIONS:
+                target_conn = ALL_CONNECTIONS[target_id][0]
+                send_rpc_push_safe(target_conn, 563, _guild_info_response(target_char, guild if agree and changed else None))
+                broadcast_aoi_attribute(target_char)
+                sync_char_attrs_rpc(target_conn, target_char)
+            _guild_refresh_members(guild)
+        send_rpc_push(591, encode_sproto([(0, target_id), (1, agree), (2, bool(changed))]))
+
+    elif msg == 169:  # req_guild_notice
+        notice = get_val_str(body, 0, '')[:150]
+        member = _guild_member_id(guild, char_id) if guild else None
+        if guild and member and int(member.get('job', 4)) in (0, 1):
+            guild['notice'] = notice
+            _guild_log(guild, f"{char.get('name', '')} changed the guild notice")
+            _save_guild_states()
+            _guild_refresh_members(guild)
+
+    elif msg == 170:  # req_guild_member_info
+        requested_id = get_val_int(body, 0, current_guild_id)
+        target_guild = GUILD_STATES.get(str(requested_id))
+        if target_guild and (requested_id == current_guild_id or _guild_id_for_character(char) == requested_id):
+            send_rpc_push(581, _guild_member_list_response(target_guild))
+        else:
+            send_rpc_push(581, encode_sproto([(0, {})]))
+
+    elif msg == 173:  # req_seting_guild_appro
+        requested_id = get_val_int(body, 1, current_guild_id)
+        member = _guild_member_id(guild, char_id) if guild else None
+        if guild and requested_id == current_guild_id and member and int(member.get('job', 4)) in (0, 1):
+            guild['need_approval'] = bool(get_val_int(body, 0, 0))
+            _save_guild_states()
+            _guild_refresh_members(guild)
+
+    elif msg == 174:  # guild_log
+        logs = [str(entry).split('|', 1)[-1] for entry in (guild or {}).get('logs', [])[:50]]
+        send_rpc_push(584, encode_sproto([(0, logs)]))
+
+    elif msg == 175:  # guild_donate
+        donation_id = get_val_str(body, 0, '')
+        cfg = GUILD_DONATE_DATA.get(donation_id)
+        member = _guild_member_id(guild, char_id) if guild else None
+        success = False
+        if cfg and guild and member and int(member.get('job', 4)) != 4:
+            _guild_donate_records(char, guild)
+            remaining = member.setdefault('donate_remaining', {})
+            cost_type_by_item = {'1001': 0, '1002': 1, '1003': 2}
+            money_type = cost_type_by_item.get(str(cfg.get('item_id')))
+            cost = max(0, int(cfg.get('item_count', 0)))
+            with GUILD_DB_LOCK, get_character_transaction_lock(char):
+                if (money_type is not None and int(remaining.get(donation_id, 0)) > 0
+                        and get_currency_balance(char, money_type) >= cost):
+                    set_currency_balance(char, money_type, get_currency_balance(char, money_type) - cost)
+                    remaining[donation_id] = max(0, int(remaining[donation_id]) - 1)
+                    earned = max(0, int(cfg.get('contribute', 0)))
+                    member['contribute'] = int(member.get('contribute', 0)) + earned
+                    member['all_contribute'] = int(member.get('all_contribute', 0)) + earned
+                    set_currency_balance(char, 3, get_currency_balance(char, 3) + earned)
+                    guild['exp'] = int(guild.get('exp', 0)) + max(0, int(cfg.get('exp', 0)))
+                    _guild_log(guild, f"{char.get('name', '')} donated to the guild")
+                    save_chars(all_accounts_chars)
+                    _save_guild_states()
+                    success = True
+            if success:
+                sync_char_attrs_rpc(conn, char)
+                _guild_refresh_members(guild)
+        member = _guild_member_id(guild, char_id) if guild else {}
+        send_rpc_push(585, encode_sproto([
+            (0, 0 if success else 1), (1, donation_id),
+            (2, int(get_currency_balance(char, 3))),
+            (3, int(member.get('all_contribute', 0) or 0)),
+            (4, _guild_level(guild) if guild else 0),
+            (5, int(guild.get('exp', 0)) if guild else 0)
+        ]))
+
+    elif msg == 176:  # search_guild
+        name = get_val_str(body, 0, '').strip().casefold()
+        requested_id = get_val_int(body, 1, 0)
+        rank = max(0, get_val_int(body, 2, 0))
+        ordered = sorted(GUILD_STATES.values(),
+                         key=lambda item: (-_guild_level(item), -int(item.get('exp', 0)), int(item.get('id', 0))))
+        found = next((item for item in ordered if requested_id and int(item.get('id', 0)) == requested_id), None)
+        if found is None and name:
+            found = next((item for item in ordered if name in str(item.get('name', '')).casefold()), None)
+        if found is None and rank > 0 and rank <= len(ordered):
+            found = ordered[rank - 1]
+        fields = [(1, ordered.index(found) + 1 if found in ordered else 0)]
+        if found:
+            fields.insert(0, (0, _guild_info_bytes(found, None)))
+        send_rpc_push(586, encode_sproto(fields))
+
+    elif msg == 195:  # request_guild_boss / Gang activity overview
+        send_rpc_push(599, _guild_activity_response(guild))
+
+    elif msg == 285:  # req_guild_battle_info; open the configured Gang Battle panel
+        send_rpc_push(662, encode_sproto([(0, _guild_battle_info_bytes(guild))]))
+
+    elif msg == 315:  # update_guild_dance_time
+        requested_slot = get_val_int(body, 0, 0)
+        dance_cfg = CITY_DANCE_CONFIG.get('103', {})
+        start_slots = [value for value in str(dance_cfg.get('StartTime', '')).split('#') if value]
+        member = _guild_member_id(guild, char_id) if guild else None
+        now = int(time.time())
+        slot_valid = 1 <= requested_slot <= len(start_slots)
+        can_change = bool(guild and member and int(member.get('job', 4)) == 0 and slot_valid)
+        if can_change:
+            try:
+                current_slot = int(guild.get('dance_slot', 1) or 1)
+            except (TypeError, ValueError):
+                current_slot = 1
+            current_slot = min(max(1, current_slot), len(start_slots))
+            duration = max(0, int(dance_cfg.get('DurationTime', 1800) or 1800))
+            active_now = _guild_daily_activity_window(
+                now, int(start_slots[current_slot - 1]), duration)[1] == 1
+            cooldown_until = int(guild.get('dance_change_until', 0) or 0)
+            if not active_now and now >= cooldown_until:
+                cooldown = max(0, int(dance_cfg.get('CDTime', 604800) or 604800))
+                guild['dance_slot'] = requested_slot
+                guild['dance_change_until'] = now + cooldown
+                _guild_log(guild, f"{char.get('name', '')} changed the guild dance time")
+                _save_guild_states()
+        # This protocol has no separate response handler; refresh the activity
+        # model through the same response used by the Gang activity screen.
+        send_rpc_push(599, _guild_activity_response(guild))
+
+    elif msg == 319:  # request_guild_map_info; Gang city/capture data
+        send_rpc_push(689, encode_sproto([(0, _guild_capture_activity_map())]))
+
+    elif msg == 233:  # open_guild_boss
+        boss_id = get_val_str(body, 0, '')
+        boss_cfg = GUILD_BOSS_DATA.get(boss_id)
+        state, remaining = _guild_boss_activity_state(boss_cfg) if boss_cfg else (0, 0)
+        member = _guild_member_id(guild, char_id) if guild else None
+        can_open = bool(boss_cfg and guild and member and int(member.get('job', 4)) != 4
+                        and _guild_level(guild) >= int(boss_cfg.get('level_min', 0))
+                        and state == 1)
+        if boss_cfg:
+            boss_payload = encode_sproto([
+                (0, boss_id), (1, state), (2, remaining), (3, 0), (4, [])
+            ])
+            send_rpc_push(628, encode_sproto([(0, can_open), (1, boss_payload)]))
+        else:
+            send_rpc_push(628, encode_sproto([(0, False)]))
+
+    elif msg == 212:  # req_guild_skill
+        send_rpc_push(609, encode_sproto([(0, _guild_skill_map(guild) if guild else {})]))
+
+    elif msg == 143:  # ask_shop_list; only the Gang shop uses this scoped handler
+        page = max(1, get_val_int(body, 1, 1))
+        rows = [row for row in GUILD_SHOP_DATA.values()
+                if int(char.get('level', 1)) >= int(row.get('min_level', 0))
+                and int(char.get('level', 1)) <= int(row.get('max_level', 80))
+                and int(row.get('profession', -1)) in (-1, int(char.get('prof', 0)))]
+        rows.sort(key=lambda row: (int(row.get('weight', 0)), str(row.get('id', ''))))
+        per_page = 30
+        max_page = max(1, (len(rows) + per_page - 1) // per_page)
+        page = min(page, max_page)
+        shop_rows = [encode_sproto([
+            (0, str(row['id'])), (1, str(row['item_id'])), (2, int(row.get('quality', 0))),
+            (3, int(row.get('price_type', 0))), (4, int(row.get('price', 0))),
+            (5, int(row.get('limit', 0))),
+            (6, _guild_shop_purchase_count(char, row['id'], row)),
+            (7, int(row.get('discount', 0))), (8, int(row.get('class', 0)))
+        ]) for row in rows[(page - 1) * per_page:page * per_page]]
+        send_rpc_push(554, encode_sproto([
+            (0, 3), (1, page), (2, max_page), (3, shop_rows),
+            (4, get_val_int(body, 3, 0))
+        ]))
+
+    elif msg == 144:  # buy_shop_item; only Guild shop purchases are handled here
+        item_shop_id = get_val_str(body, 0, '')
+        count = max(0, get_val_int(body, 1, 0))
+        row = GUILD_SHOP_DATA.get(item_shop_id)
+        success = False
+        shop_member = _guild_member_id(guild, char_id) if guild else None
+        if (get_val_int(body, 2, -1) == 3 and row and guild and shop_member
+                and int(shop_member.get('job', 4)) != 4 and count > 0):
+            per_order = int(row.get('single_limit', 0) or 0)
+            available = int(row.get('limit', 0) or 0)
+            purchased = _guild_shop_purchase_count(char, item_shop_id, row)
+            quantity_valid = (per_order <= 0 or count <= per_order)
+            limit_valid = available <= 0 or purchased + count <= available
+            item_id = str(row.get('item_id', ''))
+            quality = int(row.get('quality', ITEM_CONFIG.get(item_id, {}).get('quality', 0)) or 0)
+            unit_price = int(row.get('price', 0) or 0)
+            discount = int(row.get('discount', 0) or 0)
+            if discount > 0:
+                unit_price = max(0, unit_price * discount // 100)
+            cost = unit_price * count
+            money_type = int(row.get('price_type', -1))
+            with get_character_transaction_lock(char):
+                if (quantity_valid and limit_valid and 0 <= money_type < len(MONEY_FIELDS)
+                        and cost >= 0 and get_currency_balance(char, money_type) >= cost
+                        and can_add_to_inventory(char, item_id, count, quality)):
+                    set_currency_balance(char, money_type, get_currency_balance(char, money_type) - cost)
+                    if add_to_inventory(char, item_id, count, quality):
+                        purchases = char.setdefault('guild_shop_purchases', {})
+                        record = purchases.get(item_shop_id, {})
+                        record['count'] = purchased + count
+                        record['stamp'] = str(current_daily_stamp()) if int(row.get('reset_cycle', 0)) > 0 else 'never'
+                        purchases[item_shop_id] = record
+                        save_chars(all_accounts_chars)
+                        sync_all_backpacks(char, send_rpc_push)
+                        sync_char_attrs_rpc(conn, char)
+                        success = True
+                    else:
+                        set_currency_balance(char, money_type, get_currency_balance(char, money_type) + cost)
+        purchased = _guild_shop_purchase_count(char, item_shop_id, row) if row else 0
+        send_rpc_push(652, encode_sproto([
+            (0, 0 if success else 1),
+            (1, _guild_shop_item_bytes(row, purchased) if row else encode_sproto([])),
+            (2, 3), (3, count if success else 0)
+        ]))
+
+    if session is not None:
+        send_rpc_response(session)
+
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
     global server_session_counter, ALL_CONNECTIONS, MAIL_ID_COUNTER, TEAM_ID_COUNTER, EXP_RUN_COUNTER
@@ -15426,6 +16319,16 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif (msg in (146, 147, 148, 149, 150, 151, 152, 153, 154,
+                          169, 170, 173, 174, 175, 176, 195, 212, 233, 247,
+                          285, 315, 319)
+                  or (msg == 143 and get_val_int(body, 0, -1) == 3)
+                  or (msg == 144 and get_val_int(body, 2, -1) == 3)):
+                handle_guild_request(
+                    conn, picked_char, msg, body, send_rpc_push,
+                    send_rpc_response, session
+                )
+
             elif session is not None:
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -15458,6 +16361,12 @@ def client_handler(conn, addr):
                     equipment_state = picked_char.get('equipment_stage_state')
                     if isinstance(equipment_state, dict):
                         equipment_state.get('ready_connections', {}).pop(char_id, None)
+                    guild_id = _guild_id_for_character(picked_char)
+                    guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
+                    guild_member = _guild_member_id(guild, char_id) if guild else None
+                    if guild_member is not None:
+                        guild_member['last_logout'] = int(time.time())
+                        _save_guild_states()
                     ALL_CONNECTIONS.pop(char_id, None)
                     CONNECTION_LOCKS.pop(char_id, None)
                     # Update offline state only after the active connection
