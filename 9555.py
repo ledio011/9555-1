@@ -90,6 +90,7 @@ WILD_BOSS_CONFIG = {} # ID -> configured PVE world boss and required level band
 COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
 SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
 SHOW_REWARD_EXPLICIT_COUNT_CONFIG = {} # ShowRewardData id -> rewards with an explicit positive item count
+SHOW_REWARD_ITEM_SLOT_CONFIG = {} # ShowRewardData id -> authored Item1..Item8 slots (not Exp/Money columns)
 SHOW_REWARD_BASE_CONFIG = {} # ShowRewardData id -> authored Exp/Money1/Money2 values
 STREET_RACE_REWARD_BY_LEVEL = {} # level -> AdaptData _drop_bc ShowRewardData id
 STREET_RACE_REWARD_BY_KEY_LEVEL = {} # AdaptData reward key -> level -> ShowRewardData id
@@ -1117,6 +1118,7 @@ try:
                 if len(parts) >= 5 and parts[0] == '*' and parts[1].isdigit():
                     rewards = []
                     explicit_count_rewards = []
+                    item_slot_rewards = []
                     for index in range(3, len(parts) - 2, 3):
                         item_id = parts[index].strip()
                         quality = int(parts[index + 1]) if parts[index + 1].isdigit() else 0
@@ -1134,8 +1136,21 @@ try:
                         # ShowRewardData.InitData/AddListItem in the APK ignores
                         # slots whose ItemN field is empty, regardless of the
                         # quality or count columns in that slot.
+                    # ShowRewardData starts Item1 at column 6; columns 3-5 are
+                    # Exp/Money1/Money2. Keep correctly aligned item slots for
+                    # copy-result previews without changing other reward paths.
+                    for index in range(6, len(parts), 3):
+                        item_id = parts[index].strip()
+                        if not item_id:
+                            continue
+                        quality_str = parts[index + 1].strip() if index + 1 < len(parts) else ''
+                        count_str = parts[index + 2].strip() if index + 2 < len(parts) else ''
+                        quality = int(quality_str) if quality_str.lstrip('-').isdigit() else 0
+                        count = int(count_str) if count_str.lstrip('-').isdigit() else -1
+                        item_slot_rewards.append((item_id, quality, count))
                     SHOW_REWARD_CONFIG[parts[1]] = rewards
                     SHOW_REWARD_EXPLICIT_COUNT_CONFIG[parts[1]] = explicit_count_rewards
+                    SHOW_REWARD_ITEM_SLOT_CONFIG[parts[1]] = item_slot_rewards
                     def _show_reward_base_value(index):
                         value = parts[index].strip() if index < len(parts) else ''
                         return int(value) if value.lstrip('-').isdigit() else 0
@@ -5509,6 +5524,19 @@ def equipment_stage_result_items(copy_id):
         if int(count) > 0 and int(ITEM_CONFIG.get(str(item_id), {}).get('type', 0)) != 13
     ]
 
+def equipment_stage_result_preview_items(copy_id):
+    """Return the equipment-tier preview icons authored for this map bracket."""
+    cfg = COPY_SCENE_CONFIG.get(str(copy_id), {})
+    reward_id = str(cfg.get('show_reward_id') or cfg.get('drop_id') or '')
+    # These ShowRewardData entries are ITEM_TYPE.SHOW placeholders (e.g. 8002,
+    # "display white tier-2 equipment"), not backpack items. The client uses
+    # them in the copy result panel, while the actual guaranteed payout is Exp.
+    return [
+        (str(item_id), int(quality), 1)
+        for item_id, quality, _count in SHOW_REWARD_ITEM_SLOT_CONFIG.get(reward_id, [])
+        if int(ITEM_CONFIG.get(str(item_id), {}).get('type', 0)) == 13
+    ]
+
 def finish_equipment_stage(state, win):
     if not state:
         return False
@@ -5541,9 +5569,12 @@ def finish_equipment_stage(state, win):
         stage_exp = max(0, int(SHOW_REWARD_BASE_CONFIG.get(show_reward_id, {}).get('exp', 0)))
         if win and stage_exp:
             rewards.insert(0, ('2001', 0, stage_exp))
+        result_rewards = list(rewards)
+        if win:
+            result_rewards.extend(equipment_stage_result_preview_items(copy_id))
         item_payloads = [
             encode_sproto([(0, iid), (1, count), (3, quality)])
-            for iid, quality, count in rewards
+            for iid, quality, count in result_rewards
         ]
         for cid, member_conn, char in exp_participant_chars(state):
             if not char:
