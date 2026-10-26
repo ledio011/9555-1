@@ -9336,6 +9336,56 @@ def _guild_set_character(char, guild):
         char['guildName'] = ''
         char['guild_name'] = ''
 
+def _guild_reconcile_character_membership(char):
+    """Reconcile legacy character guild fields against persisted member IDs."""
+    if not isinstance(char, dict):
+        return False
+    char_id = int(char.get('id', 0) or 0)
+    current_guild_id = _guild_id_for_character(char)
+    try:
+        stored_guild_ids = {
+            int(char.get('guildId', 0) or 0), int(char.get('guild_id', 0) or 0)
+        }
+    except (TypeError, ValueError):
+        stored_guild_ids = {current_guild_id}
+    with GUILD_DB_LOCK:
+        matches = []
+        for guild in GUILD_STATES.values():
+            member = (guild.get('members') or {}).get(str(char_id))
+            if member:
+                matches.append((guild, member))
+        accepted = [(guild, member) for guild, member in matches
+                    if int(member.get('job', 3)) != 4]
+        if len(accepted) == 1:
+            guild, _member = accepted[0]
+            expected_guild_id = int(guild.get('id', 0) or 0)
+            if (current_guild_id != expected_guild_id
+                    or stored_guild_ids != {expected_guild_id}
+                    or str(char.get('guildName', '') or '') != str(guild.get('name', '') or '')
+                    or str(char.get('guild_name', '') or '') != str(guild.get('name', '') or '')):
+                with get_character_transaction_lock(char):
+                    _guild_set_character(char, guild)
+                    save_chars(all_accounts_chars)
+                print(f"[GUILD] restored character membership player={char_id} guild={expected_guild_id}")
+                return True
+            return False
+        if accepted:
+            # Ambiguous corrupt state: do not guess which guild should win.
+            return False
+        pending = next(((guild, member) for guild, member in matches
+                        if int(member.get('job', 3)) == 4), None)
+        pending_guild_id = int(pending[0].get('id', 0) or 0) if pending else 0
+        if pending and pending_guild_id in stored_guild_ids:
+            if (int(char.get('guildId', 0) or 0) or int(char.get('guild_id', 0) or 0)
+                    or char.get('guildName') or char.get('guild_name')):
+                with get_character_transaction_lock(char):
+                    _guild_set_character(char, None)
+                    save_chars(all_accounts_chars)
+                print(f"[GUILD] cleared stale guild membership for pending applicant={char_id} "
+                      f"guild={pending[0].get('id', 0)}")
+                return True
+    return False
+
 def _guild_log(guild, text):
     logs = guild.setdefault('logs', [])
     logs.insert(0, f"{int(time.time())}|{text}")
@@ -9349,6 +9399,12 @@ def _guild_refresh_members(guild, send_rpc_push=None, include_info=True):
         try:
             cid = int(member_id)
         except (TypeError, ValueError):
+            continue
+        member = _guild_member_id(guild, cid)
+        # Candidates are still on the no-guild client flow. Sending guild
+        # info to them marks PlayerGuild as valid before approval and unlocks
+        # tabs whose server actions correctly require an accepted member.
+        if not member or int(member.get('job', 3)) == 4:
             continue
         connection, char = ALL_CONNECTIONS.get(cid, (None, None))
         if connection is None or char is None:
@@ -9552,6 +9608,9 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
                     'members': {str(char_id): {
                         'job': 0, 'contribute': 0, 'all_contribute': 0,
                         'last_logout': 0, 'battle': 0,
+                        'name': str(char.get('name', '')),
+                        'level': int(char.get('level', 1) or 1),
+                        'profession': int(char.get('prof', 0) or 0),
                         'donate_stamp': str(current_daily_stamp()), 'donate_remaining': {
                             str(did): int(row.get('donate_count', 0))
                             for did, row in GUILD_DONATE_DATA.items()
@@ -9579,6 +9638,7 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         requested_id = get_val_int(body, 0, 0)
         target_guild = GUILD_STATES.get(str(requested_id))
         joined = False
+        joined_as_member = False
         now = int(time.time())
         with GUILD_INVITE_LOCK:
             invite_expiry = GUILD_INVITES.pop((char_id, requested_id), 0)
@@ -9598,19 +9658,31 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
                 target_guild.setdefault('members', {})[str(char_id)] = {
                     'job': job, 'contribute': 0, 'all_contribute': 0,
                     'last_logout': 0, 'battle': 0,
+                    'name': str(char.get('name', '')),
+                    'level': int(char.get('level', 1) or 1),
+                    'profession': int(char.get('prof', 0) or 0),
                     'donate_stamp': str(current_daily_stamp()),
                     'donate_remaining': {str(did): int(row.get('donate_count', 0))
                                          for did, row in GUILD_DONATE_DATA.items()}
                 }
-                _guild_set_character(char, target_guild)
+                joined_as_member = job != 4
+                if joined_as_member:
+                    _guild_set_character(char, target_guild)
                 action = 'accepted an invitation to join' if invited else 'applied to join'
                 _guild_log(target_guild, f"{char.get('name', '')} {action}")
                 joined = True
-                save_chars(all_accounts_chars)
+                if joined_as_member:
+                    save_chars(all_accounts_chars)
                 _save_guild_states()
-        send_rpc_push(566, encode_sproto([(0, requested_id if joined else 0)]))
+        # ret_guild_join_handler sets PlayerGuild.ServerId whenever tag 0 is
+        # present; even guildId=0 is considered valid by Guild.IsGuildValid.
+        # An empty response therefore correctly leaves failed/pending
+        # applications on the no-guild screen. The client already records a
+        # pending application locally in ApplyGuildIDList.
+        send_rpc_push(566, encode_sproto([(0, requested_id)] if joined_as_member else []))
         if joined:
-            sync_char_attrs_rpc(conn, char)
+            if joined_as_member:
+                sync_char_attrs_rpc(conn, char)
             _guild_refresh_members(target_guild)
 
     elif msg == 148:  # guild_leave; request characterId is tag 0
@@ -10352,6 +10424,7 @@ def client_handler(conn, addr):
                     picked_char['last_played'] = int(time.time())
                     print(f"[CHARACTER PICK] id={picked_char['id']} level={picked_char.get('level')}")
                     init_character_fields(picked_char)
+                    _guild_reconcile_character_membership(picked_char)
                     # Completion from older versions is an ambiguous claim and
                     # must never trigger another payout. Only retry automatically
                     # when this server persisted an explicit capacity-pending
