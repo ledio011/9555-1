@@ -9374,16 +9374,60 @@ def _guild_reconcile_character_membership(char):
             return False
         pending = next(((guild, member) for guild, member in matches
                         if int(member.get('job', 3)) == 4), None)
-        pending_guild_id = int(pending[0].get('id', 0) or 0) if pending else 0
-        if pending and pending_guild_id in stored_guild_ids:
-            if (int(char.get('guildId', 0) or 0) or int(char.get('guild_id', 0) or 0)
-                    or char.get('guildName') or char.get('guild_name')):
-                with get_character_transaction_lock(char):
-                    _guild_set_character(char, None)
-                    save_chars(all_accounts_chars)
-                print(f"[GUILD] cleared stale guild membership for pending applicant={char_id} "
+        # A persisted chief ID is authoritative if an older guild record lost
+        # its member row. Leaders cannot resign or be kicked through the client,
+        # so rebuilding only this exact role cannot undo a legitimate leave.
+        chief_matches = []
+        if not matches:
+            for guild in GUILD_STATES.values():
+                try:
+                    if int(guild.get('chief_id', 0) or 0) == char_id:
+                        chief_matches.append(guild)
+                except (AttributeError, TypeError, ValueError):
+                    continue
+        if len(chief_matches) == 1:
+            guild = chief_matches[0]
+            member = {
+                'job': 0, 'contribute': 0, 'all_contribute': 0,
+                'last_logout': 0, 'battle': 0,
+                'name': str(char.get('name', '')),
+                'level': int(char.get('level', 1) or 1),
+                'profession': int(char.get('prof', 0) or 0),
+                'donate_stamp': str(current_daily_stamp()),
+                'donate_remaining': {
+                    str(donation_id): int(row.get('donate_count', 0))
+                    for donation_id, row in GUILD_DONATE_DATA.items()
+                }
+            }
+            with get_character_transaction_lock(char):
+                guild.setdefault('members', {})[str(char_id)] = member
+                _guild_set_character(char, guild)
+                save_chars(all_accounts_chars)
+                _save_guild_states()
+            print(f"[GUILD] restored missing chief membership player={char_id} "
+                  f"guild={guild.get('id', 0)}")
+            return True
+
+        # The persisted member map is authoritative for ordinary members. A
+        # stale character-side ID can otherwise make the client open the
+        # no-guild list while join requests are rejected as "already joined".
+        has_stale_fields = bool(
+            current_guild_id
+            or any(guild_id > 0 for guild_id in stored_guild_ids)
+            or char.get('guildName')
+            or char.get('guild_name')
+        )
+        if has_stale_fields:
+            with get_character_transaction_lock(char):
+                _guild_set_character(char, None)
+                save_chars(all_accounts_chars)
+            if pending:
+                print(f"[GUILD] cleared stale guild fields for pending applicant={char_id} "
                       f"guild={pending[0].get('id', 0)}")
-                return True
+            else:
+                print(f"[GUILD] cleared orphaned guild fields for player={char_id} "
+                      f"stored_ids={sorted(stored_guild_ids)}")
+            return True
     return False
 
 def _guild_log(guild, text):
