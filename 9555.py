@@ -4045,10 +4045,23 @@ def character_attribute_other_fields(character, stats, hp_cur):
     levels = character_refine_levels(character)
     dance = ensure_dance_runtime(character)
     dance_active = bool(dance.get('running') and str(character.get('map_id')) == '101')
+    guild_id = _guild_id_for_character(character)
+    guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
+    guild_member = _guild_member_id(guild, character.get('id', 0)) if guild else None
+    if guild and guild_member and int(guild_member.get('job', 3)) != 4:
+        guild_id = int(guild.get('id', guild_id) or guild_id)
+        guild_job = int(guild_member.get('job', 3))
+        guild_name = str(guild.get('name', '') or '')
+    else:
+        guild_id, guild_job, guild_name = 0, -1, ''
     return [
         (0, hp_cur), (1, stats['exp']), (2, stats['lv']), (3, stats['power']),
         (4, int(character.get('title_level', 0))),
         (5, int(character.get('title_exp', 0))),
+        # The APK initializes ObjInitPlayerData.GuildId/GuildName from these
+        # fields; omitting them makes a real member look guildless in AOI and
+        # leaves the Gang panel on its no-guild path after a reconnect.
+        (6, guild_id), (7, guild_job), (8, guild_name),
         (9, levels[1]), (10, levels[2]), (11, levels[3]), (12, levels[4]),
         (13, sum(levels.values())), (15, 1),
         (17, 1 if dance_active else 0),
@@ -9464,107 +9477,6 @@ def _guild_reconcile_character_membership(char):
         pending = next(((guild, member) for guild, member in matches
                         if int(member.get('job', 3)) == 4), None)
 
-        # A unique display-name match can safely repair a stale chief ID only
-        # when the old numeric owner no longer exists in the character store.
-        # Keep the character ID authoritative whenever another live/saved
-        # character could own that name.
-        player_name = str(char.get('name', '') or '').strip().casefold()
-        name_matches = [guild for guild in GUILD_STATES.values()
-                        if isinstance(guild, dict)
-                        and str(guild.get('chief_name', '') or '').strip().casefold() == player_name
-                        and player_name]
-        if len(name_matches) == 1:
-            name_character_ids = set()
-            for area_chars in all_accounts_chars.values():
-                if not isinstance(area_chars, dict):
-                    continue
-                for char_list in area_chars.values():
-                    if not isinstance(char_list, list):
-                        continue
-                    for saved_char in char_list:
-                        if not isinstance(saved_char, dict):
-                            continue
-                        if str(saved_char.get('name', '') or '').strip().casefold() == player_name:
-                            try:
-                                name_character_ids.add(int(saved_char.get('id', 0) or 0))
-                            except (TypeError, ValueError):
-                                continue
-            for _online_conn, online_char in ALL_CONNECTIONS.values():
-                if (isinstance(online_char, dict)
-                        and str(online_char.get('name', '') or '').strip().casefold() == player_name):
-                    try:
-                        name_character_ids.add(int(online_char.get('id', 0) or 0))
-                    except (TypeError, ValueError):
-                        continue
-
-            try:
-                target_guild = name_matches[0]
-                stored_chief_id = int(target_guild.get('chief_id', 0) or 0)
-            except (TypeError, ValueError):
-                stored_chief_id = 0
-            if stored_chief_id != char_id:
-                print(f"[GUILD] chief name matches but ID differs player={char_id} "
-                      f"guild={name_matches[0].get('id', 0)} chief_id={stored_chief_id}")
-
-                members = target_guild.get('members')
-                old_owner = members.get(str(stored_chief_id)) if isinstance(members, dict) else None
-                has_other_chief = False
-                if isinstance(members, dict):
-                    for member_id, member in members.items():
-                        if str(member_id) == str(stored_chief_id) or not isinstance(member, dict):
-                            continue
-                        try:
-                            if int(member.get('job', 3)) == 0:
-                                has_other_chief = True
-                                break
-                        except (TypeError, ValueError):
-                            continue
-                old_owner_exists = _guild_char_by_id(stored_chief_id) is not None if stored_chief_id > 0 else False
-                old_owner_is_chief = old_owner is None
-                if isinstance(old_owner, dict):
-                    try:
-                        old_owner_is_chief = int(old_owner.get('job', 3)) == 0
-                    except (TypeError, ValueError):
-                        old_owner_is_chief = False
-                can_migrate_orphaned_chief = (
-                    not matches
-                    and not pending
-                    and stored_chief_id >= 0
-                    and not old_owner_exists
-                    and name_character_ids == {char_id}
-                    and not has_other_chief
-                    and old_owner_is_chief
-                )
-                if can_migrate_orphaned_chief:
-                    with get_character_transaction_lock(char):
-                        with GUILD_DB_LOCK:
-                            members = target_guild.setdefault('members', {})
-                            old_owner = members.pop(str(stored_chief_id), None)
-                            member = dict(old_owner) if isinstance(old_owner, dict) else {
-                                'contribute': 0, 'all_contribute': 0, 'last_logout': 0,
-                                'battle': 0,
-                                'donate_stamp': str(current_daily_stamp()),
-                                'donate_remaining': {
-                                    str(donation_id): int(row.get('donate_count', 0))
-                                    for donation_id, row in GUILD_DONATE_DATA.items()
-                                }
-                            }
-                            member.update({
-                                'job': 0,
-                                'name': str(char.get('name', '')),
-                                'level': int(char.get('level', 1) or 1),
-                                'profession': int(char.get('prof', 0) or 0)
-                            })
-                            target_guild['chief_id'] = char_id
-                            target_guild['chief_name'] = str(char.get('name', ''))
-                            members[str(char_id)] = member
-                            _guild_set_character(char, target_guild)
-                            save_chars(all_accounts_chars)
-                            _save_guild_states()
-                    print(f"[GUILD] repaired orphaned chief membership player={char_id} "
-                          f"guild={target_guild.get('id', 0)} old_chief_id={stored_chief_id}")
-                    return True
-
         # The persisted member map is authoritative for ordinary members. A
         # stale character-side ID can otherwise make the client open the
         # no-guild list while join requests are rejected as "already joined".
@@ -10993,7 +10905,14 @@ def client_handler(conn, addr):
                     if not guild_presence_announced and is_current_character_connection(conn, picked_char):
                         guild_id = _guild_id_for_character(picked_char)
                         guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
-                        if guild and _guild_member_id(guild, picked_char.get('id', 0)) is not None:
+                        guild_member = _guild_member_id(guild, picked_char.get('id', 0)) if guild else None
+                        if guild and guild_member and int(guild_member.get('job', 3)) != 4:
+                            # PlayerData.PlayerGuild starts invalid on a fresh
+                            # login. Without this push the Gang button chooses
+                            # the no-guild list flow and never asks for tag 563.
+                            send_rpc_push(563, _guild_info_response(picked_char, guild))
+                            print(f"[GUILD] login membership state sent player={picked_char.get('id')} "
+                                  f"guild={guild_id} job={guild_member.get('job', 3)}")
                             _guild_refresh_members(guild, include_info=False)
                         guild_presence_announced = True
                     # Login sends the backpack before the client finishes
