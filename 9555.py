@@ -9230,6 +9230,10 @@ def _guild_member_info_bytes(guild, member_id, member):
         power = 0
     online = int(int(member_id) in ALL_CONNECTIONS)
     name = str(char.get('name') or member.get('name') or '')
+    try:
+        job = int(member.get('job', 3))
+    except (AttributeError, TypeError, ValueError):
+        job = 3
     return encode_sproto([
         (0, int(guild.get('id', 0))), (1, int(member_id)),
         (2, name),
@@ -9238,7 +9242,7 @@ def _guild_member_info_bytes(guild, member_id, member):
         (5, int(char.get('level', member.get('level', 1)) or 1)),
         (6, int(member.get('contribute', 0) or 0)),
         (7, int(member.get('last_logout', 0) or 0)), (8, online),
-        (9, int(member.get('job', 3) or 3)), (10, power),
+        (9, job), (10, power),
         (11, int(member.get('all_contribute', 0) or 0)),
         (12, int(member.get('battle', 0) or 0))
     ])
@@ -9262,8 +9266,8 @@ def _guild_info_bytes(guild, player=None):
     player_job = int(member.get('job', 3)) if member else -1
     vice_count = sum(1 for entry in members.values() if int(entry.get('job', 3)) == 1)
     elder_count = sum(1 for entry in members.values() if int(entry.get('job', 3)) == 2)
-    # The client guild_info decoder skips tag 15, then reads battle=16,
-    # vice=17, elder=18, playerJob=19, icon=20, and disactiveState=21.
+    # Guild-info wire tags: boss=16, battle=17, vice=18, elder=19,
+    # playerJob=20, icon=21, and disactiveState=22.
     return encode_sproto([
         (0, int(guild.get('id', 0))), (1, str(guild.get('name', ''))),
         (2, chief_name), (3, chief_id),
@@ -9275,8 +9279,9 @@ def _guild_info_bytes(guild, player=None):
         (11, _guild_max_player(guild)), (12, str(guild.get('notice', ''))[:150]),
         (13, bool(guild.get('need_approval', True))),
         (14, int(guild.get('create_time', 0) or 0)),
-        (16, False), (17, vice_count), (18, elder_count), (19, player_job),
-        (20, max(0, min(7, int(guild.get('icon', 0) or 0)))), (21, 0)
+        (16, False), (17, False), (18, vice_count), (19, elder_count),
+        (20, player_job), (21, max(0, min(7, int(guild.get('icon', 0) or 0)))),
+        (22, max(0, int(guild.get('disactive_state', 0) or 0)))
     ])
 
 def _guild_donate_records(char, guild):
@@ -9593,8 +9598,8 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
             sync_char_attrs_rpc(conn, char)
             _guild_refresh_members(target_guild)
 
-    elif msg == 148:  # guild_leave
-        target_id = get_val_int(body, 1, char_id)
+    elif msg == 148:  # guild_leave; request characterId is tag 0
+        target_id = get_val_int(body, 0, char_id)
         member = _guild_member_id(guild, char_id) if guild else None
         left = bool(guild and member and int(member.get('job', 3)) != 0
                     and target_id in (0, char_id))
@@ -9637,9 +9642,9 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
             _guild_refresh_members(guild)
         send_rpc_push(590, encode_sproto([(0, target_id), (1, bool(kicked))]))
 
-    elif msg == 150:  # guild_job_change
-        job = get_val_int(body, 0, -1)
-        target_id = get_val_int(body, 1, 0)
+    elif msg == 150:  # guild_job_change; characterId=tag 0, jobId=tag 1
+        target_id = get_val_int(body, 0, 0)
+        job = get_val_int(body, 1, -1)
         actor = _guild_member_id(guild, char_id) if guild else None
         target = _guild_member_id(guild, target_id) if guild else None
         changed = False
@@ -9725,9 +9730,9 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         target_guild = GUILD_STATES.get(str(target_guild_id)) if target_guild_id else None
         send_rpc_push(563, _guild_info_response(target_char or char, target_guild))
 
-    elif msg == 154:  # guild_approve_resverve
-        target_id = get_val_int(body, 1, 0)
-        agree = get_val_int(body, 0, 0)
+    elif msg == 154:  # guild_approve_resverve; characterId=tag 0, isAgree=tag 1
+        target_id = get_val_int(body, 0, 0)
+        agree = get_val_int(body, 1, 0)
         actor = _guild_member_id(guild, char_id) if guild else None
         target = _guild_member_id(guild, target_id) if guild else None
         actor_job = int(actor.get('job', 4)) if actor else 4
@@ -9776,11 +9781,12 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         else:
             send_rpc_push(581, encode_sproto([(0, {})]))
 
-    elif msg == 173:  # req_seting_guild_appro
-        requested_id = get_val_int(body, 1, current_guild_id)
+    elif msg == 173:  # req_seting_guild_appro; guildId=tag 0, isNeedAppro=tag 1
+        requested_id = get_val_int(body, 0, current_guild_id)
+        need_approval = bool(get_val_int(body, 1, 0))
         member = _guild_member_id(guild, char_id) if guild else None
         if guild and requested_id == current_guild_id and member and int(member.get('job', 4)) in (0, 1):
-            guild['need_approval'] = bool(get_val_int(body, 0, 0))
+            guild['need_approval'] = need_approval
             _save_guild_states()
             _guild_refresh_members(guild)
 
