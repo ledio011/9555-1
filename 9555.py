@@ -1894,6 +1894,9 @@ all_accounts_chars = load_chars()
 # and membership fields remain in the existing character database.
 GUILD_DB_PATH = os.path.join(SCRIPT_DIR, "guilds.json")
 GUILD_DB_LOCK = threading.RLock()
+GUILD_INVITE_LOCK = threading.Lock()
+GUILD_INVITES = {}  # (target character ID, guild ID) -> expiry epoch for accepted invite flow
+GUILD_INVITE_TTL_SECONDS = 600
 def _load_guild_states():
     try:
         with open(GUILD_DB_PATH, "r", encoding="utf-8") as guild_file:
@@ -9576,6 +9579,10 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         requested_id = get_val_int(body, 0, 0)
         target_guild = GUILD_STATES.get(str(requested_id))
         joined = False
+        now = int(time.time())
+        with GUILD_INVITE_LOCK:
+            invite_expiry = GUILD_INVITES.pop((char_id, requested_id), 0)
+            invited = bool(invite_expiry and invite_expiry >= now)
         with GUILD_DB_LOCK:
             pending_applications = sum(
                 1 for member in (target_guild or {}).get('members', {}).values()
@@ -9585,9 +9592,9 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
             if (target_guild and _guild_id_for_character(char) == 0
                     and _guild_member_id(target_guild, char_id) is None
                     and _guild_member_count(target_guild) < _guild_max_player(target_guild)
-                    and (not target_guild.get('need_approval', True)
+                    and (invited or not target_guild.get('need_approval', True)
                          or pending_applications < max_applications)):
-                job = 3 if not target_guild.get('need_approval', True) else 4
+                job = 3 if invited or not target_guild.get('need_approval', True) else 4
                 target_guild.setdefault('members', {})[str(char_id)] = {
                     'job': job, 'contribute': 0, 'all_contribute': 0,
                     'last_logout': 0, 'battle': 0,
@@ -9596,7 +9603,8 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
                                          for did, row in GUILD_DONATE_DATA.items()}
                 }
                 _guild_set_character(char, target_guild)
-                _guild_log(target_guild, f"{char.get('name', '')} applied to join")
+                action = 'accepted an invitation to join' if invited else 'applied to join'
+                _guild_log(target_guild, f"{char.get('name', '')} {action}")
                 joined = True
                 save_chars(all_accounts_chars)
                 _save_guild_states()
@@ -9706,9 +9714,16 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         actor = _guild_member_id(guild, char_id) if guild else None
         target_entry = ALL_CONNECTIONS.get(target_id)
         target_conn, target_char = target_entry if target_entry else (None, None)
-        if (guild and actor and target_conn and target_char and target_id != char_id
+        if (guild and actor and int(actor.get('job', 4)) != 4
+                and target_conn and target_char and target_id != char_id
                 and _guild_id_for_character(target_char) == 0
                 and _guild_member_count(guild) < _guild_max_player(guild)):
+            now = int(time.time())
+            with GUILD_INVITE_LOCK:
+                expired_invites = [key for key, expiry in GUILD_INVITES.items() if expiry < now]
+                for key in expired_invites:
+                    GUILD_INVITES.pop(key, None)
+                GUILD_INVITES[(target_id, int(guild.get('id', 0)))] = now + GUILD_INVITE_TTL_SECONDS
             send_rpc_push_safe(target_conn, 639, encode_sproto([
                 (0, str(char.get('name', ''))), (1, int(guild.get('id', 0))),
                 (2, str(guild.get('name', '')))
