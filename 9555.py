@@ -9324,6 +9324,27 @@ def _guild_member_list_response(guild):
             continue
     return encode_sproto([(0, members)])
 
+def _guild_list_response(char, page=1):
+    char_id = int((char or {}).get('id', 0) or 0)
+    ordered = sorted(GUILD_STATES.values(),
+                     key=lambda item: (-_guild_level(item), -int(item.get('exp', 0)), int(item.get('id', 0))))
+    per_page = 10  # GuildListInfoRootLogic.PAGE_NUM
+    max_page = max(1, (len(ordered) + per_page - 1) // per_page)
+    page = min(max(1, int(page or 1)), max_page)
+    page_rows = ordered[(page - 1) * per_page:page * per_page]
+    guild_map = {str(item['id']): _guild_info_bytes(item, None) for item in page_rows}
+    applied = []
+    for item in ordered:
+        member = _guild_member_id(item, char_id)
+        if member and int(member.get('job', 3)) == 4:
+            applied.append(int(item['id']))
+    # ret_guild_req_list_handler stores tag 4 as ObjMainPlayer.LeaveGuildTime;
+    # JoinGuild blocks rejoining for one day after a voluntary leave.
+    leave_time = max(0, int((char or {}).get('guild_leave_time', 0) or 0))
+    return encode_sproto([
+        (0, guild_map), (1, applied), (2, page), (3, max_page), (4, leave_time)
+    ])
+
 def _guild_set_character(char, guild):
     if guild:
         char['guildId'] = int(guild.get('id', 0))
@@ -9350,12 +9371,74 @@ def _guild_reconcile_character_membership(char):
         stored_guild_ids = {current_guild_id}
     with GUILD_DB_LOCK:
         matches = []
+        chief_matches = []
         for guild in GUILD_STATES.values():
-            member = (guild.get('members') or {}).get(str(char_id))
-            if member:
+            if not isinstance(guild, dict):
+                continue
+            members = guild.get('members')
+            member = members.get(str(char_id)) if isinstance(members, dict) else None
+            if isinstance(member, dict):
                 matches.append((guild, member))
+            try:
+                if int(guild.get('chief_id', 0) or 0) == char_id:
+                    chief_matches.append(guild)
+            except (AttributeError, TypeError, ValueError):
+                continue
         accepted = [(guild, member) for guild, member in matches
                     if int(member.get('job', 3)) != 4]
+
+        if len(chief_matches) > 1 or len(accepted) > 1:
+            # Do not guess if persisted records claim multiple owners or
+            # multiple accepted memberships for the same character.
+            return False
+
+        if len(chief_matches) == 1:
+            guild = chief_matches[0]
+            if any(member_guild is not guild for member_guild, _member in accepted):
+                print(f"[GUILD] conflicting chief/member records player={char_id} "
+                      f"chief_guild={guild.get('id', 0)} "
+                      f"member_guilds={[g.get('id', 0) for g, _ in accepted]}")
+                return False
+
+            members = guild.get('members')
+            if not isinstance(members, dict):
+                members = {}
+                guild['members'] = members
+            existing = members.get(str(char_id)) if isinstance(members, dict) else None
+            member = dict(existing) if isinstance(existing, dict) else {
+                'contribute': 0, 'all_contribute': 0, 'last_logout': 0,
+                'battle': 0,
+                'donate_stamp': str(current_daily_stamp()),
+                'donate_remaining': {
+                    str(donation_id): int(row.get('donate_count', 0))
+                    for donation_id, row in GUILD_DONATE_DATA.items()
+                }
+            }
+            member.update({
+                'job': 0,
+                'name': str(char.get('name', '')),
+                'level': int(char.get('level', 1) or 1),
+                'profession': int(char.get('prof', 0) or 0)
+            })
+            expected_guild_id = int(guild.get('id', 0) or 0)
+            needs_character_sync = (
+                current_guild_id != expected_guild_id
+                or stored_guild_ids != {expected_guild_id}
+                or str(char.get('guildName', '') or '') != str(guild.get('name', '') or '')
+                or str(char.get('guild_name', '') or '') != str(guild.get('name', '') or '')
+            )
+            needs_member_sync = existing is None or existing != member
+            if needs_character_sync or needs_member_sync:
+                with get_character_transaction_lock(char):
+                    members[str(char_id)] = member
+                    _guild_set_character(char, guild)
+                    save_chars(all_accounts_chars)
+                    _save_guild_states()
+                print(f"[GUILD] restored chief membership player={char_id} "
+                      f"guild={expected_guild_id}")
+                return True
+            return False
+
         if len(accepted) == 1:
             guild, _member = accepted[0]
             expected_guild_id = int(guild.get('id', 0) or 0)
@@ -9369,44 +9452,24 @@ def _guild_reconcile_character_membership(char):
                 print(f"[GUILD] restored character membership player={char_id} guild={expected_guild_id}")
                 return True
             return False
-        if accepted:
-            # Ambiguous corrupt state: do not guess which guild should win.
-            return False
         pending = next(((guild, member) for guild, member in matches
                         if int(member.get('job', 3)) == 4), None)
-        # A persisted chief ID is authoritative if an older guild record lost
-        # its member row. Leaders cannot resign or be kicked through the client,
-        # so rebuilding only this exact role cannot undo a legitimate leave.
-        chief_matches = []
-        if not matches:
-            for guild in GUILD_STATES.values():
-                try:
-                    if int(guild.get('chief_id', 0) or 0) == char_id:
-                        chief_matches.append(guild)
-                except (AttributeError, TypeError, ValueError):
-                    continue
-        if len(chief_matches) == 1:
-            guild = chief_matches[0]
-            member = {
-                'job': 0, 'contribute': 0, 'all_contribute': 0,
-                'last_logout': 0, 'battle': 0,
-                'name': str(char.get('name', '')),
-                'level': int(char.get('level', 1) or 1),
-                'profession': int(char.get('prof', 0) or 0),
-                'donate_stamp': str(current_daily_stamp()),
-                'donate_remaining': {
-                    str(donation_id): int(row.get('donate_count', 0))
-                    for donation_id, row in GUILD_DONATE_DATA.items()
-                }
-            }
-            with get_character_transaction_lock(char):
-                guild.setdefault('members', {})[str(char_id)] = member
-                _guild_set_character(char, guild)
-                save_chars(all_accounts_chars)
-                _save_guild_states()
-            print(f"[GUILD] restored missing chief membership player={char_id} "
-                  f"guild={guild.get('id', 0)}")
-            return True
+
+        # A display-name match is useful for diagnosing stale legacy data but
+        # is not sufficient to grant ownership; character IDs are authoritative.
+        player_name = str(char.get('name', '') or '').strip().casefold()
+        name_matches = [guild for guild in GUILD_STATES.values()
+                        if isinstance(guild, dict)
+                        and str(guild.get('chief_name', '') or '').strip().casefold() == player_name
+                        and player_name]
+        if len(name_matches) == 1:
+            try:
+                stored_chief_id = int(name_matches[0].get('chief_id', 0) or 0)
+            except (TypeError, ValueError):
+                stored_chief_id = 0
+            if stored_chief_id != char_id:
+                print(f"[GUILD] chief name matches but ID differs player={char_id} "
+                      f"guild={name_matches[0].get('id', 0)} chief_id={stored_chief_id}")
 
         # The persisted member map is authoritative for ordinary members. A
         # stale character-side ID can otherwise make the client open the
@@ -9687,13 +9750,19 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         with GUILD_INVITE_LOCK:
             invite_expiry = GUILD_INVITES.pop((char_id, requested_id), 0)
             invited = bool(invite_expiry and invite_expiry >= now)
+        try:
+            last_guild_leave = max(0, int(char.get('guild_leave_time', 0) or 0))
+        except (TypeError, ValueError):
+            last_guild_leave = 0
+        leave_cooldown_complete = not last_guild_leave or now >= last_guild_leave + 86400
         with GUILD_DB_LOCK:
             pending_applications = sum(
                 1 for member in (target_guild or {}).get('members', {}).values()
                 if int(member.get('job', 3)) == 4
             )
             max_applications = max(30, _guild_max_player(target_guild)) if target_guild else 0
-            if (target_guild and _guild_id_for_character(char) == 0
+            if (target_guild and leave_cooldown_complete
+                    and _guild_id_for_character(char) == 0
                     and _guild_member_id(target_guild, char_id) is None
                     and _guild_member_count(target_guild) < _guild_max_player(target_guild)
                     and (invited or not target_guild.get('need_approval', True)
@@ -9724,6 +9793,11 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         # applications on the no-guild screen. The client already records a
         # pending application locally in ApplyGuildIDList.
         send_rpc_push(566, encode_sproto([(0, requested_id)] if joined_as_member else []))
+        if not joined_as_member:
+            # JoinGuild adds the guild ID locally before sending the request.
+            # Refresh the server-owned application list after a pending or
+            # rejected request so the client cannot retain an optimistic state.
+            send_rpc_push(562, _guild_list_response(char, 1))
         if joined:
             if joined_as_member:
                 sync_char_attrs_rpc(conn, char)
@@ -9735,13 +9809,15 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         left = bool(guild and member and int(member.get('job', 3)) != 0
                     and target_id in (0, char_id))
         if left:
+            leave_time = int(time.time())
             with GUILD_DB_LOCK:
                 guild.setdefault('members', {}).pop(str(char_id), None)
                 _guild_set_character(char, None)
+                char['guild_leave_time'] = leave_time
                 _guild_log(guild, f"{char.get('name', '')} left the guild")
                 save_chars(all_accounts_chars)
                 _save_guild_states()
-            send_rpc_push(565, encode_sproto([(0, int(time.time())), (1, int(guild.get('id', 0)))]))
+            send_rpc_push(565, encode_sproto([(0, leave_time), (1, int(guild.get('id', 0)))]))
             send_rpc_push(563, _guild_info_response(char, None))
             broadcast_aoi_attribute(char)
             sync_char_attrs_rpc(conn, char)
@@ -9847,19 +9923,7 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
 
     elif msg == 152:  # guild_req_list
         page = max(1, get_val_int(body, 1, 1))
-        ordered = sorted(GUILD_STATES.values(),
-                         key=lambda item: (-_guild_level(item), -int(item.get('exp', 0)), int(item.get('id', 0))))
-        # GuildListInfoRootLogic uses PAGE_NUM=10 and offsets pages by ten.
-        per_page = 10
-        max_page = max(1, (len(ordered) + per_page - 1) // per_page)
-        page = min(page, max_page)
-        page_rows = ordered[(page - 1) * per_page:page * per_page]
-        guild_map = {str(item['id']): _guild_info_bytes(item, None) for item in page_rows}
-        applied = [int(g['id']) for g in ordered
-                   if _guild_member_id(g, char_id) and int(_guild_member_id(g, char_id).get('job', 3)) == 4]
-        send_rpc_push(562, encode_sproto([
-            (0, guild_map), (1, applied), (2, page), (3, max_page), (4, 0)
-        ]))
+        send_rpc_push(562, _guild_list_response(char, page))
 
     elif msg == 153:  # guild_req_info
         target_id = get_val_int(body, 0, char_id) or char_id
@@ -9899,8 +9963,13 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
                 send_rpc_push_safe(target_conn, 563, _guild_info_response(target_char, guild if agree and changed else None))
                 broadcast_aoi_attribute(target_char)
                 sync_char_attrs_rpc(target_conn, target_char)
-            _guild_refresh_members(guild)
         send_rpc_push(591, encode_sproto([(0, target_id), (1, agree), (2, bool(changed))]))
+        # This APK's ret_guild_approve_resverve handler applies the requested
+        # isAgree value locally and ignores state. On a rejected server action
+        # (for example, a full guild), the roster must arrive after the
+        # callback so its optimistic UI change is immediately corrected.
+        if guild and actor and actor_job != 4:
+            _guild_refresh_members(guild)
 
     elif msg == 169:  # req_guild_notice
         notice = get_val_str(body, 0, '')[:150]
@@ -9990,6 +10059,24 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
 
     elif msg == 285:  # req_guild_battle_info; open the configured Gang Battle panel
         send_rpc_push(662, encode_sproto([(0, _guild_battle_info_bytes(guild))]))
+
+    elif msg == 286:  # enter_guild_battle; battle runtime is not active on this server
+        # The APK opens a wait box for request 286 and only closes it when it
+        # receives ret_enter_guild_battle (677).  The battle panel currently
+        # reports state=-1 (not open), so explicitly return the closed state
+        # instead of letting the client wait for its timeout.
+        send_rpc_push(677, encode_sproto([(0, 0)]))
+
+    elif msg == 291:  # req_guild_score_info; no live battle score state exists
+        # GuildBattleSceneManager polls this every two seconds. If an old or
+        # directly-entered battle scene sends the request while this server
+        # has no battle runtime, return a well-formed empty score snapshot so
+        # the client does not retain stale values from a previous scene.
+        score_info = encode_sproto([
+            (0, []), (1, 0), (2, 0), (3, 0), (4, 0),
+            (5, ''), (6, ''), (7, 0), (8, 0), (9, 0)
+        ])
+        send_rpc_push(667, encode_sproto([(0, score_info)]))
 
     elif msg == 287:  # req_guild_battle_rank
         ranked_guilds = sorted(
@@ -16734,7 +16821,7 @@ def client_handler(conn, addr):
 
             elif (msg in (146, 147, 148, 149, 150, 151, 152, 153, 154,
                           169, 170, 173, 174, 175, 176, 195, 212, 233, 247,
-                          285, 287, 288, 289, 293, 294, 295, 315, 318, 319, 320)
+                          285, 286, 287, 288, 289, 291, 293, 294, 295, 315, 318, 319, 320)
                   or (msg == 143 and get_val_int(body, 0, -1) == 3)
                   or (msg == 144 and get_val_int(body, 2, -1) == 3)):
                 handle_guild_request(
