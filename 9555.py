@@ -9577,9 +9577,16 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         target_guild = GUILD_STATES.get(str(requested_id))
         joined = False
         with GUILD_DB_LOCK:
+            pending_applications = sum(
+                1 for member in (target_guild or {}).get('members', {}).values()
+                if int(member.get('job', 3)) == 4
+            )
+            max_applications = max(30, _guild_max_player(target_guild)) if target_guild else 0
             if (target_guild and _guild_id_for_character(char) == 0
                     and _guild_member_id(target_guild, char_id) is None
-                    and _guild_member_count(target_guild) < _guild_max_player(target_guild)):
+                    and _guild_member_count(target_guild) < _guild_max_player(target_guild)
+                    and (not target_guild.get('need_approval', True)
+                         or pending_applications < max_applications)):
                 job = 3 if not target_guild.get('need_approval', True) else 4
                 target_guild.setdefault('members', {})[str(char_id)] = {
                     'job': job, 'contribute': 0, 'all_contribute': 0,
@@ -10120,6 +10127,7 @@ def client_handler(conn, addr):
     conn_id = id(conn)
     street_race_result_restore_pending = False
     download_bag_resynced = False
+    guild_presence_announced = False
     # ALL_CONNECTIONS will be updated when character is picked
     send_lock = threading.Lock()
 
@@ -10669,6 +10677,12 @@ def client_handler(conn, addr):
                 if picked_char:
                     mid = picked_char.get('map_id', '11')
                     print(f"[MAP READY RECEIVED] map_id={mid}")
+                    if not guild_presence_announced and is_current_character_connection(conn, picked_char):
+                        guild_id = _guild_id_for_character(picked_char)
+                        guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
+                        if guild and _guild_member_id(guild, picked_char.get('id', 0)) is not None:
+                            _guild_refresh_members(guild, include_info=False)
+                        guild_presence_announced = True
                     # Login sends the backpack before the client finishes
                     # creating its first map player. Re-send the claimed
                     # download inventory once the client confirms map-ready,
@@ -16636,6 +16650,8 @@ def client_handler(conn, addr):
                         _save_guild_states()
                     ALL_CONNECTIONS.pop(char_id, None)
                     CONNECTION_LOCKS.pop(char_id, None)
+                    if guild_member is not None:
+                        _guild_refresh_members(guild, include_info=False)
                     # Update offline state only after the active connection
                     # has actually gone away.
                     _sync_friend_online_state(char_id, 0)
