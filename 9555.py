@@ -101,6 +101,8 @@ GUILD_CAPTURE_CONFIG = {} # id -> schedule metadata from GuildCaptureData
 GUILD_LEVEL_DATA = {} # guild level -> cumulative exp/max members/daily donation count
 GUILD_DONATE_DATA = {} # donation id -> authoritative cost and reward
 GUILD_SKILL_DATA = {} # skill type -> ordered level rows
+GUILD_BATTLE_DATA = {} # id -> configured Gang Battle schedule/selection data
+GUILD_STAR_DATA = {} # id -> configured Gang Star upgrade data
 GUILD_SHOP_DATA = {} # shop item ID -> ShopData row for Guild shop
 GUILD_BOSS_DATA = {} # guild boss/activity rows shown by the Gang activity panel
 KILL_TARGET_SPAWNS = {} # logicId -> list of spawns
@@ -541,6 +543,51 @@ try:
                         "map_id": str(parts[2]), "start_time": int(parts[6]),
                         "duration": int(parts[7]), "level_min": int(parts[11]),
                         "level_max": int(parts[12])
+                    }
+                except (TypeError, ValueError):
+                    continue
+
+    # Load the Gang Battle/Star tables used by the client's roster and
+    # strengthening screens. These were present in TextAsset but were not
+    # previously loaded by the server.
+    guild_battle_path = os.path.join(text_asset_root, "GuildBattleData")
+    if os.path.exists(guild_battle_path):
+        with open(guild_battle_path, "r", encoding="utf-8") as table_file:
+            for row in table_file:
+                parts = row.strip().split(",")
+                if len(parts) < 18 or parts[0] != "*":
+                    continue
+                try:
+                    GUILD_BATTLE_DATA[str(parts[1])] = {
+                        "map_id": str(parts[2]), "max_play_num": int(parts[3] or 0),
+                        "duration": int(parts[4] or 0), "wait_time": int(parts[5] or 0),
+                        "exist_time": int(parts[6] or 0), "guess_id": str(parts[7]),
+                        "guess_cost": int(parts[8] or 0), "guess_success": int(parts[9] or 0),
+                        "week": int(parts[10] or 0), "start_time": int(parts[11] or 0),
+                        "rounds": [
+                            (int(parts[12] or 0), int(parts[13] or 0)),
+                            (int(parts[14] or 0), int(parts[15] or 0)),
+                            (int(parts[16] or 0), int(parts[17] or 0))
+                        ]
+                    }
+                except (TypeError, ValueError):
+                    continue
+
+    guild_star_path = os.path.join(text_asset_root, "GuildStarData")
+    if os.path.exists(guild_star_path):
+        with open(guild_star_path, "r", encoding="utf-8") as table_file:
+            for row in table_file:
+                parts = row.strip().split(",")
+                if len(parts) < 17 or parts[0] != "*":
+                    continue
+                try:
+                    GUILD_STAR_DATA[str(parts[1])] = {
+                        "map_id": int(parts[2]), "level": int(parts[3]), "map_name": str(parts[4]),
+                        "status1": int(parts[5]), "value1": int(parts[6]),
+                        "status2": int(parts[7]), "value2": int(parts[8]),
+                        "cost_id1": str(parts[9]), "cost1": int(parts[10] or 0),
+                        "cost_id2": str(parts[11]), "cost2": int(parts[12] or 0),
+                        "unlock_level": int(parts[13] or 0)
                     }
                 except (TypeError, ValueError):
                     continue
@@ -9182,9 +9229,10 @@ def _guild_member_info_bytes(guild, member_id, member):
     except Exception:
         power = 0
     online = int(int(member_id) in ALL_CONNECTIONS)
+    name = str(char.get('name') or member.get('name') or '')
     return encode_sproto([
         (0, int(guild.get('id', 0))), (1, int(member_id)),
-        (2, str(char.get('name', member.get('name', '')))),
+        (2, name),
         (3, int(char.get('vip_level', char.get('vip', 0)) or 0)),
         (4, int(char.get('prof', member.get('profession', 0)) or 0)),
         (5, int(char.get('level', member.get('level', 1)) or 1)),
@@ -9209,25 +9257,26 @@ def _guild_info_bytes(guild, player=None):
     applicants = sum(1 for member in members.values() if int(member.get('job', 3)) == 4)
     chief_id = int(guild.get('chief_id', 0) or 0)
     chief = _guild_char_by_id(chief_id) or {}
+    chief_name = str(chief.get('name') or guild.get('chief_name') or '')
     member = _guild_member_id(guild, player.get('id', 0)) if player else None
     player_job = int(member.get('job', 3)) if member else -1
     vice_count = sum(1 for entry in members.values() if int(entry.get('job', 3)) == 1)
     elder_count = sum(1 for entry in members.values() if int(entry.get('job', 3)) == 2)
-    # guild_info has a reserved wire tag 15; subsequent fields are tags 16-22.
+    # The client guild_info decoder skips tag 15, then reads battle=16,
+    # vice=17, elder=18, playerJob=19, icon=20, and disactiveState=21.
     return encode_sproto([
         (0, int(guild.get('id', 0))), (1, str(guild.get('name', ''))),
-        (2, str(chief.get('name', guild.get('chief_name', '')))), (3, chief_id),
+        (2, chief_name), (3, chief_id),
         (4, int(guild.get('exp', 0) or 0)), (5, int(guild.get('skill_point', 0) or 0)),
         # Client Guild.Init computes visible members as guildMemberNum - guildApplyNum,
         # so guildMemberNum must include pending candidates as well as members.
-        (6, level), (7, _guild_member_count(guild, include_candidates=True)), (8, int(guild.get('combo', 0) or 0)),
+        (6, level), (7, _guild_member_count(guild, include_candidates=True)), (8, _guild_combo(guild)),
         (9, applicants), (10, max(30, _guild_max_player(guild))),
         (11, _guild_max_player(guild)), (12, str(guild.get('notice', ''))[:150]),
         (13, bool(guild.get('need_approval', True))),
         (14, int(guild.get('create_time', 0) or 0)),
-        (16, False), (17, False), (18, vice_count), (19, elder_count),
-        (20, player_job), (21, max(0, min(7, int(guild.get('icon', 0) or 0)))),
-        (22, 0)
+        (16, False), (17, vice_count), (18, elder_count), (19, player_job),
+        (20, max(0, min(7, int(guild.get('icon', 0) or 0)))), (21, 0)
     ])
 
 def _guild_donate_records(char, guild):
@@ -9310,9 +9359,9 @@ def _guild_shop_item_bytes(row, purchased=0):
         (0, str(row.get('id', ''))), (1, str(row.get('item_id', ''))),
         (2, int(row.get('quality', 0))), (3, int(row.get('price_type', 0))),
         (4, int(row.get('price', 0))), (5, int(row.get('limit', 0))),
-        # shop_item fields are curNum=6, Discount=7 and Class=8.
-        (6, max(0, int(purchased))), (7, int(row.get('discount', 0))),
-        (8, int(row.get('class', 0)))
+        # The APK shop_item decoder reserves wire tag 6; these are 7, 8, 9.
+        (7, max(0, int(purchased))), (8, int(row.get('discount', 0))),
+        (9, int(row.get('class', 0)))
     ]
     return encode_sproto(fields)
 
@@ -9337,11 +9386,43 @@ def _guild_boss_activity_state(row, now=None):
     until = (start - seconds_today) % 86400
     return 0, until if until else 86400
 
+def _guild_combo(guild):
+    """Compute the displayed Gang combat value from its real non-applicant members."""
+    if not guild:
+        return 0
+    total = 0
+    for member_id, member in (guild.get('members') or {}).items():
+        try:
+            if int(member.get('job', 3)) == 4:
+                continue
+            char = _guild_char_by_id(member_id)
+            if char:
+                total += max(0, int(get_character_stats(char).get('power', 0) or 0))
+        except Exception:
+            continue
+    # Preserve existing imported guild records when their characters are not
+    # present in this server's character database.
+    return total if total > 0 else max(0, int(guild.get('combo', 0) or 0))
+
+def _guild_star_map(guild):
+    states = (guild or {}).get('stars', {})
+    if not isinstance(states, dict):
+        states = {}
+    result = {}
+    for star_id in sorted(GUILD_STAR_DATA, key=lambda value: (len(value), value)):
+        try:
+            state = 1 if int(states.get(star_id, 0) or 0) == 1 else 0
+        except (TypeError, ValueError):
+            state = 0
+        result[star_id] = encode_sproto([(0, star_id), (1, state)])
+    return result
+
 def _guild_battle_info_bytes(guild=None):
     # -1 is the client's configured, not-yet-open state. It displays the
     # GuildBattleData schedule and keeps the future rounds out of the UI.
+    battle_id = next(iter(sorted(GUILD_BATTLE_DATA, key=lambda value: (len(value), value))), '1501')
     return encode_sproto([
-        (0, -1), (5, '1501'),
+        (0, -1), (5, battle_id),
         (6, int(guild.get('id', 0)) if guild else 0), (7, '')
     ])
 
@@ -9766,6 +9847,147 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
     elif msg == 285:  # req_guild_battle_info; open the configured Gang Battle panel
         send_rpc_push(662, encode_sproto([(0, _guild_battle_info_bytes(guild))]))
 
+    elif msg == 287:  # req_guild_battle_rank
+        ranked_guilds = sorted(
+            GUILD_STATES.values(),
+            key=lambda item: (-_guild_combo(item), -_guild_level(item), -int(item.get('exp', 0) or 0), int(item.get('id', 0)))
+        )
+        send_rpc_push(663, encode_sproto([
+            (0, [_guild_info_bytes(item, None) for item in ranked_guilds])
+        ]))
+
+    elif msg == 288:  # req_guild_battle_member
+        battle_members = []
+        if guild:
+            members = guild.get('members') or {}
+            ordered_members = []
+            for member_id, member in members.items():
+                try:
+                    if int(member.get('job', 3)) == 4:  # applications are not battle participants
+                        continue
+                    char_id_value = int(member_id)
+                    char = _guild_char_by_id(char_id_value) or {}
+                    power = int(get_character_stats(char).get('power', 0) or 0) if char else 0
+                    ordered_members.append((-power, 0 if int(member.get('job', 3)) == 0 else 1,
+                                            char_id_value, member))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+            ordered_members.sort(key=lambda entry: (entry[0], entry[1], entry[2]))
+            battle_members = [
+                _guild_member_info_bytes(guild, member_id, member)
+                for _, _, member_id, member in ordered_members
+            ]
+        send_rpc_push(665, encode_sproto([(0, battle_members)]))
+
+    elif msg == 289:  # set_guild_battle_member
+        selected_value = body.get(0, [])
+        if isinstance(selected_value, (bytes, bytearray)):
+            raw = bytes(selected_value)
+            width = raw[0] if raw and raw[0] in (1, 2, 4, 8) else 0
+            raw_values = raw[1:] if width else raw
+            if width and len(raw_values) % width == 0:
+                selected_ids = [int.from_bytes(raw_values[index:index + width], 'little', signed=True)
+                                for index in range(0, len(raw_values), width)]
+            else:
+                selected_ids = []
+        elif isinstance(selected_value, (list, tuple)):
+            selected_ids = []
+            for value in selected_value:
+                try:
+                    selected_ids.append(int(value))
+                except (TypeError, ValueError):
+                    continue
+        else:
+            selected_ids = []
+        member = _guild_member_id(guild, char_id) if guild else None
+        active_members = {
+            int(member_id): entry for member_id, entry in (guild.get('members') or {}).items()
+            if int(entry.get('job', 3)) != 4
+        } if guild else {}
+        battle_cfg = GUILD_BATTLE_DATA.get('1501', {})
+        max_players = max(1, int(battle_cfg.get('max_play_num', 10) or 10))
+        required_count = min(len(active_members), max_players)
+        selected_unique = list(dict.fromkeys(selected_ids))
+        success = bool(
+            guild and member and int(member.get('job', 4)) == 0
+            and required_count > 0 and len(selected_unique) == required_count
+            and len(selected_unique) <= max_players
+            and all(selected_id in active_members for selected_id in selected_unique)
+        )
+        if success:
+            with GUILD_DB_LOCK:
+                for selected_id, entry in active_members.items():
+                    entry['battle'] = 1 if selected_id in selected_unique else 0
+                guild['battle_roster'] = selected_unique
+                _save_guild_states()
+        send_rpc_push(666, encode_sproto([(0, 0 if success else 1)]))
+
+    elif msg == 293:  # req_guild_star
+        send_rpc_push(671, encode_sproto([(0, _guild_star_map(guild))]))
+
+    elif msg == 294:  # update_guild_star
+        star_id = get_val_str(body, 0, '')
+        cfg = GUILD_STAR_DATA.get(star_id)
+        member = _guild_member_id(guild, char_id) if guild else None
+        stars = guild.setdefault('stars', {}) if guild else {}
+        success = False
+        spend = {}
+        if cfg and guild and member and int(member.get('job', 4)) != 4:
+            rows_for_map = sorted(
+                ((key, row) for key, row in GUILD_STAR_DATA.items()
+                 if int(row.get('map_id', 0)) == int(cfg.get('map_id', -1))),
+                key=lambda item: (int(item[1].get('level', 0)), int(item[0]) if item[0].isdigit() else 0)
+            )
+            row_index = next((index for index, (key, _) in enumerate(rows_for_map) if key == star_id), -1)
+            try:
+                is_next_level = row_index >= 0 and int(stars.get(star_id, 0) or 0) == 0 and all(
+                    int(stars.get(previous_id, 0) or 0) == 1
+                    for previous_id, _ in rows_for_map[:row_index]
+                )
+            except (TypeError, ValueError):
+                is_next_level = False
+            costs_valid = True
+            for item_key, cost_key in (('cost_id1', 'cost1'), ('cost_id2', 'cost2')):
+                item_id = str(cfg.get(item_key, '') or '')
+                cost = max(0, int(cfg.get(cost_key, 0) or 0))
+                if not item_id:
+                    continue
+                money_type = {'1001': 0, '1002': 1, '1003': 2, '1004': 3}.get(item_id)
+                if money_type is None:
+                    costs_valid = False
+                    break
+                spend[money_type] = spend.get(money_type, 0) + cost
+            with GUILD_DB_LOCK, get_character_transaction_lock(char):
+                enough_funds = costs_valid and all(
+                    get_currency_balance(char, money_type) >= cost
+                    for money_type, cost in spend.items()
+                )
+                if (is_next_level and _guild_level(guild) >= int(cfg.get('unlock_level', 0))
+                        and enough_funds):
+                    for money_type, cost in spend.items():
+                        set_currency_balance(char, money_type,
+                                             get_currency_balance(char, money_type) - cost)
+                    stars[star_id] = 1
+                    _save_guild_states()
+                    save_chars(all_accounts_chars)
+                    success = True
+        if success:
+            sync_char_attrs_rpc(conn, char)
+            send_rpc_push(563, _guild_info_response(char, guild))
+        send_rpc_push(672, encode_sproto([(0, _guild_star_map(guild))]))
+
+    elif msg == 295:  # req_guild_battle_state
+        send_rpc_push(673, encode_sproto([(0, _guild_battle_info_bytes(guild))]))
+
+    elif msg == 318:  # request_guild_map_domine_top; no unrecorded damage is fabricated
+        send_rpc_push(688, encode_sproto([
+            (0, []), (1, []), (2, -1), (3, 0), (4, -1), (5, 0)
+        ]))
+
+    elif msg == 320:  # request_guild_map_reward; no capture owner/reward state exists yet
+        capture_id = get_val_str(body, 0, '')
+        send_rpc_push(690, encode_sproto([(0, capture_id), (1, 0)]))
+
     elif msg == 315:  # update_guild_dance_time
         requested_slot = get_val_int(body, 0, 0)
         dance_cfg = CITY_DANCE_CONFIG.get('103', {})
@@ -9830,8 +10052,8 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
             (0, str(row['id'])), (1, str(row['item_id'])), (2, int(row.get('quality', 0))),
             (3, int(row.get('price_type', 0))), (4, int(row.get('price', 0))),
             (5, int(row.get('limit', 0))),
-            (6, _guild_shop_purchase_count(char, row['id'], row)),
-            (7, int(row.get('discount', 0))), (8, int(row.get('class', 0)))
+            (7, _guild_shop_purchase_count(char, row['id'], row)),
+            (8, int(row.get('discount', 0))), (9, int(row.get('class', 0)))
         ]) for row in rows[(page - 1) * per_page:page * per_page]]
         send_rpc_push(554, encode_sproto([
             (0, 3), (1, page), (2, max_page), (3, shop_rows),
@@ -9849,15 +10071,15 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
             per_order = int(row.get('single_limit', 0) or 0)
             available = int(row.get('limit', 0) or 0)
             purchased = _guild_shop_purchase_count(char, item_shop_id, row)
-            quantity_valid = (per_order <= 0 or count <= per_order)
-            limit_valid = available <= 0 or purchased + count <= available
             item_id = str(row.get('item_id', ''))
+            item_type = int(ITEM_CONFIG.get(item_id, {}).get('type', -1))
+            is_box = item_type == 15  # GameDefine.ITEM_TYPE.BOX
+            quantity_valid = (per_order <= 0 or not is_box or count <= per_order)
+            limit_valid = available <= 0 or purchased + count <= available
             quality = int(row.get('quality', ITEM_CONFIG.get(item_id, {}).get('quality', 0)) or 0)
-            unit_price = int(row.get('price', 0) or 0)
-            discount = int(row.get('discount', 0) or 0)
-            if discount > 0:
-                unit_price = max(0, unit_price * discount // 100)
-            cost = unit_price * count
+            # ShopTabRootLogic.UpdateBuyCost charges Price * count; Discount is
+            # shown as a label and is not applied to the amount sent by the APK.
+            cost = max(0, int(row.get('price', 0) or 0)) * count
             money_type = int(row.get('price_type', -1))
             with get_character_transaction_lock(char):
                 if (quantity_valid and limit_valid and 0 <= money_type < len(MONEY_FIELDS)
@@ -14218,7 +14440,7 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg in [106, 246, 273, 207, 201, 322]:
+            elif msg in [106, 246, 273, 207, 201, 194, 322]:
                 # Scene/Dungeon Entry
                 mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
                 print(f"[RX] Scene Entry: {mid} (MSG={msg})")
@@ -14228,6 +14450,39 @@ def client_handler(conn, addr):
                         reconcile_equipment_stage_login(picked_char)
                     current_map = str(picked_char.get('map_id', '11'))
                     boss_cfg = WILD_BOSS_CONFIG.get(mid, {}) if msg == 201 else {}
+                    valid_guild_boss = True
+                    if msg == 194:
+                        guild_id = _guild_id_for_character(picked_char)
+                        guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
+                        guild_member = _guild_member_id(guild, picked_char.get('id', 0)) if guild else None
+                        configured_boss = GUILD_BOSS_DATA.get(mid)
+                        boss_state, _ = _guild_boss_activity_state(configured_boss) if configured_boss else (0, 0)
+                        valid_guild_boss = bool(
+                            configured_boss and guild and guild_member
+                            and int(guild_member.get('job', 4)) != 4
+                            and _guild_level(guild) >= int(configured_boss.get('level_min', 0))
+                            and boss_state == 1
+                        )
+                        if valid_guild_boss:
+                            mid = str(configured_boss.get('map_id', ''))
+                    valid_guild_city = True
+                    if msg == 322:
+                        capture_cfg = GUILD_CAPTURE_CONFIG.get(mid)
+                        capture_map_id = GUILD_CAPTURE_DATA.get(mid, '')
+                        guild_id = _guild_id_for_character(picked_char)
+                        guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
+                        guild_member = _guild_member_id(guild, picked_char.get('id', 0)) if guild else None
+                        capture_active = bool(capture_cfg and _guild_weekly_activity_window(
+                            int(time.time()), capture_cfg.get('week', 0),
+                            capture_cfg.get('start_time', 0), capture_cfg.get('duration', 0)))
+                        valid_guild_city = bool(
+                            capture_cfg and capture_map_id and guild and guild_member
+                            and int(guild_member.get('job', 4)) != 4 and capture_active
+                        )
+                        if valid_guild_city:
+                            # enter_guild_city_scene sends GuildCaptureData.ID;
+                            # resolve that capture ID to its actual MapInfoData ID.
+                            mid = str(capture_map_id)
                     valid_world_boss = (msg != 201 or (
                         boss_cfg.get('type') == 5
                         and str(boss_cfg.get('map_id')) == mid
@@ -14237,6 +14492,12 @@ def client_handler(conn, addr):
                         print(f"[SCENE ENTRY] denied stale character socket player={picked_char.get('id')}")
                     elif not valid_world_boss:
                         print(f"[WORLD BOSS SECURITY] rejected unconfigured/ineligible id={mid} player={picked_char.get('id')}")
+                    elif not valid_guild_boss:
+                        print(f"[GUILD BOSS SECURITY] rejected id={body.get(0)} player={picked_char.get('id')}")
+                        if msg == 194:
+                            send_rpc_push(628, encode_sproto([(0, False)]))
+                    elif not valid_guild_city:
+                        print(f"[GUILD CITY SECURITY] rejected capture id={body.get(0)} player={picked_char.get('id')}")
                     elif (is_exp_map(mid) or is_exp_map(current_map)
                             or is_equipment_copy_map(mid) or is_equipment_copy_map(current_map)
                             or picked_char.get('exp_stage_state')
@@ -16321,7 +16582,7 @@ def client_handler(conn, addr):
 
             elif (msg in (146, 147, 148, 149, 150, 151, 152, 153, 154,
                           169, 170, 173, 174, 175, 176, 195, 212, 233, 247,
-                          285, 315, 319)
+                          285, 287, 288, 289, 293, 294, 295, 315, 318, 319, 320)
                   or (msg == 143 and get_val_int(body, 0, -1) == 3)
                   or (msg == 144 and get_val_int(body, 2, -1) == 3)):
                 handle_guild_request(
