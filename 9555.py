@@ -460,9 +460,23 @@ try:
                 if len(parts) > 2 and parts[1].isdigit():
                     GUILD_CAPTURE_DATA[parts[1]] = parts[2]
                     try:
+                        def _capture_int(index, default=0):
+                            value = parts[index].strip() if index < len(parts) else ''
+                            return int(value) if value.lstrip('-').isdigit() else default
+                        pos = [value.strip() for value in (parts[10] if len(parts) > 10 else '').split('#')]
                         GUILD_CAPTURE_CONFIG[parts[1]] = {
                             "map_id": parts[2], "duration": int(parts[4] or 0),
-                            "week": int(parts[5] or 0), "start_time": int(parts[6] or 0)
+                            "week": int(parts[5] or 0), "start_time": int(parts[6] or 0),
+                            "show_reward_id": parts[7].strip() if len(parts) > 7 else '',
+                            "drop_id": parts[8].strip() if len(parts) > 8 else '',
+                            "npc_id": parts[9].strip() if len(parts) > 9 else '',
+                            "npc_pos": [int(value) if value.lstrip('-').isdigit() else 0 for value in pos[:3]],
+                            "base_status": _capture_int(11), "base_value": _capture_int(12),
+                            "rank_rewards": [
+                                {"rank": _capture_int(index), "drop_id": parts[index + 1].strip()}
+                                for index in (18, 20, 22, 24, 26)
+                                if len(parts) > index + 1 and parts[index + 1].strip()
+                            ]
                         }
                     except (IndexError, TypeError, ValueError):
                         continue
@@ -1924,6 +1938,35 @@ def _save_guild_states():
 GUILD_STATES = _load_guild_states()
 GUILD_ID_COUNTER = max([99999] + [int(key) for key in GUILD_STATES if str(key).isdigit()]) + 1
 print(f"[GUILD] loaded guilds={len(GUILD_STATES)} next_id={GUILD_ID_COUNTER}")
+
+# Guild-city ownership is guild state; active boss HP and damage stay in RAM
+# for the current scheduled event. The APK tables provide the five city maps,
+# vehicle IDs, schedules, and daily claim rewards.
+GUILD_CITY_OWNER_PATH = os.path.join(SCRIPT_DIR, "guild_city.json")
+GUILD_CITY_LOCK = threading.RLock()
+GUILD_CITY_EVENT_STATE = {}
+try:
+    with open(GUILD_CITY_OWNER_PATH, "r", encoding="utf-8") as city_file:
+        _loaded_city_owners = json.load(city_file)
+    GUILD_CITY_OWNERS = ({str(key): value for key, value in _loaded_city_owners.items()
+                          if isinstance(value, dict)}
+                         if isinstance(_loaded_city_owners, dict) else {})
+except FileNotFoundError:
+    GUILD_CITY_OWNERS = {}
+except Exception as city_error:
+    print(f"[GUILD CITY] failed to read {GUILD_CITY_OWNER_PATH}: {city_error}")
+    GUILD_CITY_OWNERS = {}
+
+def _save_guild_city_owners():
+    temp_path = GUILD_CITY_OWNER_PATH + ".tmp"
+    try:
+        with open(temp_path, "w", encoding="utf-8") as city_file:
+            json.dump(GUILD_CITY_OWNERS, city_file, ensure_ascii=False, indent=2)
+            city_file.flush()
+            os.fsync(city_file.fileno())
+        os.replace(temp_path, GUILD_CITY_OWNER_PATH)
+    except Exception as city_error:
+        print(f"[GUILD CITY] failed to save {GUILD_CITY_OWNER_PATH}: {city_error}")
 
 # Initialize MAIL_ID_COUNTER from max existing mailId to avoid collisions after restart
 for area_key, area_chars in all_accounts_chars.items():
@@ -6947,6 +6990,10 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
             send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
+    # The active city-capture vehicle is configured by GuildCaptureData and
+    # has one shared server instance across players in that map.
+    _spawn_guild_city_vehicle(conn, map_str)
+
     if map_str == "11":
         return
     if picked_char:
@@ -7626,6 +7673,55 @@ def resolve_item_package_rewards(item_id):
         rewards = SHOW_REWARD_CONFIG.get(function_id, [])
     return [(str(reward[0]), int(reward[1]), int(reward[2]))
             for reward in rewards if len(reward) >= 3 and str(reward[0])]
+
+def resolve_weapon_pack_rewards(item_id, character, package_count=1):
+    """Roll the APK's 7300/7301-7308 weapon packs from EquipData + WeaponDrop."""
+    cfg = ITEM_CONFIG.get(str(item_id), {})
+    try:
+        function_id = int(cfg.get('function', 0) or 0)
+        package_count = int(package_count)
+    except (TypeError, ValueError):
+        return None
+    if function_id == 74500:
+        allowed_classes = set(range(1, 9))
+    elif 74501 <= function_id <= 74508:
+        allowed_classes = {function_id - 74500}
+    else:
+        return None
+    if not character or package_count < 1:
+        return []
+
+    candidates = []
+    for equip_id, equip_cfg in EQUIP_CONFIG.items():
+        try:
+            if (int(equip_cfg.get('position', -1)) != 0
+                    or int(equip_cfg.get('class', 0)) not in allowed_classes
+                    or int(ITEM_CONFIG.get(str(equip_id), {}).get('type', -1)) != 2):
+                continue
+            weapon_type = int(equip_cfg.get('weapon_type', -1))
+            # EquipData.Job=-1 marks the three weapon families as usable by
+            # every profession; the weapon's own family controls its attacks.
+            if int(equip_cfg.get('job', -1)) not in (-1, int(character.get('prof', 0))):
+                continue
+            quality = int(ITEM_CONFIG.get(str(equip_id), {}).get('quality', 0))
+            drop_ids = equip_cfg.get('drop_ids') or []
+            drop_id = str(drop_ids[quality]).strip() if 0 <= quality < len(drop_ids) else ''
+            if not drop_id or drop_id not in WEAPON_DROP_CONFIG:
+                continue
+            if WEAPON_DROP_CONFIG[drop_id].get('children'):
+                continue
+            if not WEAPON_DROP_CONFIG[drop_id].get('skills'):
+                continue
+            candidates.append((str(equip_id), quality, weapon_type))
+        except (TypeError, ValueError, IndexError):
+            continue
+    if not candidates:
+        return []
+
+    # ItemData says 7300 spans Class 1-8, and 7301-7308 are the individual
+    # class packs. There are no separate package odds in this APK export, so
+    # each eligible EquipData weapon is one equally selectable outcome.
+    return [(*random.choice(candidates)[:2], 1) for _ in range(package_count)]
 
 def build_mount_info(picked_char):
     """Build the exact mount map consumed by the APK garage handlers.
@@ -9477,6 +9573,60 @@ def _guild_reconcile_character_membership(char):
         pending = next(((guild, member) for guild, member in matches
                         if int(member.get('job', 3)) == 4), None)
 
+        # Older saves can contain the character-side guild ID/name but omit
+        # the member entry from guilds.json.  If both persisted identifiers
+        # still point to the same guild, restore that row instead of treating
+        # the character as guildless.  A matching saved chief name is the only
+        # fallback evidence used to restore owner privileges.
+        legacy_guild = GUILD_STATES.get(str(current_guild_id)) if current_guild_id else None
+        legacy_names = {
+            str(char.get('guildName', '') or '').strip().casefold(),
+            str(char.get('guild_name', '') or '').strip().casefold()
+        } - {''}
+        legacy_guild_name = str((legacy_guild or {}).get('name', '') or '').strip()
+        if (not pending and isinstance(legacy_guild, dict)
+                and stored_guild_ids == {current_guild_id}
+                and legacy_guild_name
+                and legacy_guild_name.casefold() in legacy_names
+                and not matches and not chief_matches):
+            members = legacy_guild.get('members')
+            if not isinstance(members, dict):
+                members = {}
+                legacy_guild['members'] = members
+            chief_name = str(legacy_guild.get('chief_name', '') or '').strip()
+            try:
+                chief_id = int(legacy_guild.get('chief_id', 0) or 0)
+            except (TypeError, ValueError):
+                chief_id = 0
+            restore_as_chief = bool(
+                chief_name and chief_name.casefold() == str(char.get('name', '')).strip().casefold()
+                and chief_id in (0, char_id)
+            )
+            member = {
+                'job': 0 if restore_as_chief else 3,
+                'name': str(char.get('name', '')),
+                'level': int(char.get('level', 1) or 1),
+                'profession': int(char.get('prof', 0) or 0),
+                'contribute': 0, 'all_contribute': 0, 'last_logout': 0,
+                'battle': 0,
+                'donate_stamp': str(current_daily_stamp()),
+                'donate_remaining': {
+                    str(donation_id): int(row.get('donate_count', 0))
+                    for donation_id, row in GUILD_DONATE_DATA.items()
+                }
+            }
+            with get_character_transaction_lock(char):
+                members[str(char_id)] = member
+                if restore_as_chief:
+                    legacy_guild['chief_id'] = char_id
+                    legacy_guild['chief_name'] = str(char.get('name', ''))
+                _guild_set_character(char, legacy_guild)
+                save_chars(all_accounts_chars)
+                _save_guild_states()
+            print(f"[GUILD] restored missing member row player={char_id} "
+                  f"guild={current_guild_id} chief={restore_as_chief}")
+            return True
+
         # The persisted member map is authoritative for ordinary members. A
         # stale character-side ID can otherwise make the client open the
         # no-guild list while join requests are rejected as "already joined".
@@ -9486,17 +9636,20 @@ def _guild_reconcile_character_membership(char):
             or char.get('guildName')
             or char.get('guild_name')
         )
-        if has_stale_fields:
+        if pending and has_stale_fields:
             with get_character_transaction_lock(char):
                 _guild_set_character(char, None)
                 save_chars(all_accounts_chars)
-            if pending:
-                print(f"[GUILD] cleared stale guild fields for pending applicant={char_id} "
-                      f"guild={pending[0].get('id', 0)}")
-            else:
-                print(f"[GUILD] cleared orphaned guild fields for player={char_id} "
-                      f"stored_ids={sorted(stored_guild_ids)}")
+            print(f"[GUILD] cleared stale guild fields for pending applicant={char_id} "
+                  f"guild={pending[0].get('id', 0)}")
             return True
+        if has_stale_fields:
+            # A character save can outlive or be copied without guilds.json.
+            # Keep the unresolved identity fields for recovery; deleting them
+            # here made a missing guild database look like an intentional
+            # departure and permanently erased the only remaining reference.
+            print(f"[GUILD] preserved unresolved legacy membership player={char_id} "
+                  f"stored_ids={sorted(stored_guild_ids)}; no matching guild record")
     return False
 
 def _guild_log(guild, text):
@@ -9651,25 +9804,222 @@ def _guild_dance_activity_info(guild=None, now=None):
         (4, state), (5, slot), (6, duration), (7, changed_until), (8, 0)
     ])
 
-def _guild_capture_activity_map(now=None):
+def _guild_capture_schedule(row, now=None):
+    """Return the latest configured UTC event start and whether it is open."""
+    now = int(time.time()) if now is None else int(now)
+    week = int(row.get('week', 0) or 0)
+    start_time = max(0, int(row.get('start_time', 0) or 0)) % 86400
+    duration = max(0, int(row.get('duration', 0) or 0))
+    if week < 1 or week > 7:
+        return 0, False
+    today = now - (now % 86400)
+    weekday = time.gmtime(now).tm_wday + 1  # GuildCaptureData: Monday=1 through Sunday=7
+    days_back = (weekday - week) % 7
+    start = today - days_back * 86400 + start_time
+    if start > now:
+        start -= 7 * 86400
+    return start, bool(duration and start <= now < start + duration)
+
+def _guild_city_event(capture_id, now=None):
+    """Get/create one runtime snapshot for the current weekly city event."""
+    now = int(time.time()) if now is None else int(now)
+    capture_id = str(capture_id)
+    row = GUILD_CAPTURE_CONFIG.get(capture_id, {})
+    event_start, active = _guild_capture_schedule(row, now)
+    if not event_start:
+        return {}, False
+    duration = max(0, int(row.get('duration', 0) or 0))
+    with GUILD_CITY_LOCK:
+        event = GUILD_CITY_EVENT_STATE.get(capture_id)
+        if not event or int(event.get('event_start', 0)) != event_start:
+            # If the previous weekly window passed without destroying its
+            # vehicle, the client rule leaves that city without an owner.
+            if event and not event.get('finished') and now >= int(event.get('event_start', 0)) + duration:
+                GUILD_CITY_OWNERS[capture_id] = {
+                    'guild_id': 0, 'name': '', 'icon': 0,
+                    'last_event_start': int(event.get('event_start', 0)),
+                    'last_event_finished': False
+                }
+                _save_guild_city_owners()
+            persisted = GUILD_CITY_OWNERS.get(capture_id, {})
+            was_finished = (int(persisted.get('last_event_start', 0) or 0) == event_start
+                            and bool(persisted.get('last_event_finished', False)))
+            event = {
+                'event_start': event_start, 'finished': was_finished,
+                'expired': False, 'boss_inst_id': None, 'damage_players': {},
+                'damage_guilds': {}
+            }
+            GUILD_CITY_EVENT_STATE[capture_id] = event
+        if (not active and now >= event_start + duration
+                and not event.get('finished') and not event.get('expired')):
+            GUILD_CITY_OWNERS[capture_id] = {
+                'guild_id': 0, 'name': '', 'icon': 0,
+                'last_event_start': event_start, 'last_event_finished': False
+            }
+            event['expired'] = True
+            _save_guild_city_owners()
+        return event, active
+
+def _guild_city_record_damage(capture_id, char, damage):
+    if int(damage) <= 0 or not char:
+        return
+    event, active = _guild_city_event(capture_id)
+    if not active or event.get('finished'):
+        return
+    guild_id = _guild_id_for_character(char)
+    guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
+    member = _guild_member_id(guild, char.get('id', 0)) if guild else None
+    if not guild or not member or int(member.get('job', 4)) == 4:
+        return
+    char_id = int(char.get('id', 0) or 0)
+    amount = int(damage)
+    with GUILD_CITY_LOCK:
+        player_row = event.setdefault('damage_players', {}).setdefault(str(char_id), {
+            'id': char_id, 'name': str(char.get('name', '')),
+            'guild_id': guild_id, 'guild_name': str(guild.get('name', '')),
+            'damage': 0
+        })
+        player_row['damage'] = int(player_row.get('damage', 0)) + amount
+        guild_row = event.setdefault('damage_guilds', {}).setdefault(str(guild_id), {
+            'id': guild_id, 'name': str(guild.get('name', '')), 'damage': 0
+        })
+        guild_row['damage'] = int(guild_row.get('damage', 0)) + amount
+
+def _guild_city_rank_response(capture_id, char):
+    event, _active = _guild_city_event(capture_id)
+    player_rows = sorted(event.get('damage_players', {}).values(),
+                         key=lambda entry: (-int(entry.get('damage', 0)), int(entry.get('id', 0))))
+    guild_rows = sorted(event.get('damage_guilds', {}).values(),
+                        key=lambda entry: (-int(entry.get('damage', 0)), int(entry.get('id', 0))))
+    player_id = int((char or {}).get('id', 0) or 0)
+    guild_id = _guild_id_for_character(char) if char else 0
+    my_player = next((row for row in player_rows if int(row.get('id', 0)) == player_id), None)
+    my_guild = next((row for row in guild_rows if int(row.get('id', 0)) == guild_id), None)
+    player_rank = next((index for index, row in enumerate(player_rows, 1)
+                        if int(row.get('id', 0)) == player_id), -1)
+    guild_rank = next((index for index, row in enumerate(guild_rows, 1)
+                       if int(row.get('id', 0)) == guild_id), -1)
+    player_damage = [encode_sproto([
+        (0, str(row.get('name', ''))), (1, int(row.get('damage', 0))), (2, int(row.get('id', 0)))
+    ]) for row in player_rows]
+    guild_damage = [encode_sproto([
+        (0, str(row.get('name', ''))), (1, int(row.get('damage', 0))), (2, int(row.get('id', 0)))
+    ]) for row in guild_rows]
+    return encode_sproto([
+        (0, player_damage), (1, guild_damage),
+        (2, guild_rank), (3, int(my_guild.get('damage', 0)) if my_guild else 0),
+        (4, player_rank), (5, int(my_player.get('damage', 0)) if my_player else 0)
+    ])
+
+def _guild_city_finish_capture(capture_id):
+    event, active = _guild_city_event(capture_id)
+    if not active:
+        return None
+    with GUILD_CITY_LOCK:
+        if event.get('finished'):
+            owner = GUILD_CITY_OWNERS.get(str(capture_id), {})
+            return GUILD_STATES.get(str(owner.get('guild_id', 0)))
+        ranked = sorted(event.get('damage_guilds', {}).values(),
+                        key=lambda entry: (-int(entry.get('damage', 0)), int(entry.get('id', 0))))
+        if not ranked or int(ranked[0].get('damage', 0)) <= 0:
+            return None
+        winner = GUILD_STATES.get(str(ranked[0].get('id', 0)))
+        if not winner:
+            return None
+        event['finished'] = True
+        GUILD_CITY_OWNERS[str(capture_id)] = {
+            'guild_id': int(winner.get('id', 0)), 'name': str(winner.get('name', '')),
+            'icon': int(winner.get('icon', 0)), 'last_event_start': int(event['event_start']),
+            'last_event_finished': True
+        }
+        _save_guild_city_owners()
+        return winner
+
+def _guild_capture_for_map(map_id):
+    map_id = str(map_id)
+    return next(((capture_id, row) for capture_id, row in GUILD_CAPTURE_CONFIG.items()
+                 if str(row.get('map_id', '')) == map_id), (None, None))
+
+def _spawn_guild_city_vehicle(conn, map_id):
+    capture_id, row = _guild_capture_for_map(map_id)
+    if not capture_id or not row:
+        return
+    event, active = _guild_city_event(capture_id)
+    if not active or event.get('finished'):
+        return
+    npc_id = str(row.get('npc_id', '')).strip()
+    position = row.get('npc_pos') or []
+    if not npc_id or len(position) < 3 or npc_id not in NPC_CONFIG:
+        return
+    with GUILD_CITY_LOCK:
+        inst_id = event.get('boss_inst_id')
+        if (not inst_id or int(inst_id) not in NPC_HP_MAP
+                or int(inst_id) in DEAD_NPC_SET
+                or str(NPC_INSTANCE_MAP.get(int(inst_id), '')) != str(map_id)):
+            inst_id, attr = build_npc_attr_sproto(
+                npc_id, NPC_CONFIG[npc_id].get('name', f'GuildCity_{npc_id}'),
+                int(position[0]), int(position[1]), int(position[2]))
+            NPC_INSTANCE_MAP[inst_id] = str(map_id)
+            event['boss_inst_id'] = inst_id
+        else:
+            inst_id, attr = build_npc_attr_sproto(
+                npc_id, NPC_CONFIG[npc_id].get('name', f'GuildCity_{npc_id}'),
+                int(position[0]), int(position[1]), int(position[2]),
+                existing_inst_id=inst_id)
+            NPC_INSTANCE_MAP[inst_id] = str(map_id)
+    send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
+    stats = get_npc_attr(npc_id)
+    sync_npc_attrs_rpc(conn, inst_id, stats, NPC_HP_MAP.get(inst_id, stats['hp_max']))
+    print(f"[GUILD CITY] spawned capture vehicle capture={capture_id} inst_id={inst_id} npc={npc_id} map={map_id}")
+
+def _guild_capture_activity_map(now=None, char=None):
     now = int(time.time()) if now is None else int(now)
     result = {}
+    char_id = int((char or {}).get('id', 0) or 0)
+    current_guild_id = _guild_id_for_character(char) if char else 0
+    current_guild = GUILD_STATES.get(str(current_guild_id)) if current_guild_id else None
+    membership = _guild_member_id(current_guild, char_id) if current_guild else None
     for capture_id, row in sorted(GUILD_CAPTURE_CONFIG.items(), key=lambda item: int(item[0])):
-        state = _guild_weekly_activity_window(
-            now, row.get('week', 0), row.get('start_time', 0), row.get('duration', 0))
+        event, active = _guild_city_event(capture_id, now)
+        state = 2 if event.get('finished') else (1 if active else 0)
+        owner = GUILD_CITY_OWNERS.get(str(capture_id), {})
+        owner_id = int(owner.get('guild_id', 0) or 0)
+        owner_guild = GUILD_STATES.get(str(owner_id)) if owner_id else None
+        owner_name = str((owner_guild or {}).get('name') or owner.get('name') or '')
+        owner_icon = int((owner_guild or {}).get('icon', owner.get('icon', 0)) or 0)
+        require_state = 0
+        if (owner_id and owner_id == current_guild_id and membership
+                and int(membership.get('job', 4)) != 4):
+            claims = char.setdefault('guild_city_claims', {})
+            require_state = (2 if str(claims.get(str(capture_id), '')) == str(current_daily_stamp()) else 1)
         result[str(capture_id)] = encode_sproto([
-            (0, str(capture_id)), (1, 0), (2, ''), (3, 0),
-            (4, 0), (5, state)
+            (0, str(capture_id)), (1, owner_id), (2, owner_name), (3, owner_icon),
+            (4, require_state), (5, state)
         ])
     return result
 
-def _guild_activity_response(guild=None):
+def _guild_city_broadcast_result(capture_id, winner):
+    winner_name = str((winner or {}).get('name', ''))
+    now = int(time.time())
+    result_chat = encode_sproto([
+        (5, 6), (7, [19, 1]), (8, [winner_name, str(capture_id)])
+    ])
+    chat_payload = encode_sproto([(0, [result_chat])])
+    for _char_id, (peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
+        if not peer_conn or not peer_char:
+            continue
+        send_rpc_push_safe(peer_conn, 528, chat_payload)
+        send_rpc_push_safe(peer_conn, 689, encode_sproto([
+            (0, _guild_capture_activity_map(now, peer_char))
+        ]))
+
+def _guild_activity_response(guild=None, char=None):
     return encode_sproto([
         (0, _guild_boss_activity_map()),
         (1, _guild_battle_info_bytes(guild)),
         (2, _guild_level(guild) if guild else 0),
         (3, _guild_dance_activity_info(guild)),
-        (4, _guild_capture_activity_map())
+        (4, _guild_capture_activity_map(char=char))
     ])
 
 def _guild_boss_activity_map():
@@ -10061,7 +10411,7 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         send_rpc_push(586, encode_sproto(fields))
 
     elif msg == 195:  # request_guild_boss / Gang activity overview
-        send_rpc_push(599, _guild_activity_response(guild))
+        send_rpc_push(599, _guild_activity_response(guild, char))
 
     elif msg == 285:  # req_guild_battle_info; open the configured Gang Battle panel
         send_rpc_push(662, encode_sproto([(0, _guild_battle_info_bytes(guild))]))
@@ -10216,14 +10566,53 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
     elif msg == 295:  # req_guild_battle_state
         send_rpc_push(673, encode_sproto([(0, _guild_battle_info_bytes(guild))]))
 
-    elif msg == 318:  # request_guild_map_domine_top; no unrecorded damage is fabricated
-        send_rpc_push(688, encode_sproto([
-            (0, []), (1, []), (2, -1), (3, 0), (4, -1), (5, 0)
-        ]))
-
-    elif msg == 320:  # request_guild_map_reward; no capture owner/reward state exists yet
+    elif msg == 318:  # request_guild_map_domine_top
         capture_id = get_val_str(body, 0, '')
-        send_rpc_push(690, encode_sproto([(0, capture_id), (1, 0)]))
+        if capture_id in GUILD_CAPTURE_CONFIG:
+            send_rpc_push(688, _guild_city_rank_response(capture_id, char))
+        else:
+            send_rpc_push(688, encode_sproto([
+                (0, []), (1, []), (2, -1), (3, 0), (4, -1), (5, 0)
+            ]))
+
+    elif msg == 320:  # request_guild_map_reward; configured daily owner claim
+        capture_id = get_val_str(body, 0, '')
+        capture_cfg = GUILD_CAPTURE_CONFIG.get(capture_id)
+        owner = GUILD_CITY_OWNERS.get(capture_id, {}) if capture_cfg else {}
+        claims = char.setdefault('guild_city_claims', {})
+        claim_stamp = str(current_daily_stamp())
+        owner_id = int(owner.get('guild_id', 0) or 0)
+        owner_guild = GUILD_STATES.get(str(owner_id)) if owner_id else None
+        member = _guild_member_id(guild, char_id) if guild else None
+        configured_rewards = SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(
+            str(capture_cfg.get('show_reward_id', '')), []) if capture_cfg else []
+        rewards_valid = bool(configured_rewards) and all(
+            str(item_id) in ITEM_CONFIG or str(item_id) in DIRECT_REWARD_RESOURCE_IDS
+            for item_id, _quality, amount in configured_rewards if int(amount) > 0
+        )
+        item_rewards = [entry for entry in configured_rewards
+                        if str(entry[0]) not in DIRECT_REWARD_RESOURCE_IDS and int(entry[2]) > 0]
+        success = False
+        with GUILD_CITY_LOCK, get_character_transaction_lock(char):
+            current_owner = GUILD_CITY_OWNERS.get(capture_id, {})
+            if (capture_cfg and owner_guild and current_owner
+                    and int(current_owner.get('guild_id', 0) or 0) == current_guild_id
+                    and current_guild_id == owner_id and member
+                    and int(member.get('job', 4)) != 4
+                    and str(claims.get(capture_id, '')) != claim_stamp
+                    and rewards_valid and can_add_reward_list_to_inventory(char, item_rewards)):
+                grant_item_rewards(char, configured_rewards, conn, send_rpc_push, save=False)
+                claims[capture_id] = claim_stamp
+                save_chars(all_accounts_chars)
+                success = True
+        if success:
+            reward_popup = [encode_sproto([
+                (0, str(item_id)), (1, int(amount)), (3, int(quality))
+            ]) for item_id, quality, amount in configured_rewards if int(amount) > 0]
+            send_rpc_push(638, encode_sproto([(0, reward_popup)]))
+        updated_claims = char.get('guild_city_claims', {})
+        claim_state = 2 if success or str(updated_claims.get(capture_id, '')) == claim_stamp else 1
+        send_rpc_push(690, encode_sproto([(0, capture_id), (1, claim_state if owner_id == current_guild_id else 0)]))
 
     elif msg == 315:  # update_guild_dance_time
         requested_slot = get_val_int(body, 0, 0)
@@ -10251,10 +10640,10 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
                 _save_guild_states()
         # This protocol has no separate response handler; refresh the activity
         # model through the same response used by the Gang activity screen.
-        send_rpc_push(599, _guild_activity_response(guild))
+        send_rpc_push(599, _guild_activity_response(guild, char))
 
     elif msg == 319:  # request_guild_map_info; Gang city/capture data
-        send_rpc_push(689, encode_sproto([(0, _guild_capture_activity_map())]))
+        send_rpc_push(689, encode_sproto([(0, _guild_capture_activity_map(char=char))]))
 
     elif msg == 233:  # open_guild_boss
         boss_id = get_val_str(body, 0, '')
@@ -12473,10 +12862,15 @@ def client_handler(conn, addr):
                                 if int(package_cfg.get('level', 0)) > int(picked_char.get('level', 1)):
                                     failure_reason = 'character level is too low'
                                 else:
-                                    base_rewards = resolve_item_package_rewards(package_id)
-                                    rewards = [(str(item_id), int(quality), int(amount) * package_count)
-                                               for item_id, quality, amount in base_rewards
-                                               if int(amount) > 0]
+                                    weapon_pack_rewards = resolve_weapon_pack_rewards(
+                                        package_id, picked_char, package_count)
+                                    if weapon_pack_rewards is not None:
+                                        rewards = weapon_pack_rewards
+                                    else:
+                                        base_rewards = resolve_item_package_rewards(package_id)
+                                        rewards = [(str(item_id), int(quality), int(amount) * package_count)
+                                                   for item_id, quality, amount in base_rewards
+                                                   if int(amount) > 0]
                                     valid_rewards = bool(rewards) and all(
                                         item_id in ITEM_CONFIG and amount > 0
                                         for item_id, _quality, amount in rewards
@@ -13426,6 +13820,20 @@ def client_handler(conn, addr):
                             target_nid = NPC_INST_MAP.get(target_id, str(target_id))
                             if not is_exp:
                                 NPC_INST_MAP[target_id] = target_nid
+                            city_capture_id, city_capture_cfg = _guild_capture_for_map(cur_map)
+                            if (city_capture_cfg and str(city_capture_cfg.get('npc_id', '')) == str(target_nid)):
+                                city_event, city_event_active = _guild_city_event(city_capture_id)
+                                city_guild_id = _guild_id_for_character(picked_char)
+                                city_guild = GUILD_STATES.get(str(city_guild_id)) if city_guild_id else None
+                                city_member = _guild_member_id(city_guild, picked_char.get('id', 0)) if city_guild else None
+                                if (not city_event_active or city_event.get('finished')
+                                        or int(city_event.get('boss_inst_id') or 0) != int(target_id)
+                                        or not city_member or int(city_member.get('job', 4)) == 4):
+                                    print(f"[GUILD CITY SECURITY] rejected hit player={picked_char.get('id')} target={target_id}")
+                                    continue
+                            else:
+                                city_capture_id = None
+                                city_capture_cfg = None
                             stage_label = 'EQUIP' if is_equipment else 'EXP' if is_exp else 'WORLD'
                             print(f"[{stage_label} MSG111] target_id={target_id} target_nid={target_nid} map={cur_map} is_stage={is_stage_combat} client_dmg={client_dmg}")
 
@@ -13499,7 +13907,8 @@ def client_handler(conn, addr):
                                         continue
                                     max_dmg, can_hit, possible_crit = get_combat_damage(
                                         attacker_stats, defender_stats, skill_id, skill_lv,
-                                        effinfo_id=effinfo_id, sat_type='satm', forced_hit=True,
+                                        effinfo_id=effinfo_id,
+                                        sat_type='satc' if city_capture_id else 'satm', forced_hit=True,
                                         forced_crit=is_cri, max_variance=True
                                     )
                                     if not can_hit or (is_cri and not possible_crit) or client_dmg > max_dmg + 2:
@@ -13545,7 +13954,8 @@ def client_handler(conn, addr):
                                 else:
                                     max_dmg, can_hit, possible_crit = get_combat_damage(
                                         attacker_stats, defender_stats, skill_id, skill_lv,
-                                        effinfo_id=effinfo_id, sat_type='satm', forced_hit=True,
+                                        effinfo_id=effinfo_id,
+                                        sat_type='satc' if city_capture_id else 'satm', forced_hit=True,
                                         forced_crit=is_cri, max_variance=True
                                     )
                                     if (not can_hit or (is_cri and not possible_crit)
@@ -13613,9 +14023,18 @@ def client_handler(conn, addr):
                                 print(f"[{stage_label} HIT] rejected target already dead/inactive target={target_id}")
                                 continue
 
+                            if city_capture_id and actual_dmg > 0:
+                                _guild_city_record_damage(city_capture_id, picked_char, actual_dmg)
+
                             # Sync changed HP and always deliver HP=0 when death is finalized.
                             if actual_dmg > 0 or (is_stage_combat and exp_npc_died):
-                                if exp_state_hit and exp_state_hit.get('team_id'):
+                                if city_capture_id:
+                                    for _peer_id, (peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
+                                        if peer_conn and peer_char and str(peer_char.get('map_id', '')) == cur_map:
+                                            sync_npc_attrs_rpc(
+                                                peer_conn, target_id, defender_stats,
+                                                max(0, NPC_HP_MAP.get(target_id, 0)))
+                                elif exp_state_hit and exp_state_hit.get('team_id'):
                                     exp_sync_npc_attrs(exp_state_hit, target_id, defender_stats, max(0, NPC_HP_MAP[target_id]))
                                 else:
                                     sync_npc_attrs_rpc(conn, target_id, defender_stats, max(0, NPC_HP_MAP[target_id]))
@@ -13634,7 +14053,12 @@ def client_handler(conn, addr):
                                     (4, calc_cri)
                                 ])
                                 dmg_board = encode_sproto([(0, [dmg_entry])])
-                                send_rpc_push(511, dmg_board)
+                                if city_capture_id:
+                                    for _peer_id, (peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
+                                        if peer_conn and peer_char and str(peer_char.get('map_id', '')) == cur_map:
+                                            send_rpc_push_safe(peer_conn, 511, dmg_board)
+                                else:
+                                    send_rpc_push(511, dmg_board)
 
                             # Issue 213: TAG 514 (hit_action) client handler does nothing — skip sending
 
@@ -13642,7 +14066,11 @@ def client_handler(conn, addr):
                             if npc_died:
                                 print(f"[{stage_label} MSG111] NPC DEAD target_id={target_id} target_nid={target_nid} hp={NPC_HP_MAP[target_id]}")
 
-                                if not is_stage_combat:
+                                if city_capture_id:
+                                    # City vehicles keep their destroyed body in
+                                    # the scene; HP=0 is the client lifecycle.
+                                    pass
+                                elif not is_stage_combat:
                                     # Non-EXP despawns keep their existing AOI path.
                                     send_rpc_push(506, encode_sproto([(0, target_id)]))
                                 else:
@@ -13661,8 +14089,16 @@ def client_handler(conn, addr):
                                     cleanup_timer.daemon = True
                                     cleanup_timer.start()
 
+                                # Guild-city capture is settled by the total
+                                # damage scoreboard, not generic NPC mission,
+                                # EXP, or loot handlers.
+                                if city_capture_id:
+                                    winner = _guild_city_finish_capture(city_capture_id)
+                                    if winner:
+                                        _guild_city_broadcast_result(city_capture_id, winner)
+                                        print(f"[GUILD CITY] capture={city_capture_id} won_by={winner.get('id')} name={winner.get('name')}")
                                 # BOSS DEATH HANDLING
-                                if target_id == picked_char.get('boss_inst_id'):
+                                elif target_id == picked_char.get('boss_inst_id'):
                                     if defender_stats:
                                         a_oth_fields = [(0, 0), (2, defender_stats['lv'])]
                                         if NPC_INST_MAP.get(target_id, '').startswith('BOSS_'):
