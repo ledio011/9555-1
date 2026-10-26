@@ -9169,10 +9169,19 @@ def _sync_friend_online_state(char_id, state):
     save_chars(all_accounts_chars)
 
 def _guild_id_for_character(char):
-    try:
-        return int(char.get('guildId', char.get('guild_id', 0)) or 0)
-    except (AttributeError, TypeError, ValueError):
+    if not isinstance(char, dict):
         return 0
+    # Old character saves can contain both aliases with guildId=0 while the
+    # legacy guild_id still points at the accepted membership. Prefer any
+    # positive stored ID so the zero-valued newer field cannot mask it.
+    for field in ('guildId', 'guild_id'):
+        try:
+            guild_id = int(char.get(field, 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if guild_id > 0:
+            return guild_id
+    return 0
 
 def _guild_level(guild):
     exp = max(0, int(guild.get('exp', 0) or 0))
@@ -9455,21 +9464,106 @@ def _guild_reconcile_character_membership(char):
         pending = next(((guild, member) for guild, member in matches
                         if int(member.get('job', 3)) == 4), None)
 
-        # A display-name match is useful for diagnosing stale legacy data but
-        # is not sufficient to grant ownership; character IDs are authoritative.
+        # A unique display-name match can safely repair a stale chief ID only
+        # when the old numeric owner no longer exists in the character store.
+        # Keep the character ID authoritative whenever another live/saved
+        # character could own that name.
         player_name = str(char.get('name', '') or '').strip().casefold()
         name_matches = [guild for guild in GUILD_STATES.values()
                         if isinstance(guild, dict)
                         and str(guild.get('chief_name', '') or '').strip().casefold() == player_name
                         and player_name]
         if len(name_matches) == 1:
+            name_character_ids = set()
+            for area_chars in all_accounts_chars.values():
+                if not isinstance(area_chars, dict):
+                    continue
+                for char_list in area_chars.values():
+                    if not isinstance(char_list, list):
+                        continue
+                    for saved_char in char_list:
+                        if not isinstance(saved_char, dict):
+                            continue
+                        if str(saved_char.get('name', '') or '').strip().casefold() == player_name:
+                            try:
+                                name_character_ids.add(int(saved_char.get('id', 0) or 0))
+                            except (TypeError, ValueError):
+                                continue
+            for _online_conn, online_char in ALL_CONNECTIONS.values():
+                if (isinstance(online_char, dict)
+                        and str(online_char.get('name', '') or '').strip().casefold() == player_name):
+                    try:
+                        name_character_ids.add(int(online_char.get('id', 0) or 0))
+                    except (TypeError, ValueError):
+                        continue
+
             try:
-                stored_chief_id = int(name_matches[0].get('chief_id', 0) or 0)
+                target_guild = name_matches[0]
+                stored_chief_id = int(target_guild.get('chief_id', 0) or 0)
             except (TypeError, ValueError):
                 stored_chief_id = 0
             if stored_chief_id != char_id:
                 print(f"[GUILD] chief name matches but ID differs player={char_id} "
                       f"guild={name_matches[0].get('id', 0)} chief_id={stored_chief_id}")
+
+                members = target_guild.get('members')
+                old_owner = members.get(str(stored_chief_id)) if isinstance(members, dict) else None
+                has_other_chief = False
+                if isinstance(members, dict):
+                    for member_id, member in members.items():
+                        if str(member_id) == str(stored_chief_id) or not isinstance(member, dict):
+                            continue
+                        try:
+                            if int(member.get('job', 3)) == 0:
+                                has_other_chief = True
+                                break
+                        except (TypeError, ValueError):
+                            continue
+                old_owner_exists = _guild_char_by_id(stored_chief_id) is not None if stored_chief_id > 0 else False
+                old_owner_is_chief = old_owner is None
+                if isinstance(old_owner, dict):
+                    try:
+                        old_owner_is_chief = int(old_owner.get('job', 3)) == 0
+                    except (TypeError, ValueError):
+                        old_owner_is_chief = False
+                can_migrate_orphaned_chief = (
+                    not matches
+                    and not pending
+                    and stored_chief_id >= 0
+                    and not old_owner_exists
+                    and name_character_ids == {char_id}
+                    and not has_other_chief
+                    and old_owner_is_chief
+                )
+                if can_migrate_orphaned_chief:
+                    with get_character_transaction_lock(char):
+                        with GUILD_DB_LOCK:
+                            members = target_guild.setdefault('members', {})
+                            old_owner = members.pop(str(stored_chief_id), None)
+                            member = dict(old_owner) if isinstance(old_owner, dict) else {
+                                'contribute': 0, 'all_contribute': 0, 'last_logout': 0,
+                                'battle': 0,
+                                'donate_stamp': str(current_daily_stamp()),
+                                'donate_remaining': {
+                                    str(donation_id): int(row.get('donate_count', 0))
+                                    for donation_id, row in GUILD_DONATE_DATA.items()
+                                }
+                            }
+                            member.update({
+                                'job': 0,
+                                'name': str(char.get('name', '')),
+                                'level': int(char.get('level', 1) or 1),
+                                'profession': int(char.get('prof', 0) or 0)
+                            })
+                            target_guild['chief_id'] = char_id
+                            target_guild['chief_name'] = str(char.get('name', ''))
+                            members[str(char_id)] = member
+                            _guild_set_character(char, target_guild)
+                            save_chars(all_accounts_chars)
+                            _save_guild_states()
+                    print(f"[GUILD] repaired orphaned chief membership player={char_id} "
+                          f"guild={target_guild.get('id', 0)} old_chief_id={stored_chief_id}")
+                    return True
 
         # The persisted member map is authoritative for ordinary members. A
         # stale character-side ID can otherwise make the client open the
