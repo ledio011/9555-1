@@ -10305,8 +10305,7 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
                               and mi.get('guildBossRewardKey') == source_key), None)
         if existing_mail:
             claims[claim_key] = sorted(claimed)
-            if conn and online:
-                send_rpc_push_safe(conn, 531, build_mail_update(existing_mail))
+            send_push_to_char(char_id_int, 531, build_mail_update(existing_mail))
             return not unresolved
 
         # The client mail item map is keyed by item ID, so consolidate duplicate
@@ -10353,8 +10352,10 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
             print(f"[GUILD BOSS MAIL] save failed; delivery remains pending player={char_id_int}")
             return False
         claims[claim_key] = sorted(claimed)
-        if conn and online:
-            send_rpc_push_safe(conn, 531, build_mail_update(mail_entry))
+        # Push mail_update to any online player so the mail red dot appears
+        # immediately without requiring a reconnect.
+        if send_push_to_char(char_id_int, 531, build_mail_update(mail_entry)):
+            print(f"[GUILD BOSS MAIL] notification pushed player={char_id_int}")
         print(f"[GUILD BOSS MAIL] queued player={char_id_int} "
               f"items={len(by_item_id)} source={source_key}")
         print(f"[GUILD BOSS REWARD DELIVERED] player={char_id_int} "
