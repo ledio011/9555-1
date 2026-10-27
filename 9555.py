@@ -1,4 +1,4 @@
-import socket, struct, threading, random, json, os, time, traceback, math, re
+import socket, struct, copy, threading, random, json, os, time, traceback, math, re
 
 PORT = int(os.environ.get("PORT", 15678))
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1902,17 +1902,17 @@ def _serializable_character_data(value, seen=None):
 def save_chars(data):
     """Serialize concurrent writers before using the shared atomic-save files."""
     with CHAR_DB_SAVE_LOCK:
-        _save_chars_atomic(data)
+        return _save_chars_atomic(data)
 
 def _save_chars_atomic(data):
     """Crash-safe atomic writer to prevent character loss during kill -9."""
     if not isinstance(data, dict):
-        return
+        return False
     # Guard against accidental wipe: never overwrite a non-empty database on disk with an empty dict
     if not data:
         if os.path.exists(CHAR_DB) and os.path.getsize(CHAR_DB) > 10:
             print("[SAVE GUARD] Refusing to overwrite non-empty CHAR_DB with empty dictionary!")
-            return
+            return False
     try:
         # 1. Write new state to temporary file
         with open(TMP_DB, "w", encoding="utf-8") as f:
@@ -1931,8 +1931,10 @@ def _save_chars_atomic(data):
 
         # 3. Atomic rename guarantees either old file or new file exists intact
         os.replace(TMP_DB, CHAR_DB)
+        return True
     except Exception as e:
         print(f"[ERROR] Failed atomic save_chars: {e}")
+        return False
 
 all_accounts_chars = load_chars()
 
@@ -10224,7 +10226,9 @@ def _guild_boss_reward_rows(reward_key, guild):
               "grant skipped")
     return None
 
-def _guild_boss_award(record, guild, char_id, reward_sets, notify=True):
+def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
+                      boss_id=None, force_mail=False):
+    """Deliver a completed Gang Boss payout once; offline/retry payouts go to mail."""
     claims = record.setdefault('reward_claims', {})
     claim_key = str(int(char_id))
     claimed = set(claims.get(claim_key, []))
@@ -10241,35 +10245,139 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True):
         pending.extend(rewards)
         claimed.add(reward_key)
         new_claims.add(reward_key)
-    claims[claim_key] = sorted(claimed)
     if not pending:
+        claims[claim_key] = sorted(claimed)
         return not unresolved
-    char = _guild_char_by_id(char_id)
-    if not char or not can_add_reward_list_to_inventory(char, pending):
-        print(f"[GUILD BOSS REWARD] deferred for inventory capacity player={char_id}")
+
+    char_id_int = int(char_id)
+    conn, online_char = ALL_CONNECTIONS.get(char_id_int, (None, None))
+    online = bool(conn and online_char
+                  and is_current_character_connection(conn, online_char))
+    char = online_char if online else _guild_char_by_id(char_id_int)
+    if not char:
+        print(f"[GUILD BOSS REWARD] deferred; character missing player={char_id_int}")
+        return False
+
+    # Offline rewards are queued at defeat. Any unresolved reward retried later
+    # must also be mailed, never silently inserted into inventory during login.
+    if force_mail or not online:
+        event_start = int(record.get('event_start', 0) or 0)
+        claim_token = ','.join(sorted(new_claims))
+        source_key = (
+            f"guild-boss:{int((guild or {}).get('id', 0) or 0)}:"
+            f"{boss_id or ''}:{event_start}:{char_id_int}:{claim_token}"
+        )
+        mails = char.setdefault('mails', [])
+        existing_mail = next((mi for mi in mails
+                              if isinstance(mi, dict)
+                              and mi.get('guildBossRewardKey') == source_key), None)
+        if existing_mail:
+            claims[claim_key] = sorted(claimed)
+            if conn and online and force_mail:
+                send_rpc_push_safe(conn, 531, build_mail_update(existing_mail))
+            return not unresolved
+
+        # The client mail item map is keyed by item ID, so consolidate duplicate
+        # IDs into one attachment and preserve the configured quality.
+        by_item_id = {}
+        for item_id, quality, amount in pending:
+            item_id = str(item_id)
+            quality = int(quality)
+            amount = int(amount)
+            if not item_id or amount <= 0:
+                continue
+            if item_id in by_item_id:
+                by_item_id[item_id]['count'] += amount
+            else:
+                by_item_id[item_id] = {
+                    'itemId': item_id, 'count': amount,
+                    'quality': quality, 'count2': 0
+                }
+        if not by_item_id:
+            return not unresolved
+        now = int(time.time())
+        mail_entry = {
+            'mailId': next_mail_id(),
+            'sendertype': 0,
+            'title': 'Guild Boss Rewards',
+            'senderTime': now,
+            'receiveId': char_id_int,
+            'readTime': 0,
+            'context': 'The Gang Boss was defeated. Your rewards are attached.',
+            'mailState': 0,
+            'sortTime': now,
+            'items': list(by_item_id.values()),
+            'expireday': 7,
+            'guildBossRewardKey': source_key
+        }
+        mails.append(mail_entry)
+        if not save_chars(all_accounts_chars):
+            try:
+                mails.remove(mail_entry)
+            except ValueError:
+                pass
+            claimed.difference_update(new_claims)
+            claims[claim_key] = sorted(claimed)
+            print(f"[GUILD BOSS MAIL] save failed; delivery remains pending player={char_id_int}")
+            return False
+        claims[claim_key] = sorted(claimed)
+        if conn and online and force_mail:
+            send_rpc_push_safe(conn, 531, build_mail_update(mail_entry))
+        print(f"[GUILD BOSS MAIL] queued player={char_id_int} "
+              f"items={len(by_item_id)} source={source_key}")
+        return not unresolved
+
+    if not can_add_reward_list_to_inventory(char, pending):
+        print(f"[GUILD BOSS REWARD] deferred for inventory capacity player={char_id_int}")
         claimed.difference_update(new_claims)
         claims[claim_key] = sorted(claimed)
         return False
-    conn = ALL_CONNECTIONS.get(int(char_id), (None, None))[0]
-    push = (lambda tag, data: send_push_to_char(char_id, tag, data)) if conn else None
-    grant_item_rewards(char, pending, conn, push, save=False)
-    delivered = record.setdefault('delivered_rewards', {}).setdefault(str(int(char_id)), [])
-    delivered.extend(
+
+    # Apply online payouts in memory, persist first, and only then sync the client.
+    char_snapshot = copy.deepcopy(char)
+    delivered_by_char = record.setdefault('delivered_rewards', {})
+    delivered_before = list(delivered_by_char.get(claim_key, []))
+    grant_item_rewards(char, pending, None, None, save=False)
+    delivered_by_char[claim_key] = delivered_before + [
         [str(item_id), int(quality), int(amount)]
         for item_id, quality, amount in pending
-    )
-    if notify and push:
-        popup = encode_sproto([(0, [encode_sproto([
-            (0, str(item_id)), (1, int(amount)), (3, int(quality))
-        ]) for item_id, quality, amount in pending])])
-        push(638, popup)
-    save_chars(all_accounts_chars)
+    ]
+    if not save_chars(all_accounts_chars):
+        char.clear()
+        char.update(char_snapshot)
+        delivered_by_char[claim_key] = delivered_before
+        claimed.difference_update(new_claims)
+        claims[claim_key] = sorted(claimed)
+        print(f"[GUILD BOSS REWARD] save failed; delivery remains pending player={char_id_int}")
+        return False
+    claims[claim_key] = sorted(claimed)
+    push = (lambda tag, data: send_push_to_char(char_id_int, tag, data)) if conn else None
+    if conn and online:
+        sync_char_attrs_rpc(conn, char)
+        sync_all_backpacks(char, push)
+        if notify and push:
+            popup = encode_sproto([(0, [encode_sproto([
+                (0, str(item_id)), (1, int(amount)), (3, int(quality))
+            ]) for item_id, quality, amount in pending])])
+            push(638, popup)
     return not unresolved
 
-def _guild_boss_distribute_rewards(guild, boss_id, record, notify=True):
+def _guild_boss_distribute_rewards(guild, boss_id, record, notify=True, force_mail=False):
+    if not isinstance(record, dict) or not record.get('finished'):
+        print(f"[GUILD BOSS REWARD BLOCKED] distribution requested before defeat boss={boss_id}")
+        return False
     rows = _guild_boss_rank_rows(record)
     boss = GUILD_BOSS_DATA.get(str(boss_id), {})
-    pending = False
+    awards_by_player = {}
+
+    def add_awards(player_id, reward_sets):
+        try:
+            player_id = str(int(player_id))
+        except (TypeError, ValueError, OverflowError):
+            return
+        awards_by_player.setdefault(player_id, []).extend(reward_sets)
+
+    # All eligible members receive the guild-wide package.
     for member_id, member in (guild or {}).get('members', {}).items():
         try:
             char_id = int(member_id)
@@ -10277,15 +10385,15 @@ def _guild_boss_distribute_rewards(guild, boss_id, record, notify=True):
             continue
         if int((member or {}).get('job', 4)) == 4:
             continue
-        if not _guild_boss_award(record, guild, char_id, [
-                ('guild-wide', boss.get('exist_drop_id', ''))], notify=notify):
-            pending = True
+        add_awards(char_id, [('guild-wide', boss.get('exist_drop_id', ''))])
+
+    # Participants receive participation rewards, including those offline at defeat.
     participant_ids = set(str(value) for value in record.get('participants', {}))
     participant_ids.update(str(entry.get('id', 0)) for entry in rows)
     for participant_id in sorted(participant_ids, key=lambda value: int(value)):
-        if not _guild_boss_award(record, guild, int(participant_id), [
-                ('participate', boss.get('participate_drop_id', ''))], notify=notify):
-            pending = True
+        add_awards(participant_id, [('participate', boss.get('participate_drop_id', ''))])
+
+    # Aggregate rank and final-hit packages so each offline recipient gets one mail.
     rank_drop_ids = boss.get('rank_drop_ids', [])
     rank_limits = boss.get('rank_limits', [])
     for rank, entry in enumerate(rows, 1):
@@ -10296,8 +10404,14 @@ def _guild_boss_distribute_rewards(guild, boss_id, record, notify=True):
                 drops.append((f'rank-{award_rank}', drop_id))
         if int(entry.get('id', 0)) == int(record.get('last_kill_id', 0) or 0):
             drops.append(('last-kill', boss.get('last_kill_drop_id', '')))
-        if drops and not _guild_boss_award(
-                record, guild, int(entry.get('id', 0)), drops, notify=notify):
+        if drops:
+            add_awards(entry.get('id', 0), drops)
+
+    pending = False
+    for player_id in sorted(awards_by_player, key=lambda value: int(value)):
+        if not _guild_boss_award(
+                record, guild, int(player_id), awards_by_player[player_id],
+                notify=notify, boss_id=boss_id, force_mail=force_mail):
             pending = True
     record['rewards_pending'] = pending
     return not pending
@@ -10908,7 +11022,8 @@ def _guild_activity_response(guild=None, char=None):
             for boss_id, record in (guild.get('guild_boss_events') or {}).items():
                 if (isinstance(record, dict) and record.get('finished')
                         and record.get('rewards_pending')):
-                    _guild_boss_distribute_rewards(guild, boss_id, record)
+                    _guild_boss_distribute_rewards(
+                        guild, boss_id, record, force_mail=True)
                     retry_boss_rewards = True
             if retry_boss_rewards:
                 _save_guild_states()
@@ -17491,9 +17606,14 @@ def client_handler(conn, addr):
                                         and mi.get('mailState', 0) != 3
                                         and mi.get('items')):
                                     mi['mailState'] = 3  # GETITEM - client IsGetItem() checks mailstate==3
-                                    for it in mi.get('items', []):
-                                        add_to_inventory(picked_char, str(it.get('itemId', 0)), it.get('count', 1))
-                                    sync_all_backpacks(picked_char, send_rpc_push)
+                                    mail_rewards = [
+                                        (str(it.get('itemId', 0)),
+                                         int(it.get('quality', 0) or 0),
+                                         int(it.get('count', 1) or 1))
+                                        for it in mi.get('items', [])
+                                    ]
+                                    grant_item_rewards(
+                                        picked_char, mail_rewards, conn, send_rpc_push, save=False)
                                     # Send updated mail_update (531) so client knows the mail state changed
                                     mi_bytes = build_mail_update(mi)
                                     send_rpc_push(531, mi_bytes)
@@ -17501,15 +17621,21 @@ def client_handler(conn, addr):
                             save_chars(all_accounts_chars)
                     elif operation == 3: # get all items
                         with get_character_transaction_lock(picked_char):
+                            all_mail_rewards = []
                             for mi in picked_char.get('mails', []):
                                 if mi.get('mailState', 0) != 3 and mi.get('items'):
                                     mi['mailState'] = 3  # GETITEM - client IsGetItem() checks mailstate==3
-                                    for it in mi.get('items', []):
-                                        add_to_inventory(picked_char, str(it.get('itemId', 0)), it.get('count', 1))
+                                    all_mail_rewards.extend(
+                                        (str(it.get('itemId', 0)),
+                                         int(it.get('quality', 0) or 0),
+                                         int(it.get('count', 1) or 1))
+                                        for it in mi.get('items', [])
+                                    )
                                     # Send updated mail_update (531) for each claimed mail
                                     mi_bytes = build_mail_update(mi)
                                     send_rpc_push(531, mi_bytes)
-                            sync_all_backpacks(picked_char, send_rpc_push)
+                            grant_item_rewards(
+                                picked_char, all_mail_rewards, conn, send_rpc_push, save=False)
                             save_chars(all_accounts_chars)
                     elif operation == 4: # delete all
                         picked_char['mails'] = []
