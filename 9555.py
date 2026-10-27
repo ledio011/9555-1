@@ -10191,13 +10191,11 @@ def _guild_boss_battle_info(char, include_state=True):
     return encode_sproto([(0, battle_info), (1, 1 if record else 0)])
 
 def _guild_boss_reward_rows(reward_key, guild):
-    """Resolve a Gang Boss ShowRewardData ID to its item list.
-
-    GuildBossData columns (LastKillDropId, RankDropIds, ParticipateDropId,
-    ExistDropId) already contain ShowRewardData IDs — they do NOT go through
-    AdaptData level mapping.  Use the ID directly.
-    """
-    reward_id = str(reward_key or '')
+    reward_key = str(reward_key or '')
+    guild_level = _guild_level(guild)
+    reward_id = str(
+        STREET_RACE_REWARD_BY_KEY_LEVEL.get(reward_key, {}).get(guild_level, '') or ''
+    )
     if not reward_id:
         return None
     rewards = SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(reward_id)
@@ -10217,14 +10215,14 @@ def _guild_boss_reward_rows(reward_key, guild):
                 if reward_id not in GUILD_BOSS_TEST_REWARD_LOGGED:
                     GUILD_BOSS_TEST_REWARD_LOGGED.add(reward_id)
                     print(f"[GUILD BOSS TEST REWARD FALLBACK] "
-                          f"reward={reward_id}; "
+                          f"key={reward_key} level={guild_level} reward={reward_id}; "
                           "using proposed test quantities, not client-authoritative values")
                 return list(fallback_rewards)
-    missing_key = reward_id
+    missing_key = (reward_key, guild_level, reward_id)
     if missing_key not in GUILD_BOSS_MISSING_REWARD_LOGGED:
         GUILD_BOSS_MISSING_REWARD_LOGGED.add(missing_key)
         print(f"[GUILD BOSS REWARD BLOCKED] no explicit payout quantities "
-              f"reward={reward_id}; "
+              f"key={reward_key} level={guild_level} reward={reward_id}; "
               "grant skipped")
     return None
 
