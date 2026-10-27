@@ -105,6 +105,7 @@ GUILD_BATTLE_DATA = {} # id -> configured Gang Battle schedule/selection data
 GUILD_STAR_DATA = {} # id -> configured Gang Star upgrade data
 GUILD_SHOP_DATA = {} # shop item ID -> ShopData row for Guild shop
 GUILD_BOSS_DATA = {} # guild boss/activity rows shown by the Gang activity panel
+GUILD_BOSS_TEST_ALWAYS_OPEN = True
 KILL_TARGET_SPAWNS = {} # logicId -> list of spawns
 TARGET_CAR_SPAWNS = {}  # logicId -> list of car spawns
 MISSION_REQUIRE_DATA = {} # logicId -> dict
@@ -9773,6 +9774,8 @@ def _guild_shop_purchase_count(char, item_id, row):
 def _guild_boss_activity_state(row, now=None):
     now = int(time.time()) if now is None else int(now)
     seconds_today = now % 86400
+    if GUILD_BOSS_TEST_ALWAYS_OPEN:
+        return 1, 86400 - seconds_today
     start = max(0, int(row.get('start_time', 0) or 0)) % 86400
     duration = max(0, int(row.get('duration', 0) or 0))
     elapsed = (seconds_today - start) % 86400
@@ -9783,6 +9786,8 @@ def _guild_boss_activity_state(row, now=None):
 
 def _guild_boss_event_start(row, now=None):
     now = int(time.time()) if now is None else int(now)
+    if GUILD_BOSS_TEST_ALWAYS_OPEN:
+        return now - now % 86400
     return now - now % 86400 + max(0, int(row.get('start_time', 0) or 0)) % 86400
 
 def _guild_boss_record(guild, boss_id, create=False, now=None):
@@ -9806,7 +9811,9 @@ def _guild_boss_record(guild, boss_id, create=False, now=None):
         npc_id = str(row.get('boss_npc_id', ''))
         stats = get_npc_attr(npc_id)
         record = {
-            'event_start': event_start, 'end_time': event_start + int(row.get('duration', 0) or 0),
+            'event_start': event_start, 'end_time': event_start + (
+                86400 if GUILD_BOSS_TEST_ALWAYS_OPEN else int(row.get('duration', 0) or 0)
+            ),
             'hp_max': int(stats.get('hp_max', 0)), 'hp': int(stats.get('hp_max', 0)),
             'damage_players': {}, 'participants': {}, 'last_kill_id': 0,
             'last_kill_name': '', 'finished': False, 'attempts': 0,
