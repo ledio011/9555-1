@@ -5417,7 +5417,13 @@ def get_npc_attr(nid, player_level=1):
         atk_std = adapt.get('atk', ld.get('atk', [40])[0] if isinstance(ld.get('atk'), list) else 40)
         def_std = adapt.get('def', ld.get('def', [100])[0] if isinstance(ld.get('def'), list) else 100)
         hit_std = adapt.get('hit', ld.get('hit', [2844])[0] if isinstance(ld.get('hit'), list) else 2844)
-        eva_std = adapt.get('eva', 100)
+        is_guild_boss_npc = any(
+            str(nid) == str(boss_row.get('boss_npc_id', ''))
+            for boss_row in GUILD_BOSS_DATA.values()
+        )
+        # AdaptData names the standard evasion column "dge", not "eva".
+        # Limit this correction to Gang Boss NPCs to avoid unrelated combat changes.
+        eva_std = adapt.get('dge', 100) if is_guild_boss_npc else adapt.get('eva', 100)
         cri_std = adapt.get('cri', 351)
         res_std = adapt.get('res', 0)
         exd_std = adapt.get('exd', 0)
@@ -10419,6 +10425,45 @@ def _guild_boss_apply_hit(conn, char, target_id, client_dmg, skill_id,
     if effinfo_id not in valid_effects:
         print(f"[GUILD BOSS SECURITY] rejected mismatched effect skill={skill_id} effect={effinfo_id}")
         return False
+
+    # Mirror the existing EXP skill range check: skill trace range plus effect
+    # reach and the same 3 m collision/position tolerance.
+    player_pos = char.get('pos')
+    runtime = GUILD_BOSS_RUNTIMES.get(instance_key)
+    if (not isinstance(player_pos, (list, tuple)) or len(player_pos) < 3
+            or not runtime or runtime.get('finished')
+            or runtime.get('inst_id') != int(target_id)
+            or not isinstance(runtime.get('position'), (list, tuple))
+            or len(runtime.get('position')) < 2):
+        print(f"[GUILD BOSS SECURITY] rejected hit without position/runtime player={char.get('id')} target={target_id}")
+        return False
+    effect_cfg = EFF_CONFIG.get(effinfo_id, {})
+    params = effect_cfg.get('params', [0, 0, 0, 0, 0])
+    try:
+        param1 = abs(int(params[0] if len(params) > 0 else 0)) / 100.0
+        param2 = abs(int(params[1] if len(params) > 1 else 0)) / 100.0
+        area_type = int(effect_cfg.get('area_type', 0) or 0)
+        trace_distance = max(0, int(skill_cfg.get('trace_distance_cm', 0) or 0)) / 100.0
+        player_x = float(player_pos[0]) / 100.0
+        player_z = float(player_pos[2]) / 100.0
+        boss_x = float(runtime['position'][0])
+        boss_z = float(runtime['position'][1])
+    except (TypeError, ValueError, OverflowError):
+        print(f"[GUILD BOSS SECURITY] rejected invalid range config/position skill={skill_id} effect={effinfo_id}")
+        return False
+    if area_type == 1:
+        effect_reach = trace_distance + param1
+    elif area_type == 2:
+        effect_reach = math.hypot(param1, param2 / 2.0)
+    elif area_type in (3, 4, 5):
+        effect_reach = param1
+    else:
+        effect_reach = trace_distance
+    max_reach = max(trace_distance, effect_reach) + 3.0
+    if math.hypot(boss_x - player_x, boss_z - player_z) > max_reach:
+        print(f"[GUILD BOSS SECURITY] rejected out-of-range hit player={char.get('id')} target={target_id} skill={skill_id}")
+        return False
+
     attacker_stats = get_character_stats(char)
     defender_stats = get_npc_attr(npc_id)
     max_damage, can_hit, possible_crit = get_combat_damage(
