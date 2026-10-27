@@ -10443,7 +10443,9 @@ def _guild_boss_distribute_rewards(guild, boss_id, record, notify=True, force_ma
         drops = []
         for award_rank, (drop_id, rank_limit) in enumerate(
                 zip(rank_drop_ids, rank_limits), 1):
-            if drop_id and int(rank_limit or 0) > 0 and rank <= int(rank_limit):
+            # GuildBossData FirstRank/SecondRank/ThirdRank are exact
+            # placements (1/2/3), not cumulative upper-bound thresholds.
+            if drop_id and int(rank_limit or 0) > 0 and rank == int(rank_limit):
                 drops.append((f'rank-{award_rank}', drop_id))
         if int(entry.get('id', 0)) == int(record.get('last_kill_id', 0) or 0):
             drops.append(('last-kill', boss.get('last_kill_drop_id', '')))
