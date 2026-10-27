@@ -7212,6 +7212,11 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
         _schedule_guild_boss_tick(runtime_key, runtime)
         return
 
+    attack_distance = max(
+        0.5,
+        (int(ai_cfg.get('around_min_distance', 100) or 100)
+         + int(ai_cfg.get('around_max_distance', 200) or 200)) / 200.0
+    )
     configured_lock = int(ai_cfg.get('lock_distance', 500) or 500)
     search_radius = int(npc_cfg.get('search_radius', 0) or 0)
     lock_distance = (
@@ -7245,8 +7250,9 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
             effect_ids = [str(skill_cfg.get(field) or '') for field in ('eff0', 'eff1', 'eff2')]
             effect_ids = [effect_id for effect_id in effect_ids if effect_id]
             skill_range = max(
-                (_guild_boss_effect_range_m(skill_cfg, effect_id) for effect_id in effect_ids),
-                default=float(skill_cfg.get('trace_distance_cm', 0) or 0) / 100.0
+                attack_distance,
+                max((_guild_boss_effect_range_m(skill_cfg, effect_id) for effect_id in effect_ids),
+                    default=float(skill_cfg.get('trace_distance_cm', 0) or 0) / 100.0)
             )
             if (nearest_distance <= min(lock_distance, skill_range)
                     and float(runtime['skill_ready_at'].get(skill, 0.0)) <= now):
@@ -7266,7 +7272,7 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
                     _guild_boss_effect_range_m(skill_cfg, effect_id)
                     for _index, effect_id in effect_pairs
                 ]
-                skill_range = max(all_effect_ranges, default=0.0)
+                skill_range = max(attack_distance, max(all_effect_ranges, default=0.0))
                 available_targets = [
                     member for distance, member in distances
                     if distance <= min(lock_distance, skill_range)
