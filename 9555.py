@@ -557,6 +557,7 @@ try:
                     continue
                 try:
                     GUILD_BOSS_DATA[str(parts[1])] = {
+                        "boss_id": str(parts[1]),
                         "map_id": str(parts[2]), "type": int(parts[3] or 0),
                         "subtype": int(parts[4] or 0), "max_play_num": int(parts[5] or 0),
                         "start_time": int(parts[6]), "duration": int(parts[7]),
@@ -7038,7 +7039,14 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
     boss_cfg = GUILD_BOSS_DATA.get(boss_id, {})
     record = _guild_boss_record(guild, boss_id)
     inst_id = int(runtime['inst_id'])
-    if (not record or record.get('finished') or int(record.get('hp', 0) or 0) <= 0
+    if not record:
+        # Retire a previous day's boss instance rather than leaving its NPC
+        # visible after the daily boss rotates.
+        _guild_boss_remove_instance(
+            runtime_key, inst_id, str(boss_cfg.get('map_id', ''))
+        )
+        return
+    if (record.get('finished') or int(record.get('hp', 0) or 0) <= 0
             or GUILD_BOSS_INSTANCES.get(runtime_key) != inst_id):
         return
     members = _guild_boss_scene_members(guild, boss_cfg.get('map_id', ''))
@@ -9999,9 +10007,37 @@ def _guild_shop_purchase_count(char, item_id, row):
         purchases[str(item_id)] = record
     return max(0, int(record.get('count', 0) or 0))
 
+def _guild_boss_daily_id(now=None):
+    """Return the one Gang Boss assigned to the current UTC weekday.
+
+    The client orders the seven boss rows by ID and labels weekdays Monday=0
+    through Sunday=6. Use the UTC day because this server's daily event keys
+    are based on the same Unix-day boundary.
+    """
+    now = int(time.time()) if now is None else int(now)
+    boss_ids = sorted(
+        (str(value) for value in GUILD_BOSS_DATA),
+        key=lambda value: int(value) if value.isdigit() else 0
+    )
+    if not boss_ids:
+        return ''
+    weekday_index = time.gmtime(now).tm_wday  # Monday=0 ... Sunday=6
+    return boss_ids[weekday_index % len(boss_ids)]
+
+
 def _guild_boss_activity_state(row, now=None):
     now = int(time.time()) if now is None else int(now)
     seconds_today = now % 86400
+    boss_id = str(row.get('boss_id', '') or '')
+    if not boss_id:
+        boss_id = next(
+            (str(candidate_id) for candidate_id, candidate_row in GUILD_BOSS_DATA.items()
+             if candidate_row is row),
+            ''
+        )
+    if boss_id and boss_id != _guild_boss_daily_id(now):
+        # The row is not today's boss; keep it closed even during 24-hour testing.
+        return 0, 86400 - seconds_today
     if GUILD_BOSS_TEST_ALWAYS_OPEN:
         return 1, 86400 - seconds_today
     start = max(0, int(row.get('start_time', 0) or 0)) % 86400
@@ -10023,6 +10059,8 @@ def _guild_boss_record(guild, boss_id, create=False, now=None):
     if not guild or not row:
         return None
     now = int(time.time()) if now is None else int(now)
+    if str(boss_id) != _guild_boss_daily_id(now):
+        return None
     event_start = _guild_boss_event_start(row, now)
     state, _remaining = _guild_boss_activity_state(row, now)
     events = guild.setdefault('guild_boss_events', {})
