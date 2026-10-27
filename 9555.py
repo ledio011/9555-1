@@ -6993,6 +6993,7 @@ def _guild_boss_remove_instance(runtime_key, inst_id, map_id):
     NPC_INST_MAP.pop(int(inst_id), None)
     NPC_INSTANCE_MAP.pop(int(inst_id), None)
     NPC_ATTR_MAP.pop(int(inst_id), None)
+    DEAD_NPC_SET.discard(int(inst_id))
 
 def _start_guild_boss_runtime(runtime_key, guild_id, boss_id, inst_id, x, z):
     with GUILD_BOSS_LOCK:
@@ -7016,6 +7017,7 @@ def _guild_boss_ai_tick(runtime_key):
         return
     tick_lock = runtime['tick_lock']
     if not tick_lock.acquire(False):
+        _schedule_guild_boss_tick(runtime_key, runtime)
         return
     try:
         _guild_boss_ai_tick_locked(runtime_key, runtime)
@@ -7115,7 +7117,17 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
                 boss_stats, player_stats, skill_id, 1, effinfo_id=effect_id
             )
             if hit and damage > 0:
-                target_char['hp'] = max(0, int(target_char.get('hp', 0) or 0) - damage)
+                with GUILD_BOSS_LOCK:
+                    live_record = _guild_boss_record(guild, boss_id)
+                    if (runtime.get('finished') or not live_record
+                            or live_record.get('finished')
+                            or not _guild_boss_member(guild, target_char, boss_id)
+                            or int(target_char.get('hp', 0) or 0) <= 0):
+                        _schedule_guild_boss_tick(runtime_key, runtime)
+                        return
+                    target_char['hp'] = max(
+                        0, int(target_char.get('hp', 0) or 0) - damage
+                    )
                 attack_item = encode_sproto([(0, target_id), (1, damage)])
                 attack = encode_sproto([
                     (0, inst_id), (1, target_id), (2, skill_id), (3, [attack_item])
