@@ -117,16 +117,18 @@ GUILD_BOSS_MISSING_REWARD_LOGGED = set()
 GUILD_BOSS_TEST_REWARD_FALLBACK = True
 GUILD_BOSS_TEST_REWARD_LOGGED = set()
 GUILD_BOSS_TEST_REWARD_RANGES = (
+    # 8801 is only the display "Rank 1 badge" item. 9603 is the real Level 1
+    # Badge Case; its client description says it grants a random Rank 1 badge.
     (51001, 51010, (('1001', 1, 50000), ('1004', 1, 500),
-                    ('8801', 1, 1), ('6002', 1, 2))),      # Rank 1
+                    ('9603', 1, 1), ('6002', 1, 2))),       # Rank 1
     (51011, 51020, (('1001', 1, 40000), ('1004', 1, 400),
-                    ('8801', 1, 1))),                     # Rank 2
+                    ('9603', 1, 1))),                      # Rank 2
     (51021, 51030, (('1001', 1, 30000), ('1004', 1, 300),
-                    ('8801', 1, 1))),                     # Rank 3
+                    ('9603', 1, 1))),                      # Rank 3
     (51101, 51110, (('1001', 1, 10000), ('1004', 1, 100))),  # Participation
     (51201, 51210, (('1001', 1, 20000), ('1004', 1, 200),
-                    ('6002', 1, 1))),                     # Final hit
-    (51301, 51310, (('1001', 1, 5000), ('1004', 1, 50))),    # All members
+                    ('6002', 1, 1))),                      # Final hit
+    (51301, 51310, (('1001', 1, 5000), ('1004', 1, 50))),     # All members
 )
 KILL_TARGET_SPAWNS = {} # logicId -> list of spawns
 TARGET_CAR_SPAWNS = {}  # logicId -> list of car spawns
@@ -10235,14 +10237,28 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
     new_claims = set()
     pending = []
     unresolved = False
+    audit_packages = []
     for reward_key, selector in reward_sets:
         if reward_key in claimed:
             continue
+        guild_level = _guild_level(guild)
+        reward_id = str(
+            STREET_RACE_REWARD_BY_KEY_LEVEL.get(str(selector or ''), {}).get(
+                guild_level, '') or ''
+        )
         rewards = _guild_boss_reward_rows(selector, guild)
         if rewards is None:
             unresolved = True
+            audit_packages.append(
+                f"{reward_key}:{selector}->{reward_id or 'unresolved'}:BLOCKED")
             continue
         pending.extend(rewards)
+        audit_items = ','.join(
+            f"{item_id}x{int(amount)}@q{int(quality)}"
+            for item_id, quality, amount in rewards
+        )
+        audit_packages.append(
+            f"{reward_key}:{selector}->{reward_id}[{audit_items}]")
         claimed.add(reward_key)
         new_claims.add(reward_key)
     if not pending:
@@ -10257,6 +10273,22 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
     if not char:
         print(f"[GUILD BOSS REWARD] deferred; character missing player={char_id_int}")
         return False
+
+    reward_totals = {}
+    for item_id, quality, amount in pending:
+        total_key = (str(item_id), int(quality))
+        reward_totals[total_key] = reward_totals.get(total_key, 0) + int(amount)
+    audit_total = ','.join(
+        f"{item_id}x{amount}@q{quality}"
+        for (item_id, quality), amount in sorted(
+            reward_totals.items(), key=lambda pair: (pair[0][0], pair[0][1]))
+    )
+    audit_mode = 'mail' if (force_mail or not online) else 'inventory'
+    print(f"[GUILD BOSS REWARD PLAN] player={char_id_int} "
+          f"guild={int((guild or {}).get('id', 0) or 0)} boss={boss_id} "
+          f"guild_level={_guild_level(guild)} mode={audit_mode} "
+          f"test_fallback={bool(GUILD_BOSS_TEST_REWARD_FALLBACK)} "
+          f"packages={' ; '.join(audit_packages)} total=[{audit_total}]")
 
     # Offline rewards are queued at defeat. Any unresolved reward retried later
     # must also be mailed, never silently inserted into inventory during login.
@@ -10325,6 +10357,8 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
             send_rpc_push_safe(conn, 531, build_mail_update(mail_entry))
         print(f"[GUILD BOSS MAIL] queued player={char_id_int} "
               f"items={len(by_item_id)} source={source_key}")
+        print(f"[GUILD BOSS REWARD DELIVERED] player={char_id_int} "
+              f"mode=mail total=[{audit_total}]")
         return not unresolved
 
     if not can_add_reward_list_to_inventory(char, pending):
@@ -10367,6 +10401,8 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
                 (0, str(item_id)), (1, int(amount)), (3, int(quality))
             ]) for item_id, quality, amount in pending])])
             push(638, popup)
+    print(f"[GUILD BOSS REWARD DELIVERED] player={char_id_int} "
+          f"mode=inventory total=[{audit_total}]")
     return not unresolved
 
 def _guild_boss_distribute_rewards(guild, boss_id, record, notify=True, force_mail=False):
