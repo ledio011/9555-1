@@ -6147,7 +6147,7 @@ def flush_exp_kill_tracker(exp_state, conn, picked_char, send_rpc_push):
 def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_rpc_push_func, conn_for_sync, on_player_die):
     """Shared EXP dungeon monster AI loop.
     Bug 2: Extracted from duplicated main AI and relife AI loops to eliminate ~80 lines of duplicate code.
-    
+
     Parameters:
         exp_state: EXP dungeon state dict
         map_str: Current map ID string
@@ -7086,7 +7086,7 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
         (int(ai_cfg.get('around_min_distance', 100) or 100)
          + int(ai_cfg.get('around_max_distance', 200) or 200)) / 200.0
     )
-    skills = [skill.strip() for skill in str(npc_cfg.get('skill_group', '')).split(';')
+    skills = [skill.strip() for skill in re.split(r'[;,]', str(npc_cfg.get('skill_group', '')))
               if skill.strip() in SKILL_CONFIG]
     if not skills:
         _schedule_guild_boss_tick(runtime_key, runtime)
@@ -10476,23 +10476,15 @@ def _guild_boss_auto_exit(guild_id, boss_id, event_start):
     if (not record or int(record.get('event_start', 0) or 0) != int(event_start)
             or not record.get('finished')):
         return
-    participants = set(str(member_id) for member_id in record.get('participants', {}))
-    participants.update(
-        str(entry.get('id', 0)) for entry in _guild_boss_rank_rows(record)
-    )
-    for participant_id in participants:
-        try:
-            char_id = int(participant_id)
-        except (TypeError, ValueError):
-            continue
-        conn, char = ALL_CONNECTIONS.get(char_id, (None, None))
-        if (not conn or not char or not is_current_character_connection(conn, char)
-                or str(char.get('map_id', '')) != map_id
-                or str(char.get('active_copy_id', '')) != map_id):
-            continue
+    scene_players = []
+    for char_id, (conn, char) in list(ALL_CONNECTIONS.items()):
+        if (conn and char and is_current_character_connection(conn, char)
+                and str(char.get('map_id', '')) == map_id):
+            scene_players.append((char_id, conn, char))
+    for char_id, conn, char in scene_players:
         return_map = str(char.get('pre_copy_map') or '11')
         return_pos = char.get('pre_copy_pos')
-        if return_map == map_id:
+        if return_map == map_id or _guild_boss_map_id(return_map):
             return_map = '11'
             return_pos = None
         char['pre_copy_pos'] = None
@@ -10509,25 +10501,16 @@ def _guild_boss_start_exit_countdown(guild, boss_id, record):
     row = GUILD_BOSS_DATA.get(str(boss_id), {})
     end_time = int(record.get('end_time', 0) or 0)
     map_id = str(row.get('map_id', ''))
-    participant_ids = set(str(member_id) for member_id in record.get('participants', {}))
-    participant_ids.update(
-        str(entry.get('id', 0)) for entry in _guild_boss_rank_rows(record)
-    )
     countdown = encode_sproto([(0, end_time), (1, 2)])
-    for participant_id in participant_ids:
-        try:
-            char_id = int(participant_id)
-        except (TypeError, ValueError):
-            continue
-        conn, char = ALL_CONNECTIONS.get(char_id, (None, None))
+    notice = encode_sproto([
+        (0, f"The Guild Boss has been defeated today. You will leave the scene after {GUILD_BOSS_POST_KILL_EXIT_SECONDS} seconds."),
+        (1, True)
+    ])
+    for _cid, (conn, char) in list(ALL_CONNECTIONS.items()):
         if (conn and char and is_current_character_connection(conn, char)
-                and str(char.get('map_id', '')) == map_id
-                and str(char.get('active_copy_id', '')) == map_id):
+                and str(char.get('map_id', '')) == map_id):
             send_rpc_push_safe(conn, 629, countdown)
-            send_rpc_push_safe(conn, 529, encode_sproto([
-                (0, f"The Guild Boss has been defeated today. You will leave the scene after {GUILD_BOSS_POST_KILL_EXIT_SECONDS} seconds."),
-                (1, True)
-            ]))
+            send_rpc_push_safe(conn, 529, notice)
     delay = max(0.0, end_time - time.time())
     timer = threading.Timer(
         delay, _guild_boss_auto_exit,
@@ -10596,7 +10579,7 @@ def _guild_boss_finish(guild, boss_id, record, killer_id):
             old_timer = runtime.get('timer')
             if old_timer:
                 old_timer.cancel()
-        delay = max(1, int(boss_cfg.get('exist_time', 1) or 1))
+        delay = max(1, int(boss_cfg.get('exist_time', 10) or 10))
         cleanup = threading.Timer(
             delay, _guild_boss_remove_instance,
             args=(runtime_key, int(inst_id), str(boss_cfg.get('map_id', '')))
@@ -11475,8 +11458,8 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
     elif msg == 195:  # request_guild_boss / Gang activity overview
         send_rpc_push(599, _guild_activity_response(guild, char))
 
-    elif msg == 231 and _guild_boss_map_id(char.get('map_id', '')):
-        boss_id = _guild_boss_map_id(char.get('map_id', ''))
+    elif msg == 231:  # request_battle_info; Gang Boss live battle/damage ranking
+        boss_id = _guild_boss_map_id(char.get('map_id', '')) if char else None
         if boss_id and _guild_boss_member(guild, char, boss_id):
             battle_info = _guild_boss_battle_info(char)
         else:
@@ -17555,6 +17538,9 @@ def client_handler(conn, addr):
                         saved_pos = picked_char.get('pre_copy_pos')
                         saved_map = picked_char.get('pre_copy_map', '11')
                         picked_char['pre_copy_pos'] = None; picked_char['pre_copy_map'] = None
+                    if saved_map == str(picked_char.get('map_id', '')) or _guild_boss_map_id(saved_map):
+                        saved_map = '11'
+                        saved_pos = None
                     start_map_transition(conn, picked_char, saved_map, send_rpc_push, override_pos=saved_pos)
                     save_chars(all_accounts_chars)
                 if session is not None:
