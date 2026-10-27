@@ -10334,7 +10334,14 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
         return False
 
     # Apply online payouts in memory, persist first, and only then sync the client.
-    char_snapshot = copy.deepcopy(char)
+    try:
+        char_snapshot = copy.deepcopy(char)
+    except Exception as snapshot_error:
+        claimed.difference_update(new_claims)
+        claims[claim_key] = sorted(claimed)
+        print(f"[GUILD BOSS REWARD] deferred; character snapshot failed "
+              f"player={char_id_int}: {snapshot_error}")
+        return False
     delivered_by_char = record.setdefault('delivered_rewards', {})
     delivered_before = list(delivered_by_char.get(claim_key, []))
     grant_item_rewards(char, pending, None, None, save=False)
