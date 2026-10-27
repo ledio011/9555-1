@@ -117,14 +117,14 @@ GUILD_BOSS_MISSING_REWARD_LOGGED = set()
 GUILD_BOSS_TEST_REWARD_FALLBACK = True
 GUILD_BOSS_TEST_REWARD_LOGGED = set()
 GUILD_BOSS_TEST_REWARD_RANGES = (
-    # 8801 is only the display "Rank 1 badge" item. 9603 is the real Level 1
-    # Badge Case; its client description says it grants a random Rank 1 badge.
+    # 50001 is the actual BadgeData Level 1 item "Strength Badge Lv.1".
+    # 8801 is only the cosmetic "Rank 1 badge" display item; 9603 is a box.
     (51001, 51010, (('1001', 1, 50000), ('1004', 1, 500),
-                    ('9603', 1, 1), ('6002', 1, 2))),       # Rank 1
+                    ('50001', 1, 1), ('6002', 1, 2))),      # Rank 1
     (51011, 51020, (('1001', 1, 40000), ('1004', 1, 400),
-                    ('9603', 1, 1))),                      # Rank 2
+                    ('50001', 1, 1))),                     # Rank 2
     (51021, 51030, (('1001', 1, 30000), ('1004', 1, 300),
-                    ('9603', 1, 1))),                      # Rank 3
+                    ('50001', 1, 1))),                     # Rank 3
     (51101, 51110, (('1001', 1, 10000), ('1004', 1, 100))),  # Participation
     (51201, 51210, (('1001', 1, 20000), ('1004', 1, 200),
                     ('6002', 1, 1))),                      # Final hit
@@ -10269,6 +10269,13 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
     conn, online_char = ALL_CONNECTIONS.get(char_id_int, (None, None))
     online = bool(conn and online_char
                   and is_current_character_connection(conn, online_char))
+    boss_config = GUILD_BOSS_DATA.get(str(boss_id or ''), {})
+    boss_map_id = str(boss_config.get('map_id', '') or '')
+    online_in_boss_scene = bool(
+        online and boss_map_id
+        and str(online_char.get('map_id', '')) == boss_map_id
+        and str(online_char.get('active_copy_id', '')) == boss_map_id
+    )
     char = online_char if online else _guild_char_by_id(char_id_int)
     if not char:
         print(f"[GUILD BOSS REWARD] deferred; character missing player={char_id_int}")
@@ -10283,7 +10290,7 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
         for (item_id, quality), amount in sorted(
             reward_totals.items(), key=lambda pair: (pair[0][0], pair[0][1]))
     )
-    audit_mode = 'mail' if (force_mail or not online) else 'inventory'
+    audit_mode = 'mail' if (force_mail or not online_in_boss_scene) else 'inventory'
     print(f"[GUILD BOSS REWARD PLAN] player={char_id_int} "
           f"guild={int((guild or {}).get('id', 0) or 0)} boss={boss_id} "
           f"guild_level={_guild_level(guild)} mode={audit_mode} "
@@ -10292,7 +10299,7 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
 
     # Offline rewards are queued at defeat. Any unresolved reward retried later
     # must also be mailed, never silently inserted into inventory during login.
-    if force_mail or not online:
+    if force_mail or not online_in_boss_scene:
         event_start = int(record.get('event_start', 0) or 0)
         claim_token = ','.join(sorted(new_claims))
         source_key = (
@@ -10305,7 +10312,7 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
                               and mi.get('guildBossRewardKey') == source_key), None)
         if existing_mail:
             claims[claim_key] = sorted(claimed)
-            if conn and online and force_mail:
+            if conn and online:
                 send_rpc_push_safe(conn, 531, build_mail_update(existing_mail))
             return not unresolved
 
@@ -10353,7 +10360,7 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
             print(f"[GUILD BOSS MAIL] save failed; delivery remains pending player={char_id_int}")
             return False
         claims[claim_key] = sorted(claimed)
-        if conn and online and force_mail:
+        if conn and online:
             send_rpc_push_safe(conn, 531, build_mail_update(mail_entry))
         print(f"[GUILD BOSS MAIL] queued player={char_id_int} "
               f"items={len(by_item_id)} source={source_key}")
