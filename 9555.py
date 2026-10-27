@@ -11817,6 +11817,20 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
                 if record and not record.get('finished'):
                     if int(record.get('attempts', 0) or 0) < max_attempts:
                         record['attempts'] = int(record.get('attempts', 0) or 0) + 1
+                        # Clear reward claims from the previous attempt so each
+                        # new attempt distributes rewards fresh.
+                        record['reward_claims'] = {}
+                        record['rewards_pending'] = False
+                        # Reset HP for the new attempt
+                        npc_id = str(boss_cfg.get('boss_npc_id', ''))
+                        stats = get_npc_attr(npc_id)
+                        record['hp_max'] = int(stats.get('hp_max', 0))
+                        record['hp'] = int(stats.get('hp_max', 0))
+                        record['damage_players'] = {}
+                        record['participants'] = {}
+                        record['last_kill_id'] = 0
+                        record['last_kill_name'] = ''
+                        record['finished'] = False
                         _save_guild_states()
                     can_open = bool(
                         record and not record.get('finished')
