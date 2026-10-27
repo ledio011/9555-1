@@ -10525,8 +10525,46 @@ def _guild_boss_start_exit_countdown(guild, boss_id, record):
 
 def _guild_boss_send_result(guild, boss_id, record):
     map_id = str(GUILD_BOSS_DATA.get(str(boss_id), {}).get('map_id', ''))
-    delivered = record.get('delivered_rewards', {})
-    for entry in _guild_boss_rank_rows(record):
+    rows = _guild_boss_rank_rows(record)
+    boss = GUILD_BOSS_DATA.get(str(boss_id), {})
+    # Pre-compute the reward sets for each player so the result screen always
+    # shows the correct items regardless of delivery mode (inventory vs mail).
+    awards_by_player = {}
+    def add_awards(player_id, reward_sets):
+        try:
+            player_id = str(int(player_id))
+        except (TypeError, ValueError, OverflowError):
+            return
+        awards_by_player.setdefault(player_id, []).extend(reward_sets)
+    # Guild-wide for all eligible members
+    for member_id, member in (guild or {}).get('members', {}).items():
+        try:
+            cid = int(member_id)
+        except (TypeError, ValueError):
+            continue
+        if int((member or {}).get('job', 4)) == 4:
+            continue
+        add_awards(cid, [('guild-wide', boss.get('exist_drop_id', ''))])
+    # Participation for all participants
+    participant_ids = set(str(value) for value in record.get('participants', {}))
+    participant_ids.update(str(entry.get('id', 0)) for entry in rows)
+    for pid in sorted(participant_ids, key=lambda v: int(v)):
+        add_awards(pid, [('participate', boss.get('participate_drop_id', ''))])
+    # Rank and final-hit for damage dealers
+    rank_drop_ids = boss.get('rank_drop_ids', [])
+    rank_limits = boss.get('rank_limits', [])
+    for rank, entry in enumerate(rows, 1):
+        drops = []
+        for award_rank, (drop_id, rank_limit) in enumerate(
+                zip(rank_drop_ids, rank_limits), 1):
+            if drop_id and int(rank_limit or 0) > 0 and rank == int(rank_limit):
+                drops.append((f'rank-{award_rank}', drop_id))
+        if int(entry.get('id', 0)) == int(record.get('last_kill_id', 0) or 0):
+            drops.append(('last-kill', boss.get('last_kill_drop_id', '')))
+        if drops:
+            add_awards(entry.get('id', 0), drops)
+    # Send result to each online rank-row participant
+    for entry in rows:
         try:
             char_id = int(entry.get('id', 0) or 0)
         except (TypeError, ValueError):
@@ -10545,18 +10583,22 @@ def _guild_boss_send_result(guild, boss_id, record):
         member = _guild_member_id(guild, char_id)
         if not member or int(member.get('job', 4)) == 4:
             continue
+        # Compute the actual reward items for this player from their award sets.
+        # Show all rewards earned, regardless of delivery mode.
         item_list = []
-        for reward in delivered.get(str(char_id), []):
-            if not isinstance(reward, (list, tuple)) or len(reward) != 3:
+        reward_sets = awards_by_player.get(str(char_id), [])
+        for reward_key, selector in reward_sets:
+            rewards = _guild_boss_reward_rows(selector, guild)
+            if rewards is None:
                 continue
-            item_id, quality, amount = reward
-            if int(amount) <= 0:
-                continue
-            item_id = str(item_id)
-            item_list.append(encode_sproto([
-                (0, item_id), (1, int(amount)), (3, int(quality)),
-                (4, item_id), (5, 0)
-            ]))
+            for item_id, quality, amount in rewards:
+                if int(amount) <= 0:
+                    continue
+                item_id = str(item_id)
+                item_list.append(encode_sproto([
+                    (0, item_id), (1, int(amount)), (3, int(quality)),
+                    (4, item_id), (5, 0)
+                ]))
         result_fields = [
             (0, 6), (2, True), (3, item_list),
             (4, _guild_boss_battle_info(char, include_state=False)),
