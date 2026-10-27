@@ -550,13 +550,22 @@ try:
         with open(guild_boss_path, "r", encoding="utf-8") as table_file:
             for row in table_file:
                 parts = row.strip().split(",")
-                if len(parts) < 13 or parts[0] != "*":
+                if len(parts) < 24 or parts[0] != "*":
                     continue
                 try:
                     GUILD_BOSS_DATA[str(parts[1])] = {
-                        "map_id": str(parts[2]), "start_time": int(parts[6]),
-                        "duration": int(parts[7]), "level_min": int(parts[11]),
-                        "level_max": int(parts[12])
+                        "map_id": str(parts[2]), "type": int(parts[3] or 0),
+                        "subtype": int(parts[4] or 0), "max_play_num": int(parts[5] or 0),
+                        "start_time": int(parts[6]), "duration": int(parts[7]),
+                        "wait_time": int(parts[8] or 0), "exist_time": int(parts[9] or 0),
+                        "max_player": int(parts[10] or 0), "level_min": int(parts[11]),
+                        "level_max": int(parts[12]), "last_kill_drop_id": str(parts[13]),
+                        "rank_drop_ids": [str(parts[14]), str(parts[16]), str(parts[18])],
+                        "rank_limits": [int(parts[15] or 0), int(parts[17] or 0),
+                                        int(parts[19] or 0)],
+                        "participate_drop_id": str(parts[20]),
+                        "exist_drop_id": str(parts[21]), "show_reward_id": str(parts[22]),
+                        "boss_npc_id": str(parts[23])
                     }
                 except (TypeError, ValueError):
                     continue
@@ -1945,6 +1954,8 @@ print(f"[GUILD] loaded guilds={len(GUILD_STATES)} next_id={GUILD_ID_COUNTER}")
 GUILD_CITY_OWNER_PATH = os.path.join(SCRIPT_DIR, "guild_city.json")
 GUILD_CITY_LOCK = threading.RLock()
 GUILD_CITY_EVENT_STATE = {}
+GUILD_BOSS_LOCK = threading.RLock()
+GUILD_BOSS_INSTANCES = {}
 try:
     with open(GUILD_CITY_OWNER_PATH, "r", encoding="utf-8") as city_file:
         _loaded_city_owners = json.load(city_file)
@@ -3593,6 +3604,19 @@ def is_character_available_for_team(char):
 
 def can_aoi_exchange(source, target):
     if not source or not target or source.get('id')==target.get('id') or str(source.get('map_id'))!=str(target.get('map_id')): return False
+    guild_boss_id = _guild_boss_map_id(source.get('map_id'))
+    if guild_boss_id:
+        source_guild_id = _guild_id_for_character(source)
+        target_guild_id = _guild_id_for_character(target)
+        source_guild = GUILD_STATES.get(str(source_guild_id)) if source_guild_id else None
+        target_guild = GUILD_STATES.get(str(target_guild_id)) if target_guild_id else None
+        return bool(
+            source_guild_id and source_guild_id == target_guild_id
+            and _guild_member_id(source_guild, source.get('id', 0))
+            and _guild_member_id(target_guild, target.get('id', 0))
+            and int(_guild_member_id(source_guild, source.get('id', 0)).get('job', 4)) != 4
+            and int(_guild_member_id(target_guild, target.get('id', 0)).get('job', 4)) != 4
+        )
     if is_exp_map(source.get('map_id')):
         state=source.get('exp_stage_state')
         return bool(state and state.get('team_id') and state is target.get('exp_stage_state'))
@@ -6876,6 +6900,42 @@ def start_exp_stage_runtime(conn, owner, state):
     t = threading.Timer(0.2, tick); t.daemon = True; state['ai_timer'] = t; t.start()
 
 
+def _spawn_guild_boss(conn, char, boss_id, map_id):
+    guild_id = _guild_id_for_character(char)
+    guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
+    if not _guild_boss_member(guild, char, boss_id):
+        print(f"[GUILD BOSS] suppressed spawn for ineligible player={char.get('id')} boss={boss_id}")
+        return
+    cfg = GUILD_BOSS_DATA.get(str(boss_id), {})
+    record = _guild_boss_record(guild, boss_id, create=True)
+    if not record or record.get('finished'):
+        return
+    key = (str(guild_id), str(boss_id), int(record.get('event_start', 0)))
+    monster = next((entry for entry in MONSTER_DATA.get(str(map_id), [])
+                    if str(entry.get('nid', '')) == str(cfg.get('boss_npc_id', ''))), {})
+    x, z, heading = (int(monster.get(field, 0) or 0) for field in ('x', 'z', 'o'))
+    with GUILD_BOSS_LOCK:
+        inst_id = GUILD_BOSS_INSTANCES.get(key)
+        if inst_id is None or inst_id not in NPC_ATTR_MAP:
+            inst_id, _attr = build_npc_attr_sproto(
+                str(cfg.get('boss_npc_id', '')), NPC_CONFIG.get(
+                    str(cfg.get('boss_npc_id', '')), {}).get('name', 'Guild Boss'),
+                x, z, heading)
+            GUILD_BOSS_INSTANCES[key] = inst_id
+        hp_max = int(record.get('hp_max', 0) or 0)
+        hp_cur = max(0, min(int(record.get('hp', hp_max) or 0), hp_max))
+        record['hp'] = hp_cur
+        NPC_HP_MAP[inst_id] = hp_cur
+        NPC_INST_MAP[inst_id] = str(cfg.get('boss_npc_id', ''))
+        NPC_INSTANCE_MAP[inst_id] = str(map_id)
+        _inst_id, attr = build_npc_attr_sproto(
+            str(cfg.get('boss_npc_id', '')), NPC_CONFIG.get(
+                str(cfg.get('boss_npc_id', '')), {}).get('name', 'Guild Boss'),
+            x, z, heading, existing_inst_id=inst_id)
+    send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
+    stats = get_npc_attr(str(cfg.get('boss_npc_id', '')))
+    sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur)
+
 def spawn_map_npcs(conn, map_id, picked_char=None):
     map_str = str(map_id)
     spawned_maps = NPC_SPAWNED_MAPS.setdefault(id(conn), set())
@@ -6886,6 +6946,11 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         NPC_INSTANCE_MAP[inst_id] = map_str
         send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
         return inst_id
+    boss_id = _guild_boss_map_id(map_str)
+    if boss_id:
+        if picked_char:
+            _spawn_guild_boss(conn, picked_char, boss_id, map_str)
+        return
     if is_equipment_copy_map(map_str):
         # Equipment-copy maps use ordered MonsterData groups and share their
         # physical map IDs across squads. Never spawn every row as static map
@@ -9716,6 +9781,364 @@ def _guild_boss_activity_state(row, now=None):
     until = (start - seconds_today) % 86400
     return 0, until if until else 86400
 
+def _guild_boss_event_start(row, now=None):
+    now = int(time.time()) if now is None else int(now)
+    return now - now % 86400 + max(0, int(row.get('start_time', 0) or 0)) % 86400
+
+def _guild_boss_record(guild, boss_id, create=False, now=None):
+    row = GUILD_BOSS_DATA.get(str(boss_id))
+    if not guild or not row:
+        return None
+    now = int(time.time()) if now is None else int(now)
+    event_start = _guild_boss_event_start(row, now)
+    state, _remaining = _guild_boss_activity_state(row, now)
+    events = guild.setdefault('guild_boss_events', {})
+    record = events.get(str(boss_id))
+    if (isinstance(record, dict)
+            and int(record.get('event_start', 0) or 0) == event_start):
+        return record
+    if state != 1:
+        return None
+    if (not isinstance(record, dict)
+            or int(record.get('event_start', 0) or 0) != event_start):
+        if not create:
+            return None
+        npc_id = str(row.get('boss_npc_id', ''))
+        stats = get_npc_attr(npc_id)
+        record = {
+            'event_start': event_start, 'end_time': event_start + int(row.get('duration', 0) or 0),
+            'hp_max': int(stats.get('hp_max', 0)), 'hp': int(stats.get('hp_max', 0)),
+            'damage_players': {}, 'participants': {}, 'last_kill_id': 0,
+            'last_kill_name': '', 'finished': False, 'attempts': 0,
+            'reward_claims': {}, 'rewards_pending': False
+        }
+        events[str(boss_id)] = record
+        for old_id, old_record in list(events.items()):
+            if old_id != str(boss_id) and isinstance(old_record, dict):
+                old_start = int(old_record.get('event_start', 0) or 0)
+                if old_start < event_start - 86400 and not old_record.get('rewards_pending'):
+                    events.pop(old_id, None)
+    return record
+
+def _guild_boss_map_id(map_id):
+    map_id = str(map_id)
+    return next((boss_id for boss_id, row in GUILD_BOSS_DATA.items()
+                 if str(row.get('map_id', '')) == map_id), None)
+
+def _guild_boss_member(guild, char, boss_id, now=None):
+    if (not guild or not char
+            or int(guild.get('id', 0) or 0) != _guild_id_for_character(char)
+            or not is_current_character_connection(
+                ALL_CONNECTIONS.get(int(char.get('id', 0)), (None, None))[0], char)):
+        return None
+    member = _guild_member_id(guild, char.get('id', 0))
+    row = GUILD_BOSS_DATA.get(str(boss_id), {})
+    level = _guild_level(guild)
+    if (not member or int(member.get('job', 4)) == 4
+            or level < int(row.get('level_min', 0))
+            or level > int(row.get('level_max', 10))
+            or _guild_boss_activity_state(row, now)[0] != 1):
+        return None
+    return member
+
+def _guild_boss_rank_rows(record):
+    players = (record or {}).get('damage_players', {})
+    return sorted(
+        (value for value in players.values() if isinstance(value, dict)),
+        key=lambda entry: (-int(entry.get('damage', 0) or 0), int(entry.get('id', 0) or 0))
+    )
+
+def _guild_boss_activity_item(boss_id, guild, now=None):
+    row = GUILD_BOSS_DATA.get(str(boss_id), {})
+    state, remaining = _guild_boss_activity_state(row, now)
+    record = _guild_boss_record(guild, boss_id, now=now)
+    if record:
+        if record.get('finished') or state == 0:
+            state, remaining = 2, 0
+        top_rows = _guild_boss_rank_rows(record)[:3]
+        sort_items = [encode_sproto([
+            (0, int(entry.get('id', 0) or 0)),
+            (1, int(entry.get('damage', 0) or 0)),
+            (2, str(entry.get('name', ''))),
+            (3, int(entry.get('profession', 0) or 0))
+        ]) for entry in top_rows]
+        cur_num = int(record.get('attempts', 0) or 0)
+    else:
+        sort_items, cur_num = [], 0
+    return encode_sproto([
+        (0, str(boss_id)), (1, state), (2, remaining), (3, cur_num), (4, sort_items)
+    ])
+
+def _guild_boss_battle_info(char):
+    guild_id = _guild_id_for_character(char) if char else 0
+    guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
+    boss_id = _guild_boss_map_id(char.get('map_id', '')) if char else None
+    record = _guild_boss_record(guild, boss_id) if boss_id else None
+    damage_rows = _guild_boss_rank_rows(record)
+    my_id = int((char or {}).get('id', 0) or 0)
+    my_row = next((entry for entry in damage_rows
+                   if int(entry.get('id', 0) or 0) == my_id), None)
+    my_rank = next((index for index, entry in enumerate(damage_rows, 1)
+                    if int(entry.get('id', 0) or 0) == my_id), -1)
+    damage_list = [encode_sproto([
+        (0, str(entry.get('name', ''))), (1, int(entry.get('damage', 0) or 0)),
+        (2, int(entry.get('id', 0) or 0))
+    ]) for entry in damage_rows]
+    battle_info = encode_sproto([
+        (0, damage_list), (1, my_rank),
+        (2, int((my_row or {}).get('damage', 0) or 0)),
+        (3, sum(int(entry.get('damage', 0) or 0) for entry in damage_rows)),
+        (4, str((record or {}).get('last_kill_name', ''))),
+        (5, int((record or {}).get('end_time', 0) or 0))
+    ])
+    return encode_sproto([(0, battle_info), (1, 1 if record else 0)])
+
+def _guild_boss_reward_rows(reward_key, guild):
+    reward_id = str(
+        STREET_RACE_REWARD_BY_KEY_LEVEL.get(str(reward_key or ''), {}).get(
+            _guild_level(guild), ''
+        ) or ''
+    )
+    if not reward_id:
+        return None
+    rewards = SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(reward_id)
+    if rewards:
+        return list(rewards)
+    print(f"[GUILD BOSS REWARD] no explicit payout quantities key={reward_key} "
+          f"level={_guild_level(guild)} reward={reward_id}")
+    return None
+
+def _guild_boss_award(record, guild, char_id, reward_sets):
+    claims = record.setdefault('reward_claims', {})
+    claim_key = str(int(char_id))
+    claimed = set(claims.get(claim_key, []))
+    new_claims = set()
+    pending = []
+    unresolved = False
+    for reward_key, selector in reward_sets:
+        if reward_key in claimed:
+            continue
+        rewards = _guild_boss_reward_rows(selector, guild)
+        if rewards is None:
+            unresolved = True
+            continue
+        pending.extend(rewards)
+        claimed.add(reward_key)
+        new_claims.add(reward_key)
+    claims[claim_key] = sorted(claimed)
+    if not pending:
+        return not unresolved
+    char = _guild_char_by_id(char_id)
+    if not char or not can_add_reward_list_to_inventory(char, pending):
+        print(f"[GUILD BOSS REWARD] deferred for inventory capacity player={char_id}")
+        claimed.difference_update(new_claims)
+        claims[claim_key] = sorted(claimed)
+        return False
+    conn = ALL_CONNECTIONS.get(int(char_id), (None, None))[0]
+    push = (lambda tag, data: send_push_to_char(char_id, tag, data)) if conn else None
+    grant_item_rewards(char, pending, conn, push, save=False)
+    popup = encode_sproto([(0, [encode_sproto([
+        (0, str(item_id)), (1, int(amount)), (2, int(quality))
+    ]) for item_id, quality, amount in pending])])
+    if push:
+        push(638, popup)
+    save_chars(all_accounts_chars)
+    return not unresolved
+
+def _guild_boss_distribute_rewards(guild, boss_id, record):
+    rows = _guild_boss_rank_rows(record)
+    boss = GUILD_BOSS_DATA.get(str(boss_id), {})
+    pending = False
+    participant_ids = set(str(value) for value in record.get('participants', {}))
+    participant_ids.update(str(entry.get('id', 0)) for entry in rows)
+    for participant_id in sorted(participant_ids, key=lambda value: int(value)):
+        if not _guild_boss_award(record, guild, int(participant_id), [
+                ('participate', boss.get('participate_drop_id', ''))]):
+            pending = True
+    rank_drop_ids = boss.get('rank_drop_ids', [])
+    for rank, entry in enumerate(rows, 1):
+        drops = []
+        if rank <= len(rank_drop_ids):
+            drops.append((f'rank-{rank}', rank_drop_ids[rank - 1]))
+        if int(entry.get('id', 0)) == int(record.get('last_kill_id', 0) or 0):
+            drops.append(('last-kill', boss.get('last_kill_drop_id', '')))
+        if drops and not _guild_boss_award(record, guild, int(entry.get('id', 0)), drops):
+            pending = True
+    record['rewards_pending'] = pending
+    return not pending
+
+def _guild_boss_finish(guild, boss_id, record, killer_id):
+    if record.get('finished'):
+        return False
+    rows = _guild_boss_rank_rows(record)
+    if not rows:
+        return False
+    record['finished'] = True
+    killer = next((entry for entry in rows if int(entry.get('id', 0)) == int(killer_id)), {})
+    record['last_kill_id'] = int(killer_id)
+    record['last_kill_name'] = str(killer.get('name', ''))
+    _guild_boss_distribute_rewards(guild, boss_id, record)
+    _save_guild_states()
+    return True
+
+def _guild_boss_push_activity(guild):
+    for member_id in list((guild or {}).get('members', {})):
+        try:
+            cid = int(member_id)
+        except (TypeError, ValueError):
+            continue
+        conn, char = ALL_CONNECTIONS.get(cid, (None, None))
+        if conn and char and _guild_member_id(guild, cid):
+            send_rpc_push_safe(conn, 599, _guild_activity_response(guild, char))
+
+def _guild_boss_apply_hit(conn, char, target_id, client_dmg, skill_id,
+                          requested_effinfo_id, is_cri, client_cri_flag,
+                          client_hit_flag):
+    boss_id = _guild_boss_map_id(char.get('map_id', '')) if char else None
+    guild_id = _guild_id_for_character(char) if char else 0
+    guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
+    if not boss_id or not _guild_boss_member(guild, char, boss_id):
+        print(f"[GUILD BOSS SECURITY] rejected attacker={getattr(char, 'get', lambda *_: '')('id')} boss={boss_id}")
+        return False
+    row = GUILD_BOSS_DATA[boss_id]
+    record = _guild_boss_record(guild, boss_id)
+    if not record or record.get('finished'):
+        return False
+    instance_key = (str(guild_id), str(boss_id), int(record.get('event_start', 0)))
+    npc_id = str(row.get('boss_npc_id', ''))
+    if (GUILD_BOSS_INSTANCES.get(instance_key) != int(target_id)
+            or str(NPC_INST_MAP.get(int(target_id), '')) != npc_id
+            or str(NPC_INSTANCE_MAP.get(int(target_id), '')) != str(char.get('map_id', ''))):
+        print(f"[GUILD BOSS SECURITY] rejected invalid target player={char.get('id')} target={target_id}")
+        return False
+    if int(char.get('hp', 0) or 0) <= 0 or int(client_dmg) < 0 or client_cri_flag != bool(is_cri):
+        print(f"[GUILD BOSS SECURITY] rejected malformed/downed attack player={char.get('id')} target={target_id}")
+        return False
+
+    skill_id = str(skill_id)
+    skill_cfg = SKILL_CONFIG.get(skill_id)
+    if not skill_cfg:
+        print(f"[GUILD BOSS SECURITY] rejected unknown skill={skill_id} player={char.get('id')}")
+        return False
+    skill_levels = {str(key): value for key, value in (char.get('skill_levels') or {}).items()}
+    starter = get_character_combat_skills(char.get('prof', 0), char.get('equipped_equip', []))
+    available = set(starter.get('atk', []))
+    available.update((starter.get('dodge', ''), starter.get('starter_active', '')))
+    available.update(equipped_weapon_skill_ids(char))
+    if skill_id not in learned_non_weapon_skill_ids(skill_levels) and skill_id not in available:
+        print(f"[GUILD BOSS SECURITY] rejected unlearned skill={skill_id} player={char.get('id')}")
+        return False
+    try:
+        skill_level = max(0, int(skill_levels.get(skill_id, 0) or 0))
+    except (TypeError, ValueError):
+        return False
+    valid_effects = {str(skill_cfg.get(field, '')) for field in ('eff0', 'eff1', 'eff2')
+                     if skill_cfg.get(field)}
+    effinfo_id = str(requested_effinfo_id or '')
+    if not effinfo_id:
+        effinfo_id = str(skill_cfg.get('eff0', '') or '')
+    if effinfo_id not in valid_effects:
+        print(f"[GUILD BOSS SECURITY] rejected mismatched effect skill={skill_id} effect={effinfo_id}")
+        return False
+    attacker_stats = get_character_stats(char)
+    defender_stats = get_npc_attr(npc_id)
+    max_damage, can_hit, possible_crit = get_combat_damage(
+        attacker_stats, defender_stats, skill_id, skill_level,
+        effinfo_id=effinfo_id, sat_type='satm', forced_hit=True,
+        forced_crit=bool(is_cri), max_variance=True
+    )
+    if (client_dmg == 0 and (client_hit_flag or is_cri)
+            or client_dmg > 0 and (not client_hit_flag or not can_hit
+                                   or client_dmg > max_damage + 2)
+            or is_cri and not possible_crit):
+        print(f"[GUILD BOSS SECURITY] rejected impossible damage player={char.get('id')} "
+              f"damage={client_dmg} max={max_damage} crit={is_cri}")
+        return False
+
+    killed = False
+    with GUILD_BOSS_LOCK, npc_hp_lock(target_id):
+        record = _guild_boss_record(guild, boss_id)
+        hp_now = NPC_HP_MAP.get(int(target_id))
+        if (not record or record.get('finished') or hp_now is None
+                or int(hp_now) <= 0 or int(record.get('hp', 0) or 0) <= 0
+                or not _guild_boss_member(guild, char, boss_id)):
+            print(f"[GUILD BOSS SECURITY] rejected stale/dead target player={char.get('id')} target={target_id}")
+            return False
+        actual_damage = min(int(client_dmg), int(hp_now))
+        hp_after = max(0, int(hp_now) - actual_damage)
+        NPC_HP_MAP[int(target_id)] = hp_after
+        record['hp'] = hp_after
+        if actual_damage > 0:
+            char_id = str(int(char.get('id', 0)))
+            player = record.setdefault('damage_players', {}).setdefault(char_id, {
+                'id': int(char.get('id', 0)), 'name': str(char.get('name', '')),
+                'profession': int(char.get('prof', 0) or 0),
+                'damage': 0
+            })
+            player['name'] = str(char.get('name', player.get('name', '')))
+            player['profession'] = int(char.get('prof', player.get('profession', 0)) or 0)
+            player['damage'] = int(player.get('damage', 0) or 0) + actual_damage
+            record.setdefault('participants', {})[char_id] = True
+        if hp_after == 0:
+            DEAD_NPC_SET.add(int(target_id))
+            killed = _guild_boss_finish(guild, boss_id, record, int(char.get('id', 0)))
+        _save_guild_states()
+    sync_npc_attrs_rpc(conn, target_id, defender_stats, hp_after)
+    hit_entry = encode_sproto([
+        (0, int(target_id)), (1, actual_damage), (2, skill_id),
+        (3, effinfo_id), (4, bool(is_cri and client_dmg > 0))
+    ])
+    dmg_board = encode_sproto([(0, [hit_entry])])
+    for member_id in list((guild or {}).get('members', {})):
+        try:
+            peer_id = int(member_id)
+        except (TypeError, ValueError):
+            continue
+        peer_conn, peer_char = ALL_CONNECTIONS.get(peer_id, (None, None))
+        if (peer_conn and peer_char and str(peer_char.get('map_id', '')) == str(char.get('map_id', ''))
+                and _guild_member_id(guild, peer_id)
+                and int(_guild_member_id(guild, peer_id).get('job', 4)) != 4):
+            send_rpc_push_safe(peer_conn, 511, dmg_board)
+    if killed:
+        _guild_boss_push_activity(guild)
+    return True
+
+def _guild_boss_counter_damage(char, effinfo_id):
+    boss_id = _guild_boss_map_id(char.get('map_id', '')) if char else None
+    guild_id = _guild_id_for_character(char) if char else 0
+    guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
+    if not boss_id or not _guild_boss_member(guild, char, boss_id):
+        return 0, False
+    record = _guild_boss_record(guild, boss_id)
+    if not record or record.get('finished') or int(record.get('hp', 0) or 0) <= 0:
+        return 0, False
+    npc_cfg = NPC_CONFIG.get(str(GUILD_BOSS_DATA[boss_id].get('boss_npc_id', '')), {})
+    boss_skills = [value for value in str(npc_cfg.get('skill_group', '')).split(';') if value]
+    selected_skill = None
+    selected_effect = ''
+    for candidate in boss_skills:
+        cfg = SKILL_CONFIG.get(candidate, {})
+        effects = [str(cfg.get(key, '')) for key in ('eff0', 'eff1', 'eff2') if cfg.get(key)]
+        if effinfo_id and str(effinfo_id) in effects:
+            selected_skill, selected_effect = candidate, str(effinfo_id)
+            break
+    if selected_skill is None:
+        for candidate in boss_skills:
+            cfg = SKILL_CONFIG.get(candidate, {})
+            effect = str(cfg.get('eff0', '') or '')
+            if effect:
+                selected_skill, selected_effect = candidate, effect
+                break
+    if not selected_skill:
+        print(f"[GUILD BOSS] no configured attack skill boss={boss_id}")
+        return 0, False
+    boss_stats = get_npc_attr(GUILD_BOSS_DATA[boss_id].get('boss_npc_id', ''))
+    player_stats = get_character_stats(char)
+    damage, hit, critical = get_combat_damage(
+        boss_stats, player_stats, selected_skill, 1, effinfo_id=selected_effect
+    )
+    return (damage if hit else 0), (critical if hit else False)
+
 def _guild_combo(guild):
     """Compute the displayed Gang combat value from its real non-applicant members."""
     if not guild:
@@ -10014,22 +10437,29 @@ def _guild_city_broadcast_result(capture_id, winner):
         ]))
 
 def _guild_activity_response(guild=None, char=None):
+    if guild:
+        with GUILD_BOSS_LOCK:
+            retry_boss_rewards = False
+            for boss_id, record in (guild.get('guild_boss_events') or {}).items():
+                if (isinstance(record, dict) and record.get('finished')
+                        and record.get('rewards_pending')):
+                    _guild_boss_distribute_rewards(guild, boss_id, record)
+                    retry_boss_rewards = True
+            if retry_boss_rewards:
+                _save_guild_states()
     return encode_sproto([
-        (0, _guild_boss_activity_map()),
+        (0, _guild_boss_activity_map(guild)),
         (1, _guild_battle_info_bytes(guild)),
         (2, _guild_level(guild) if guild else 0),
         (3, _guild_dance_activity_info(guild)),
         (4, _guild_capture_activity_map(char=char))
     ])
 
-def _guild_boss_activity_map():
+def _guild_boss_activity_map(guild=None):
     now = int(time.time())
     result = {}
     for boss_id, row in sorted(GUILD_BOSS_DATA.items(), key=lambda item: int(item[0]) if item[0].isdigit() else 0):
-        state, next_time = _guild_boss_activity_state(row, now)
-        result[str(boss_id)] = encode_sproto([
-            (0, str(boss_id)), (1, state), (2, next_time), (3, 0), (4, [])
-        ])
+        result[str(boss_id)] = _guild_boss_activity_item(boss_id, guild, now)
     return result
 
 def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response, session):
@@ -10413,6 +10843,18 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
     elif msg == 195:  # request_guild_boss / Gang activity overview
         send_rpc_push(599, _guild_activity_response(guild, char))
 
+    elif msg == 231 and _guild_boss_map_id(char.get('map_id', '')):
+        boss_id = _guild_boss_map_id(char.get('map_id', ''))
+        if boss_id and _guild_boss_member(guild, char, boss_id):
+            battle_info = _guild_boss_battle_info(char)
+        else:
+            battle_info = encode_sproto([
+                (0, encode_sproto([(0, []), (1, -1), (2, 0), (3, 0),
+                                   (4, ''), (5, 0)])),
+                (1, 0)
+            ])
+        send_rpc_push(627, battle_info)
+
     elif msg == 285:  # req_guild_battle_info; open the configured Gang Battle panel
         send_rpc_push(662, encode_sproto([(0, _guild_battle_info_bytes(guild))]))
 
@@ -10649,14 +11091,19 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         boss_id = get_val_str(body, 0, '')
         boss_cfg = GUILD_BOSS_DATA.get(boss_id)
         state, remaining = _guild_boss_activity_state(boss_cfg) if boss_cfg else (0, 0)
-        member = _guild_member_id(guild, char_id) if guild else None
-        can_open = bool(boss_cfg and guild and member and int(member.get('job', 4)) != 4
-                        and _guild_level(guild) >= int(boss_cfg.get('level_min', 0))
-                        and state == 1)
+        can_open = False
+        record = None
+        if boss_cfg and guild and state == 1 and _guild_boss_member(guild, char, boss_id):
+            with GUILD_BOSS_LOCK:
+                record = _guild_boss_record(guild, boss_id, create=True)
+                max_attempts = max(1, int(boss_cfg.get('max_play_num', 1) or 1))
+                if record and not record.get('finished'):
+                    if int(record.get('attempts', 0) or 0) < max_attempts:
+                        record['attempts'] = int(record.get('attempts', 0) or 0) + 1
+                        _save_guild_states()
+                    can_open = int(record.get('attempts', 0) or 0) > 0
         if boss_cfg:
-            boss_payload = encode_sproto([
-                (0, boss_id), (1, state), (2, remaining), (3, 0), (4, [])
-            ])
+            boss_payload = _guild_boss_activity_item(boss_id, guild)
             send_rpc_push(628, encode_sproto([(0, can_open), (1, boss_payload)]))
         else:
             send_rpc_push(628, encode_sproto([(0, False)]))
@@ -11193,6 +11640,20 @@ def client_handler(conn, addr):
 
                     # TAG 503: enter_map
                     mid = str(picked_char.get('map_id') or '11')
+                    saved_guild_boss = _guild_boss_map_id(mid)
+                    if saved_guild_boss:
+                        saved_guild_id = _guild_id_for_character(picked_char)
+                        saved_guild = GUILD_STATES.get(str(saved_guild_id)) if saved_guild_id else None
+                        saved_boss_record = _guild_boss_record(saved_guild, saved_guild_boss)
+                        if (not _guild_boss_member(saved_guild, picked_char, saved_guild_boss)
+                                or not saved_boss_record or saved_boss_record.get('finished')):
+                            mid = str(picked_char.get('pre_copy_map') or '11')
+                            picked_char['map_id'] = mid
+                            picked_char['active_copy_id'] = None
+                            picked_char.pop('pre_copy_pos', None)
+                            picked_char.pop('pre_copy_map', None)
+                            save_chars(all_accounts_chars)
+                            print(f"[GUILD BOSS] recovered stale scene player={char_id} map={mid}")
                     if is_equipment_copy_map(mid):
                         # Equipment run objects are runtime-only. After a
                         # process restart, recover to the saved entrance
@@ -13459,6 +13920,7 @@ def client_handler(conn, addr):
                 calc_cri = False
 
                 current_map = str(picked_char.get('map_id', '')) if picked_char else ''
+                guild_boss_id = _guild_boss_map_id(current_map) if picked_char else None
                 if picked_char and (is_exp_map(current_map) or is_equipment_copy_map(current_map)):
                     # Copy monsters are calculated by the server AI from
                     # the active wave. This client-local NPC report carries no
@@ -13476,7 +13938,10 @@ def client_handler(conn, addr):
                     print(f"[RELIFE] ignored repeated attack on downed player={picked_char.get('id')} map={current_map}")
                 elif picked_char and target_id == picked_char['id']:
                     is_area = (picked_char.get('map_id') == "502")
-                    if is_area:
+                    if guild_boss_id:
+                        server_dmg, calc_cri = _guild_boss_counter_damage(
+                            picked_char, effinfo_id)
+                    elif is_area:
                         # Server-authoritative boss->player damage calculation
                         boss_id = picked_char.get('boss_inst_id')
                         if boss_id:
@@ -13521,7 +13986,7 @@ def client_handler(conn, addr):
                     # look up the correct attacker stats for exact server-authoritative calculation.
                     # However, we should NOT trust client_dmg directly as it allows damage manipulation.
                     # Use a reasonable default NPC attacker stats for server-authoritative calculation.
-                    if not is_area and picked_char:
+                    if not is_area and not guild_boss_id and picked_char:
                         # Use a generic NPC attacker with basic stats for non-arena single-copy scenes
                         # The original game trusted client-authoritative damage, but server-side validation
                         # prevents extreme manipulation while still allowing the attack to deal damage.
@@ -13602,6 +14067,13 @@ def client_handler(conn, addr):
                             continue
 
                         print(f"[COMBAT] accept_damge target={target_id} client_dmg={client_dmg} skill={skill_id} eff={requested_effinfo_id} cri={is_cri}")
+
+                        if _guild_boss_map_id(picked_char.get('map_id', '')):
+                            _guild_boss_apply_hit(
+                                conn, picked_char, target_id, client_dmg, skill_id,
+                                requested_effinfo_id, is_cri, client_cri_flag,
+                                client_hit_flag)
+                            continue
 
                         # --- Check if target is an online player (PvP) ---
                         target_cid, target_conn, target_char = find_player_connection(target_id)
@@ -14201,6 +14673,12 @@ def client_handler(conn, addr):
 
                 cur_map = str(picked_char.get('map_id', '11')) if picked_char else ''
                 report_valid = False
+                if picked_char and _guild_boss_map_id(cur_map):
+                    print(f"[GUILD BOSS] ignored client death report player={picked_char.get('id')} inst={inst_id}")
+                    if session is not None:
+                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                        conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    continue
                 if picked_char and msg == 127:
                     # MSG 127 carries the NPC's serverId. Only accept instances
                     # that this server actually created, with the matching
@@ -15145,14 +15623,31 @@ def client_handler(conn, addr):
                         guild_member = _guild_member_id(guild, picked_char.get('id', 0)) if guild else None
                         configured_boss = GUILD_BOSS_DATA.get(mid)
                         boss_state, _ = _guild_boss_activity_state(configured_boss) if configured_boss else (0, 0)
+                        same_guild_players = sum(
+                            1 for _cid, (_peer_conn, peer_char) in list(ALL_CONNECTIONS.items())
+                            if peer_char and str(peer_char.get('map_id', '')) ==
+                            str(configured_boss.get('map_id', ''))
+                            and _guild_id_for_character(peer_char) == guild_id
+                        ) if configured_boss else 0
                         valid_guild_boss = bool(
                             configured_boss and guild and guild_member
-                            and int(guild_member.get('job', 4)) != 4
-                            and _guild_level(guild) >= int(configured_boss.get('level_min', 0))
+                            and _guild_boss_member(guild, picked_char, mid)
                             and boss_state == 1
+                            and same_guild_players < int(configured_boss.get('max_player', 50) or 50)
                         )
                         if valid_guild_boss:
-                            mid = str(configured_boss.get('map_id', ''))
+                            boss_id = mid
+                            with GUILD_BOSS_LOCK:
+                                boss_record = _guild_boss_record(guild, boss_id, create=True)
+                                if boss_record and not boss_record.get('finished'):
+                                    mid = str(configured_boss.get('map_id', ''))
+                                    boss_record['attempts'] = max(1, int(boss_record.get('attempts', 0) or 0))
+                                    boss_record.setdefault('participants', {})[str(picked_char.get('id', 0))] = True
+                                    _save_guild_states()
+                                else:
+                                    valid_guild_boss = False
+                    elif _guild_boss_map_id(mid):
+                        valid_guild_boss = False
                     valid_guild_city = True
                     if msg == 322:
                         capture_cfg = GUILD_CAPTURE_CONFIG.get(mid)
@@ -17269,7 +17764,7 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif (msg in (146, 147, 148, 149, 150, 151, 152, 153, 154,
-                          169, 170, 173, 174, 175, 176, 195, 212, 233, 247,
+                          169, 170, 173, 174, 175, 176, 195, 212, 231, 233, 247,
                           285, 286, 287, 288, 289, 291, 293, 294, 295, 315, 318, 319, 320)
                   or (msg == 143 and get_val_int(body, 0, -1) == 3)
                   or (msg == 144 and get_val_int(body, 2, -1) == 3)):
