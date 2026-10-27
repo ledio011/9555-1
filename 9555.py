@@ -118,14 +118,15 @@ GUILD_BOSS_TEST_REWARD_FALLBACK = True
 GUILD_BOSS_TEST_REWARD_LOGGED = set()
 GUILD_BOSS_TEST_REWARD_RANGES = (
     # Match ShowRewardData 51001: 1001(Money), 1004(Contribution), 8801(Gang Stereo), 6002(Refine Stone)
-    # Only Rank 1 receives the Gang Stereo badge (8801).
-    (51001, 51010, (('1001', 1, 5000), ('1004', 1, 500),
-                    ('8801', 1, 1), ('6002', 1, 2))),       # Rank 1 — gets Gang Stereo badge
-    (51011, 51020, (('1001', 1, 3000), ('1004', 1, 300))),  # Rank 2
-    (51021, 51030, (('1001', 1, 1000), ('1004', 1, 100))),  # Rank 3
-    (51101, 51110, (('1001', 1, 500), ('1004', 1, 50))),    # Participation
-    (51201, 51210, (('1001', 1, 2000), ('1004', 1, 200))),  # Final hit
-    (51301, 51310, (('1001', 1, 100), ('1004', 1, 10))),    # All members (guild-wide)
+    # Only Rank 1 receives the Gang Stereo badge (8801) and Refine Stone (6002).
+    # Minimal amounts — Gang Boss is a daily activity, not a major reward source.
+    (51001, 51010, (('1001', 1, 500), ('1004', 1, 50),
+                    ('8801', 1, 1), ('6002', 1, 1))),        # Rank 1 — gets Gang Stereo badge + 1 refine stone
+    (51011, 51020, (('1001', 1, 300), ('1004', 1, 30))),    # Rank 2
+    (51021, 51030, (('1001', 1, 100), ('1004', 1, 10))),    # Rank 3
+    (51101, 51110, (('1001', 1, 50), ('1004', 1, 5))),      # Participation
+    (51201, 51210, (('1001', 1, 100), ('1004', 1, 10))),    # Final hit
+    (51301, 51310, (('1001', 1, 10), ('1004', 1, 1))),      # All members (guild-wide)
 )
 KILL_TARGET_SPAWNS = {} # logicId -> list of spawns
 TARGET_CAR_SPAWNS = {}  # logicId -> list of car spawns
@@ -10190,11 +10191,13 @@ def _guild_boss_battle_info(char, include_state=True):
     return encode_sproto([(0, battle_info), (1, 1 if record else 0)])
 
 def _guild_boss_reward_rows(reward_key, guild):
-    reward_key = str(reward_key or '')
-    guild_level = _guild_level(guild)
-    reward_id = str(
-        STREET_RACE_REWARD_BY_KEY_LEVEL.get(reward_key, {}).get(guild_level, '') or ''
-    )
+    """Resolve a Gang Boss ShowRewardData ID to its item list.
+
+    GuildBossData columns (LastKillDropId, RankDropIds, ParticipateDropId,
+    ExistDropId) already contain ShowRewardData IDs — they do NOT go through
+    AdaptData level mapping.  Use the ID directly.
+    """
+    reward_id = str(reward_key or '')
     if not reward_id:
         return None
     rewards = SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(reward_id)
@@ -10214,14 +10217,14 @@ def _guild_boss_reward_rows(reward_key, guild):
                 if reward_id not in GUILD_BOSS_TEST_REWARD_LOGGED:
                     GUILD_BOSS_TEST_REWARD_LOGGED.add(reward_id)
                     print(f"[GUILD BOSS TEST REWARD FALLBACK] "
-                          f"key={reward_key} level={guild_level} reward={reward_id}; "
+                          f"reward={reward_id}; "
                           "using proposed test quantities, not client-authoritative values")
                 return list(fallback_rewards)
-    missing_key = (reward_key, guild_level, reward_id)
+    missing_key = reward_id
     if missing_key not in GUILD_BOSS_MISSING_REWARD_LOGGED:
         GUILD_BOSS_MISSING_REWARD_LOGGED.add(missing_key)
         print(f"[GUILD BOSS REWARD BLOCKED] no explicit payout quantities "
-              f"key={reward_key} level={guild_level} reward={reward_id}; "
+              f"reward={reward_id}; "
               "grant skipped")
     return None
 
@@ -10238,16 +10241,11 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
     for reward_key, selector in reward_sets:
         if reward_key in claimed:
             continue
-        guild_level = _guild_level(guild)
-        reward_id = str(
-            STREET_RACE_REWARD_BY_KEY_LEVEL.get(str(selector or ''), {}).get(
-                guild_level, '') or ''
-        )
         rewards = _guild_boss_reward_rows(selector, guild)
         if rewards is None:
             unresolved = True
             audit_packages.append(
-                f"{reward_key}:{selector}->{reward_id or 'unresolved'}:BLOCKED")
+                f"{reward_key}:{selector}->unresolved:BLOCKED")
             continue
         pending.extend(rewards)
         audit_items = ','.join(
@@ -10255,7 +10253,7 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
             for item_id, quality, amount in rewards
         )
         audit_packages.append(
-            f"{reward_key}:{selector}->{reward_id}[{audit_items}]")
+            f"{reward_key}:{selector}->{selector}[{audit_items}]")
         claimed.add(reward_key)
         new_claims.add(reward_key)
     if not pending:
