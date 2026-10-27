@@ -108,6 +108,26 @@ GUILD_BOSS_DATA = {} # guild boss/activity rows shown by the Gang activity panel
 GUILD_BOSS_TEST_ALWAYS_OPEN = True
 GUILD_BOSS_POST_KILL_EXIT_SECONDS = 5
 GUILD_BOSS_MISSING_REWARD_LOGGED = set()
+# Temporary server-side test packages for Gang Boss because the shipped APK
+# export omits explicit quantities for reward IDs 51001-51010 and 51011-51310.
+# These amounts follow the proposed test package list, not an authoritative
+# copy of the original live-service payout table. Complete ShowRewardData rows
+# always take precedence below. Disable this fallback once authoritative rows
+# have been added to the server's TextAsset data.
+GUILD_BOSS_TEST_REWARD_FALLBACK = True
+GUILD_BOSS_TEST_REWARD_LOGGED = set()
+GUILD_BOSS_TEST_REWARD_RANGES = (
+    (51001, 51010, (('1001', 1, 50000), ('1004', 1, 500),
+                    ('8801', 1, 1), ('6002', 1, 2))),      # Rank 1
+    (51011, 51020, (('1001', 1, 40000), ('1004', 1, 400),
+                    ('8801', 1, 1))),                     # Rank 2
+    (51021, 51030, (('1001', 1, 30000), ('1004', 1, 300),
+                    ('8801', 1, 1))),                     # Rank 3
+    (51101, 51110, (('1001', 1, 10000), ('1004', 1, 100))),  # Participation
+    (51201, 51210, (('1001', 1, 20000), ('1004', 1, 200),
+                    ('6002', 1, 1))),                     # Final hit
+    (51301, 51310, (('1001', 1, 5000), ('1004', 1, 50))),    # All members
+)
 KILL_TARGET_SPAWNS = {} # logicId -> list of spawns
 TARGET_CAR_SPAWNS = {}  # logicId -> list of car spawns
 MISSION_REQUIRE_DATA = {} # logicId -> dict
@@ -10178,7 +10198,24 @@ def _guild_boss_reward_rows(reward_key, guild):
         return None
     rewards = SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(reward_id)
     if rewards:
+        # Authoritative, fully populated ShowRewardData always wins.
         return list(rewards)
+    # The available client export has IDs for all six reward categories but
+    # lacks explicit item counts for those rows. This opt-in test fallback
+    # applies the proposed test packages to the level-specific ID ranges.
+    if GUILD_BOSS_TEST_REWARD_FALLBACK:
+        try:
+            numeric_reward_id = int(reward_id)
+        except (TypeError, ValueError):
+            numeric_reward_id = 0
+        for first_id, last_id, fallback_rewards in GUILD_BOSS_TEST_REWARD_RANGES:
+            if first_id <= numeric_reward_id <= last_id:
+                if reward_id not in GUILD_BOSS_TEST_REWARD_LOGGED:
+                    GUILD_BOSS_TEST_REWARD_LOGGED.add(reward_id)
+                    print(f"[GUILD BOSS TEST REWARD FALLBACK] "
+                          f"key={reward_key} level={guild_level} reward={reward_id}; "
+                          "using proposed test quantities, not client-authoritative values")
+                return list(fallback_rewards)
     missing_key = (reward_key, guild_level, reward_id)
     if missing_key not in GUILD_BOSS_MISSING_REWARD_LOGGED:
         GUILD_BOSS_MISSING_REWARD_LOGGED.add(missing_key)
