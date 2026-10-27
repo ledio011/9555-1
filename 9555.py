@@ -510,12 +510,12 @@ try:
     # Guild UI tables are authoritative for capacity, donations, skill cost,
     # and guild-shop inventory. Keep these separate from unrelated shop logic.
     for asset_name, target, parser in (
-        ("GuildLevelData", GUILD_LEVEL_DATA,
-         lambda p: (int(p[1]), {"exp": int(p[2]), "max_player": int(p[3]), "donate_count": int(p[4])})),
-        ("GuildDonateData", GUILD_DONATE_DATA,
-         lambda p: (str(p[1]), {"item_id": str(p[2]), "item_count": int(p[3]),
-                                "contribute": int(p[4]), "exp": int(p[5]),
-                                "donate_count": int(p[6])})),
+            ("GuildLevelData", GUILD_LEVEL_DATA,
+             lambda p: (int(p[1]), {"exp": int(p[2]), "max_player": int(p[3]), "donate_count": int(p[4])})),
+            ("GuildDonateData", GUILD_DONATE_DATA,
+             lambda p: (str(p[1]), {"item_id": str(p[2]), "item_count": int(p[3]),
+                                    "contribute": int(p[4]), "exp": int(p[5]),
+                                    "donate_count": int(p[6])})),
     ):
         table_path = os.path.join(text_asset_root, asset_name)
         if os.path.exists(table_path):
@@ -1272,8 +1272,8 @@ try:
                             (int(parts[index]), int(parts[index + 1]))
                             for index in range(5, min(25, len(parts) - 1), 2)
                             if parts[index].strip().lstrip('-').isdigit()
-                            and parts[index + 1].strip().lstrip('-').isdigit()
-                            and int(parts[index]) > 0
+                               and parts[index + 1].strip().lstrip('-').isdigit()
+                               and int(parts[index]) > 0
                         ]
                     }
         print(f"[TITLE CONFIG LOADED] levels={len(TITLE_CONFIG)}")
@@ -1459,7 +1459,7 @@ try:
                               if not any(item_id and amount > 0
                                          for item_id, _quality, amount
                                          in SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(
-                                             str(level_map.get(reward_level, '') or ''), []))]
+                    str(level_map.get(reward_level, '') or ''), []))]
             if missing_levels:
                 print(f"[LEVEL REWARD DATA MISSING] key={reward_key} levels={missing_levels}")
         # Log street race rewards for verification
@@ -1640,7 +1640,7 @@ try:
                             (parts[offset].strip(), int(parts[offset + 1]))
                             for offset in range(4, min(16, len(parts) - 1), 2)
                             if parts[offset].strip().isdigit() and parts[offset + 1].strip().isdigit()
-                            and int(parts[offset + 1]) > 0
+                               and int(parts[offset + 1]) > 0
                         ],
                         'attributes': attributes
                     }
@@ -1673,7 +1673,7 @@ try:
                             (parts[offset].strip(), int(parts[offset + 1]))
                             for offset in range(34, len(parts) - 1, 2)
                             if parts[offset].strip().isdigit() and parts[offset + 1].strip().isdigit()
-                            and int(parts[offset + 1]) > 0
+                               and int(parts[offset + 1]) > 0
                         ],
                         'skills': skills
                     }
@@ -1887,7 +1887,7 @@ def _serializable_character_data(value, seen=None):
             key: _serializable_character_data(item, seen)
             for key, item in value.items()
             if key not in ('exp_stage_state', 'equipment_stage_state', 'equipment_team_id')
-            and not isinstance(item, threading.Timer)
+               and not isinstance(item, threading.Timer)
         }
         seen.remove(marker)
         return result
@@ -2496,15 +2496,15 @@ def apply_skill_level_up(character, skill_id, client_level, upgrade_all=False):
     is_weapon_skill = (skill_id in ALL_WEAPON_SKILL_IDS
                        or skill_id in ALL_EQUIPMENT_BASE_SKILL_IDS)
     skill_owned = (
-        skill_id in owned_starter_skills
-        or skill_id in weapon_skill_ids
-        or (skill_key in skill_levels and not is_weapon_skill)
+            skill_id in owned_starter_skills
+            or skill_id in weapon_skill_ids
+            or (skill_key in skill_levels and not is_weapon_skill)
     )
     skill_cfg = SKILL_CONFIG.get(skill_id, {})
     request_valid = (
-        skill_owned and bool(skill_cfg)
-        and int(skill_cfg.get('is_upgrade', 0)) == 1
-        and client_level == current_level and current_level >= 0
+            skill_owned and bool(skill_cfg)
+            and int(skill_cfg.get('is_upgrade', 0)) == 1
+            and client_level == current_level and current_level >= 0
     )
     if not request_valid:
         return 0, current_level, False
@@ -3628,8 +3628,8 @@ def is_character_available_for_team(char):
     reconcile_exp_stage_login(char)
     reconcile_equipment_stage_login(char)
     return (not char.get('exp_stage_state') and not char.get('equipment_stage_state')
-        and not char.get('_exp_leave_timer') and not is_exp_map(char.get('map_id'))
-        and not is_equipment_copy_map(char.get('map_id')) and not is_active_daily_copy_current(char))
+            and not char.get('_exp_leave_timer') and not is_exp_map(char.get('map_id'))
+            and not is_equipment_copy_map(char.get('map_id')) and not is_active_daily_copy_current(char))
 
 def can_aoi_exchange(source, target):
     if not source or not target or source.get('id')==target.get('id') or str(source.get('map_id'))!=str(target.get('map_id')): return False
@@ -3684,10 +3684,10 @@ def team_member_blob(char, team_id):
     attempts = copy_attempts_remaining(char, goal, goal_cfg) if is_team_battle_copy(goal) else -1
     hp_cur = current_character_hp(char, stats)
     return encode_sproto([(0, int(char.get('id', 0))), (1, int(team_id)), (2, str(char.get('name', 'Hero'))),
-        (3, int(char.get('level', 1))), (4, int(char.get('prof', 0))), (5, int(stats.get('power', 0))),
-        (6, int(char.get('map_id', 11))), (7, 0), (8, 0), (9, hp_cur),
-        (10, hpmax), (14, build_main_player_visual(char)), (15, attempts),
-        (16, int(char.get('guild_id', 0))), (17, str(char.get('guild_name', '')))])
+                          (3, int(char.get('level', 1))), (4, int(char.get('prof', 0))), (5, int(stats.get('power', 0))),
+                          (6, int(char.get('map_id', 11))), (7, 0), (8, 0), (9, hp_cur),
+                          (10, hpmax), (14, build_main_player_visual(char)), (15, attempts),
+                          (16, int(char.get('guild_id', 0))), (17, str(char.get('guild_name', '')))])
 
 def team_payload(team):
     if not team or not team.get('members'):
@@ -3702,8 +3702,8 @@ def team_payload(team):
         char = ALL_CONNECTIONS.get(int(cid), (None, team.get('char_refs', {}).get(int(cid))))[1]
         if char is not None: others[int(cid)] = team_member_blob(char, team['id'])
     return encode_sproto([(0, int(team['id'])), (1, team_member_blob(leader, team['id'])), (2, len(team['members'])),
-        (3, int(team.get('verify', 0))), (4, others), (5, str(team.get('goal_id', ''))),
-        (6, int(team.get('min_level', 1))), (7, int(team.get('max_level', 80))), (8, int(team.get('recruit', 0)))])
+                          (3, int(team.get('verify', 0))), (4, others), (5, str(team.get('goal_id', ''))),
+                          (6, int(team.get('min_level', 1))), (7, int(team.get('max_level', 80))), (8, int(team.get('recruit', 0)))])
 
 def send_team_update(team_id, only_ids=None):
     team = TEAM_STATES.get(int(team_id))
@@ -4550,7 +4550,7 @@ def personal_dance_reward_list(char, dance_id, running_source='', interval_index
     # row for the same active reward category and supplies the item identity.
     active_reward_rows = (SHOW_REWARD_CONFIG.get(active_drop_id)
                           or SHOW_REWARD_CONFIG.get(
-                              str(activity.get('ShowRewardId', '') or '').strip(), []))
+                str(activity.get('ShowRewardId', '') or '').strip(), []))
     active_items = {
         (str(item_id), int(quality))
         for item_id, quality, _preview_count in active_reward_rows
@@ -4662,11 +4662,11 @@ def personal_dance_reward_timer_tick(char_id, run_id):
         # refreshed after settling, including the final 00:00 update.
         runtime_before = char.get('dance_runtime', {})
         update_daily_dance_time = (
-            str(char.get('map_id')) == str(CITY_DANCE_CONFIG.get('101', {}).get('MapId', '101'))
-            and isinstance(runtime_before, dict)
-            and runtime_before.get('running')
-            and runtime_before.get('running_source') == 'free'
-            and str(runtime_before.get('dance_run_id', '')) == str(run_id)
+                str(char.get('map_id')) == str(CITY_DANCE_CONFIG.get('101', {}).get('MapId', '101'))
+                and isinstance(runtime_before, dict)
+                and runtime_before.get('running')
+                and runtime_before.get('running_source') == 'free'
+                and str(runtime_before.get('dance_run_id', '')) == str(run_id)
         )
         runtime = settle_personal_dance(char, stop=False, expected_run_id=run_id)
         if update_daily_dance_time:
@@ -6256,8 +6256,8 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
             live_targets = exp_online_members(exp_state, alive=True)
             if not live_targets: continue
             _tid, target_conn, target_char = min(live_targets, key=lambda item: (
-                exp_state.get('player_auth_pos', {}).get(int(item[0]), item[2].get('pos', [0,100,0,0]))[0] / 100.0 - m_pos[0]) ** 2 + (
-                exp_state.get('player_auth_pos', {}).get(int(item[0]), item[2].get('pos', [0,100,0,0]))[2] / 100.0 - m_pos[1]) ** 2)
+                                                                                        exp_state.get('player_auth_pos', {}).get(int(item[0]), item[2].get('pos', [0,100,0,0]))[0] / 100.0 - m_pos[0]) ** 2 + (
+                                                                                        exp_state.get('player_auth_pos', {}).get(int(item[0]), item[2].get('pos', [0,100,0,0]))[2] / 100.0 - m_pos[1]) ** 2)
             conn_for_sync = target_conn; picked_char = target_char
             target_pos = exp_state.get('player_auth_pos', {}).get(
                 int(picked_char.get('id', 0)), picked_char.get('pos', [0, 100, 0, 0]))
@@ -7143,7 +7143,7 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
         ready = [
             skill for skill in skills
             if distance <= skill_ranges[skill]
-            and float(runtime['skill_ready_at'].get(skill, 0.0)) <= now
+               and float(runtime['skill_ready_at'].get(skill, 0.0)) <= now
         ]
         if ready:
             skill_id = max(ready, key=lambda skill: int(SKILL_CONFIG[skill].get('priority', 0)))
@@ -7243,11 +7243,11 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             now=int(time.time()); members=picked_char.get('exp_members') or [int(picked_char.get('id',0))]
             duration=int((COPY_SCENE_CONFIG.get(copy_id) or {}).get('exist_time') or 600)
             state={'copy_id':copy_id,'map_id':map_str,'members':list(dict.fromkeys(int(x) for x in members)),
-                'owner_id':int(picked_char.get('id',0)),'team_id':picked_char.get('exp_team_id'),'char_refs':{},
-                'cur_group':1,'cur_wave':1,'subwave':1,'wave_kills':0,'total_kills':0,'deaths':0,
-                'start_time':now,'end_time':now+duration,'group_start_time':now,'active_monsters':[],'monster_pos':{},'monster_heading':{},
-                'ai_active':True,'run_initialized':True,'runtime_started':False,
-                'defer_start':bool(picked_char.get('exp_defer_start')),'kill_tracker':[],'killed_npcs':[],'spawned_npcs':set()}
+                   'owner_id':int(picked_char.get('id',0)),'team_id':picked_char.get('exp_team_id'),'char_refs':{},
+                   'cur_group':1,'cur_wave':1,'subwave':1,'wave_kills':0,'total_kills':0,'deaths':0,
+                   'start_time':now,'end_time':now+duration,'group_start_time':now,'active_monsters':[],'monster_pos':{},'monster_heading':{},
+                   'ai_active':True,'run_initialized':True,'runtime_started':False,
+                   'defer_start':bool(picked_char.get('exp_defer_start')),'kill_tracker':[],'killed_npcs':[],'spawned_npcs':set()}
             for cid in state['members']:
                 member=ALL_CONNECTIONS.get(cid,(None,None))[1]
                 if member is not None: state['char_refs'][cid]=member; member['exp_stage_state']=state
@@ -7542,7 +7542,7 @@ def _normalise_backpack_item(item, next_index):
     if not isinstance(item, dict):
         return None, next_index
     item_id = str(item.get('id', item.get('itemId', item.get('item_id',
-                  item.get('itemID', item.get('ItemId', item.get('ID', '')))))))
+                                                             item.get('itemID', item.get('ItemId', item.get('ID', '')))))))
     if not item_id:
         return None, next_index
     item['id'] = item_id
@@ -8697,8 +8697,8 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                 race_copy_ids = {str(copy_id) for copy_id, race_cfg in COPY_SCENE_CONFIG.items()
                                  if race_cfg.get('subtype') == 7}
                 matched = event == 'car_copy' and (
-                    target_id_str in race_copy_ids
-                    or target_id_str in ['102', '飙车副本']
+                        target_id_str in race_copy_ids
+                        or target_id_str in ['102', '飙车副本']
                 )
             elif logic_type == 105:
                 # Mission 1019 (EXP copy) stores its discriminator in Target=105;
@@ -9866,10 +9866,10 @@ def _guild_reconcile_character_membership(char):
             })
             expected_guild_id = int(guild.get('id', 0) or 0)
             needs_character_sync = (
-                current_guild_id != expected_guild_id
-                or stored_guild_ids != {expected_guild_id}
-                or str(char.get('guildName', '') or '') != str(guild.get('name', '') or '')
-                or str(char.get('guild_name', '') or '') != str(guild.get('name', '') or '')
+                    current_guild_id != expected_guild_id
+                    or stored_guild_ids != {expected_guild_id}
+                    or str(char.get('guildName', '') or '') != str(guild.get('name', '') or '')
+                    or str(char.get('guild_name', '') or '') != str(guild.get('name', '') or '')
             )
             needs_member_sync = existing is None or existing != member
             if needs_character_sync or needs_member_sync:
@@ -9906,9 +9906,9 @@ def _guild_reconcile_character_membership(char):
         # fallback evidence used to restore owner privileges.
         legacy_guild = GUILD_STATES.get(str(current_guild_id)) if current_guild_id else None
         legacy_names = {
-            str(char.get('guildName', '') or '').strip().casefold(),
-            str(char.get('guild_name', '') or '').strip().casefold()
-        } - {''}
+                           str(char.get('guildName', '') or '').strip().casefold(),
+                           str(char.get('guild_name', '') or '').strip().casefold()
+                       } - {''}
         legacy_guild_name = str((legacy_guild or {}).get('name', '') or '').strip()
         if (not pending and isinstance(legacy_guild, dict)
                 and stored_guild_ids == {current_guild_id}
@@ -10511,7 +10511,11 @@ def _guild_boss_start_exit_countdown(guild, boss_id, record):
                 and str(char.get('map_id', '')) == map_id):
             send_rpc_push_safe(conn, 629, countdown)
             send_rpc_push_safe(conn, 529, notice)
+    # Use GUILD_BOSS_POST_KILL_EXIT_SECONDS for the auto-exit delay,
+    # not the raw end_time difference which may already be expired.
     delay = max(0.0, end_time - time.time())
+    if delay <= 0:
+        delay = float(GUILD_BOSS_POST_KILL_EXIT_SECONDS)
     timer = threading.Timer(
         delay, _guild_boss_auto_exit,
         args=(int(guild.get('id', 0)), str(boss_id), int(record.get('event_start', 0) or 0))
@@ -10528,10 +10532,18 @@ def _guild_boss_send_result(guild, boss_id, record):
         except (TypeError, ValueError):
             continue
         conn, char = ALL_CONNECTIONS.get(char_id, (None, None))
+        # After defeat, _guild_boss_member rejects because activity state is no
+        # longer 1. Use a relaxed check: only verify the player is online, on the
+        # boss map, and belongs to the guild (skip the activity-state gate).
         if (not conn or not char or not is_current_character_connection(conn, char)
-                or str(char.get('map_id', '')) != map_id
-                or str(char.get('active_copy_id', '')) != map_id
-                or not _guild_boss_member(guild, char, boss_id)):
+                or str(char.get('map_id', '')) != map_id):
+            continue
+        # Verify guild membership without the activity-state gate
+        guild_id = _guild_id_for_character(char)
+        if guild_id != int(guild.get('id', 0)):
+            continue
+        member = _guild_member_id(guild, char_id)
+        if not member or int(member.get('job', 4)) == 4:
             continue
         item_list = []
         for reward in delivered.get(str(char_id), []):
@@ -10579,7 +10591,10 @@ def _guild_boss_finish(guild, boss_id, record, killer_id):
             old_timer = runtime.get('timer')
             if old_timer:
                 old_timer.cancel()
-        delay = max(1, int(boss_cfg.get('exist_time', 10) or 10))
+        # Clean up the boss NPC after players have been teleported out.
+        # Use GUILD_BOSS_POST_KILL_EXIT_SECONDS + buffer so the NPC disappears
+        # after the auto-exit timer fires.
+        delay = float(GUILD_BOSS_POST_KILL_EXIT_SECONDS) + 2.0
         cleanup = threading.Timer(
             delay, _guild_boss_remove_instance,
             args=(runtime_key, int(inst_id), str(boss_cfg.get('map_id', '')))
@@ -11460,7 +11475,20 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
 
     elif msg == 231:  # request_battle_info; Gang Boss live battle/damage ranking
         boss_id = _guild_boss_map_id(char.get('map_id', '')) if char else None
+        # Allow battle info during and immediately after defeat (before auto-exit).
+        # _guild_boss_member rejects once the boss is finished, so check the
+        # record directly when the player is on the boss map.
+        allow_battle_info = False
         if boss_id and _guild_boss_member(guild, char, boss_id):
+            allow_battle_info = True
+        if not allow_battle_info and boss_id and guild:
+            record = _guild_boss_record(guild, boss_id)
+            if record and record.get('finished'):
+                # Boss was just defeated; still show battle info until auto-exit.
+                member = _guild_member_id(guild, int(char.get('id', 0)))
+                if member and int(member.get('job', 4)) != 4:
+                    allow_battle_info = True
+        if allow_battle_info:
             battle_info = _guild_boss_battle_info(char)
         else:
             battle_info = encode_sproto([
@@ -11723,6 +11751,18 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         if boss_cfg:
             boss_payload = _guild_boss_activity_item(boss_id, guild)
             send_rpc_push(628, encode_sproto([(0, can_open), (1, boss_payload)]))
+            # Teleport the player to the boss map when can_open is true
+            if can_open:
+                boss_map_id = str(boss_cfg.get('map_id', ''))
+                if boss_map_id:
+                    # Save pre-copy position for return after boss fight
+                    if char.get('pre_copy_pos') is None:
+                        char['pre_copy_pos'] = list(char.get('pos', [0, 100, 0, 0]))
+                        char['pre_copy_map'] = str(char.get('map_id', '11'))
+                    char['active_copy_id'] = boss_map_id
+                    save_chars(all_accounts_chars)
+                    start_map_transition(conn, char, boss_map_id, send_rpc_push)
+                    print(f"[GUILD BOSS] entered player={char.get('id')} boss={boss_id} map={boss_map_id}")
         else:
             send_rpc_push(628, encode_sproto([(0, False)]))
 
@@ -12075,7 +12115,7 @@ def client_handler(conn, addr):
                                                   or picked_char.get('pos')
                                                   or [29860, 100, -17005, 0])
                     elif orphaned_race_map or (active_copy_cfg.get('subtype') == 7
-                                              and not active_race):
+                                               and not active_race):
                         # A disconnect during a half-finished transition can leave
                         # the route ID and physical map out of sync. Return to the
                         # saved entrance instead of loading a broken race scene.
@@ -12500,7 +12540,7 @@ def client_handler(conn, addr):
                 requested_map = field_text(body, 2, '')
                 reconnect_char = next((c for c in get_account_chars(
                     all_accounts_chars, cur_areaId, acc_id)
-                    if int(c.get('id', 0)) == reconnect_char_id), None)
+                                       if int(c.get('id', 0)) == reconnect_char_id), None)
                 if reconnect_char:
                     reconcile_equipment_stage_login(reconnect_char)
                     char_map = str(reconnect_char.get('map_id') or '11')
@@ -12523,8 +12563,8 @@ def client_handler(conn, addr):
                     requested_race = street_race_config_for_map(requested_map)
                     char_race_map = street_race_config_for_map(char_map)
                     is_street_race_reconnect = bool(active_race or requested_race or char_race_map
-                                                     or active_cfg.get('subtype') == 7
-                                                     or reconnect_char.get('_street_race_return_reconnect'))
+                                                    or active_cfg.get('subtype') == 7
+                                                    or reconnect_char.get('_street_race_return_reconnect'))
                     transition_override_pos = None
                     if picked_char and int(picked_char.get('id', 0)) != reconnect_char_id:
                         old_id = int(picked_char.get('id', 0))
@@ -12668,7 +12708,7 @@ def client_handler(conn, addr):
                 if picked_char:
                     move_stage_state = (picked_char.get('exp_stage_state') if is_exp_move_map
                                         else picked_char.get('equipment_stage_state') if is_equipment_move_map
-                                        else None)
+                    else None)
                 stale_race_socket = bool(picked_char and street_race_config_for_map(move_map)
                                          and not is_current_character_connection(conn, picked_char))
                 stage_move_valid = bool(
@@ -12985,9 +13025,9 @@ def client_handler(conn, addr):
                             print(f"[SKILL LOCKED] sid={sid} req={req_lv}")
                             send_rpc_push(529, encode_sproto([(0, "#{100681}"), (1, True)]))
                         else:
-                        # Do not echo Tag 508 back to the casting player.
-                        # The casting player executes skill effects locally on client.
-                        # Broadcast TAG 508 (ret_skill_use) to other players on the same map
+                            # Do not echo Tag 508 back to the casting player.
+                            # The casting player executes skill effects locally on client.
+                            # Broadcast TAG 508 (ret_skill_use) to other players on the same map
                             attacker_id = picked_char.get('id', 0)
                             attacker_map = str(picked_char.get('map_id', '11'))
                             try:
@@ -13377,13 +13417,13 @@ def client_handler(conn, addr):
                         prior_row = (REFINE_BY_PART_LEVEL.get((profession, part, current_level - 1))
                                      if current_level > 0 else None)
                         request_matches = (
-                            current_row is not None and target_row is not None
-                            and target_row['id'] == refine_id
-                            and current_row['id'] == current_id
-                            and (prior_row['id'] if prior_row else '') == pre_id
-                            and int(target_row['level']) == requested_level
-                            and 1 <= part <= 4 and requested_level == current_level + 1
-                            and requested_level <= 10
+                                current_row is not None and target_row is not None
+                                and target_row['id'] == refine_id
+                                and current_row['id'] == current_id
+                                and (prior_row['id'] if prior_row else '') == pre_id
+                                and int(target_row['level']) == requested_level
+                                and 1 <= part <= 4 and requested_level == current_level + 1
+                                and requested_level <= 10
                         )
                         if request_matches:
                             money_type = int(current_row.get('money_type', -1))
@@ -13511,14 +13551,14 @@ def client_handler(conn, addr):
                                 consumed_exp += threshold
                                 result_level += 1
                             valid = (
-                                int(ITEM_CONFIG.get(source_id, {}).get('type', -1)) == 2
-                                and int(ITEM_CONFIG.get(target_id, {}).get('type', -1)) == 2
-                                and bool(source_cfg) and bool(target_cfg)
-                                and source_subtype == target_subtype
-                                and target_job in (-1, int(picked_char.get('prof', 0)))
-                                and source_exp > 0 and consumed_exp > 0
-                                and result_level > target_level
-                                and get_currency_balance(picked_char, 0) >= consumed_exp
+                                    int(ITEM_CONFIG.get(source_id, {}).get('type', -1)) == 2
+                                    and int(ITEM_CONFIG.get(target_id, {}).get('type', -1)) == 2
+                                    and bool(source_cfg) and bool(target_cfg)
+                                    and source_subtype == target_subtype
+                                    and target_job in (-1, int(picked_char.get('prof', 0)))
+                                    and source_exp > 0 and consumed_exp > 0
+                                    and result_level > target_level
+                                    and get_currency_balance(picked_char, 0) >= consumed_exp
                             )
                             if valid:
                                 power_before = get_character_stats(picked_char)['power']
@@ -13653,27 +13693,27 @@ def client_handler(conn, addr):
                                 else:
                                     try:
                                         same_inherit_key = (
-                                            int(selected_value)
-                                            == int(_random_attr_field(target_roll, 1, 'id'))
+                                                int(selected_value)
+                                                == int(_random_attr_field(target_roll, 1, 'id'))
                                         )
                                     except (TypeError, ValueError):
                                         same_inherit_key = False
                             valid = (
-                                source_index != target_index
-                                and int(ITEM_CONFIG.get(source_id, {}).get('type', -1)) == 2
-                                and int(ITEM_CONFIG.get(target_id, {}).get('type', -1)) == 2
-                                and source_cfg and target_cfg
-                                and source_subtype == target_subtype
-                                and ((source_subtype == 0) if is_weapon else (source_subtype != 0))
-                                and isinstance(source_roll, dict)
-                                and (target_roll is None or isinstance(target_roll, dict))
-                                and source_roll_key is not None
-                                and (target_roll_key is not None or target_roll is None)
-                                and 1 <= target_attr_index <= 6
-                                and selected_value not in (None, '', 0, '0')
-                                and same_inherit_key
-                                and inherit_quality >= 0
-                                and (not quality_rows or inherit_quality < len(quality_rows))
+                                    source_index != target_index
+                                    and int(ITEM_CONFIG.get(source_id, {}).get('type', -1)) == 2
+                                    and int(ITEM_CONFIG.get(target_id, {}).get('type', -1)) == 2
+                                    and source_cfg and target_cfg
+                                    and source_subtype == target_subtype
+                                    and ((source_subtype == 0) if is_weapon else (source_subtype != 0))
+                                    and isinstance(source_roll, dict)
+                                    and (target_roll is None or isinstance(target_roll, dict))
+                                    and source_roll_key is not None
+                                    and (target_roll_key is not None or target_roll is None)
+                                    and 1 <= target_attr_index <= 6
+                                    and selected_value not in (None, '', 0, '0')
+                                    and same_inherit_key
+                                    and inherit_quality >= 0
+                                    and (not quality_rows or inherit_quality < len(quality_rows))
                             )
                             inherit_debug.update({
                                 'source_item': source_id, 'target_item': target_id,
@@ -13697,9 +13737,9 @@ def client_handler(conn, addr):
                                 if gold_cost >= 0 and gold_balance >= gold_cost:
                                     inherited_roll = dict(source_roll)
                                     index_key = (0 if 0 in inherited_roll else '0'
-                                                 if '0' in inherited_roll else 'index')
+                                    if '0' in inherited_roll else 'index')
                                     quality_key = (5 if 5 in inherited_roll else '5'
-                                                   if '5' in inherited_roll else 'qualityId')
+                                    if '5' in inherited_roll else 'qualityId')
                                     inherited_roll[index_key] = target_attr_index
                                     if source_quality_id:
                                         inherited_roll[quality_key] = source_quality_id
@@ -14158,8 +14198,8 @@ def client_handler(conn, addr):
                             # boxes, and their keys in the item bag. Fashion
                             # items are not sellable by the client.
                             sellable_in_container = (
-                                (container_type == 0 and item_type == 2)
-                                or (container_type == 2 and item_type in (3, 4, 15, 20, 21))
+                                    (container_type == 0 and item_type == 2)
+                                    or (container_type == 2 and item_type in (3, 4, 15, 20, 21))
                             )
                             if (sellable_in_container
                                     and item_count <= int(item.get('amount', 0))):
@@ -14205,9 +14245,9 @@ def client_handler(conn, addr):
                             money_type = int(source_badge.get('money_type', 0))
                             cost = max(0, int(source_badge.get('upgrade_cost', 0))) * merge_count
                             same_badge_line = (source_badge and target_badge
-                                and source_badge.get('badge_type') == target_badge.get('badge_type')
-                                and source_badge.get('color') == target_badge.get('color')
-                                and int(target_badge.get('level', -1)) == int(source_badge.get('level', -1)) + 1)
+                                               and source_badge.get('badge_type') == target_badge.get('badge_type')
+                                               and source_badge.get('color') == target_badge.get('color')
+                                               and int(target_badge.get('level', -1)) == int(source_badge.get('level', -1)) + 1)
                             frees_badge_slot = int(source.get('amount', 0)) <= required
                             if (adjacent and same_badge_line and int(source.get('amount', 0)) >= required
                                     and 0 <= money_type < len(MONEY_FIELDS)
@@ -14352,11 +14392,11 @@ def client_handler(conn, addr):
             elif msg == 228: # pause_participate_dance
                 if picked_char and is_current_character_connection(conn, picked_char):
                     was_free_dance = (
-                        isinstance(picked_char.get('dance_runtime'), dict)
-                        and picked_char['dance_runtime'].get('running')
-                        and picked_char['dance_runtime'].get('running_source') == 'free'
-                        and str(picked_char.get('map_id')) == str(
-                            CITY_DANCE_CONFIG.get('101', {}).get('MapId', '101'))
+                            isinstance(picked_char.get('dance_runtime'), dict)
+                            and picked_char['dance_runtime'].get('running')
+                            and picked_char['dance_runtime'].get('running_source') == 'free'
+                            and str(picked_char.get('map_id')) == str(
+                        CITY_DANCE_CONFIG.get('101', {}).get('MapId', '101'))
                     )
                     settle_personal_dance(picked_char, stop=True)
                     if str(picked_char.get('map_id')) == '101':
@@ -14445,7 +14485,7 @@ def client_handler(conn, addr):
                                         # daily maximum.
                                         for copy_id, sc_cfg in matches:
                                             state['remaining'][copy_id] = (
-                                                copy_attempts_remaining(picked_char, copy_id, sc_cfg) + 1
+                                                    copy_attempts_remaining(picked_char, copy_id, sc_cfg) + 1
                                             )
                                         ticket_use_valid = True
                                     elif subtype == 12 and matches:
@@ -14461,7 +14501,7 @@ def client_handler(conn, addr):
                                                 target_copy_id = copy_id
                                         target_cfg = COPY_SCENE_CONFIG[target_copy_id]
                                         state['remaining'][target_copy_id] = (
-                                            copy_attempts_remaining(picked_char, target_copy_id, target_cfg) + 1
+                                                copy_attempts_remaining(picked_char, target_copy_id, target_cfg) + 1
                                         )
                                         record_pending_exp_ticket(picked_char, target_copy_id)
                                         ticket_use_valid = True
@@ -14669,7 +14709,7 @@ def client_handler(conn, addr):
                         is_stage_combat = is_exp or is_equipment
                         exp_state_hit = (picked_char.get('exp_stage_state') if is_exp
                                          else picked_char.get('equipment_stage_state') if is_equipment
-                                         else None)
+                        else None)
                         current_conn, current_char = ALL_CONNECTIONS.get(int(picked_char.get('id', 0)), (None, None))
 
                         # EXP damage is only valid for a live participant in
@@ -14883,7 +14923,7 @@ def client_handler(conn, addr):
                             is_stage_combat = is_exp or is_equipment
                             exp_state_hit = (picked_char.get('exp_stage_state') if is_exp
                                              else picked_char.get('equipment_stage_state') if is_equipment
-                                             else None)
+                            else None)
                             if not is_stage_combat and (
                                     target_id not in NPC_INST_MAP
                                     or str(NPC_INSTANCE_MAP.get(target_id, '')) != cur_map
@@ -15306,8 +15346,8 @@ def client_handler(conn, addr):
                     server_npcid = str(NPC_INST_MAP.get(inst_id, '')) if inst_id else ''
                     expected_client_npcid = NPC_CLIENT_ID_ALIASES.get(server_npcid, server_npcid)
                     report_valid = bool(inst_id and expected_client_npcid == str(npcid)
-                                         and str(NPC_INSTANCE_MAP.get(inst_id, '')) == cur_map
-                                         and int(NPC_HP_MAP.get(inst_id, 1)) <= 0)
+                                        and str(NPC_INSTANCE_MAP.get(inst_id, '')) == cur_map
+                                        and int(NPC_HP_MAP.get(inst_id, 1)) <= 0)
                 elif picked_char and die_type in (2, 6):
                     # Car robbery packets carry no vehicle ID. Match the
                     # active objective; targeted-car missions also require
@@ -15330,8 +15370,8 @@ def client_handler(conn, addr):
                     # server-created NPC instance on this map whose server HP
                     # has reached zero; a death report alone cannot mint kills.
                     report_valid = bool(str(NPC_INST_MAP.get(inst_id, '')) == str(npcid)
-                                         and str(NPC_INSTANCE_MAP.get(inst_id, '')) == cur_map
-                                         and int(NPC_HP_MAP.get(inst_id, 1)) <= 0)
+                                        and str(NPC_INSTANCE_MAP.get(inst_id, '')) == cur_map
+                                        and int(NPC_HP_MAP.get(inst_id, 1)) <= 0)
 
                 if not report_valid:
                     print(f"[NPC DEATH SECURITY] rejected client report msg={msg} inst_id={inst_id} npc={npcid} map={cur_map} type={die_type}")
@@ -15580,8 +15620,8 @@ def client_handler(conn, addr):
                     matching_copies = [
                         candidate_id for candidate_id, candidate_cfg in COPY_SCENE_CONFIG.items()
                         if candidate_id in DAILY_EXP_CONFIG
-                        and str(candidate_cfg.get('single_map_id') or '') == copy_id
-                        and int(candidate_cfg.get('min_level', 1)) <= player_level <= int(candidate_cfg.get('max_level', 80))
+                           and str(candidate_cfg.get('single_map_id') or '') == copy_id
+                           and int(candidate_cfg.get('min_level', 1)) <= player_level <= int(candidate_cfg.get('max_level', 80))
                     ]
                     if len(matching_copies) == 1:
                         copy_id = matching_copies[0]
@@ -15590,9 +15630,9 @@ def client_handler(conn, addr):
                 single_entry_valid = msg != 276 or bool(single_entry_map and is_exp_map(single_entry_map))
                 entry_team = get_team_for_char(int(picked_char.get('id', 0))) if picked_char else None
                 solo_entry_allowed = (entry_team is None or (msg == 276
-                    and not entry_team.get('active_run')
-                    and not entry_team.get('pending_run')
-                    and not entry_team.get('matching')))
+                                                             and not entry_team.get('active_run')
+                                                             and not entry_team.get('pending_run')
+                                                             and not entry_team.get('matching')))
                 if (picked_char and copy_id in DAILY_EXP_CONFIG and single_entry_valid
                         and solo_entry_allowed):
                     reconcile_exp_stage_login(picked_char)
@@ -15809,8 +15849,8 @@ def client_handler(conn, addr):
                              and finish_position_valid)))
                 race_route_valid = (not won or (route_progress_valid and movement_valid))
                 race_splits_valid = (not won or (expected_checkpoints is not None
-                                     and expected_checkpoints > 0
-                                     and bool(valid_splits) and race_route_valid))
+                                                 and expected_checkpoints > 0
+                                                 and bool(valid_splits) and race_route_valid))
                 race_time_valid = bool(
                     race_started_at is not None
                     and (reported_elapsed > 0 or not won)
@@ -16191,8 +16231,8 @@ def client_handler(conn, addr):
                                 picked_char['street_race_started_at'] = start_time
                                 picked_char['street_race_last_move_at'] = start_time
                                 picked_char['street_race_last_car_pos'] = (
-                                    street_race_start_position(current_map)
-                                    or list(picked_char.get('pos') or [0, 100, 0, 0]))
+                                        street_race_start_position(current_map)
+                                        or list(picked_char.get('pos') or [0, 100, 0, 0]))
                                 picked_char['street_race_movement_valid'] = True
                             duration = int(cfg.get('exist_time') or 900)
                             elapsed_s = max(0, int(time.monotonic() - float(picked_char['street_race_started_at'])))
@@ -16287,9 +16327,9 @@ def client_handler(conn, addr):
                             # resolve that capture ID to its actual MapInfoData ID.
                             mid = str(capture_map_id)
                     valid_world_boss = (msg != 201 or (
-                        boss_cfg.get('type') == 5
-                        and str(boss_cfg.get('map_id')) == mid
-                        and int(boss_cfg.get('min_level', 1)) <= int(picked_char.get('level', 1)) <= int(boss_cfg.get('max_level', 80))
+                            boss_cfg.get('type') == 5
+                            and str(boss_cfg.get('map_id')) == mid
+                            and int(boss_cfg.get('min_level', 1)) <= int(picked_char.get('level', 1)) <= int(boss_cfg.get('max_level', 80))
                     ))
                     if not is_current_character_connection(conn, picked_char):
                         print(f"[SCENE ENTRY] denied stale character socket player={picked_char.get('id')}")
@@ -16302,9 +16342,9 @@ def client_handler(conn, addr):
                     elif not valid_guild_city:
                         print(f"[GUILD CITY SECURITY] rejected capture id={body.get(0)} player={picked_char.get('id')}")
                     elif (is_exp_map(mid) or is_exp_map(current_map)
-                            or is_equipment_copy_map(mid) or is_equipment_copy_map(current_map)
-                            or picked_char.get('exp_stage_state')
-                            or picked_char.get('equipment_stage_state')):
+                          or is_equipment_copy_map(mid) or is_equipment_copy_map(current_map)
+                          or picked_char.get('exp_stage_state')
+                          or picked_char.get('equipment_stage_state')):
                         # EXP maps can only be entered through the validated
                         # daily/solo or ready team flows, and an active run can
                         # only be exited through its explicit leave/revive flow.
@@ -16646,8 +16686,8 @@ def client_handler(conn, addr):
                             goal_min,goal_max=team_goal_level_bounds(goal,get_val_int(body,2,1),get_val_int(body,3,80))
                             team_id=next_team_id()
                             team={'id':team_id,'leader_id':cid,'members':[],'goal_id':goal,
-                                'min_level':goal_min,'max_level':goal_max,
-                                'verify':get_val_int(body,4,0),'recruit':get_val_int(body,5,0),'char_refs':{},'pending_apps':{}}
+                                  'min_level':goal_min,'max_level':goal_max,
+                                  'verify':get_val_int(body,4,0),'recruit':get_val_int(body,5,0),'char_refs':{},'pending_apps':{}}
                             if team_join_member(team,picked_char): TEAM_STATES[team['id']]=team; ok=True
                         elif team and team.get('leader_id')==cid and not team.get('active_run'):
                             team['goal_id']=goal
@@ -16678,7 +16718,7 @@ def client_handler(conn, addr):
                     # The APK sends CurTeamInfo.characterId here, which is
                     # the inviter's ID, not the invited player's own ID.
                     valid=bool(invite and invite.get('expires_at',0)>=int(time.time())
-                        and inviter and reply_id==inviter)
+                               and inviter and reply_id==inviter)
                     if inviter:
                         send_push_to_char(inviter,517,encode_sproto([(0,1 if ok and valid else 0),(1,cid)]))
                     if not ok or not valid: TEAM_INVITES.pop(cid,None)
@@ -16686,8 +16726,8 @@ def client_handler(conn, addr):
                     tid=get_val_int(body,0); team=TEAM_STATES.get(tid); inv=TEAM_INVITES.get(cid,{})
                     is_invite_accept=get_val_int(body,1,0)==1
                     invited=bool(is_invite_accept and inv.get('team_id')==tid
-                        and inv.get('expires_at',0)>=int(time.time())
-                        and team and inv.get('inviter_id')==int(team.get('leader_id',0)))
+                                 and inv.get('expires_at',0)>=int(time.time())
+                                 and team and inv.get('inviter_id')==int(team.get('leader_id',0)))
                     if team and not team.get('active_run') and is_invite_accept:
                         if invited and team_join_member(team,picked_char):
                             TEAM_INVITES.pop(cid,None)
@@ -16755,8 +16795,8 @@ def client_handler(conn, addr):
                             cfg=COPY_SCENE_CONFIG.get(goal,{})
                             team_id=next_team_id()
                             team={'id':team_id,'leader_id':cid,'members':[],'goal_id':goal,
-                                'min_level':int(cfg.get('min_level',1)),'max_level':int(cfg.get('max_level',80)),
-                                'verify':0,'recruit':0,'char_refs':{},'pending_apps':{}}
+                                  'min_level':int(cfg.get('min_level',1)),'max_level':int(cfg.get('max_level',80)),
+                                  'verify':0,'recruit':0,'char_refs':{},'pending_apps':{}}
                             if team_join_member(team,picked_char): TEAM_STATES[team['id']]=team
                             else: team=None
                         if (team and team.get('leader_id')==cid and not team.get('active_run')
@@ -16841,7 +16881,7 @@ def client_handler(conn, addr):
                                 with run_lock:
                                     current_pending=team.get('pending_run')
                                     start_this_run=(current_pending is pending and not pending.get('starting')
-                                        and all(pending['ready'].values()))
+                                                    and all(pending['ready'].values()))
                                     if start_this_run: pending['starting']=True
                                 if start_this_run:
                                     if not (start_team_exp_run(team,pending['copy_id'])
@@ -17104,9 +17144,9 @@ def client_handler(conn, addr):
                         reward_cfg = DAILY_ACTIVE_REWARD_CONFIG.get(reward_id, {})
                         try:
                             reward_level_ok = (
-                                bool(reward_cfg)
-                                and int(reward_cfg.get('LvMin', 1)) <= player_level
-                                <= int(reward_cfg.get('LvMax', 80))
+                                    bool(reward_cfg)
+                                    and int(reward_cfg.get('LvMin', 1)) <= player_level
+                                    <= int(reward_cfg.get('LvMax', 80))
                             )
                             score_required = int(reward_cfg.get('Score', 0))
                         except (TypeError, ValueError):
@@ -17392,7 +17432,7 @@ def client_handler(conn, addr):
                     m_cfg = missions_data.get(mid, {})
                     logic_type = m_cfg.get('logic_type')
                     can_finish_dialog = bool(mdata and mdata.get('state') == 1
-                                              and logic_type == 0 and m_cfg.get('class') != 6)
+                                             and logic_type == 0 and m_cfg.get('class') != 6)
                     if mdata and mdata.get('state') == 1 and logic_type == 13:
                         stops = MULTI_DELIVERY_DATA.get(str(m_cfg.get('logic_id', '')), [])
                         can_finish_dialog = bool(stops and int((mdata.get('parm') or [0])[0]) >= len(stops) - 1)
@@ -17458,6 +17498,22 @@ def client_handler(conn, addr):
                         picked_char['street_race_checkpoint_progress'] = 0
                         picked_char.pop('street_race_last_car_pos', None)
                         picked_char.pop('street_race_pending_result', None)
+
+                    # Handle leaving Guild Boss scene early
+                    in_guild_boss = bool(_guild_boss_map_id(picked_char.get('map_id', '')))
+                    if in_guild_boss and in_copy:
+                        saved_pos = picked_char.get('pre_copy_pos')
+                        saved_map = picked_char.get('pre_copy_map', '11')
+                        picked_char['pre_copy_pos'] = None
+                        picked_char['pre_copy_map'] = None
+                        picked_char['active_copy_id'] = None
+                        start_map_transition(conn, picked_char, saved_map, send_rpc_push, override_pos=saved_pos)
+                        save_chars(all_accounts_chars)
+                        print(f"[GUILD BOSS] player left early id={picked_char.get('id')} map={picked_char.get('map_id')}")
+                        if session is not None:
+                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                            conn.sendall(struct.pack('>H', len(pf)) + pf)
+                        continue
 
                     if has_leave_timer:
                         leave_timer = picked_char.pop('_exp_leave_timer', None)
@@ -18093,7 +18149,7 @@ def client_handler(conn, addr):
                                     other_update = build_social_friend_update(other_char)
                                     threading.Thread(
                                         target=lambda cid=target_id, payload=other_update:
-                                            send_push_to_char(cid, 534, payload),
+                                        send_push_to_char(cid, 534, payload),
                                         daemon=True
                                     ).start()
                             if 'friend_requests_sent' in picked_char:
@@ -18175,7 +18231,7 @@ def client_handler(conn, addr):
                                             requester_update = build_social_friend_update(ch)
                                             threading.Thread(
                                                 target=lambda cid=target_id, payload=requester_update:
-                                                    send_push_to_char(cid, 534, payload),
+                                                send_push_to_char(cid, 534, payload),
                                                 daemon=True
                                             ).start()
                                         break
@@ -18330,7 +18386,7 @@ def client_handler(conn, addr):
                         if not is_current_character_connection(conn, picked_char):
                             print(f"[GATHER] denied stale character socket player={picked_char.get('id')}")
                         elif (is_exp_map(target_map) or is_exp_map(current_map)
-                                or picked_char.get('exp_stage_state')):
+                              or picked_char.get('exp_stage_state')):
                             # A gather request must not join or abandon an EXP
                             # instance; those transitions require the run's
                             # normal entry, reconnect, and exit checks.
