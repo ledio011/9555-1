@@ -107,6 +107,7 @@ GUILD_SHOP_DATA = {} # shop item ID -> ShopData row for Guild shop
 GUILD_BOSS_DATA = {} # guild boss/activity rows shown by the Gang activity panel
 GUILD_BOSS_TEST_ALWAYS_OPEN = True
 GUILD_BOSS_POST_KILL_EXIT_SECONDS = 5
+GUILD_BOSS_MISSING_REWARD_LOGGED = set()
 KILL_TARGET_SPAWNS = {} # logicId -> list of spawns
 TARGET_CAR_SPAWNS = {}  # logicId -> list of car spawns
 MISSION_REQUIRE_DATA = {} # logicId -> dict
@@ -10124,18 +10125,22 @@ def _guild_boss_battle_info(char, include_state=True):
     return encode_sproto([(0, battle_info), (1, 1 if record else 0)])
 
 def _guild_boss_reward_rows(reward_key, guild):
+    reward_key = str(reward_key or '')
+    guild_level = _guild_level(guild)
     reward_id = str(
-        STREET_RACE_REWARD_BY_KEY_LEVEL.get(str(reward_key or ''), {}).get(
-            _guild_level(guild), ''
-        ) or ''
+        STREET_RACE_REWARD_BY_KEY_LEVEL.get(reward_key, {}).get(guild_level, '') or ''
     )
     if not reward_id:
         return None
     rewards = SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(reward_id)
     if rewards:
         return list(rewards)
-    print(f"[GUILD BOSS REWARD] no explicit payout quantities key={reward_key} "
-          f"level={_guild_level(guild)} reward={reward_id}")
+    missing_key = (reward_key, guild_level, reward_id)
+    if missing_key not in GUILD_BOSS_MISSING_REWARD_LOGGED:
+        GUILD_BOSS_MISSING_REWARD_LOGGED.add(missing_key)
+        print(f"[GUILD BOSS REWARD BLOCKED] no explicit payout quantities "
+              f"key={reward_key} level={guild_level} reward={reward_id}; "
+              "grant skipped")
     return None
 
 def _guild_boss_award(record, guild, char_id, reward_sets, notify=True):
