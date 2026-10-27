@@ -105,8 +105,6 @@ GUILD_BATTLE_DATA = {} # id -> configured Gang Battle schedule/selection data
 GUILD_STAR_DATA = {} # id -> configured Gang Star upgrade data
 GUILD_SHOP_DATA = {} # shop item ID -> ShopData row for Guild shop
 GUILD_BOSS_DATA = {} # guild boss/activity rows shown by the Gang activity panel
-GUILD_BOSS_TEST_ALWAYS_OPEN = True # 24-hour test override for Gang Boss
-GUILD_BOSS_RUNTIME = {} # (guild_id, boss_id) -> active runtime dictionary
 KILL_TARGET_SPAWNS = {} # logicId -> list of spawns
 TARGET_CAR_SPAWNS = {}  # logicId -> list of car spawns
 MISSION_REQUIRE_DATA = {} # logicId -> dict
@@ -6988,23 +6986,9 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
     if map_str != "11" and map_str in MONSTER_DATA:
-        guild_id = _guild_id_for_character(picked_char) if picked_char else None
-        gb_runtime = _get_or_create_guild_boss_runtime(str(guild_id), map_str, picked_char) if (guild_id and map_str in ("1001", "1002", "1003", "1004", "1005", "1006", "1007")) else None
         for i, m in enumerate(MONSTER_DATA[map_str]):
             cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
-            inst_id = send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
-            if gb_runtime and not gb_runtime.get('finished'):
-                gb_runtime['boss_inst_id'] = inst_id
-                gb_runtime['boss_npc_id'] = str(m['nid'])
-                if not gb_runtime.get('max_hp'):
-                    boss_stats = get_npc_attr(str(m['nid']), picked_char.get('level', 1) if picked_char else 1)
-                    boss_hp = max(10000, int(boss_stats.get('hp_max', 100000)))
-                    gb_runtime['max_hp'] = boss_hp
-                    gb_runtime['cur_hp'] = boss_hp
-                NPC_HP_MAP[inst_id] = gb_runtime['cur_hp']
-                NPC_INST_MAP[inst_id] = str(m['nid'])
-                NPC_INSTANCE_MAP[inst_id] = map_str
-                print(f"[GUILD BOSS SPAWNED] guild={guild_id} map={map_str} inst={inst_id} hp={gb_runtime['cur_hp']}/{gb_runtime['max_hp']}")
+            send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
     # The active city-capture vehicle is configured by GuildCaptureData and
     # has one shared server instance across players in that map.
@@ -9722,8 +9706,6 @@ def _guild_shop_purchase_count(char, item_id, row):
     return max(0, int(record.get('count', 0) or 0))
 
 def _guild_boss_activity_state(row, now=None):
-    if GUILD_BOSS_TEST_ALWAYS_OPEN:
-        return 1, 86400
     now = int(time.time()) if now is None else int(now)
     seconds_today = now % 86400
     start = max(0, int(row.get('start_time', 0) or 0)) % 86400
@@ -9733,200 +9715,6 @@ def _guild_boss_activity_state(row, now=None):
         return 1, duration - elapsed
     until = (start - seconds_today) % 86400
     return 0, until if until else 86400
-
-def _get_or_create_guild_boss_runtime(guild_id, boss_id, player_char=None):
-    guild_id_str = str(guild_id or '')
-    boss_id_str = str(boss_id or '')
-    if not guild_id_str or not boss_id_str:
-        return None
-    key = (guild_id_str, boss_id_str)
-    now = int(time.time())
-    runtime = GUILD_BOSS_RUNTIME.get(key)
-    if not runtime or runtime.get('finished') or now >= runtime.get('end_time', 0):
-        boss_cfg = GUILD_BOSS_DATA.get(boss_id_str, {})
-        duration = int(boss_cfg.get('duration') or 3600)
-        map_id = str(boss_cfg.get('map_id') or boss_id_str)
-        runtime = {
-            'guild_id': guild_id_str,
-            'boss_id': boss_id_str,
-            'map_id': map_id,
-            'boss_npc_id': f"9001{int(boss_id_str) % 100:02d}" if boss_id_str.isdigit() else "900101",
-            'boss_inst_id': None,
-            'max_hp': 100000,
-            'cur_hp': 100000,
-            'damage_map': {},
-            'players': set(),
-            'participants': set(),
-            'last_kill': '',
-            'start_time': now,
-            'end_time': now + duration,
-            'finished': False,
-            'win': False,
-            'timeout_timer': None
-        }
-        def _on_timeout():
-            if not runtime.get('finished'):
-                _settle_and_finish_guild_boss(guild_id_str, boss_id_str, win=False)
-        t = threading.Timer(duration, _on_timeout)
-        t.daemon = True
-        t.start()
-        runtime['timeout_timer'] = t
-        GUILD_BOSS_RUNTIME[key] = runtime
-
-    if player_char:
-        try:
-            runtime.setdefault('players', set()).add(int(player_char.get('id', 0)))
-        except (TypeError, ValueError):
-            pass
-    return runtime
-
-def _get_guild_boss_sort_items(runtime):
-    if not runtime or not runtime.get('damage_map'):
-        return []
-    sorted_damage = sorted(runtime['damage_map'].values(), key=lambda x: int(x.get('damage', 0)), reverse=True)
-    result = []
-    for d in sorted_damage[:10]:
-        result.append(encode_sproto([
-            (0, int(d.get('char_id', 0))),
-            (1, int(d.get('damage', 0))),
-            (2, str(d.get('name', ''))),
-            (3, int(d.get('prof', 0)))
-        ]))
-    return result
-
-def _get_guild_boss_reward_items(reward_key, guild_level):
-    guild_level = max(1, int(guild_level or 1))
-    reward_id = STREET_RACE_REWARD_BY_KEY_LEVEL.get(reward_key, {}).get(guild_level, '')
-    if not reward_id and guild_level > 1:
-        reward_id = STREET_RACE_REWARD_BY_KEY_LEVEL.get(reward_key, {}).get(1, '')
-
-    if reward_id and reward_id in SHOW_REWARD_EXPLICIT_COUNT_CONFIG:
-        configured = SHOW_REWARD_EXPLICIT_COUNT_CONFIG[reward_id]
-        if configured:
-            return [(str(item_id), int(qual), int(cnt)) for item_id, qual, cnt in configured]
-
-    c_mult = guild_level
-    if reward_key == '_one_ghb':
-        return [("1001", 1, 50000 * c_mult), ("1004", 1, 500 * c_mult), ("8801", 1, 1), ("6002", 1, 2)]
-    elif reward_key == '_two_ghb':
-        return [("1001", 1, 40000 * c_mult), ("1004", 1, 400 * c_mult), ("8801", 1, 1)]
-    elif reward_key == '_three_ghb':
-        return [("1001", 1, 30000 * c_mult), ("1004", 1, 300 * c_mult), ("8801", 1, 1)]
-    elif reward_key == '_join_ghb':
-        return [("1001", 1, 15000 * c_mult), ("1004", 1, 150 * c_mult)]
-    elif reward_key == '_last_ghb':
-        return [("1001", 1, 20000 * c_mult), ("1004", 1, 200 * c_mult), ("6002", 1, 1)]
-    elif reward_key == '_every_ghb':
-        return [("1001", 1, 10000 * c_mult), ("1004", 1, 100 * c_mult)]
-    else:
-        return [("1001", 1, 10000 * c_mult), ("1004", 1, 100 * c_mult)]
-
-def _settle_and_finish_guild_boss(guild_id, boss_id, win=True):
-    guild_id_str = str(guild_id or '')
-    boss_id_str = str(boss_id or '')
-    runtime = GUILD_BOSS_RUNTIME.get((guild_id_str, boss_id_str))
-    if not runtime or runtime.get('finished'):
-        return
-    runtime['finished'] = True
-    runtime['win'] = win
-
-    if runtime.get('timeout_timer'):
-        try:
-            runtime['timeout_timer'].cancel()
-        except Exception:
-            pass
-
-    guild = GUILD_STATES.get(guild_id_str)
-    guild_level = _guild_level(guild) if guild else 1
-
-    damage_list = list(runtime.get('damage_map', {}).values())
-    damage_list.sort(key=lambda x: int(x.get('damage', 0)), reverse=True)
-
-    all_damage = sum(int(x.get('damage', 0)) for x in damage_list)
-    last_kill_name = str(runtime.get('last_kill', ''))
-
-    sproto_damage_list = []
-    for d in damage_list:
-        sproto_damage_list.append(encode_sproto([
-            (0, str(d.get('name', ''))),
-            (1, int(d.get('damage', 0))),
-            (2, int(d.get('char_id', 0)))
-        ]))
-
-    rank_map = {int(d.get('char_id', 0)): idx + 1 for idx, d in enumerate(damage_list)}
-    damage_amount_map = {int(d.get('char_id', 0)): int(d.get('damage', 0)) for d in damage_list}
-
-    members = (guild.get('members') or {}) if guild else {}
-
-    all_member_cids = set()
-    for m_id in members.keys():
-        try:
-            all_member_cids.add(int(m_id))
-        except (TypeError, ValueError):
-            pass
-    all_member_cids.update(rank_map.keys())
-
-    for cid in all_member_cids:
-        c_rank = rank_map.get(cid, 0)
-        c_damage = damage_amount_map.get(cid, 0)
-        char = _guild_char_by_id(cid) if cid else None
-        char_name = str(char.get('name', '')) if char else ''
-
-        items_to_grant = []
-        if win:
-            if c_rank == 1:
-                items_to_grant.extend(_get_guild_boss_reward_items('_one_ghb', guild_level))
-            elif c_rank == 2:
-                items_to_grant.extend(_get_guild_boss_reward_items('_two_ghb', guild_level))
-            elif c_rank == 3:
-                items_to_grant.extend(_get_guild_boss_reward_items('_three_ghb', guild_level))
-            elif c_rank > 3:
-                items_to_grant.extend(_get_guild_boss_reward_items('_join_ghb', guild_level))
-
-            if char_name and char_name == last_kill_name:
-                items_to_grant.extend(_get_guild_boss_reward_items('_last_ghb', guild_level))
-
-            if str(cid) in members:
-                items_to_grant.extend(_get_guild_boss_reward_items('_every_ghb', guild_level))
-
-        sproto_items = []
-        for iid, qual, cnt in items_to_grant:
-            sproto_items.append(encode_sproto([
-                (0, str(iid)),
-                (1, int(cnt)),
-                (3, int(qual))
-            ]))
-
-        battle_info_bytes = encode_sproto([
-            (0, sproto_damage_list),
-            (1, int(c_rank)),
-            (2, int(c_damage)),
-            (3, int(all_damage)),
-            (4, last_kill_name),
-            (5, int(time.time()))
-        ])
-
-        reward_push = encode_sproto([
-            (0, 6),
-            (1, 0),
-            (2, win),
-            (3, sproto_items),
-            (4, battle_info_bytes),
-            (5, boss_id_str)
-        ])
-
-        conn_tuple = ALL_CONNECTIONS.get(cid)
-        if conn_tuple and conn_tuple[0] and conn_tuple[1]:
-            peer_conn, peer_char = conn_tuple
-            if items_to_grant:
-                grant_item_rewards(peer_char, items_to_grant, peer_conn, lambda tag, data: send_rpc_push_safe(peer_conn, tag, data))
-            send_rpc_push_safe(peer_conn, 620, reward_push)
-        else:
-            if char and items_to_grant:
-                grant_item_rewards(char, items_to_grant, None, None)
-                save_chars(all_accounts_chars)
-
-    print(f"[GUILD BOSS SETTLED] guild={guild_id_str} boss={boss_id_str} win={win} participants={len(damage_list)} last_kill='{last_kill_name}'")
 
 def _guild_combo(guild):
     """Compute the displayed Gang combat value from its real non-applicant members."""
@@ -10227,24 +10015,20 @@ def _guild_city_broadcast_result(capture_id, winner):
 
 def _guild_activity_response(guild=None, char=None):
     return encode_sproto([
-        (0, _guild_boss_activity_map(guild)),
+        (0, _guild_boss_activity_map()),
         (1, _guild_battle_info_bytes(guild)),
         (2, _guild_level(guild) if guild else 0),
         (3, _guild_dance_activity_info(guild)),
         (4, _guild_capture_activity_map(char=char))
     ])
 
-def _guild_boss_activity_map(guild=None):
+def _guild_boss_activity_map():
     now = int(time.time())
     result = {}
-    guild_id = str(guild.get('id', '')) if guild else ''
     for boss_id, row in sorted(GUILD_BOSS_DATA.items(), key=lambda item: int(item[0]) if item[0].isdigit() else 0):
         state, next_time = _guild_boss_activity_state(row, now)
-        runtime = GUILD_BOSS_RUNTIME.get((guild_id, str(boss_id))) if guild_id else None
-        cur_num = len(runtime.get('players', set())) if runtime else 0
-        sort_items = _get_guild_boss_sort_items(runtime) if runtime else []
         result[str(boss_id)] = encode_sproto([
-            (0, str(boss_id)), (1, state), (2, next_time), (3, cur_num), (4, sort_items)
+            (0, str(boss_id)), (1, state), (2, next_time), (3, 0), (4, [])
         ])
     return result
 
@@ -10869,13 +10653,9 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         can_open = bool(boss_cfg and guild and member and int(member.get('job', 4)) != 4
                         and _guild_level(guild) >= int(boss_cfg.get('level_min', 0))
                         and state == 1)
-        guild_id_str = str(guild.get('id', '')) if guild else ''
-        runtime = _get_or_create_guild_boss_runtime(guild_id_str, boss_id, char) if (can_open and guild_id_str) else GUILD_BOSS_RUNTIME.get((guild_id_str, boss_id))
-        cur_num = len(runtime.get('players', set())) if runtime else 0
-        sort_items = _get_guild_boss_sort_items(runtime) if runtime else []
         if boss_cfg:
             boss_payload = encode_sproto([
-                (0, boss_id), (1, state), (2, remaining), (3, cur_num), (4, sort_items)
+                (0, boss_id), (1, state), (2, remaining), (3, 0), (4, [])
             ])
             send_rpc_push(628, encode_sproto([(0, can_open), (1, boss_payload)]))
         else:
@@ -14246,26 +14026,6 @@ def client_handler(conn, addr):
                             if city_capture_id and actual_dmg > 0:
                                 _guild_city_record_damage(city_capture_id, picked_char, actual_dmg)
 
-                            guild_id = _guild_id_for_character(picked_char) if picked_char else None
-                            gb_runtime = GUILD_BOSS_RUNTIME.get((str(guild_id), cur_map)) if (guild_id and cur_map in ("1001", "1002", "1003", "1004", "1005", "1006", "1007")) else None
-                            if gb_runtime and int(gb_runtime.get('boss_inst_id') or 0) == int(target_id) and not gb_runtime.get('finished'):
-                                cid = int(picked_char.get('id', 0))
-                                d_rec = gb_runtime.setdefault('damage_map', {}).setdefault(cid, {
-                                    'damage': 0, 'name': str(picked_char.get('name', '')),
-                                    'prof': int(picked_char.get('prof', 0)), 'char_id': cid
-                                })
-                                d_rec['damage'] += actual_dmg
-                                gb_runtime.setdefault('participants', set()).add(cid)
-                                gb_hp_after = max(0, int(gb_runtime.get('cur_hp', 0)) - actual_dmg)
-                                gb_runtime['cur_hp'] = gb_hp_after
-                                NPC_HP_MAP[target_id] = gb_hp_after
-                                for _peer_id, (peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
-                                    if peer_conn and peer_char and str(peer_char.get('map_id', '')) == cur_map:
-                                        sync_npc_attrs_rpc(peer_conn, target_id, defender_stats, gb_hp_after)
-                                if gb_hp_after == 0:
-                                    gb_runtime['last_kill'] = str(picked_char.get('name', ''))
-                                    _settle_and_finish_guild_boss(str(guild_id), cur_map, win=True)
-
                             # Sync changed HP and always deliver HP=0 when death is finalized.
                             if actual_dmg > 0 or (is_stage_combat and exp_npc_died):
                                 if city_capture_id:
@@ -15392,9 +15152,7 @@ def client_handler(conn, addr):
                             and boss_state == 1
                         )
                         if valid_guild_boss:
-                            boss_id = str(mid)
-                            mid = str(configured_boss.get('map_id', mid))
-                            _get_or_create_guild_boss_runtime(str(guild_id), boss_id, picked_char)
+                            mid = str(configured_boss.get('map_id', ''))
                     valid_guild_city = True
                     if msg == 322:
                         capture_cfg = GUILD_CAPTURE_CONFIG.get(mid)
