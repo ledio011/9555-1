@@ -106,6 +106,7 @@ GUILD_STAR_DATA = {} # id -> configured Gang Star upgrade data
 GUILD_SHOP_DATA = {} # shop item ID -> ShopData row for Guild shop
 GUILD_BOSS_DATA = {} # guild boss/activity rows shown by the Gang activity panel
 GUILD_BOSS_TEST_ALWAYS_OPEN = True
+GUILD_BOSS_POST_KILL_EXIT_SECONDS = 5
 KILL_TARGET_SPAWNS = {} # logicId -> list of spawns
 TARGET_CAR_SPAWNS = {}  # logicId -> list of car spawns
 MISSION_REQUIRE_DATA = {} # logicId -> dict
@@ -7038,18 +7039,6 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
         _schedule_guild_boss_tick(runtime_key, runtime)
         return
 
-    mx, mz = runtime['position']
-    target_id, target_conn, target_char = min(
-        members,
-        key=lambda item: (
-            (float((item[2].get('pos') or [0, 0, 0])[0]) / 100.0 - mx) ** 2
-            + (float((item[2].get('pos') or [0, 0, 0])[2]) / 100.0 - mz) ** 2
-        )
-    )
-    target_pos = target_char.get('pos') or [0, 0, 0, 0]
-    px, pz = float(target_pos[0]) / 100.0, float(target_pos[2]) / 100.0
-    dx, dz = px - mx, pz - mz
-    distance = math.sqrt(dx * dx + dz * dz)
     npc_id = str(boss_cfg.get('boss_npc_id', ''))
     npc_cfg = NPC_CONFIG.get(npc_id, {})
     ai_cfg = AI_DATA_CONFIG.get(str(npc_cfg.get('ai_data_id') or ''), {})
@@ -7058,50 +7047,65 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
         (int(ai_cfg.get('around_min_distance', 100) or 100)
          + int(ai_cfg.get('around_max_distance', 200) or 200)) / 200.0
     )
-    configured_lock = int(ai_cfg.get('lock_distance', 500) or 500)
-    search_radius = int(npc_cfg.get('search_radius', 0) or 0)
-    lock_distance = (search_radius if configured_lock < 0 else configured_lock) / 100.0
-    lock_distance = max(10.0, lock_distance)
-    if search_radius > 0:
-        lock_distance = min(lock_distance, search_radius / 100.0)
-    move_speed = max(0.5, float(npc_cfg.get('move_speed', 50) or 50) / 10.0)
-    heading = int(math.degrees(math.atan2(dx, dz)) * 100) if distance else 0
-    if distance > lock_distance:
-        if not runtime.get('stopped'):
-            runtime['stopped'] = True
-            pos = encode_sproto([(0, int(mx * 100)), (1, 0), (2, int(mz * 100)), (3, heading)])
-            move = encode_sproto([(0, pos), (1, pos)])
-            payload = encode_sproto([(0, encode_sproto([(0, inst_id), (1, move), (2, True)]))])
-            for _cid, peer_conn, _peer_char in members:
-                send_rpc_push_safe(peer_conn, 513, payload)
+    skills = [skill.strip() for skill in str(npc_cfg.get('skill_group', '')).split(';')
+              if skill.strip() in SKILL_CONFIG]
+    if not skills:
         _schedule_guild_boss_tick(runtime_key, runtime)
         return
-    if distance > attack_distance:
-        step = min(move_speed * 0.2, distance - attack_distance)
-        if distance > 0:
-            mx += dx / distance * step
-            mz += dz / distance * step
-        runtime['position'] = [mx, mz]
-        runtime['stopped'] = False
-        pos = encode_sproto([(0, int(mx * 100)), (1, 0), (2, int(mz * 100)), (3, heading)])
-        move = encode_sproto([(0, pos), (1, pos)])
-        payload = encode_sproto([(0, encode_sproto([(0, inst_id), (1, move), (2, True)]))])
-        for _cid, peer_conn, _peer_char in members:
-            send_rpc_push_safe(peer_conn, 507, payload)
-    elif not runtime.get('stopped'):
-        runtime['stopped'] = True
-        pos = encode_sproto([(0, int(mx * 100)), (1, 0), (2, int(mz * 100)), (3, heading)])
-        move = encode_sproto([(0, pos), (1, pos)])
-        payload = encode_sproto([(0, encode_sproto([(0, inst_id), (1, move), (2, True)]))])
-        for _cid, peer_conn, _peer_char in members:
-            send_rpc_push_safe(peer_conn, 513, payload)
+    skill_ranges = {}
+    for skill in skills:
+        skill_cfg = SKILL_CONFIG[skill]
+        try:
+            trace_distance = max(0, int(skill_cfg.get('trace_distance_cm', 0) or 0)) / 100.0
+        except (TypeError, ValueError):
+            trace_distance = 0.0
+        effect_cfg = EFF_CONFIG.get(str(skill_cfg.get('eff0') or ''), {})
+        params = effect_cfg.get('params', [])
+        try:
+            param1 = abs(int(params[0] if len(params) > 0 else 0)) / 100.0
+            param2 = abs(int(params[1] if len(params) > 1 else 0)) / 100.0
+            area_type = int(effect_cfg.get('area_type', 0) or 0)
+        except (TypeError, ValueError):
+            param1, param2, area_type = 0.0, 0.0, 0
+        if area_type == 1:
+            effect_range = trace_distance + param1
+        elif area_type == 2:
+            effect_range = math.hypot(param1, param2 / 2.0)
+        elif area_type in (3, 4, 5):
+            effect_range = param1
+        else:
+            effect_range = trace_distance
+        skill_ranges[skill] = max(attack_distance, trace_distance, effect_range)
+
+    configured_lock = int(ai_cfg.get('lock_distance', 500) or 500)
+    search_radius = int(npc_cfg.get('search_radius', 0) or 0)
+    lock_distance = (
+        search_radius / 100.0 if configured_lock < 0 and search_radius > 0
+        else max(0.5, configured_lock / 100.0)
+    )
+    if search_radius > 0:
+        lock_distance = min(lock_distance, search_radius / 100.0)
+    max_attack_range = min(lock_distance, max(skill_ranges.values()))
+    mx, mz = runtime['position']
+    targets = []
+    for member in members:
+        pos = member[2].get('pos') or [0, 0, 0, 0]
+        px, pz = float(pos[0]) / 100.0, float(pos[2]) / 100.0
+        distance = math.hypot(px - mx, pz - mz)
+        if distance <= max_attack_range:
+            targets.append((distance, member))
+    if not targets:
+        _schedule_guild_boss_tick(runtime_key, runtime)
+        return
+    distance, (target_id, target_conn, target_char) = min(targets, key=lambda item: item[0])
 
     now = time.time()
-    if distance <= attack_distance and now >= float(runtime.get('next_attack_at', 0.0)):
-        skills = [skill.strip() for skill in str(npc_cfg.get('skill_group', '')).split(';')
-                  if skill.strip() in SKILL_CONFIG]
-        ready = [skill for skill in skills
-                 if float(runtime['skill_ready_at'].get(skill, 0.0)) <= now]
+    if now >= float(runtime.get('next_attack_at', 0.0)):
+        ready = [
+            skill for skill in skills
+            if distance <= skill_ranges[skill]
+            and float(runtime['skill_ready_at'].get(skill, 0.0)) <= now
+        ]
         if ready:
             skill_id = max(ready, key=lambda skill: int(SKILL_CONFIG[skill].get('priority', 0)))
             skill_cfg = SKILL_CONFIG[skill_id]
@@ -10077,7 +10081,7 @@ def _guild_boss_activity_item(boss_id, guild, now=None):
     state, remaining = _guild_boss_activity_state(row, now)
     record = _guild_boss_record(guild, boss_id, now=now)
     if record:
-        if record.get('finished') or state == 0:
+        if record.get('finished'):
             state, remaining = 2, 0
         top_rows = _guild_boss_rank_rows(record)[:3]
         sort_items = [encode_sproto([
@@ -10093,7 +10097,7 @@ def _guild_boss_activity_item(boss_id, guild, now=None):
         (0, str(boss_id)), (1, state), (2, remaining), (3, cur_num), (4, sort_items)
     ])
 
-def _guild_boss_battle_info(char):
+def _guild_boss_battle_info(char, include_state=True):
     guild_id = _guild_id_for_character(char) if char else 0
     guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
     boss_id = _guild_boss_map_id(char.get('map_id', '')) if char else None
@@ -10115,6 +10119,8 @@ def _guild_boss_battle_info(char):
         (4, str((record or {}).get('last_kill_name', ''))),
         (5, int((record or {}).get('end_time', 0) or 0))
     ])
+    if not include_state:
+        return battle_info
     return encode_sproto([(0, battle_info), (1, 1 if record else 0)])
 
 def _guild_boss_reward_rows(reward_key, guild):
@@ -10132,7 +10138,7 @@ def _guild_boss_reward_rows(reward_key, guild):
           f"level={_guild_level(guild)} reward={reward_id}")
     return None
 
-def _guild_boss_award(record, guild, char_id, reward_sets):
+def _guild_boss_award(record, guild, char_id, reward_sets, notify=True):
     claims = record.setdefault('reward_claims', {})
     claim_key = str(int(char_id))
     claimed = set(claims.get(claim_key, []))
@@ -10161,35 +10167,157 @@ def _guild_boss_award(record, guild, char_id, reward_sets):
     conn = ALL_CONNECTIONS.get(int(char_id), (None, None))[0]
     push = (lambda tag, data: send_push_to_char(char_id, tag, data)) if conn else None
     grant_item_rewards(char, pending, conn, push, save=False)
-    popup = encode_sproto([(0, [encode_sproto([
-        (0, str(item_id)), (1, int(amount)), (2, int(quality))
-    ]) for item_id, quality, amount in pending])])
-    if push:
+    delivered = record.setdefault('delivered_rewards', {}).setdefault(str(int(char_id)), [])
+    delivered.extend(
+        [str(item_id), int(quality), int(amount)]
+        for item_id, quality, amount in pending
+    )
+    if notify and push:
+        popup = encode_sproto([(0, [encode_sproto([
+            (0, str(item_id)), (1, int(amount)), (2, int(quality))
+        ]) for item_id, quality, amount in pending])])
         push(638, popup)
     save_chars(all_accounts_chars)
     return not unresolved
 
-def _guild_boss_distribute_rewards(guild, boss_id, record):
+def _guild_boss_distribute_rewards(guild, boss_id, record, notify=True):
     rows = _guild_boss_rank_rows(record)
     boss = GUILD_BOSS_DATA.get(str(boss_id), {})
     pending = False
+    for member_id, member in (guild or {}).get('members', {}).items():
+        try:
+            char_id = int(member_id)
+        except (TypeError, ValueError):
+            continue
+        if int((member or {}).get('job', 4)) == 4:
+            continue
+        if not _guild_boss_award(record, guild, char_id, [
+                ('guild-wide', boss.get('exist_drop_id', ''))], notify=notify):
+            pending = True
     participant_ids = set(str(value) for value in record.get('participants', {}))
     participant_ids.update(str(entry.get('id', 0)) for entry in rows)
     for participant_id in sorted(participant_ids, key=lambda value: int(value)):
         if not _guild_boss_award(record, guild, int(participant_id), [
-                ('participate', boss.get('participate_drop_id', ''))]):
+                ('participate', boss.get('participate_drop_id', ''))], notify=notify):
             pending = True
     rank_drop_ids = boss.get('rank_drop_ids', [])
+    rank_limits = boss.get('rank_limits', [])
     for rank, entry in enumerate(rows, 1):
         drops = []
-        if rank <= len(rank_drop_ids):
-            drops.append((f'rank-{rank}', rank_drop_ids[rank - 1]))
+        for award_rank, (drop_id, rank_limit) in enumerate(
+                zip(rank_drop_ids, rank_limits), 1):
+            if drop_id and int(rank_limit or 0) > 0 and rank <= int(rank_limit):
+                drops.append((f'rank-{award_rank}', drop_id))
         if int(entry.get('id', 0)) == int(record.get('last_kill_id', 0) or 0):
             drops.append(('last-kill', boss.get('last_kill_drop_id', '')))
-        if drops and not _guild_boss_award(record, guild, int(entry.get('id', 0)), drops):
+        if drops and not _guild_boss_award(
+                record, guild, int(entry.get('id', 0)), drops, notify=notify):
             pending = True
     record['rewards_pending'] = pending
     return not pending
+
+def _guild_boss_auto_exit(guild_id, boss_id, event_start):
+    guild = GUILD_STATES.get(str(guild_id))
+    row = GUILD_BOSS_DATA.get(str(boss_id), {})
+    map_id = str(row.get('map_id', ''))
+    record = (guild or {}).get('guild_boss_events', {}).get(str(boss_id), {})
+    if (not record or int(record.get('event_start', 0) or 0) != int(event_start)
+            or not record.get('finished')):
+        return
+    participants = set(str(member_id) for member_id in record.get('participants', {}))
+    participants.update(
+        str(entry.get('id', 0)) for entry in _guild_boss_rank_rows(record)
+    )
+    for participant_id in participants:
+        try:
+            char_id = int(participant_id)
+        except (TypeError, ValueError):
+            continue
+        conn, char = ALL_CONNECTIONS.get(char_id, (None, None))
+        if (not conn or not char or not is_current_character_connection(conn, char)
+                or str(char.get('map_id', '')) != map_id
+                or str(char.get('active_copy_id', '')) != map_id):
+            continue
+        return_map = str(char.get('pre_copy_map') or '11')
+        return_pos = char.get('pre_copy_pos')
+        if return_map == map_id:
+            return_map = '11'
+            return_pos = None
+        char['pre_copy_pos'] = None
+        char['pre_copy_map'] = None
+        char['active_copy_id'] = None
+        send_rpc_push_safe(conn, 629, encode_sproto([
+            (0, int(time.time())), (1, 2)
+        ]))
+        push = lambda tag, data, cid=char_id: send_push_to_char(cid, tag, data)
+        start_map_transition(conn, char, return_map, push, override_pos=return_pos)
+    save_chars(all_accounts_chars)
+
+def _guild_boss_start_exit_countdown(guild, boss_id, record):
+    row = GUILD_BOSS_DATA.get(str(boss_id), {})
+    end_time = int(record.get('end_time', 0) or 0)
+    map_id = str(row.get('map_id', ''))
+    participant_ids = set(str(member_id) for member_id in record.get('participants', {}))
+    participant_ids.update(
+        str(entry.get('id', 0)) for entry in _guild_boss_rank_rows(record)
+    )
+    countdown = encode_sproto([(0, end_time), (1, 2)])
+    for participant_id in participant_ids:
+        try:
+            char_id = int(participant_id)
+        except (TypeError, ValueError):
+            continue
+        conn, char = ALL_CONNECTIONS.get(char_id, (None, None))
+        if (conn and char and is_current_character_connection(conn, char)
+                and str(char.get('map_id', '')) == map_id
+                and str(char.get('active_copy_id', '')) == map_id):
+            send_rpc_push_safe(conn, 629, countdown)
+            send_rpc_push_safe(conn, 529, encode_sproto([
+                (0, f"The Guild Boss has been defeated today. You will leave the scene after {GUILD_BOSS_POST_KILL_EXIT_SECONDS} seconds."),
+                (1, True)
+            ]))
+    delay = max(0.0, end_time - time.time())
+    timer = threading.Timer(
+        delay, _guild_boss_auto_exit,
+        args=(int(guild.get('id', 0)), str(boss_id), int(record.get('event_start', 0) or 0))
+    )
+    timer.daemon = True
+    timer.start()
+
+def _guild_boss_send_result(guild, boss_id, record):
+    map_id = str(GUILD_BOSS_DATA.get(str(boss_id), {}).get('map_id', ''))
+    delivered = record.get('delivered_rewards', {})
+    for entry in _guild_boss_rank_rows(record):
+        try:
+            char_id = int(entry.get('id', 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        conn, char = ALL_CONNECTIONS.get(char_id, (None, None))
+        if (not conn or not char or not is_current_character_connection(conn, char)
+                or str(char.get('map_id', '')) != map_id
+                or str(char.get('active_copy_id', '')) != map_id
+                or not _guild_boss_member(guild, char, boss_id)):
+            continue
+        item_list = []
+        for reward in delivered.get(str(char_id), []):
+            if not isinstance(reward, (list, tuple)) or len(reward) != 3:
+                continue
+            item_id, quality, amount = reward
+            if int(amount) <= 0:
+                continue
+            item_id = str(item_id)
+            item_list.append(encode_sproto([
+                (0, item_id), (1, int(amount)), (3, int(quality)),
+                (4, item_id), (5, 0)
+            ]))
+        result_fields = [(0, 6), (2, True)]
+        if item_list:
+            result_fields.append((3, item_list))
+        result_fields.extend([
+            (4, _guild_boss_battle_info(char, include_state=False)),
+            (5, str(boss_id))
+        ])
+        send_rpc_push_safe(conn, 620, encode_sproto(result_fields))
 
 def _guild_boss_finish(guild, boss_id, record, killer_id):
     if record.get('finished'):
@@ -10201,11 +10329,11 @@ def _guild_boss_finish(guild, boss_id, record, killer_id):
     finished_at = int(time.time())
     boss_cfg = GUILD_BOSS_DATA.get(str(boss_id), {})
     record['finished_at'] = finished_at
-    record['end_time'] = finished_at + max(1, int(boss_cfg.get('wait_time', 1) or 1))
+    record['end_time'] = finished_at + GUILD_BOSS_POST_KILL_EXIT_SECONDS
     killer = next((entry for entry in rows if int(entry.get('id', 0)) == int(killer_id)), {})
     record['last_kill_id'] = int(killer_id)
     record['last_kill_name'] = str(killer.get('name', ''))
-    _guild_boss_distribute_rewards(guild, boss_id, record)
+    _guild_boss_distribute_rewards(guild, boss_id, record, notify=False)
     _save_guild_states()
     runtime_key = (
         str(guild.get('id', 0)), str(boss_id), int(record.get('event_start', 0) or 0)
@@ -10348,6 +10476,8 @@ def _guild_boss_apply_hit(conn, char, target_id, client_dmg, skill_id,
                 and int(_guild_member_id(guild, peer_id).get('job', 4)) != 4):
             send_rpc_push_safe(peer_conn, 511, dmg_board)
     if killed:
+        _guild_boss_start_exit_countdown(guild, boss_id, record)
+        _guild_boss_send_result(guild, boss_id, record)
         _guild_boss_push_activity(guild)
     return True
 
