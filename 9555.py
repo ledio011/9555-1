@@ -10229,8 +10229,10 @@ def _guild_boss_reward_rows(reward_key, guild):
 def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
                       boss_id=None, force_mail=False):
     """Deliver a completed Gang Boss payout once; offline/retry payouts go to mail."""
+    char_id_int = int(char_id)
+    print(f"[GUILD BOSS AWARD ENTER] player={char_id_int} reward_sets={len(reward_sets)} force_mail={force_mail}")
     claims = record.setdefault('reward_claims', {})
-    claim_key = str(int(char_id))
+    claim_key = str(char_id_int)
     claimed = set(claims.get(claim_key, []))
     new_claims = set()
     pending = []
@@ -10238,6 +10240,7 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
     audit_packages = []
     for reward_key, selector in reward_sets:
         if reward_key in claimed:
+            print(f"[GUILD BOSS AWARD SKIP] player={char_id_int} {reward_key} already claimed")
             continue
         rewards = _guild_boss_reward_rows(selector, guild)
         if rewards is None:
@@ -10255,10 +10258,10 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
         claimed.add(reward_key)
         new_claims.add(reward_key)
     if not pending:
+        print(f"[GUILD BOSS AWARD EARLY RETURN] player={char_id_int} no pending rewards, unresolved={unresolved}")
         claims[claim_key] = sorted(claimed)
         return not unresolved
 
-    char_id_int = int(char_id)
     conn, online_char = ALL_CONNECTIONS.get(char_id_int, (None, None))
     online = bool(conn and online_char
                   and is_current_character_connection(conn, online_char))
@@ -10269,6 +10272,9 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
         and str(online_char.get('map_id', '')) == boss_map_id
         and str(online_char.get('active_copy_id', '')) == boss_map_id
     )
+    print(f"[GUILD BOSS AWARD CHECK] player={char_id_int} online={online} "
+          f"in_boss_scene={online_in_boss_scene} boss_map={boss_map_id} "
+          f"player_map={str(online_char.get('map_id', '') if online_char else 'N/A')}")
     char = online_char if online else _guild_char_by_id(char_id_int)
     if not char:
         print(f"[GUILD BOSS REWARD] deferred; character missing player={char_id_int}")
@@ -10293,6 +10299,7 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
     # Offline rewards are queued at defeat. Any unresolved reward retried later
     # must also be mailed, never silently inserted into inventory during login.
     if force_mail or not online_in_boss_scene:
+        print(f"[GUILD BOSS AWARD MAIL PATH] player={char_id_int} force_mail={force_mail}")
         event_start = int(record.get('event_start', 0) or 0)
         claim_token = ','.join(sorted(new_claims))
         source_key = (
@@ -10304,6 +10311,7 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
                               if isinstance(mi, dict)
                               and mi.get('guildBossRewardKey') == source_key), None)
         if existing_mail:
+            print(f"[GUILD BOSS MAIL EXISTING] player={char_id_int} updating existing mail")
             claims[claim_key] = sorted(claimed)
             send_push_to_char(char_id_int, 531, build_mail_update(existing_mail))
             return not unresolved
@@ -10354,14 +10362,14 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
         claims[claim_key] = sorted(claimed)
         # Push mail_update to any online player so the mail red dot appears
         # immediately without requiring a reconnect.
-        if send_push_to_char(char_id_int, 531, build_mail_update(mail_entry)):
-            print(f"[GUILD BOSS MAIL] notification pushed player={char_id_int}")
+        push_result = send_push_to_char(char_id_int, 531, build_mail_update(mail_entry))
         print(f"[GUILD BOSS MAIL] queued player={char_id_int} "
-              f"items={len(by_item_id)} source={source_key}")
+              f"items={len(by_item_id)} source={source_key} push_sent={push_result}")
         print(f"[GUILD BOSS REWARD DELIVERED] player={char_id_int} "
               f"mode=mail total=[{audit_total}]")
         return not unresolved
 
+    print(f"[GUILD BOSS AWARD INVENTORY PATH] player={char_id_int}")
     if not can_add_reward_list_to_inventory(char, pending):
         print(f"[GUILD BOSS REWARD] deferred for inventory capacity player={char_id_int}")
         claimed.difference_update(new_claims)
