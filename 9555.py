@@ -10179,7 +10179,7 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True):
     )
     if notify and push:
         popup = encode_sproto([(0, [encode_sproto([
-            (0, str(item_id)), (1, int(amount)), (2, int(quality))
+            (0, str(item_id)), (1, int(amount)), (3, int(quality))
         ]) for item_id, quality, amount in pending])])
         push(638, popup)
     save_chars(all_accounts_chars)
@@ -10315,13 +10315,11 @@ def _guild_boss_send_result(guild, boss_id, record):
                 (0, item_id), (1, int(amount)), (3, int(quality)),
                 (4, item_id), (5, 0)
             ]))
-        result_fields = [(0, 6), (2, True)]
-        if item_list:
-            result_fields.append((3, item_list))
-        result_fields.extend([
+        result_fields = [
+            (0, 6), (2, True), (3, item_list),
             (4, _guild_boss_battle_info(char, include_state=False)),
             (5, str(boss_id))
-        ])
+        ]
         send_rpc_push_safe(conn, 620, encode_sproto(result_fields))
 
 def _guild_boss_finish(guild, boss_id, record, killer_id):
