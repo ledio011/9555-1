@@ -117,18 +117,15 @@ GUILD_BOSS_MISSING_REWARD_LOGGED = set()
 GUILD_BOSS_TEST_REWARD_FALLBACK = True
 GUILD_BOSS_TEST_REWARD_LOGGED = set()
 GUILD_BOSS_TEST_REWARD_RANGES = (
-    # 50001 is the actual BadgeData Level 1 item "Strength Badge Lv.1".
-    # 8801 is only the cosmetic "Rank 1 badge" display item; 9603 is a box.
-    (51001, 51010, (('1001', 1, 50000), ('1004', 1, 500),
-                    ('50001', 1, 1), ('6002', 1, 2))),      # Rank 1
-    (51011, 51020, (('1001', 1, 40000), ('1004', 1, 400),
-                    ('50001', 1, 1))),                     # Rank 2
-    (51021, 51030, (('1001', 1, 30000), ('1004', 1, 300),
-                    ('50001', 1, 1))),                     # Rank 3
-    (51101, 51110, (('1001', 1, 10000), ('1004', 1, 100))),  # Participation
-    (51201, 51210, (('1001', 1, 20000), ('1004', 1, 200),
-                    ('6002', 1, 1))),                      # Final hit
-    (51301, 51310, (('1001', 1, 5000), ('1004', 1, 50))),     # All members
+    # Match ShowRewardData 51001: 1001(Money), 1004(Contribution), 8801(Gang Stereo), 6002(Refine Stone)
+    # Only Rank 1 receives the Gang Stereo badge (8801).
+    (51001, 51010, (('1001', 1, 5000), ('1004', 1, 500),
+                    ('8801', 1, 1), ('6002', 1, 2))),       # Rank 1 — gets Gang Stereo badge
+    (51011, 51020, (('1001', 1, 3000), ('1004', 1, 300))),  # Rank 2
+    (51021, 51030, (('1001', 1, 1000), ('1004', 1, 100))),  # Rank 3
+    (51101, 51110, (('1001', 1, 500), ('1004', 1, 50))),    # Participation
+    (51201, 51210, (('1001', 1, 2000), ('1004', 1, 200))),  # Final hit
+    (51301, 51310, (('1001', 1, 100), ('1004', 1, 10))),    # All members (guild-wide)
 )
 KILL_TARGET_SPAWNS = {} # logicId -> list of spawns
 TARGET_CAR_SPAWNS = {}  # logicId -> list of car spawns
