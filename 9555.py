@@ -10459,6 +10459,35 @@ def _guild_boss_distribute_rewards(guild, boss_id, record, notify=True, force_ma
         if drops:
             add_awards(entry.get('id', 0), drops)
 
+    # Summary: log the complete reward distribution picture
+    guild_id_log = int((guild or {}).get('id', 0) or 0)
+    guild_level_log = _guild_level(guild)
+    num_players = len(awards_by_player)
+    num_guild_wide = 0
+    num_participate = 0
+    num_rank = 0
+    num_last_kill = 0
+    for _pid, awards in awards_by_player.items():
+        for reward_key, _sel in awards:
+            if reward_key == 'guild-wide':
+                num_guild_wide += 1
+            elif reward_key == 'participate':
+                num_participate += 1
+            elif reward_key.startswith('rank-'):
+                num_rank += 1
+            elif reward_key == 'last-kill':
+                num_last_kill += 1
+    print(f"[GUILD BOSS REWARD SUMMARY] boss={boss_id} guild={guild_id_log} "
+          f"level={guild_level_log} total_players={num_players} "
+          f"guild_wide={num_guild_wide} participate={num_participate} "
+          f"rank={num_rank} last_kill={num_last_kill} "
+          f"force_mail={force_mail} notify={notify}")
+    # Per-player detail
+    for player_id in sorted(awards_by_player, key=lambda value: int(value)):
+        awards = awards_by_player[player_id]
+        award_desc = '; '.join(f"{rk}({sel})" for rk, sel in awards)
+        print(f"[GUILD BOSS REWARD PLAYER] player={player_id} awards=[{award_desc}]")
+
     pending = False
     for player_id in sorted(awards_by_player, key=lambda value: int(value)):
         if not _guild_boss_award(
@@ -10466,6 +10495,7 @@ def _guild_boss_distribute_rewards(guild, boss_id, record, notify=True, force_ma
                 notify=notify, boss_id=boss_id, force_mail=force_mail):
             pending = True
     record['rewards_pending'] = pending
+    print(f"[GUILD BOSS REWARD DONE] boss={boss_id} pending={pending}")
     return not pending
 
 def _guild_boss_auto_exit(guild_id, boss_id, event_start):
