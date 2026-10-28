@@ -7325,49 +7325,30 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         print(f"[NPC SPAWN] client-owned MonsterData simulation map={map_str}; suppress server duplicates")
         return
     if map_str != "11" and (map_str in STATIC_NPC_DATA or map_str in MONSTER_DATA):
-        # For BIG_WORLD maps, the client has no distance-based recycling for
-        # server-created NPCs (they go into mObjNpcPoolGroup, not the ragdoll
-        # pool that CitySimController recycles). We must filter on the server side.
+        # For BIG_WORLD maps (type 1), skip patrol NPCs (Group 6) that have
+        # empty AI fields — the client destroys AILogic and they appear as
+        # stationary "stunned" figures. CitySimController patrol only works
+        # for tutorial scenes.
         map_type = int(MAP_CONFIG.get(map_str, {}).get('type', -1))
         is_big_world = (map_type == 1)
-        # Player position for distance filtering (in map units, same scale as NPC coords)
-        player_x = player_z = None
-        if is_big_world and picked_char:
-            pos = picked_char.get('pos')
-            if isinstance(pos, list) and len(pos) >= 3:
-                player_x = pos[0]
-                player_z = pos[2]
-        big_world_spawn_radius = 150  # units (same scale as NPC x/z coords)
-        def _should_send_npc(nid, x, z):
-            """Return True if this NPC should be sent to the client."""
-            cfg = NPC_CONFIG.get(nid, {})
-            # Skip patrol NPCs (Group 6 with movement skill 1008) on BIG_WORLD.
-            # Their AI field is empty, so the client destroys AILogic and they
-            # appear as stationary "stunned" figures. The client-side patrol
-            # system (CitySimController) only works for tutorial scenes.
-            if is_big_world:
-                npc_group = int(cfg.get('group', 5))
-                if npc_group == 6:
-                    return False
-            # Distance filter for BIG_WORLD: only send NPCs within spawn radius
-            if is_big_world and player_x is not None and player_z is not None:
-                dx = x - player_x
-                dz = z - player_z
-                if (dx * dx + dz * dz) > (big_world_spawn_radius ** 2):
-                    return False
-            return True
         if map_str in STATIC_NPC_DATA:
             for m in STATIC_NPC_DATA[map_str]:
                 nid = m['nid']
-                if _should_send_npc(nid, m['x'], m['z']):
-                    cfg = NPC_CONFIG.get(nid, {'name': f"NPC_{nid}"})
-                    send_npc_create(nid, cfg['name'], m['x'], m['z'], m['o'])
+                cfg = NPC_CONFIG.get(nid, {'name': f"NPC_{nid}"})
+                if is_big_world:
+                    npc_group = int(cfg.get('group', 5))
+                    if npc_group == 6:
+                        continue
+                send_npc_create(nid, cfg['name'], m['x'], m['z'], m['o'])
         if map_str in MONSTER_DATA:
             for i, m in enumerate(MONSTER_DATA[map_str]):
                 nid = m['nid']
-                if _should_send_npc(nid, m['x'], m['z']):
-                    cfg = NPC_CONFIG.get(nid, {'name': f"Monster_{nid}"})
-                    send_npc_create(nid, cfg['name'], m['x'], m['z'], m['o'])
+                cfg = NPC_CONFIG.get(nid, {'name': f"Monster_{nid}"})
+                if is_big_world:
+                    npc_group = int(cfg.get('group', 5))
+                    if npc_group == 6:
+                        continue
+                send_npc_create(nid, cfg['name'], m['x'], m['z'], m['o'])
 
     # The active city-capture vehicle is configured by GuildCaptureData and
     # has one shared server instance across players in that map.
