@@ -9351,8 +9351,8 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         print(f"[TELEPORT] Lord Battle Map 502 start pos={landing_pos}")
 
     # 1. Try teleport portal heuristic
-    if not landing_pos and (target_map_id, src_map) in MAP_CONNECT_DATA:
-        px, py, pz = MAP_CONNECT_DATA[(target_map_id, src_map)]
+    if not landing_pos and (src_map, target_map_id) in MAP_CONNECT_DATA:
+        px, py, pz = MAP_CONNECT_DATA[(src_map, target_map_id)]
         # Liberty City height fix: ensure player is above NavMesh
         y_coord = int(py * 100)
         if target_map_id == "101" or target_map_id == "105":
@@ -12453,6 +12453,26 @@ def client_handler(conn, addr):
                         scene_name = MAP_CONFIG[mid]['scene']
                     else:
                         print(f"[MAP CONFIG MISSING] map_id={mid}")
+
+                    # Validate spawn position - fall back to birth position if invalid
+                    current_pos = picked_char.get('pos')
+                    pos_valid = (isinstance(current_pos, list)
+                                 and len(current_pos) >= 3
+                                 and not (current_pos[0] == 0 and current_pos[1] == 0 and current_pos[2] == 0))
+                    if not pos_valid and mid in MAP_CONFIG:
+                        birth = MAP_CONFIG[mid].get('birth')
+                        if birth:
+                            parts = birth.split('#')
+                            if len(parts) >= 3:
+                                x_coord = int(parts[0])
+                                y_coord = int(parts[1])
+                                z_coord = int(parts[2])
+                                # Fix height for maps with known NavMesh issues
+                                if mid in ("101", "105") or y_coord == 0:
+                                    y_coord = 200 if mid in ("101", "105") else 100
+                                o_coord = int(parts[3]) if len(parts) > 3 else 0
+                                picked_char['pos'] = [x_coord, y_coord, z_coord, o_coord]
+                                print(f"[LOGIN SPAWN FIX] map={mid} pos={picked_char['pos']}")
 
                     print("[DEBUG] BEFORE MAP ENTER")
                     try:
