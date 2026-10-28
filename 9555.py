@@ -7327,11 +7327,22 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
     if map_str != "11" and map_str in STATIC_NPC_DATA:
         for m in STATIC_NPC_DATA[map_str]:
             cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}"})
+            # For BIG_WORLD maps (e.g. Liberty City 101), skip patrol NPCs (type=0).
+            # Their AI field is empty, so the client destroys AILogic and they appear
+            # as stationary "stunned" NPCs. CitySimController handles them locally for
+            # tutorial scenes only; for BIG_WORLD the client spawns ambient NPCs instead.
+            npc_type = cfg.get('type', 3)
+            if map_str == "101" and npc_type == 0:
+                continue
             send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
     if map_str != "11" and map_str in MONSTER_DATA:
         for i, m in enumerate(MONSTER_DATA[map_str]):
             cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
+            # Same filter for MonsterData entries on Liberty City
+            npc_type = cfg.get('type', 3)
+            if map_str == "101" and npc_type == 0:
+                continue
             send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
     # The active city-capture vehicle is configured by GuildCaptureData and
@@ -12497,9 +12508,9 @@ def client_handler(conn, addr):
                         # level-up during this login session.
                         send_rpc_push(644, level_package_state_payload(picked_char))
 
-                        # Initialize dance runtime and send dance state for Liberty City (map 101)
-                        if mid == '101' and int(picked_char.get('level', 1)) >= int(CITY_DANCE_CONFIG.get('101', {}).get('UnlockLevel', 8) or 8):
-                            ensure_dance_runtime(picked_char)
+                        # Refresh the client's cached dance activity state on every map entry.
+                        # SceneManager only requests tag 313 on the first scene load; without
+                        # this push, a reconnect or return to map 101 can keep stale duration.
                         send_rpc_push(686, dance_state_info_payload(picked_char))
 
                         # TAG 505: aoi_add (NPCs)
