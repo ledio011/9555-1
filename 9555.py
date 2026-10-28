@@ -42,6 +42,7 @@ TEAM_MATCH_QUEUE = {}
 TEAM_ID_COUNTER = 500000
 EXP_RUN_COUNTER = 900000
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
+NPC_AOI_TRACK = {}  # connection identity -> {inst_id: {'nid': ..., 'x': ..., 'z': ...}}
 DEAD_NPC_SET = set() # duplicate death/reward prevention set
 LOCAL_NPC_DEATHS = {} # (character, map, npc, spawn) -> last accepted local death time
 LOCAL_NPC_DEATH_LOCK = threading.Lock()
@@ -7215,16 +7216,115 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
                     save_chars(all_accounts_chars)
     _schedule_guild_boss_tick(runtime_key, runtime)
 
+def _npc_aoi_distance_sq(x1, z1, x2, z2):
+    """Squared distance between two points in NPC coordinate space."""
+    dx = x1 - x2
+    dz = z1 - z2
+    return dx * dx + dz * dz
+
+def update_npc_aoi(conn, map_id, picked_char):
+    """Update NPC visibility based on player position for BIG_WORLD maps.
+    Remove distant NPCs (TAG 506) and add nearby ones (TAG 509)."""
+    map_str = str(map_id)
+    conn_id = id(conn)
+    
+    # Only for BIG_WORLD maps (type 1)
+    map_type = int(MAP_CONFIG.get(map_str, {}).get('type', -1))
+    if map_type != 1:
+        return
+    
+    pos = picked_char.get('pos')
+    if not isinstance(pos, list) or len(pos) < 3:
+        return
+    player_x = int(pos[0])
+    player_z = int(pos[2])
+    
+    # Spawn/despawn distances (squared, in NPC coordinate space)
+    spawn_dist_sq = 300 * 300  # 300 units spawn radius
+    despawn_dist_sq = 450 * 450  # 450 units despawn radius (hysteresis)
+    
+    # Get all NPCs for this map
+    all_npcs = []
+    if map_str in STATIC_NPC_DATA:
+        for m in STATIC_NPC_DATA[map_str]:
+            cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}"})
+            all_npcs.append((m['nid'], cfg['name'], m['x'], m['z'], m['o']))
+    if map_str in MONSTER_DATA:
+        for m in MONSTER_DATA[map_str]:
+            cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
+            all_npcs.append((m['nid'], cfg['name'], m['x'], m['z'], m['o']))
+    
+    if not all_npcs:
+        return
+    
+    # Get tracked NPCs for this connection
+    tracked = NPC_AOI_TRACK.get(conn_id, {})
+    
+    # Build set of expected nearby NPCs
+    nearby_nids = set()
+    for nid, name, x, z, o in all_npcs:
+        dist_sq = _npc_aoi_distance_sq(player_x, player_z, x, z)
+        if dist_sq <= spawn_dist_sq:
+            nearby_nids.add((nid, x, z))
+    
+    # Remove NPCs that are too far away
+    to_remove = []
+    for inst_id, info in list(tracked.items()):
+        nid = info['nid']
+        x = info['x']
+        z = info['z']
+        dist_sq = _npc_aoi_distance_sq(player_x, player_z, x, z)
+        if dist_sq > despawn_dist_sq:
+            to_remove.append((inst_id, nid))
+    
+    for inst_id, nid in to_remove:
+        tracked.pop(inst_id, None)
+        try:
+            send_rpc_push_safe(conn, 506, encode_sproto([(0, inst_id)]))
+        except:
+            pass
+    
+    # Add NPCs that are nearby but not yet sent
+    for nid, name, x, z, o in all_npcs:
+        if (nid, x, z) in nearby_nids:
+            # Check if already tracked
+            already_sent = False
+            for info in tracked.values():
+                if info['nid'] == nid and info['x'] == x and info['z'] == z:
+                    already_sent = True
+                    break
+            if not already_sent:
+                inst_id, attr = build_npc_attr_sproto(nid, name, x, z, o)
+                NPC_INSTANCE_MAP[inst_id] = map_str
+                tracked[inst_id] = {'nid': nid, 'x': x, 'z': z}
+                try:
+                    send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
+                except:
+                    pass
+    
+    NPC_AOI_TRACK[conn_id] = tracked
+
+
 def spawn_map_npcs(conn, map_id, picked_char=None):
     map_str = str(map_id)
     spawned_maps = NPC_SPAWNED_MAPS.setdefault(id(conn), set())
     if map_str in spawned_maps: return
     spawned_maps.add(map_str)
+    
+    # For BIG_WORLD maps (type 1), use distance-based AOI spawning
+    map_type = int(MAP_CONFIG.get(map_str, {}).get('type', -1))
+    is_big_world = (map_type == 1)
+    
     def send_npc_create(nid, name, x, z, o):
         inst_id, attr = build_npc_attr_sproto(nid, name, x, z, o)
         NPC_INSTANCE_MAP[inst_id] = map_str
         send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
         return inst_id
+    
+    if is_big_world and picked_char:
+        # Use AOI-based spawning for BIG_WORLD maps
+        update_npc_aoi(conn, map_id, picked_char)
+        return
     boss_id = _guild_boss_map_id(map_str)
     if boss_id:
         if picked_char:
@@ -7325,29 +7425,15 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         print(f"[NPC SPAWN] client-owned MonsterData simulation map={map_str}; suppress server duplicates")
         return
     if map_str != "11" and (map_str in STATIC_NPC_DATA or map_str in MONSTER_DATA):
-        # For BIG_WORLD maps (type 1), skip patrol NPCs (Group 6) that have
-        # empty AI fields — the client destroys AILogic and they appear as
-        # stationary "stunned" figures. CitySimController patrol only works
-        # for tutorial scenes.
-        map_type = int(MAP_CONFIG.get(map_str, {}).get('type', -1))
-        is_big_world = (map_type == 1)
         if map_str in STATIC_NPC_DATA:
             for m in STATIC_NPC_DATA[map_str]:
                 nid = m['nid']
                 cfg = NPC_CONFIG.get(nid, {'name': f"NPC_{nid}"})
-                if is_big_world:
-                    npc_group = int(cfg.get('group', 5))
-                    if npc_group == 6:
-                        continue
                 send_npc_create(nid, cfg['name'], m['x'], m['z'], m['o'])
         if map_str in MONSTER_DATA:
             for i, m in enumerate(MONSTER_DATA[map_str]):
                 nid = m['nid']
                 cfg = NPC_CONFIG.get(nid, {'name': f"Monster_{nid}"})
-                if is_big_world:
-                    npc_group = int(cfg.get('group', 5))
-                    if npc_group == 6:
-                        continue
                 send_npc_create(nid, cfg['name'], m['x'], m['z'], m['o'])
 
     # The active city-capture vehicle is configured by GuildCaptureData and
@@ -12882,15 +12968,20 @@ def client_handler(conn, addr):
                         new_pos = update_exp_authoritative_position(picked_char, move_stage_state, new_pos)
                     picked_char['pos'] = new_pos
                     # Issue 224: Throttle position saves to avoid excessive disk I/O.
-                    # Save every 30 seconds instead of on every move packet (~10Hz).
+                    # Save every 10 seconds instead of on every move packet (~10Hz).
                     # The position is still saved on important events: dungeon entry/exit,
                     # map transition, disconnect, mission completion, etc.
                     last_pos_save = picked_char.get('_last_pos_save', 0)
-                    if int(time.time()) - last_pos_save >= 30:
+                    if int(time.time()) - last_pos_save >= 10:
                         save_chars(all_accounts_chars)
                         picked_char['_last_pos_save'] = int(time.time())
                     # Broadcast movement to other players on the same map (TAG 507)
                     broadcast_aoi_move(picked_char)
+                    # Update NPC AOI for BIG_WORLD maps — throttle to every 2 seconds
+                    last_aoi_update = picked_char.get('_last_npc_aoi_update', 0)
+                    if int(time.time()) - last_aoi_update >= 2:
+                        update_npc_aoi(conn, move_map, picked_char)
+                        picked_char['_last_npc_aoi_update'] = int(time.time())
                 elif p_raw and picked_char and (is_exp_move_map or is_equipment_move_map):
                     stage_label = 'EQUIP' if is_equipment_move_map else 'EXP'
                     print(f"[{stage_label} MOVE] rejected downed/nonparticipant/stale player={picked_char.get('id')} map={picked_char.get('map_id')}")
