@@ -105,7 +105,7 @@ GUILD_BATTLE_DATA = {} # id -> configured Gang Battle schedule/selection data
 GUILD_STAR_DATA = {} # id -> configured Gang Star upgrade data
 GUILD_SHOP_DATA = {} # shop item ID -> ShopData row for Guild shop
 GUILD_BOSS_DATA = {} # guild boss/activity rows shown by the Gang activity panel
-GUILD_BOSS_TEST_ALWAYS_OPEN = True
+GUILD_BOSS_TEST_ALWAYS_OPEN = False
 GUILD_BOSS_POST_KILL_EXIT_SECONDS = 5
 GUILD_BOSS_MISSING_REWARD_LOGGED = set()
 # Temporary server-side test packages for Gang Boss because the shipped APK
@@ -121,7 +121,7 @@ GUILD_BOSS_TEST_REWARD_RANGES = (
     # Only Rank 1 receives the Gang Stereo badge (8801) and Refine Stone (6002).
     # Minimal amounts — Gang Boss is a daily activity, not a major reward source.
     (51001, 51010, (('1001', 1, 500), ('1004', 1, 50),
-                    ('8801', 1, 1), ('6002', 1, 1))),        # Rank 1 — gets Gang Stereo badge + 1 refine stone
+                    ('8801', 0, 1), ('6002', 1, 1))),        # Rank 1 — gets Gang Stereo badge (quality 0 = level 1) + 1 refine stone
     (51011, 51020, (('1001', 1, 300), ('1004', 1, 30))),    # Rank 2
     (51021, 51030, (('1001', 1, 100), ('1004', 1, 10))),    # Rank 3
     (51101, 51110, (('1001', 1, 50), ('1004', 1, 5))),      # Participation
