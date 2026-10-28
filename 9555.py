@@ -7223,15 +7223,12 @@ def _npc_aoi_distance_sq(x1, z1, x2, z2):
     return dx * dx + dz * dz
 
 def update_npc_aoi(conn, map_id, picked_char):
-    """Update NPC visibility based on player position for BIG_WORLD maps.
+    """Update NPC visibility based on player position for Liberty City (map 101).
     Remove distant NPCs (TAG 506) and add nearby ones (TAG 509)."""
     map_str = str(map_id)
-    conn_id = id(conn)
-    
-    # Only for BIG_WORLD maps (type 1)
-    map_type = int(MAP_CONFIG.get(map_str, {}).get('type', -1))
-    if map_type != 1:
+    if map_str != "101":
         return
+    conn_id = id(conn)
     
     pos = picked_char.get('pos')
     if not isinstance(pos, list) or len(pos) < 3:
@@ -7311,18 +7308,15 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
     if map_str in spawned_maps: return
     spawned_maps.add(map_str)
     
-    # For BIG_WORLD maps (type 1), use distance-based AOI spawning
-    map_type = int(MAP_CONFIG.get(map_str, {}).get('type', -1))
-    is_big_world = (map_type == 1)
-    
     def send_npc_create(nid, name, x, z, o):
         inst_id, attr = build_npc_attr_sproto(nid, name, x, z, o)
         NPC_INSTANCE_MAP[inst_id] = map_str
         send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
         return inst_id
     
-    if is_big_world and picked_char:
-        # Use AOI-based spawning for BIG_WORLD maps
+    # For Liberty City (map 101), use distance-based AOI spawning so NPCs
+    # appear when the player comes close and disappear when far away.
+    if map_str == "101" and picked_char:
         update_npc_aoi(conn, map_id, picked_char)
         return
     boss_id = _guild_boss_map_id(map_str)
@@ -12968,20 +12962,21 @@ def client_handler(conn, addr):
                         new_pos = update_exp_authoritative_position(picked_char, move_stage_state, new_pos)
                     picked_char['pos'] = new_pos
                     # Issue 224: Throttle position saves to avoid excessive disk I/O.
-                    # Save every 10 seconds instead of on every move packet (~10Hz).
+                    # Save every 30 seconds instead of on every move packet (~10Hz).
                     # The position is still saved on important events: dungeon entry/exit,
                     # map transition, disconnect, mission completion, etc.
                     last_pos_save = picked_char.get('_last_pos_save', 0)
-                    if int(time.time()) - last_pos_save >= 10:
+                    if int(time.time()) - last_pos_save >= 30:
                         save_chars(all_accounts_chars)
                         picked_char['_last_pos_save'] = int(time.time())
                     # Broadcast movement to other players on the same map (TAG 507)
                     broadcast_aoi_move(picked_char)
-                    # Update NPC AOI for BIG_WORLD maps — throttle to every 2 seconds
-                    last_aoi_update = picked_char.get('_last_npc_aoi_update', 0)
-                    if int(time.time()) - last_aoi_update >= 2:
-                        update_npc_aoi(conn, move_map, picked_char)
-                        picked_char['_last_npc_aoi_update'] = int(time.time())
+                    # Update NPC AOI for Liberty City (map 101) — throttle to every 2 seconds
+                    if str(move_map) == '101':
+                        last_aoi_update = picked_char.get('_last_npc_aoi_update', 0)
+                        if int(time.time()) - last_aoi_update >= 2:
+                            update_npc_aoi(conn, move_map, picked_char)
+                            picked_char['_last_npc_aoi_update'] = int(time.time())
                 elif p_raw and picked_char and (is_exp_move_map or is_equipment_move_map):
                     stage_label = 'EQUIP' if is_equipment_move_map else 'EXP'
                     print(f"[{stage_label} MOVE] rejected downed/nonparticipant/stale player={picked_char.get('id')} map={picked_char.get('map_id')}")
