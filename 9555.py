@@ -6941,7 +6941,27 @@ def _spawn_guild_boss(conn, char, boss_id, map_id):
         return
     cfg = GUILD_BOSS_DATA.get(str(boss_id), {})
     record = _guild_boss_record(guild, boss_id, create=True)
-    if not record or record.get('finished'):
+    if not record:
+        return
+    # If the previous attempt finished, start a fresh attempt: clear old
+    # reward claims so players can receive rewards for the new fight.
+    if record.get('finished'):
+        record['reward_claims'] = {}
+        record['rewards_pending'] = False
+        record['hp_max'] = int(record.get('hp_max', 0) or 0)
+        npc_id = str(cfg.get('boss_npc_id', ''))
+        stats = get_npc_attr(npc_id)
+        if stats:
+            record['hp_max'] = int(stats.get('hp_max', 0))
+            record['hp'] = int(stats.get('hp_max', 0))
+        record['damage_players'] = {}
+        record['participants'] = {}
+        record['last_kill_id'] = 0
+        record['last_kill_name'] = ''
+        record['finished'] = False
+        record['attempts'] = int(record.get('attempts', 0) or 0) + 1
+        _save_guild_states()
+    if record.get('finished'):
         return
     key = (str(guild_id), str(boss_id), int(record.get('event_start', 0)))
     monster = next((entry for entry in MONSTER_DATA.get(str(map_id), [])
