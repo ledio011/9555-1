@@ -7327,22 +7327,11 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
     if map_str != "11" and map_str in STATIC_NPC_DATA:
         for m in STATIC_NPC_DATA[map_str]:
             cfg = NPC_CONFIG.get(m['nid'], {'name': f"NPC_{m['nid']}"})
-            # For BIG_WORLD maps (e.g. Liberty City 101), skip patrol NPCs (type=0).
-            # Their AI field is empty, so the client destroys AILogic and they appear
-            # as stationary "stunned" NPCs. CitySimController handles them locally for
-            # tutorial scenes only; for BIG_WORLD the client spawns ambient NPCs instead.
-            npc_type = cfg.get('type', 3)
-            if map_str == "101" and npc_type == 0:
-                continue
             send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
     if map_str != "11" and map_str in MONSTER_DATA:
         for i, m in enumerate(MONSTER_DATA[map_str]):
             cfg = NPC_CONFIG.get(m['nid'], {'name': f"Monster_{m['nid']}"})
-            # Same filter for MonsterData entries on Liberty City
-            npc_type = cfg.get('type', 3)
-            if map_str == "101" and npc_type == 0:
-                continue
             send_npc_create(m['nid'], cfg['name'], m['x'], m['z'], m['o'])
 
     # The active city-capture vehicle is configured by GuildCaptureData and
