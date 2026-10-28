@@ -7236,9 +7236,11 @@ def update_npc_aoi(conn, map_id, picked_char):
     player_x = int(pos[0])
     player_z = int(pos[2])
     
-    # Spawn/despawn distances (squared, in NPC coordinate space)
-    spawn_dist_sq = 300 * 300  # 300 units spawn radius
-    despawn_dist_sq = 450 * 450  # 450 units despawn radius (hysteresis)
+    # Spawn/despawn distances (squared, in NPC coordinate space).
+    # The client uses NpcCreateDis=40 and mNpcRecycleDis=50 in Unity world units.
+    # Unity units = server raw coords / 100, so 40 Unity = 4000 raw, 50 Unity = 5000 raw.
+    spawn_dist_sq = 4000 * 4000  # 40 Unity units spawn radius
+    despawn_dist_sq = 5000 * 5000  # 50 Unity units despawn radius (hysteresis)
     
     # Get all NPCs for this map
     all_npcs = []
