@@ -12477,6 +12477,11 @@ def client_handler(conn, addr):
                         # level-up during this login session.
                         send_rpc_push(644, level_package_state_payload(picked_char))
 
+                        # Initialize dance runtime and send dance state for Liberty City (map 101)
+                        if mid == '101' and int(picked_char.get('level', 1)) >= int(CITY_DANCE_CONFIG.get('101', {}).get('UnlockLevel', 8) or 8):
+                            ensure_dance_runtime(picked_char)
+                        send_rpc_push(686, dance_state_info_payload(picked_char))
+
                         # TAG 505: aoi_add (NPCs)
                         if is_equipment_copy_map(mid):
                             equipment_state = picked_char.get('equipment_stage_state')
