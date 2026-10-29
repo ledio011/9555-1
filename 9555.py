@@ -6305,7 +6305,7 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
                 exp_state.setdefault('monster_heading', {})[inst_id] = heading
                 pos_obj = encode_sproto([(0, int(new_mx * 100)), (1, 0), (2, int(new_mz * 100)), (3, heading)])
                 m_move = encode_sproto([(0, pos_obj), (1, pos_obj)])
-                char_move = encode_sproto([(0, inst_id), (1, m_move), (2, False)])
+                char_move = encode_sproto([(0, inst_id), (1, m_move), (2, True)])
                 send_func(507, encode_sproto([(0, char_move)]))
         else:
             with exp_npc_hp_lock(exp_state, inst_id):
@@ -7155,7 +7155,7 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
     def move_packet(x, z, heading):
         pos_obj = encode_sproto([(0, int(x * 100)), (1, 0), (2, int(z * 100)), (3, heading)])
         move = encode_sproto([(0, pos_obj), (1, pos_obj)])
-        return encode_sproto([(0, encode_sproto([(0, inst_id), (1, move), (2, False)]))])
+        return encode_sproto([(0, encode_sproto([(0, inst_id), (1, move), (2, True)]))])
 
     targets = []
     for member in members:
@@ -7199,7 +7199,7 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
         ready = [
             skill for skill in skills
             if distance <= skill_ranges[skill]
-               and float(runtime['skill_ready_at'].get(skill, 0.0)) <= now
+            and float(runtime['skill_ready_at'].get(skill, 0.0)) <= now
         ]
         if ready:
             # NpcData AI is "RandomSkill": random among the ready skills of the top priority tier.
@@ -7275,13 +7275,13 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
     spawned_maps = NPC_SPAWNED_MAPS.setdefault(id(conn), set())
     if map_str in spawned_maps: return
     spawned_maps.add(map_str)
-
+    
     def send_npc_create(nid, name, x, z, o):
         inst_id, attr = build_npc_attr_sproto(nid, name, x, z, o)
         NPC_INSTANCE_MAP[inst_id] = map_str
         send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
         return inst_id
-
+    
     # For Liberty City (map 101), use distance-based AOI spawning so NPCs
     # appear when the player comes close and disappear when far away.
     if map_str == "101" and picked_char:
