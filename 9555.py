@@ -7199,7 +7199,7 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
         ready = [
             skill for skill in skills
             if distance <= skill_ranges[skill]
-            and float(runtime['skill_ready_at'].get(skill, 0.0)) <= now
+               and float(runtime['skill_ready_at'].get(skill, 0.0)) <= now
         ]
         if ready:
             # NpcData AI is "RandomSkill": random among the ready skills of the top priority tier.
@@ -7270,18 +7270,102 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
                     save_chars(all_accounts_chars)
     _schedule_guild_boss_tick(runtime_key, runtime)
 
+def update_npc_aoi(conn, map_id, picked_char):
+    """Distance-based AOI spawning for Liberty City (map 101) static NPCs.
+
+    Spawns NPCs within AOI range using TAG 509 (npc_create) and removes
+    out-of-range NPCs using TAG 506 (aoi_remove).  Tracks per-connection
+    spawned instances in NPC_AOI_TRACK so repeated calls are idempotent.
+    """
+    map_str = str(map_id)
+    conn_key = id(conn)
+
+    # Get player position in centi-units (same scale as MonsterData)
+    pos = picked_char.get('pos', [0, 0, 0, 0])
+    px = int(pos[0])  # already in centi-units
+    pz = int(pos[2])
+
+    # AOI radius from MapInfoData (2000 world units = 200000 centi-units)
+    aoi_radius_cm = 200000
+    aoi_radius_sq = aoi_radius_cm * aoi_radius_cm
+
+    # Get all static NPCs for this map
+    static_npcs = STATIC_NPC_DATA.get(map_str, [])
+    if not static_npcs:
+        return
+
+    # Current tracked NPCs for this connection
+    tracked = NPC_AOI_TRACK.setdefault(conn_key, {})
+
+    # Build a set of inst_ids that should be visible
+    visible_inst_ids = set()
+    for npc in static_npcs:
+        nx = int(npc.get('x', 0))
+        nz = int(npc.get('z', 0))
+        dx = px - nx
+        dz = pz - nz
+        dist_sq = dx * dx + dz * dz
+        if dist_sq <= aoi_radius_sq:
+            # Create a stable key for this NPC spawn slot so the same
+            # instance ID is reused across calls
+            nid = str(npc.get('nid', ''))
+            o = int(npc.get('o', 0))
+            slot_key = f"{nid}_{nx}_{nz}"
+            # Check if we already have an instance for this slot
+            inst_id = None
+            for tid, tdata in tracked.items():
+                if tdata.get('slot') == slot_key:
+                    inst_id = tid
+                    break
+            if inst_id is None:
+                # Spawn a new instance for this NPC slot
+                cfg = NPC_CONFIG.get(nid, {'name': f"NPC_{nid}"})
+                name = cfg.get('name', f"NPC_{nid}")
+                inst_id, attr = build_npc_attr_sproto(nid, name, nx, nz, o)
+                NPC_INSTANCE_MAP[inst_id] = map_str
+                send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
+                # Sync NPC attributes so the client shows correct stats
+                stats = get_npc_attr(nid)
+                sync_npc_attrs_rpc(conn, inst_id, stats, NPC_HP_MAP.get(inst_id, stats['hp_max']))
+                tracked[inst_id] = {
+                    'slot': slot_key,
+                    'nid': nid,
+                    'x': nx,
+                    'z': nz,
+                    'o': o
+                }
+                print(f"[AOI NPC] Spawned inst_id={inst_id} nid={nid} at ({nx},{nz}) for conn={conn_key}")
+            visible_inst_ids.add(inst_id)
+
+    # Remove NPCs that are no longer in range
+    removed = set()
+    for inst_id in list(tracked.keys()):
+        if inst_id not in visible_inst_ids:
+            # Send aoi_remove (TAG 506) to the client
+            send_rpc_push_safe(conn, 506, encode_sproto([(0, inst_id)]))
+            removed.add(inst_id)
+            print(f"[AOI NPC] Removed inst_id={inst_id} (out of range) for conn={conn_key}")
+
+    for inst_id in removed:
+        tracked.pop(inst_id, None)
+        # Clean up server-side NPC state
+        NPC_HP_MAP.pop(inst_id, None)
+        NPC_INST_MAP.pop(inst_id, None)
+        NPC_INSTANCE_MAP.pop(inst_id, None)
+        NPC_ATTR_MAP.pop(inst_id, None)
+
 def spawn_map_npcs(conn, map_id, picked_char=None):
     map_str = str(map_id)
     spawned_maps = NPC_SPAWNED_MAPS.setdefault(id(conn), set())
     if map_str in spawned_maps: return
     spawned_maps.add(map_str)
-    
+
     def send_npc_create(nid, name, x, z, o):
         inst_id, attr = build_npc_attr_sproto(nid, name, x, z, o)
         NPC_INSTANCE_MAP[inst_id] = map_str
         send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
         return inst_id
-    
+
     # For Liberty City (map 101), use distance-based AOI spawning so NPCs
     # appear when the player comes close and disappear when far away.
     if map_str == "101" and picked_char:
@@ -9395,6 +9479,16 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
     target_map_id = str(target_map_id) or '11'
     if src_map == '101' and target_map_id != '101':
         settle_personal_dance(picked_char, stop=True)
+        # Clean up AOI-tracked Liberty City NPCs when leaving map 101
+        conn_key = id(conn)
+        tracked = NPC_AOI_TRACK.pop(conn_key, {})
+        for inst_id in tracked:
+            NPC_HP_MAP.pop(inst_id, None)
+            NPC_INST_MAP.pop(inst_id, None)
+            NPC_INSTANCE_MAP.pop(inst_id, None)
+            NPC_ATTR_MAP.pop(inst_id, None)
+        if tracked:
+            print(f"[AOI NPC] Cleaned up {len(tracked)} tracked NPCs for conn={conn_key} leaving map 101")
     if src_map != target_map_id: broadcast_aoi_remove(picked_char.get('id', 0), src_map)
     NPC_SPAWNED_MAPS.setdefault(id(conn), set()).discard(target_map_id)
     picked_char['map_id'] = target_map_id
@@ -18823,6 +18917,14 @@ def client_handler(conn, addr):
         try:
             if conn_id in NPC_SPAWNED_MAPS:
                 del NPC_SPAWNED_MAPS[conn_id]
+            # Clean up AOI-tracked Liberty City NPCs on disconnect
+            conn_aoi_key = id(conn)
+            tracked_aoi = NPC_AOI_TRACK.pop(conn_aoi_key, {})
+            for inst_id_aoi in tracked_aoi:
+                NPC_HP_MAP.pop(inst_id_aoi, None)
+                NPC_INST_MAP.pop(inst_id_aoi, None)
+                NPC_INSTANCE_MAP.pop(inst_id_aoi, None)
+                NPC_ATTR_MAP.pop(inst_id_aoi, None)
             if picked_char and picked_char.get('exp_stage_state'):
                 save_chars(all_accounts_chars)
             # A superseded socket can close after the player already
