@@ -660,6 +660,7 @@ try:
                         'name': parts[2],
                         'model': parts[4],
                         'level': lvl,
+                        'function_type': int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else 0,
                         'type': int(parts[13]) if len(parts) > 13 and parts[13].isdigit() else 0,
                         'is_abs': is_abs,
                         'skill_group': parts[14] if len(parts) > 14 and parts[14] else '50001',
@@ -6108,6 +6109,15 @@ def get_npc_attr(nid, player_level=1):
         'satp': 0, 'satm': 0, 'satc': 0
     }
 
+def npc_damage_sat_type(npc_id):
+    """Match CharacterAttributeData.GetDamage: NPC FunctionType 10 uses SATC."""
+    npc_cfg = NPC_CONFIG.get(str(npc_id), {})
+    try:
+        return 'satc' if int(npc_cfg.get('function_type', 0)) == 10 else 'satm'
+    except (TypeError, ValueError):
+        return 'satm'
+
+
 def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
     """Sends TAG 510 to sync NPC stats."""
     # The dominance zombie is initially added to camp 2 by tag 544.  Omitting
@@ -6144,7 +6154,7 @@ def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
             conn.sendall(packet)
     except: pass
 
-def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_area=False, pvp_scale=1.0, effinfo_id=None, sat_type=None, forced_hit=None, forced_crit=None, max_variance=False, is_pvp=False):
+def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_area=False, pvp_scale=1.0, effinfo_id=None, sat_type=None, forced_hit=None, forced_crit=None, max_variance=False, is_pvp=False, attacker_is_npc=False):
     """Original Damage calculation reproduced from CharacterAttributeData.cs"""
     prefix = "[AREA DAMAGE]" if is_area else "[COMBAT]"
 
@@ -6168,7 +6178,10 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
         pvp_mult += 0.05
 
     # 2. Check Hit/Dodge
-    skill_shit = eff_cfg['adds'].get(3001, 0) / 10000.0
+    # Client GameDefine.GetSkillTypeValue returns zero for every add type when
+    # the attacker is OBJ_NPC. Do not apply player-only SHIT/SCRI/SAT bonuses
+    # to NPC AI attacks.
+    skill_shit = 0.0 if attacker_is_npc else eff_cfg['adds'].get(3001, 0) / 10000.0
     hit_p = min((attacker_stats['hit'] + 1.0) / (attacker_stats['hita'] + attacker_stats['hit'] + 1.0), 1.0)
     dge_p = min((defender_stats['eva'] + 1.0) / (defender_stats['dgea'] + defender_stats['eva'] + 1.0), 0.5)
 
@@ -6187,7 +6200,7 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
         return 0, False, False # MISS
 
     # 3. Check Crit
-    skill_scri = eff_cfg['adds'].get(3002, 0) / 10000.0
+    skill_scri = 0.0 if attacker_is_npc else eff_cfg['adds'].get(3002, 0) / 10000.0
     cri_p = min((attacker_stats['cri'] + 1.0) / (attacker_stats['cri'] + attacker_stats['cria'] + 1.0), 0.9)
     res_p = min((defender_stats['res'] + 1.0) / (defender_stats['res'] + defender_stats['resa'] + 1.0), 0.8)
 
@@ -6209,7 +6222,7 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     # sat_type parameter overrides: 'satp' (default for PvP), 'satm' (NPC), 'satc' (car)
     if sat_type is None:
         sat_type = attacker_stats.get('sat_type', 'satp')
-    sat_value = attacker_stats.get(sat_type, 0)
+    sat_value = 0 if attacker_is_npc else attacker_stats.get(sat_type, 0)
     # Client adds CurSATM/SATP/SATC to skillDamge (fixed damage).
     # The scale add comes from effinfo's AddType fields via GetSkillTypeValue.
     # GetSkillTypeValue returns 0 for OBJ_NPC attackers, but for player attackers
@@ -6217,15 +6230,15 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     scaled_damage += sat_value
     # Add effect-based SAT scale bonus (client: skillScale += GetSkillTypeValue(..., SATM))
     # This applies to player attackers; for NPC attackers GetSkillTypeValue returns 0.
-    if sat_type == 'satm':
+    if not attacker_is_npc and sat_type == 'satm':
         satm_eff = eff_cfg['adds'].get(3005, 0)
         if satm_eff:
             scaled_scale += satm_eff / 10000.0
-    elif sat_type == 'satp':
+    elif not attacker_is_npc and sat_type == 'satp':
         satp_eff = eff_cfg['adds'].get(3007, 0)
         if satp_eff:
             scaled_scale += satp_eff / 10000.0
-    elif sat_type == 'satc':
+    elif not attacker_is_npc and sat_type == 'satc':
         satc_eff = eff_cfg['adds'].get(3006, 0)
         if satc_eff:
             scaled_scale += satc_eff / 10000.0
@@ -6975,12 +6988,12 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
                 if exp_state.get('stage_kind') == 'equipment':
                     dmg, is_hit, is_cri = get_combat_damage(
                         monster_stats, player_stats, skill_id=monster_skill,
-                        skill_lv=0, effinfo_id=monster_effect_id)
+                        skill_lv=0, effinfo_id=monster_effect_id, attacker_is_npc=True)
                 else:
                     # Preserve EXP-stage behavior; only equipment-copy NPCs
                     # need the explicitly selected boss skill effect.
                     dmg, is_hit, is_cri = get_combat_damage(
-                        monster_stats, player_stats, skill_id=monster_skill, skill_lv=0)
+                        monster_stats, player_stats, skill_id=monster_skill, skill_lv=0, attacker_is_npc=True)
 
                 if is_hit and dmg > 0:
                     picked_char['hp'] = max(0, picked_char['hp'] - dmg)
@@ -7845,7 +7858,7 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
             for v_id, v_conn, v_char in victims:
                 player_stats = get_character_stats(v_char)
                 damage, hit, critical = get_combat_damage(
-                    boss_stats, player_stats, skill_id, 0, effinfo_id=effect_id)
+                    boss_stats, player_stats, skill_id, 0, effinfo_id=effect_id, attacker_is_npc=True)
                 if not (hit and damage > 0):
                     continue
                 with GUILD_BOSS_LOCK:
@@ -15690,7 +15703,7 @@ def client_handler(conn, addr):
                                 effinfo_id = skill_cfg.get('eff0', "10000")
 
                             server_dmg, hit, calc_cri = get_combat_damage(
-                                boss_stats, player_stats, boss_skill_id, 0, effinfo_id=effinfo_id
+                                boss_stats, player_stats, boss_skill_id, 0, effinfo_id=effinfo_id, attacker_is_npc=True
                             )
                             if not hit:
                                 server_dmg = 0
@@ -15714,7 +15727,7 @@ def client_handler(conn, addr):
                         generic_npc_stats = get_npc_attr("100", picked_char.get('level', 1))
                         player_stats = get_character_stats(picked_char)
                         server_dmg, hit, calc_cri = get_combat_damage(
-                            generic_npc_stats, player_stats, "101", 0, effinfo_id=effinfo_id
+                            generic_npc_stats, player_stats, "101", 0, effinfo_id=effinfo_id, attacker_is_npc=True
                         )
                         if not hit:
                             server_dmg = 0
@@ -16101,7 +16114,7 @@ def client_handler(conn, addr):
                                     max_dmg, can_hit, possible_crit = get_combat_damage(
                                         attacker_stats, defender_stats, skill_id, skill_lv,
                                         effinfo_id=effinfo_id,
-                                        sat_type='satc' if city_capture_id else 'satm', forced_hit=True,
+                                        sat_type=npc_damage_sat_type(target_nid), forced_hit=True,
                                         forced_crit=is_cri, max_variance=True
                                     )
                                     if not can_hit or (is_cri and not possible_crit) or client_dmg > max_dmg + 2:
@@ -16148,7 +16161,7 @@ def client_handler(conn, addr):
                                     max_dmg, can_hit, possible_crit = get_combat_damage(
                                         attacker_stats, defender_stats, skill_id, skill_lv,
                                         effinfo_id=effinfo_id,
-                                        sat_type='satc' if city_capture_id else 'satm', forced_hit=True,
+                                        sat_type=npc_damage_sat_type(target_nid), forced_hit=True,
                                         forced_crit=is_cri, max_variance=True
                                     )
                                     if (not can_hit or (is_cri and not possible_crit)
