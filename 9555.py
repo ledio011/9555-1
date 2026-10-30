@@ -1426,6 +1426,8 @@ try:
                     'exr': int(parts[10]) if parts[10].isdigit() else 0,
                     'crd': int(parts[11]) if parts[11].isdigit() else 15000,
                     'crr': int(parts[12]) if parts[12].isdigit() else 0,
+                    'anti_stun': int(parts[13]) if len(parts) > 13 and parts[13].isdigit() else 0,
+                    'anti_knock_down': int(parts[14]) if len(parts) > 14 and parts[14].isdigit() else 0,
                     'defa': int(parts[15]) if len(parts) > 15 and parts[15].isdigit() else 3158,
                     'dgea': int(parts[16]) if len(parts) > 16 and parts[16].isdigit() else 6317,
                     'resa': int(parts[17]) if len(parts) > 17 and parts[17].isdigit() else 3158,
@@ -6008,7 +6010,8 @@ def get_npc_attr(nid, player_level=1):
         return {
             'hp_max': 1000, 'atk': 40, 'def': 100, 'hit': 2844, 'eva': 100, 'cri': 351, 'res': 0,
             'lv': player_level, 'defa': 3158, 'dgea': 6317, 'resa': 3158, 'hita': 316, 'cria': 3158,
-            'exd': 0, 'exr': 0, 'crd': 15000, 'crr': 0, 'power': 1000
+            'exd': 0, 'exr': 0, 'crd': 15000, 'crr': 0,
+            'anti_stun': 0, 'anti_knock_down': 0, 'mov': 500, 'power': 1000
         }
 
     lvl = cfg.get('level', 1)
@@ -6037,6 +6040,8 @@ def get_npc_attr(nid, player_level=1):
         resa = cfg.get('resa_abs', 3158)
         hita = cfg.get('hita_abs', 316)
         cria = cfg.get('cria_abs', 3158)
+        anti_stun = cfg.get('anti_stun_abs', 0)
+        anti_knock_down = cfg.get('anti_knock_down_abs', 0)
     else:
         hp_std = adapt.get('hp', ld.get('hp', [1000])[0] if isinstance(ld.get('hp'), list) else 1000)
         atk_std = adapt.get('atk', ld.get('atk', [40])[0] if isinstance(ld.get('atk'), list) else 40)
@@ -6060,6 +6065,8 @@ def get_npc_attr(nid, player_level=1):
         resa_std = adapt.get('resa', 3158)
         hita_std = adapt.get('hita', 316)
         cria_std = adapt.get('cria', 3158)
+        anti_stun_std = adapt.get('anti_stun', ld.get('anti_stun', 0))
+        anti_knock_down_std = adapt.get('anti_knock_down', ld.get('anti_knock_down', 0))
 
         hp = (cfg.get('hp_coe', 10000) * hp_std) // 10000
         atk = (cfg.get('atk_coe', 10000) * atk_std) // 10000
@@ -6077,10 +6084,19 @@ def get_npc_attr(nid, player_level=1):
         resa = (cfg.get('resa_coe', 10000) * resa_std) // 10000
         hita = (cfg.get('hita_coe', 10000) * hita_std) // 10000
         cria = (cfg.get('cria_coe', 10000) * cria_std) // 10000
+        anti_stun = (cfg.get('anti_stun_coe', 10000) * anti_stun_std) // 10000
+        anti_knock_down = (cfg.get('anti_knock_down_coe', 10000) * anti_knock_down_std) // 10000
 
     if cfg.get('hp_abs', 0) > hp: hp = cfg['hp_abs']
     if cfg.get('atk_abs', 0) > atk: atk = cfg['atk_abs']
     if cfg.get('def_abs', 0) > df: df = cfg['def_abs']
+
+    try:
+        move_speed = max(0, int(cfg.get('move_speed', 50)))
+    except (TypeError, ValueError):
+        move_speed = 50
+    # Client CharacterAttributeData reads attribute_all.mov / 100; NpcData.MoveSpeedMeter is MoveSpeed / 10.
+    mov = move_speed * 10
 
     prof_coeffs = {"atk": 16, "hp": 1, "def": 11}
     raw_power = (atk * prof_coeffs['atk'] + hp * prof_coeffs['hp'] + df * prof_coeffs['def'])
@@ -6091,6 +6107,7 @@ def get_npc_attr(nid, player_level=1):
         'hit': hit, 'eva': eva, 'cri': cri, 'res': res,
         'lv': lvl, 'defa': defa, 'dgea': dgea, 'resa': resa, 'hita': hita, 'cria': cria,
         'exd': exd, 'exr': exr, 'crd': crd, 'crr': crr,
+        'anti_stun': anti_stun, 'anti_knock_down': anti_knock_down, 'mov': mov,
         'power': power,
         'satp': 0, 'satm': 0, 'satc': 0
     }
@@ -6106,14 +6123,18 @@ def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
         # assigned in get_boss_char or the APK resets it to level 0.
         attr_other_fields.extend([(4, 1), (15, 2)])
     attr_oth = encode_sproto(attr_other_fields)
-    attr_base = encode_sproto([(0, stats['hp_max'])])
-    attr_all_data = [
+    # character_aoi_attribute.attribute and attribute_all are both consumed by
+    # CharacterAttributeData.InitData; send the complete NPC stat set in both.
+    attr_data = [
         (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
         (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
         (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
-        (12, stats['defa']), (13, 500), (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
+        (12, stats['defa']), (13, stats.get('mov', 500)),
+        (15, stats.get('anti_stun', 0)), (16, stats.get('anti_knock_down', 0)),
+        (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
     ]
-    attr_all = encode_sproto(attr_all_data)
+    attr_base = encode_sproto(attr_data)
+    attr_all = encode_sproto(attr_data)
     aoi_attr = encode_sproto([(0, inst_id), (1, attr_oth), (2, attr_base), (3, attr_all)])
     try:
         ph_p = encode_sproto([(0, 510)])
@@ -6127,7 +6148,7 @@ def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
             conn.sendall(packet)
     except: pass
 
-def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_area=False, pvp_scale=1.0, effinfo_id=None, sat_type=None, forced_hit=None, forced_crit=None, max_variance=False):
+def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_area=False, pvp_scale=1.0, is_pvp=False, effinfo_id=None, sat_type=None, forced_hit=None, forced_crit=None, max_variance=False):
     """Original Damage calculation reproduced from CharacterAttributeData.cs"""
     prefix = "[AREA DAMAGE]" if is_area else "[COMBAT]"
 
@@ -6147,10 +6168,8 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     # Only applies when BOTH attacker and defender are player/zombie/zombie_ragdoll types.
     # For NPC targets, pvp_scale stays at 1.0 (no PvP multiplier).
     pvp_mult = pvp_scale
-    if pvp_scale > 1.0:
-        # PvP context — check combo value condition from client
-        if attacker_stats.get('power', 0) > defender_stats.get('power', 0):
-            pvp_mult += 0.05
+    if is_pvp and attacker_stats.get('power', 0) > defender_stats.get('power', 0):
+        pvp_mult += 0.05
 
     # 2. Check Hit/Dodge
     skill_shit = eff_cfg['adds'].get(3001, 0) / 10000.0
@@ -6282,7 +6301,8 @@ def build_npc_attr_sproto(nid, name, x, z, o, existing_inst_id=None):
     attr = encode_sproto([
         (0, inst_id), (1, final_nid), (2, hp_cur), (3, hp_max), (4, atk), (5, df),
         (6, hit), (7, eva), (8, cri), (9, exd), (10, exr), (11, res), (12, crd), (13, crr), (14, defa),
-        (15, x), (16, z), (17, o), (18, lvl), (21, name),
+        (15, x), (16, z), (17, o), (18, lvl), (19, npc_stats.get('anti_stun', 0)),
+        (20, npc_stats.get('anti_knock_down', 0)), (21, name),
         (24, dgea), (25, resa), (26, hita), (27, cria)
     ])
     NPC_ATTR_MAP[inst_id] = attr
@@ -6959,12 +6979,12 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
                 if exp_state.get('stage_kind') == 'equipment':
                     dmg, is_hit, is_cri = get_combat_damage(
                         monster_stats, player_stats, skill_id=monster_skill,
-                        skill_lv=1, effinfo_id=monster_effect_id)
+                        skill_lv=0, effinfo_id=monster_effect_id)
                 else:
                     # Preserve EXP-stage behavior; only equipment-copy NPCs
                     # need the explicitly selected boss skill effect.
                     dmg, is_hit, is_cri = get_combat_damage(
-                        monster_stats, player_stats, skill_id=monster_skill, skill_lv=1)
+                        monster_stats, player_stats, skill_id=monster_skill, skill_lv=0)
 
                 if is_hit and dmg > 0:
                     picked_char['hp'] = max(0, picked_char['hp'] - dmg)
@@ -7829,7 +7849,7 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
             for v_id, v_conn, v_char in victims:
                 player_stats = get_character_stats(v_char)
                 damage, hit, critical = get_combat_damage(
-                    boss_stats, player_stats, skill_id, 1, effinfo_id=effect_id)
+                    boss_stats, player_stats, skill_id, 0, effinfo_id=effect_id)
                 if not (hit and damage > 0):
                     continue
                 with GUILD_BOSS_LOCK:
@@ -15674,7 +15694,7 @@ def client_handler(conn, addr):
                                 effinfo_id = skill_cfg.get('eff0', "10000")
 
                             server_dmg, hit, calc_cri = get_combat_damage(
-                                boss_stats, player_stats, boss_skill_id, 1, effinfo_id=effinfo_id
+                                boss_stats, player_stats, boss_skill_id, 0, effinfo_id=effinfo_id
                             )
                             if not hit:
                                 server_dmg = 0
@@ -15698,7 +15718,7 @@ def client_handler(conn, addr):
                         generic_npc_stats = get_npc_attr("100", picked_char.get('level', 1))
                         player_stats = get_character_stats(picked_char)
                         server_dmg, hit, calc_cri = get_combat_damage(
-                            generic_npc_stats, player_stats, "101", 1, effinfo_id=effinfo_id
+                            generic_npc_stats, player_stats, "101", 0, effinfo_id=effinfo_id
                         )
                         if not hit:
                             server_dmg = 0
@@ -15823,7 +15843,7 @@ def client_handler(conn, addr):
                             if effinfo_id is None:
                                 effinfo_id = skill_cfg.get('eff0', "10000")
 
-                            server_dmg, hit, calc_cri = get_combat_damage(attacker_stats, target_stats, skill_id, skill_lv, pvp_scale=1.0, effinfo_id=effinfo_id)
+                            server_dmg, hit, calc_cri = get_combat_damage(attacker_stats, target_stats, skill_id, skill_lv, pvp_scale=1.0, is_pvp=True, effinfo_id=effinfo_id)
                             if not hit:
                                 server_dmg = 0
                                 calc_cri = False
