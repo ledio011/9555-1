@@ -3,6 +3,8 @@ from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Tuple
 
 PORT = int(os.environ.get("PORT", 15678))
+# Verified from the shipped APK: GameDefine.PLAYER_MAX_LEVEL = 80.
+PLAYER_MAX_LEVEL = 80
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CHAR_DB = os.path.join(SCRIPT_DIR, "characters_final.json")
 BAK_DB = CHAR_DB + ".bak"
@@ -4772,9 +4774,21 @@ def character_attribute_other_fields(character, stats, hp_cur):
         (18, str(dance.get('dance_id', '')) if dance_active else '')
     ]
 
+def normalize_player_level(character):
+    """Clamp a saved character to the APK's hard maximum level (80)."""
+    try:
+        level = int(character.get('level', 1))
+    except (AttributeError, TypeError, ValueError):
+        level = 1
+    level = max(1, min(PLAYER_MAX_LEVEL, level))
+    if isinstance(character, dict):
+        character['level'] = level
+    return level
+
+
 def get_character_stats(c):
     """Calculate player attributes from BaseLvData and currently equipped items."""
-    lv = c.get('level', 1)
+    lv = normalize_player_level(c)
     prof = c.get('prof', 0)
     ld = get_level_data(lv)
 
@@ -9434,10 +9448,12 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None,
             inv_changed = True
 
     if exp_gained > 0:
-        picked_char['exp'] = picked_char.get('exp', 0) + exp_gained
-        old_level = picked_char.get('level', 1)
+        normalize_player_level(picked_char)
+        # Keep earning EXP at level 80. The client clamps its EXP bar to 100%,
+        # but must never be sent a level above PLAYER_MAX_LEVEL.
+        picked_char['exp'] = max(0, int(picked_char.get('exp', 0))) + exp_gained
         leveled_up = False
-        while True:
+        while int(picked_char.get('level', 1)) < PLAYER_MAX_LEVEL:
             lv = picked_char.get('level', 1)
             rd = LEVEL_DATA.get(lv)
             if rd and picked_char['exp'] >= rd['exp']:
@@ -9493,10 +9509,12 @@ def give_mission_rewards(picked_char, mid):
         added_cash = reward.get('cash', 0)
 
         picked_char['cash'] = picked_char.get('cash', 0) + added_cash
-        picked_char['exp'] = picked_char.get('exp', 0) + added_exp
+        normalize_player_level(picked_char)
+        # Mission EXP remains claimable at the cap, without creating level 81.
+        picked_char['exp'] = max(0, int(picked_char.get('exp', 0))) + added_exp
 
         leveled_up = False
-        while True:
+        while int(picked_char.get('level', 1)) < PLAYER_MAX_LEVEL:
             lv = picked_char.get('level', 1)
             req_data = LEVEL_DATA.get(lv)
             if not req_data: break
