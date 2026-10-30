@@ -6144,7 +6144,7 @@ def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
             conn.sendall(packet)
     except: pass
 
-def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_area=False, pvp_scale=1.0, is_pvp=False, effinfo_id=None, sat_type=None, forced_hit=None, forced_crit=None, max_variance=False):
+def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_area=False, pvp_scale=1.0, effinfo_id=None, sat_type=None, forced_hit=None, forced_crit=None, max_variance=False, is_pvp=False):
     """Original Damage calculation reproduced from CharacterAttributeData.cs"""
     prefix = "[AREA DAMAGE]" if is_area else "[COMBAT]"
 
