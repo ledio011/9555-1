@@ -45,6 +45,8 @@ TEAM_ID_COUNTER = 500000
 EXP_RUN_COUNTER = 900000
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 NPC_AOI_TRACK = {}  # connection identity -> {inst_id: {'nid': ..., 'x': ..., 'z': ...}}
+NPC_PATROL_THREADS = {}  # connection identity -> Liberty City patrol worker
+NPC_PATROL_THREADS_LOCK = threading.Lock()
 DEAD_NPC_SET = set() # duplicate death/reward prevention set
 LOCAL_NPC_DEATHS = {} # (character, map, npc, spawn) -> last accepted local death time
 LOCAL_NPC_DEATH_LOCK = threading.Lock()
@@ -7897,96 +7899,241 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
                     save_chars(all_accounts_chars)
     _schedule_guild_boss_tick(runtime_key, runtime)
 
-def update_npc_aoi(conn, map_id, picked_char):
-    """Distance-based AOI spawning for Liberty City (map 101) static NPCs.
+def _send_liberty_npc_patrol_move(conn, inst_id, from_x, from_z, target_x, target_z):
+    """Send one client-native walking waypoint for a Liberty City NPC (TAG 507)."""
+    dx = int(target_x) - int(from_x)
+    dz = int(target_z) - int(from_z)
+    heading = int(round(math.degrees(math.atan2(dx, dz)) * 100)) % 36000
 
-    Spawns NPCs within AOI range using TAG 509 (npc_create) and removes
-    out-of-range NPCs using TAG 506 (aoi_remove).  Tracks per-connection
-    spawned instances in NPC_AOI_TRACK so repeated calls are idempotent.
+    # Protocol.aoi_update_move -> character_aoi_move -> movement -> position.
+    # Coordinates are centi-units, matching MonsterData/NPCPathData.
+    pos_data = encode_sproto([
+        (0, int(target_x)), (1, 0), (2, int(target_z)), (3, heading)
+    ])
+    movement_data = encode_sproto([(0, pos_data)])
+    character_data = encode_sproto([
+        (0, int(inst_id)), (1, movement_data), (2, True)
+    ])
+    return send_rpc_push_safe(conn, 507, encode_sproto([(0, character_data)]))
+
+
+def _liberty_npc_patrol_worker(conn, picked_char, conn_key):
+    """Advance client-visible Liberty City patrol NPCs along NPCPathData."""
+    try:
+        while True:
+            time.sleep(0.25)
+            if str(picked_char.get('map_id', '')) != '101':
+                break
+            try:
+                if conn.fileno() < 0:
+                    break
+            except Exception:
+                break
+
+            active = ALL_CONNECTIONS.get(int(picked_char.get('id', 0)))
+            if active and active[0] is not conn:
+                break
+
+            tracked = NPC_AOI_TRACK.get(conn_key)
+            if not tracked:
+                continue
+
+            now = time.monotonic()
+            for inst_id, tdata in list(tracked.items()):
+                if tracked.get(inst_id) is not tdata:
+                    continue
+                path = tdata.get('path') or []
+                if len(path) < 2 or now < float(tdata.get('path_next_at', 0)):
+                    continue
+                try:
+                    if int(NPC_HP_MAP.get(inst_id, 1)) <= 0:
+                        continue
+                    path_index = int(tdata.get('path_index', 0)) % len(path)
+                    target_x, target_z = int(path[path_index][0]), int(path[path_index][1])
+                    from_x, from_z = tdata.get('path_pos', (tdata.get('x', 0), tdata.get('z', 0)))
+                    from_x, from_z = int(from_x), int(from_z)
+                except (TypeError, ValueError, IndexError, KeyError):
+                    continue
+
+                if not _send_liberty_npc_patrol_move(
+                        conn, inst_id, from_x, from_z, target_x, target_z):
+                    return
+
+                tdata['path_index'] = (path_index + 1) % len(path)
+                tdata['path_pos'] = (target_x, target_z)
+
+                # Client NpcData.WalkSpeed defaults to 10; WalkSpeedMeter is
+                # therefore 1 m/s. PatrolState waits 2 seconds after arrival.
+                travel_seconds = math.hypot(target_x - from_x, target_z - from_z) / 100.0
+                tdata['path_next_at'] = now + max(0.5, travel_seconds) + 2.0
+                print(
+                    f"[LIBERTY PATROL] TAG 507 inst_id={inst_id} "
+                    f"nid={tdata.get('nid')} path={tdata.get('path_id')} "
+                    f"waypoint={path_index} pos=({target_x},{target_z})"
+                )
+    except Exception as exc:
+        print(f"[LIBERTY PATROL] worker error conn={conn_key}: {exc}")
+    finally:
+        with NPC_PATROL_THREADS_LOCK:
+            if NPC_PATROL_THREADS.get(conn_key) is threading.current_thread():
+                NPC_PATROL_THREADS.pop(conn_key, None)
+
+
+def _ensure_liberty_npc_patrol_worker(conn, picked_char, conn_key):
+    """Start at most one patrol scheduler for this client connection."""
+    with NPC_PATROL_THREADS_LOCK:
+        current = NPC_PATROL_THREADS.get(conn_key)
+        if current is not None and current.is_alive():
+            return
+        worker = threading.Thread(
+            target=_liberty_npc_patrol_worker,
+            args=(conn, picked_char, conn_key),
+            name=f"ATG-Liberty-NPC-Patrol-{conn_key}",
+            daemon=True,
+        )
+        NPC_PATROL_THREADS[conn_key] = worker
+        worker.start()
+        print(f"[LIBERTY PATROL] worker started conn={conn_key}")
+
+
+def update_npc_aoi(conn, map_id, picked_char):
+    """Per-client AOI for Liberty City NPCs.
+
+    Ordinary static NPCs retain the MapInfoData AOI. Path-bearing map-101
+    placements use 40-unit creation / 50-unit recycle hysteresis and receive
+    server TAG 507 walking waypoints because map 101 is BIG_WORLD: the
+    client's CitySimController.InitMonsterList() does not initialize its
+    local MonsterData simulation in that scene.
     """
     map_str = str(map_id)
     conn_key = id(conn)
 
-    # Get player position in centi-units (same scale as MonsterData)
+    # Player positions and MonsterData/NPCPathData coordinates are centi-units.
     pos = picked_char.get('pos', [0, 0, 0, 0])
-    px = int(pos[0])  # already in centi-units
+    px = int(pos[0])
     pz = int(pos[2])
 
-    # AOI radius from MapInfoData (2000 world units = 200000 centi-units)
+    # MapInfoData radius for ordinary static NPCs (2000 world units).
     aoi_radius_cm = 200000
     aoi_radius_sq = aoi_radius_cm * aoi_radius_cm
 
-    # Get all static NPCs for this map
     static_npcs = STATIC_NPC_DATA.get(map_str, [])
     if not static_npcs:
         return
 
-    # Current tracked NPCs for this connection
     tracked = NPC_AOI_TRACK.setdefault(conn_key, {})
-
-    # Build a set of inst_ids that should be visible
     visible_inst_ids = set()
+    patrol_create_cm = 4000
+    patrol_recycle_cm = 5000
+    now = time.monotonic()
+
     for npc in static_npcs:
-        # Liberty City's path-bearing MonsterData NPCs are client-owned actors.
-        # CitySimController creates them from MonsterData/NPCPathData within
-        # 40 units and recycles them beyond 50. TAG 509 cannot carry PathId,
-        # so a server copy would be a second, non-patrolling NPC. Exclude these
-        # rows; if already tracked, the normal removal pass below sends TAG 506.
-        if map_str == '101' and npc.get('path_id'):
-            continue
+        nid = str(npc.get('nid', ''))
         nx = int(npc.get('x', 0))
         nz = int(npc.get('z', 0))
+        o = int(npc.get('o', 0))
         dx = px - nx
         dz = pz - nz
         dist_sq = dx * dx + dz * dz
-        if dist_sq <= aoi_radius_sq:
-            # Create a stable key for this NPC spawn slot so the same
-            # instance ID is reused across calls
-            nid = str(npc.get('nid', ''))
-            o = int(npc.get('o', 0))
-            slot_key = f"{nid}_{nx}_{nz}"
-            # Check if we already have an instance for this slot
-            inst_id = None
-            for tid, tdata in tracked.items():
-                if tdata.get('slot') == slot_key:
-                    inst_id = tid
-                    break
-            if inst_id is None:
-                # Spawn a new instance for this NPC slot
-                cfg = NPC_CONFIG.get(nid, {'name': f"NPC_{nid}"})
-                name = cfg.get('name', f"NPC_{nid}")
-                inst_id, attr = build_npc_attr_sproto(nid, name, nx, nz, o)
-                NPC_INSTANCE_MAP[inst_id] = map_str
-                send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
-                # Sync NPC attributes so the client shows correct stats
-                stats = get_npc_attr(nid)
-                sync_npc_attrs_rpc(conn, inst_id, stats, NPC_HP_MAP.get(inst_id, stats['hp_max']))
-                tracked[inst_id] = {
-                    'slot': slot_key,
-                    'nid': nid,
-                    'x': nx,
-                    'z': nz,
-                    'o': o
-                }
-                print(f"[AOI NPC] Spawned inst_id={inst_id} nid={nid} at ({nx},{nz}) for conn={conn_key}")
-            visible_inst_ids.add(inst_id)
+        slot_key = f"{nid}_{nx}_{nz}"
 
-    # Remove NPCs that are no longer in range
+        # Find the existing instance for this exact MonsterData placement.
+        inst_id = None
+        for tid, tdata in tracked.items():
+            if tdata.get('slot') == slot_key:
+                inst_id = tid
+                break
+
+        path_id = str(npc.get('path_id') or '').strip()
+        is_path_npc = (map_str == '101' and bool(path_id))
+        path_points = []
+        if is_path_npc:
+            try:
+                path_points = [
+                    (int(point[0]), int(point[1]))
+                    for point in (npc.get('path') or [])
+                    if isinstance(point, (list, tuple)) and len(point) >= 2
+                ]
+            except (TypeError, ValueError):
+                path_points = []
+
+        if is_path_npc:
+            # Match the requested 40/50-unit lifecycle. Existing instances
+            # remain alive until they cross 50 units; new ones require <=40.
+            radius_cm = patrol_recycle_cm if inst_id is not None else patrol_create_cm
+            in_range = dist_sq <= radius_cm * radius_cm
+        else:
+            in_range = dist_sq <= aoi_radius_sq
+
+        if not in_range:
+            continue
+
+        if inst_id is None:
+            cfg = NPC_CONFIG.get(nid, {'name': f'NPC_{nid}'})
+            name = cfg.get('name', f'NPC_{nid}')
+            inst_id, attr = build_npc_attr_sproto(nid, name, nx, nz, o)
+            NPC_INSTANCE_MAP[inst_id] = map_str
+            send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
+            stats = get_npc_attr(nid)
+            sync_npc_attrs_rpc(conn, inst_id, stats, NPC_HP_MAP.get(inst_id, stats['hp_max']))
+
+            track_data = {
+                'slot': slot_key,
+                'nid': nid,
+                'x': nx,
+                'z': nz,
+                'o': o,
+            }
+            if is_path_npc:
+                track_data.update({
+                    'path_id': path_id,
+                    'path': path_points,
+                    'path_index': 0,
+                    'path_pos': (nx, nz),
+                    'path_next_at': now + 0.5,
+                    'path_speed_mps': 1.0,
+                })
+            tracked[inst_id] = track_data
+            suffix = f" path={path_id}" if is_path_npc else ''
+            print(
+                f"[AOI NPC] Spawned inst_id={inst_id} nid={nid} "
+                f"at ({nx},{nz}) for conn={conn_key}{suffix}"
+            )
+        elif is_path_npc:
+            track_data = tracked[inst_id]
+            # Populate route state for a pre-existing tracked instance without
+            # resetting an already-running patrol.
+            if track_data.get('path_id') != path_id or not track_data.get('path'):
+                track_data.update({
+                    'path_id': path_id,
+                    'path': path_points,
+                    'path_index': 0,
+                    'path_pos': (nx, nz),
+                    'path_next_at': now + 0.5,
+                    'path_speed_mps': 1.0,
+                })
+
+        visible_inst_ids.add(inst_id)
+
+    # Send TAG 506 and discard state only after the placement leaves its AOI.
     removed = set()
     for inst_id in list(tracked.keys()):
         if inst_id not in visible_inst_ids:
-            # Send aoi_remove (TAG 506) to the client
             send_rpc_push_safe(conn, 506, encode_sproto([(0, inst_id)]))
             removed.add(inst_id)
             print(f"[AOI NPC] Removed inst_id={inst_id} (out of range) for conn={conn_key}")
 
     for inst_id in removed:
         tracked.pop(inst_id, None)
-        # Clean up server-side NPC state
         NPC_HP_MAP.pop(inst_id, None)
         NPC_INST_MAP.pop(inst_id, None)
         NPC_INSTANCE_MAP.pop(inst_id, None)
         NPC_ATTR_MAP.pop(inst_id, None)
+
+    # The worker sends one TAG 507 per path point, with the same cyclic waypoint
+    # order and two-second pause used by the client's PatrolState.
+    if any(len(tdata.get('path') or []) >= 2 for tdata in tracked.values()):
+        _ensure_liberty_npc_patrol_worker(conn, picked_char, conn_key)
 
 def spawn_map_npcs(conn, map_id, picked_char=None):
     map_str = str(map_id)
