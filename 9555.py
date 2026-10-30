@@ -885,6 +885,7 @@ try:
                         'group': group,
                         'rebirth_type': int(parts[7]) if len(parts) > 7 and parts[7].lstrip('-').isdigit() else 0,
                         'rebirth_time': int(parts[8]) if len(parts) > 8 and parts[8].lstrip('-').isdigit() else -1,
+                        'path_id': parts[9].strip() if len(parts) > 9 else '',
                     }
                     if group == 9999:
                         if mid not in STATIC_NPC_DATA: STATIC_NPC_DATA[mid] = []
@@ -7926,6 +7927,13 @@ def update_npc_aoi(conn, map_id, picked_char):
     # Build a set of inst_ids that should be visible
     visible_inst_ids = set()
     for npc in static_npcs:
+        # Liberty City's path-bearing MonsterData NPCs are client-owned actors.
+        # CitySimController creates them from MonsterData/NPCPathData within
+        # 40 units and recycles them beyond 50. TAG 509 cannot carry PathId,
+        # so a server copy would be a second, non-patrolling NPC. Exclude these
+        # rows; if already tracked, the normal removal pass below sends TAG 506.
+        if map_str == '101' and npc.get('path_id'):
+            continue
         nx = int(npc.get('x', 0))
         nz = int(npc.get('z', 0))
         dx = px - nx
