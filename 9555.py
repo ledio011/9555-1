@@ -45,8 +45,9 @@ TEAM_ID_COUNTER = 500000
 EXP_RUN_COUNTER = 900000
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 NPC_AOI_TRACK = {}  # connection identity -> {inst_id: {'nid': ..., 'x': ..., 'z': ...}}
-NPC_PATROL_THREADS = {}  # connection identity -> Liberty City patrol worker
-NPC_PATROL_THREADS_LOCK = threading.Lock()
+NPC_PATROL_CONNECTIONS = {}  # connection identity -> (socket, character) with active Liberty patrols
+NPC_PATROL_WORKER = None
+NPC_PATROL_WORKER_LOCK = threading.Lock()
 DEAD_NPC_SET = set() # duplicate death/reward prevention set
 LOCAL_NPC_DEATHS = {} # (character, map, npc, spawn) -> last accepted local death time
 LOCAL_NPC_DEATH_LOCK = threading.Lock()
@@ -7917,84 +7918,106 @@ def _send_liberty_npc_patrol_move(conn, inst_id, from_x, from_z, target_x, targe
     return send_rpc_push_safe(conn, 507, encode_sproto([(0, character_data)]))
 
 
-def _liberty_npc_patrol_worker(conn, picked_char, conn_key):
-    """Advance client-visible Liberty City patrol NPCs along NPCPathData."""
+def _liberty_npc_patrol_worker():
+    """Advance patrols for all local players using one shared daemon thread."""
+    global NPC_PATROL_WORKER
     try:
         while True:
             time.sleep(0.25)
-            if str(picked_char.get('map_id', '')) != '101':
-                break
-            try:
-                if conn.fileno() < 0:
-                    break
-            except Exception:
-                break
-
-            active = ALL_CONNECTIONS.get(int(picked_char.get('id', 0)))
-            if active and active[0] is not conn:
-                break
-
-            tracked = NPC_AOI_TRACK.get(conn_key)
-            if not tracked:
-                continue
+            with NPC_PATROL_WORKER_LOCK:
+                connections = list(NPC_PATROL_CONNECTIONS.items())
 
             now = time.monotonic()
-            for inst_id, tdata in list(tracked.items()):
-                if tracked.get(inst_id) is not tdata:
-                    continue
-                path = tdata.get('path') or []
-                if len(path) < 2 or now < float(tdata.get('path_next_at', 0)):
-                    continue
+            for conn_key, (conn, picked_char) in connections:
                 try:
-                    if int(NPC_HP_MAP.get(inst_id, 1)) <= 0:
+                    if str(picked_char.get('map_id', '')) != '101' or conn.fileno() < 0:
+                        with NPC_PATROL_WORKER_LOCK:
+                            NPC_PATROL_CONNECTIONS.pop(conn_key, None)
                         continue
-                    path_index = int(tdata.get('path_index', 0)) % len(path)
-                    target_x, target_z = int(path[path_index][0]), int(path[path_index][1])
-                    from_x, from_z = tdata.get('path_pos', (tdata.get('x', 0), tdata.get('z', 0)))
-                    from_x, from_z = int(from_x), int(from_z)
-                except (TypeError, ValueError, IndexError, KeyError):
+                except Exception:
+                    with NPC_PATROL_WORKER_LOCK:
+                        NPC_PATROL_CONNECTIONS.pop(conn_key, None)
                     continue
 
-                if not _send_liberty_npc_patrol_move(
-                        conn, inst_id, from_x, from_z, target_x, target_z):
-                    return
+                active = ALL_CONNECTIONS.get(int(picked_char.get('id', 0)))
+                if active and active[0] is not conn:
+                    with NPC_PATROL_WORKER_LOCK:
+                        NPC_PATROL_CONNECTIONS.pop(conn_key, None)
+                    continue
 
-                tdata['path_index'] = (path_index + 1) % len(path)
-                tdata['path_pos'] = (target_x, target_z)
+                tracked = NPC_AOI_TRACK.get(conn_key)
+                if not tracked:
+                    with NPC_PATROL_WORKER_LOCK:
+                        NPC_PATROL_CONNECTIONS.pop(conn_key, None)
+                    continue
 
-                # Client NpcData.WalkSpeed defaults to 10; WalkSpeedMeter is
-                # therefore 1 m/s. PatrolState waits 2 seconds after arrival.
-                travel_seconds = math.hypot(target_x - from_x, target_z - from_z) / 100.0
-                tdata['path_next_at'] = now + max(0.5, travel_seconds) + 2.0
-                print(
-                    f"[LIBERTY PATROL] TAG 507 inst_id={inst_id} "
-                    f"nid={tdata.get('nid')} path={tdata.get('path_id')} "
-                    f"waypoint={path_index} pos=({target_x},{target_z})"
-                )
+                has_patrol = False
+                send_failed = False
+                for inst_id, tdata in list(tracked.items()):
+                    if tracked.get(inst_id) is not tdata:
+                        continue
+                    path = tdata.get('path') or []
+                    if len(path) < 2:
+                        continue
+                    has_patrol = True
+                    if now < float(tdata.get('path_next_at', 0)):
+                        continue
+                    try:
+                        if int(NPC_HP_MAP.get(inst_id, 1)) <= 0:
+                            continue
+                        path_index = int(tdata.get('path_index', 0)) % len(path)
+                        target_x, target_z = int(path[path_index][0]), int(path[path_index][1])
+                        from_x, from_z = tdata.get(
+                            'path_pos', (tdata.get('x', 0), tdata.get('z', 0)))
+                        from_x, from_z = int(from_x), int(from_z)
+                    except (TypeError, ValueError, IndexError, KeyError):
+                        continue
+
+                    if not _send_liberty_npc_patrol_move(
+                            conn, inst_id, from_x, from_z, target_x, target_z):
+                        send_failed = True
+                        break
+
+                    tdata['path_index'] = (path_index + 1) % len(path)
+                    tdata['path_pos'] = (target_x, target_z)
+
+                    # NpcData.WalkSpeed defaults to 10 -> WalkSpeedMeter 1 m/s.
+                    # PatrolState waits 2 seconds after each waypoint arrival.
+                    travel_seconds = math.hypot(
+                        target_x - from_x, target_z - from_z) / 100.0
+                    tdata['path_next_at'] = now + max(0.5, travel_seconds) + 2.0
+                    print(
+                        f"[LIBERTY PATROL] TAG 507 inst_id={inst_id} "
+                        f"nid={tdata.get('nid')} path={tdata.get('path_id')} "
+                        f"waypoint={path_index} pos=({target_x},{target_z})"
+                    )
+
+                if send_failed or not has_patrol:
+                    with NPC_PATROL_WORKER_LOCK:
+                        NPC_PATROL_CONNECTIONS.pop(conn_key, None)
     except Exception as exc:
-        print(f"[LIBERTY PATROL] worker error conn={conn_key}: {exc}")
+        print(f"[LIBERTY PATROL] shared worker error: {exc}")
     finally:
-        with NPC_PATROL_THREADS_LOCK:
-            if NPC_PATROL_THREADS.get(conn_key) is threading.current_thread():
-                NPC_PATROL_THREADS.pop(conn_key, None)
+        with NPC_PATROL_WORKER_LOCK:
+            if NPC_PATROL_WORKER is threading.current_thread():
+                NPC_PATROL_WORKER = None
 
 
 def _ensure_liberty_npc_patrol_worker(conn, picked_char, conn_key):
-    """Start at most one patrol scheduler for this client connection."""
-    with NPC_PATROL_THREADS_LOCK:
-        current = NPC_PATROL_THREADS.get(conn_key)
-        if current is not None and current.is_alive():
+    """Register this client and start one shared scheduler if needed."""
+    global NPC_PATROL_WORKER
+    with NPC_PATROL_WORKER_LOCK:
+        NPC_PATROL_CONNECTIONS[conn_key] = (conn, picked_char)
+        if NPC_PATROL_WORKER is not None and NPC_PATROL_WORKER.is_alive():
             return
         worker = threading.Thread(
             target=_liberty_npc_patrol_worker,
-            args=(conn, picked_char, conn_key),
-            name=f"ATG-Liberty-NPC-Patrol-{conn_key}",
+            name="ATG-Liberty-NPC-Patrol",
             daemon=True,
         )
-        NPC_PATROL_THREADS[conn_key] = worker
+        NPC_PATROL_WORKER = worker
         worker.start()
-        print(f"[LIBERTY PATROL] worker started conn={conn_key}")
-
+        print("[LIBERTY PATROL] shared worker started")
 
 def update_npc_aoi(conn, map_id, picked_char):
     """Per-client AOI for Liberty City NPCs.
