@@ -4785,12 +4785,14 @@ def get_character_stats(c):
         1006: 'cri', 1007: 'res', 1008: 'exd', 1009: 'exr', 1010: 'rec',
         1011: 'mov', 1012: 'crd', 1013: 'crr'
     }
-    # S attributes 2001..2007 are percentage bonuses for the corresponding
-    # primary attribute. The client displays these as percentages and the
-    # server protocol only has the resulting flat combat fields.
+    # S attributes 2001..2013 are 1/10000 percentage bonuses. GameDefine
+    # maps them to the matching runtime fields: ATK, HP, DEF, HIT, DGE, CRI,
+    # RES, EXD, EXR, REC, MOV, CRD and CRR.
     percent_fields = {
         2001: 'atk', 2002: 'hp_max', 2003: 'def', 2004: 'hit',
-        2005: 'eva', 2006: 'cri', 2007: 'res'
+        2005: 'eva', 2006: 'cri', 2007: 'res', 2008: 'exd',
+        2009: 'exr', 2010: 'rec', 2011: 'mov', 2012: 'crd',
+        2013: 'crr'
     }
     percent_totals = {field: 0 for field in percent_fields.values()}
     totals = {
@@ -4907,12 +4909,13 @@ def get_character_stats(c):
         {"atk":7, "hp":1, "def":7.4, "hit":3, "eva":3.7, "cri":15, "res":10}
     ][prof]
 
-    # Primary stats use the server's established 3x combat-rating scale.
-    # Secondary/item-only stats use the APK's exact GetItemCombatVal weights.
+    # Use the APK's profession-specific combat weights and item-only weights
+    # directly. The client consumes attribute_other.combValue as supplied;
+    # it does not apply a further global 3x multiplier.
     raw_power = (atk * coeffs['atk'] + hp_max * coeffs['hp'] + df * coeffs['def'] +
                  hit * coeffs['hit'] + eva * coeffs['eva'] + cri * coeffs['cri'] + res * coeffs['res'] +
                  extra_combat_power)
-    power = int(raw_power * 3.0)
+    power = int(raw_power)
 
     return {
         'atk': atk, 'hp_max': hp_max, 'def': df,
@@ -6081,7 +6084,7 @@ def get_npc_attr(nid, player_level=1):
 
     prof_coeffs = {"atk": 16, "hp": 1, "def": 11}
     raw_power = (atk * prof_coeffs['atk'] + hp * prof_coeffs['hp'] + df * prof_coeffs['def'])
-    power = int(raw_power * 3.0)
+    power = int(raw_power)
 
     return {
         'hp_max': hp, 'atk': atk, 'def': df,
