@@ -17627,7 +17627,10 @@ def client_handler(conn, addr):
                                 recipient_ids = {
                                     int(online_id)
                                     for online_id, (_, online_char) in list(ALL_CONNECTIONS.items())
-                                    if online_char and can_aoi_exchange(picked_char, online_char)
+                                    if online_char and (
+                                            int(online_id) == sender_id
+                                            or can_aoi_exchange(picked_char, online_char)
+                                    )
                                 }
                             elif chat_type == 3:  # team
                                 team_id = CHAR_TEAM.get(sender_id)
