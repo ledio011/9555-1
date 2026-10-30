@@ -6047,13 +6047,9 @@ def get_npc_attr(nid, player_level=1):
         atk_std = adapt.get('atk', ld.get('atk', [40])[0] if isinstance(ld.get('atk'), list) else 40)
         def_std = adapt.get('def', ld.get('def', [100])[0] if isinstance(ld.get('def'), list) else 100)
         hit_std = adapt.get('hit', ld.get('hit', [2844])[0] if isinstance(ld.get('hit'), list) else 2844)
-        is_guild_boss_npc = any(
-            str(nid) == str(boss_row.get('boss_npc_id', ''))
-            for boss_row in GUILD_BOSS_DATA.values()
-        )
-        # AdaptData names the standard evasion column "dge", not "eva".
-        # Limit this correction to Gang Boss NPCs to avoid unrelated combat changes.
-        eva_std = adapt.get('dge', 100) if is_guild_boss_npc else adapt.get('eva', 100)
+        # AdaptData's client column is DGEStd (loaded as "dge"), and this
+        # is the standard evasion value for every level-scaled NPC.
+        eva_std = adapt.get('dge', 100)
         cri_std = adapt.get('cri', 351)
         res_std = adapt.get('res', 0)
         exd_std = adapt.get('exd', 0)
