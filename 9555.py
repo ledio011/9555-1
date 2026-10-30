@@ -1,4 +1,6 @@
 import socket, struct, copy, threading, random, json, os, time, traceback, math, re
+from dataclasses import dataclass, field, asdict
+from typing import Dict, List, Optional, Tuple
 
 PORT = int(os.environ.get("PORT", 15678))
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1813,6 +1815,594 @@ try:
         print(f"[GAME CONFIG LOADED] keys={len(GAME_CONFIG)}")
 
 except: traceback.print_exc()
+
+# LIBERTY_CITY_CLIENT_LOADER_BEGIN
+# Client-table loader for map 101 (Liberty City / DSJ_zhuCheng).
+MAP_ID = "101"
+SCENE_NAME = "DSJ_zhuCheng"
+
+# Same lookup order as 9555.py, plus the layout used inside ATG-project-main.zip.
+_ASSET_CANDIDATES = (
+    ("assets", "Bundle", "TextAsset"),
+    ("assets", "Bundle", "TextAssets"),
+    ("Decompiled", "assets", "Bundle", "TextAsset"),
+    ("Decompiled", "Decompiled", "assets", "Bundle", "TextAsset"),
+)
+
+Vec3 = Tuple[int, int, int]
+
+
+# --------------------------------------------------------------------------
+# Table reading
+# --------------------------------------------------------------------------
+def find_text_asset_root(base: Optional[str] = None, override: Optional[str] = None) -> Optional[str]:
+    """Return the first folder that looks like the client's TextAsset directory."""
+    candidates = []
+    if override:
+        candidates.append(override)
+    if os.environ.get("ATG_TEXT_ASSETS"):
+        candidates.append(os.environ["ATG_TEXT_ASSETS"])
+    base = base or os.path.dirname(os.path.abspath(__file__))
+    for parts in _ASSET_CANDIDATES:
+        candidates.append(os.path.join(base, *parts))
+    for c in candidates:
+        if c and os.path.isdir(c) and os.path.isfile(os.path.join(c, "MapInfoData")):
+            return c
+    return None
+
+
+class Table:
+    """A client data table: a '*,ID,...' header line followed by '*,...' rows."""
+
+    def __init__(self, name: str, header: List[str], rows: List[List[str]]):
+        self.name = name
+        self.header = header
+        self.index = {h: i for i, h in enumerate(header)}  # duplicate names: last wins
+        self.rows = rows
+
+    def get(self, row: List[str], col: str, default: str = "") -> str:
+        i = self.index.get(col)
+        if i is None or i >= len(row):
+            return default
+        return row[i].strip()
+
+    def where(self, col: str, value: str) -> List[List[str]]:
+        return [r for r in self.rows if self.get(r, col) == value]
+
+
+def read_table(root: str, name: str) -> Optional[Table]:
+    path = os.path.join(root, name)
+    if not os.path.isfile(path):
+        return None
+    header: Optional[List[str]] = None
+    rows: List[List[str]] = []
+    with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+        for line in f:
+            parts = line.rstrip("\r\n").split(",")
+            if len(parts) < 2 or parts[0] != "*":
+                continue
+            if header is None and not parts[1].lstrip("-").isdigit():
+                header = parts
+                continue
+            rows.append(parts)
+    if header is None:
+        return None
+    return Table(name, header, rows)
+
+
+def read_localization(root: str) -> Dict[str, str]:
+    """KEY -> English text from the Localization table (header: KEY,note,Chinese,English,French)."""
+    out: Dict[str, str] = {}
+    path = os.path.join(root, "Localization")
+    if not os.path.isfile(path):
+        return out
+    with open(path, "r", encoding="utf-8-sig", errors="replace") as f:
+        for line in f:
+            parts = line.rstrip("\r\n").split(",")
+            if len(parts) >= 4 and parts[0].isdigit():
+                out[parts[0]] = parts[3]
+    return out
+
+
+_COLOR_TAG = re.compile(r"\[(?:[0-9A-Fa-f]{6}|-)\]")
+_LABEL_TAG = re.compile(r"^\[(?:Dance|PVP|Single)\]")
+
+
+def _resolve(text: str, loc: Dict[str, str]) -> str:
+    """Turn '#{100131}' into its English text; plain text is returned unchanged."""
+    m = re.fullmatch(r"#[{\uff5b](\d+)[}\uff5d]", text.strip())
+    return loc.get(m.group(1), text) if m else text
+
+
+def clean_name(text: str) -> str:
+    """Strip NGUI colour codes and the [Dance]/[PVP]/[Single] label: 'Liberty City'."""
+    return _LABEL_TAG.sub("", _COLOR_TAG.sub("", text)).strip()
+
+
+def parse_vec3(text: str) -> Optional[Vec3]:
+    parts = text.split("#")
+    if len(parts) == 3:
+        try:
+            return (int(parts[0]), int(parts[1]), int(parts[2]))
+        except ValueError:
+            pass
+    return None
+
+
+def _int(text: str, default: int = 0) -> int:
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return default
+
+
+# --------------------------------------------------------------------------
+# Data model
+# --------------------------------------------------------------------------
+@dataclass
+class Finding:
+    level: str  # ERROR / WARN / INFO / OK
+    code: str
+    text: str
+
+
+@dataclass
+class Portal:
+    src: str
+    dst: str
+    # Values exactly as in MapConnectInfoData (looks like metres; spawn data is ~100x larger).
+    x: float
+    y: float
+    z: float
+
+    @property
+    def x_cm(self) -> int:
+        return int(round(self.x * 100))
+
+    @property
+    def z_cm(self) -> int:
+        return int(round(self.z * 100))
+
+
+@dataclass
+class NpcSpawn:
+    uid: str                 # stable id: "<map>:<nid>:<n>"
+    nid: str
+    name: str
+    model: str
+    npc_type: int
+    x: int
+    z: int
+    o: int
+    group: int
+    rebirth_type: int
+    rebirth_time: int
+    path_id: str
+    path: List[Tuple[int, int]] = field(default_factory=list)
+    roles: List[Tuple[str, str, str]] = field(default_factory=list)  # (mission_id, role, mission name)
+
+    def as_stock_entry(self) -> dict:
+        """Same shape as 9555.py STATIC_NPC_DATA entries, plus the fields the stock loader drops."""
+        return {
+            "nid": self.nid, "x": self.x, "z": self.z, "o": self.o, "group": self.group,
+            "uid": self.uid, "rebirth_type": self.rebirth_type, "rebirth_time": self.rebirth_time,
+            "path_id": self.path_id, "path": list(self.path),
+        }
+
+
+class LibertyCity:
+    """All client data for map 101, loaded and cross-referenced."""
+
+    def __init__(self) -> None:
+        self.root = ""
+        self.found = False
+        self.name = "Liberty City"
+        self.name_key = ""
+        self.display_name = ""
+        self.info: Dict[str, object] = {}
+        self.portals_out: List[Portal] = []
+        self.portals_in: List[Portal] = []
+        self.spawns: List[NpcSpawn] = []
+        self.paths: Dict[str, List[Tuple[int, int]]] = {}
+        self.missions: List[dict] = []
+        self.multi_delivery: List[dict] = []
+        self.dances: List[dict] = []
+        self.activities: List[dict] = []
+        self.decor: List[dict] = []
+        self.event_window: Tuple[str, str] = ("", "")
+        self._npc_defs: Dict[str, dict] = {}
+        self._map_ids: set = set()
+        self._notes: List[Finding] = []
+
+    # ---- loading ------------------------------------------------------
+    @classmethod
+    def load(cls, assets: Optional[str] = None, base: Optional[str] = None) -> "LibertyCity":
+        self = cls()
+        root = find_text_asset_root(base=base, override=assets)
+        if not root:
+            return self
+        self.root = root
+        loc = read_localization(root)
+
+        mi = read_table(root, "MapInfoData")
+        if mi is None:
+            return self
+        self._map_ids = {mi.get(r, "ID") for r in mi.rows}
+        rows = mi.where("ID", MAP_ID)
+        if not rows:
+            return self
+        r = rows[0]
+        self.found = True
+        self.name_key = mi.get(r, "Name")  # e.g. '#{100131}', kept raw like the stock loader
+        raw = _resolve(self.name_key, loc)
+        self.display_name = _COLOR_TAG.sub("", raw).strip()
+        self.name = clean_name(raw) or self.name
+        self.info = {
+            "id": MAP_ID,
+            "name": self.name,
+            "scene": mi.get(r, "SceneName"),
+            "type": _int(mi.get(r, "Type")),
+            "width": _int(mi.get(r, "MapLength")),
+            "height": _int(mi.get(r, "MapHeight")),
+            "birth": parse_vec3(mi.get(r, "BirthPos")),
+            "relife": parse_vec3(mi.get(r, "RelifePos")),
+            "teleport": parse_vec3(mi.get(r, "TelePortPos")),
+            "exit": parse_vec3(mi.get(r, "ExitPos")),
+            "aoi_radius": _int(mi.get(r, "radius")),
+            "lua": mi.get(r, "luaname"),
+            "audio_id": _int(mi.get(r, "AudioId")),
+            "relife_type": _int(mi.get(r, "RelifeType")),
+            "relife_cost": _int(mi.get(r, "RelifeCost")),
+            "gather_area_id": mi.get(r, "GatherAreaId"),
+            "safe_area_id": mi.get(r, "SaftyAreaId"),
+            "open_lv": _int(mi.get(r, "OpenLv")),
+            "auto_fight_dis": _int(mi.get(r, "AutoFightDis")),
+            "act_audio_id": _int(mi.get(r, "ActAudioID")),
+        }
+        self.event_window = (mi.get(r, "Starttime"), mi.get(r, "EndTime"))
+
+        self._load_portals(root)
+        self._load_paths(root)
+        self._load_npc_defs(root, loc)
+        self._load_spawns(root)
+        self._load_missions(root, loc)
+        self._load_extras(root, loc)
+        return self
+
+    def _load_portals(self, root: str) -> None:
+        t = read_table(root, "MapConnectInfoData")
+        if t is None:
+            return
+        seen = set()
+        for r in t.rows:
+            src, dst = t.get(r, "SourceSceneId"), t.get(r, "TargetSceneId")
+            if MAP_ID not in (src, dst):
+                continue
+            try:
+                p = Portal(src, dst, float(t.get(r, "PosX") or 0), float(t.get(r, "PosY") or 0),
+                           float(t.get(r, "PosZ") or 0))
+            except ValueError:
+                continue
+            key = (p.src, p.dst, p.x, p.y, p.z)
+            if key in seen:  # the client table lists 102->101 twice
+                continue
+            seen.add(key)
+            (self.portals_out if src == MAP_ID else self.portals_in).append(p)
+
+    def _load_paths(self, root: str) -> None:
+        t = read_table(root, "NPCPathData")
+        if t is None:
+            return
+        tmp: Dict[str, Dict[int, Tuple[int, int]]] = {}
+        for r in t.rows:
+            pid = t.get(r, "ID")
+            idx = _int(t.get(r, "PointIndex"), -1)
+            if idx < 0:
+                continue
+            tmp.setdefault(pid, {}).setdefault(idx, (_int(t.get(r, "PosX")), _int(t.get(r, "PosZ"))))
+        self.paths = {pid: [pts[i] for i in sorted(pts)] for pid, pts in tmp.items()}
+
+    def _load_npc_defs(self, root: str, loc: Dict[str, str]) -> None:
+        t = read_table(root, "NpcData")
+        if t is None:
+            return
+        for r in t.rows:
+            nid = t.get(r, "ID")
+            self._npc_defs[nid] = {
+                "name": _resolve(t.get(r, "Name"), loc),
+                "model": t.get(r, "Model"),
+                "type": _int(t.get(r, "Type")),
+            }
+
+    def _load_spawns(self, root: str) -> None:
+        t = read_table(root, "MonsterData")
+        if t is None:
+            return
+        counter: Dict[str, int] = {}
+        for r in t.where("MapID", MAP_ID):
+            nid = t.get(r, "NpcID")
+            n = counter.get(nid, 0)
+            counter[nid] = n + 1
+            d = self._npc_defs.get(nid, {})
+            pid = t.get(r, "PathId")
+            self.spawns.append(NpcSpawn(
+                uid="%s:%s:%d" % (MAP_ID, nid, n), nid=nid,
+                name=d.get("name", "?"), model=d.get("model", ""), npc_type=d.get("type", 0),
+                x=_int(t.get(r, "PosX")), z=_int(t.get(r, "PosZ")), o=_int(t.get(r, "PosO")),
+                group=_int(t.get(r, "Group")),
+                rebirth_type=_int(t.get(r, "ReBirthType")), rebirth_time=_int(t.get(r, "ReBirthTime"), -1),
+                path_id=pid, path=list(self.paths.get(pid, [])) if pid else [],
+            ))
+
+    def _load_missions(self, root: str, loc: Dict[str, str]) -> None:
+        t = read_table(root, "MissionData")
+        if t is None:
+            return
+        by_npc: Dict[str, List[Tuple[str, str, str]]] = {}
+        for r in t.rows:
+            mid = t.get(r, "ID")
+            name = _resolve(t.get(r, "Name"), loc)
+            roles = []
+            if t.get(r, "AcceptMapId") == MAP_ID and t.get(r, "Accept"):
+                roles.append(("accept", t.get(r, "Accept")))
+            if t.get(r, "SubmitMapId") == MAP_ID and t.get(r, "Submit"):
+                roles.append(("submit", t.get(r, "Submit")))
+            if t.get(r, "TargetMapId") == MAP_ID and t.get(r, "LogicType") in ("0", "2") and t.get(r, "Target"):
+                roles.append(("target", t.get(r, "Target")))
+            touches = MAP_ID in (t.get(r, "AcceptMapId"), t.get(r, "TargetMapId"), t.get(r, "SubmitMapId"))
+            if not touches:
+                continue
+            self.missions.append({
+                "id": mid, "name": name, "class": _int(t.get(r, "Class")),
+                "logic_type": _int(t.get(r, "LogicType")), "logic_id": t.get(r, "LogicID"),
+                "accept_npc": t.get(r, "Accept"), "accept_map": t.get(r, "AcceptMapId"),
+                "target": t.get(r, "Target"), "target_map": t.get(r, "TargetMapId"),
+                "submit_npc": t.get(r, "Submit"), "submit_map": t.get(r, "SubmitMapId"),
+                "min_lv": _int(t.get(r, "MinLv")), "pre_id": t.get(r, "PreID"), "next_id": t.get(r, "NextID"),
+            })
+            for role, npc in roles:
+                by_npc.setdefault(npc, []).append((mid, role, name))
+        for s in self.spawns:
+            s.roles = by_npc.get(s.nid, [])
+
+    def _load_extras(self, root: str, loc: Dict[str, str]) -> None:
+        t = read_table(root, "MultiDeliveryMissionData")
+        if t:
+            for r in t.rows:
+                if t.get(r, "TargetMapId") == MAP_ID:
+                    self.multi_delivery.append({"id": t.get(r, "ID"), "index": _int(t.get(r, "Index")),
+                                                "npc": t.get(r, "TargetNpcId"), "dialog": t.get(r, "Dialog")})
+        t = read_table(root, "CityDanceData")
+        if t:
+            for r in t.where("MapId", MAP_ID):
+                self.dances.append({"id": t.get(r, "ID"), "type": _int(t.get(r, "Type")),
+                                    "unlock_lv": _int(t.get(r, "UnlockLevel")), "npc": t.get(r, "NpcID"),
+                                    "duration": _int(t.get(r, "DurationTime"))})
+        t = read_table(root, "ActivityMapData")
+        if t:
+            for r in t.where("MapId", MAP_ID):
+                self.activities.append({"id": t.get(r, "ID"), "activity_id": t.get(r, "ActivityID"),
+                                        "type": _int(t.get(r, "Type")), "x": _int(t.get(r, "PosX")),
+                                        "z": _int(t.get(r, "PosZ")), "icon": t.get(r, "Icon")})
+        t = read_table(root, "SceneComponentData")
+        if t:
+            for r in t.where("MapID", MAP_ID):
+                self.decor.append({"prefab": t.get(r, "PrefabName"), "start": t.get(r, "Starttime"),
+                                   "end": t.get(r, "EndTime")})
+
+    # ---- queries ------------------------------------------------------
+    def spawn_entries(self) -> List[dict]:
+        return [s.as_stock_entry() for s in self.spawns]
+
+    def patrol_path(self, path_id: str) -> List[Tuple[int, int]]:
+        return list(self.paths.get(path_id, []))
+
+    def npcs_for_mission(self, mission_id: str) -> List[NpcSpawn]:
+        return [s for s in self.spawns if any(m == str(mission_id) for m, _, _ in s.roles)]
+
+    def spawns_of(self, nid: str) -> List[NpcSpawn]:
+        return [s for s in self.spawns if s.nid == str(nid)]
+
+    def arrival_pos(self, from_map: Optional[str] = None) -> Vec3:
+        """
+        Where a player should appear in Liberty City.
+        With no source map (login / respawn-less entry): BirthPos.
+        Coming from another map: the Liberty City side of that connection, i.e. the
+        (101 -> from_map) row of MapConnectInfoData, scaled metres -> spawn units.
+        ASSUMPTION (from the table's column names): rows describe the portal's position in
+        the *source* scene, so the portal you walk through in 101 is also where you arrive.
+        Confirm in-game; if it is off, switch to birth/teleport below.
+        """
+        if from_map:
+            for p in self.portals_out:
+                if p.dst == str(from_map):
+                    return (p.x_cm, int(round(p.y * 100)) or int(self.info.get("birth", (0, 44, 0))[1]), p.z_cm)
+        return self.info.get("birth") or self.info.get("teleport") or (0, 0, 0)  # type: ignore[return-value]
+
+    def map_config_entry(self) -> dict:
+        """Superset of the keys 9555.py stores in MAP_CONFIG[mapId] (strings kept as strings)."""
+        i = self.info
+
+        def join(v):  # Vec3 -> '6600#44#-2371' like the stock loader
+            return "#".join(str(n) for n in v) if v else ""
+        return {
+            "name": self.name_key or i.get("name", ""), "scene": i.get("scene", ""), "type": i.get("type", 0),
+            "width": i.get("width", 0), "height": i.get("height", 0), "birth": join(i.get("birth")),
+            "teleport_pos": join(i.get("teleport")), "open_lv": i.get("open_lv", 0),
+            # extras the stock loader drops:
+            "relife_pos": join(i.get("relife")), "exit_pos": join(i.get("exit")),
+            "aoi_radius": i.get("aoi_radius", 0), "lua": i.get("lua", ""), "audio_id": i.get("audio_id", 0),
+            "relife_type": i.get("relife_type", 0), "relife_cost": i.get("relife_cost", 0),
+            "gather_area_id": i.get("gather_area_id", ""), "safe_area_id": i.get("safe_area_id", ""),
+            "auto_fight_dis": i.get("auto_fight_dis", 0), "clean_name": self.name, "display_name": self.display_name,
+        }
+
+    # ---- validation ---------------------------------------------------
+    def validate(self) -> List[Finding]:
+        F: List[Finding] = []
+        add = lambda lvl, code, txt: F.append(Finding(lvl, code, txt))  # noqa: E731
+        if not self.root:
+            add("ERROR", "NO_ASSETS", "TextAsset folder not found. Pass --assets or set ATG_TEXT_ASSETS.")
+            return F
+        if not self.found:
+            add("ERROR", "NO_MAP_ROW", "MapInfoData has no row for map 101.")
+            return F
+        add("OK", "MAP_ROW", "map 101 = %r, scene %s, type %s, %sx%s" % (
+            self.name, self.info["scene"], self.info["type"], self.info["width"], self.info["height"]))
+
+        hw, hh = int(self.info["width"]) / 2.0, int(self.info["height"]) / 2.0
+
+        def inside(x: float, z: float) -> bool:
+            return abs(x) <= hw and abs(z) <= hh
+        for key in ("birth", "relife", "teleport"):
+            v = self.info.get(key)
+            if not v:
+                add("WARN", "NO_" + key.upper(), "%s position missing in MapInfoData" % key)
+            elif not inside(v[0], v[2]):  # type: ignore[index]
+                add("WARN", "OUT_OF_BOUNDS", "%s %s lies outside the map (+-%d, +-%d)" % (key, v, hw, hh))
+
+        # Spawns
+        missing_def = [s for s in self.spawns if s.nid not in self._npc_defs]
+        if missing_def:
+            add("ERROR", "NPC_NO_DEF", "spawns with no NpcData row: %s" % sorted({s.nid for s in missing_def}))
+        no_model = [s for s in self.spawns if s.nid in self._npc_defs and not s.model]
+        if no_model:
+            add("ERROR", "NPC_NO_MODEL", "NPCs with empty model: %s" % sorted({s.nid for s in no_model}))
+        oob = [s for s in self.spawns if not inside(s.x, s.z)]
+        if oob:
+            add("WARN", "SPAWN_OUT_OF_BOUNDS", "spawns outside map bounds: %s" % [s.uid for s in oob])
+        add("OK", "SPAWNS", "%d static NPC spawns (%d distinct NPCs); respawn types %s" % (
+            len(self.spawns), len({s.nid for s in self.spawns}), sorted({s.rebirth_type for s in self.spawns})))
+
+        # Patrol paths
+        patrol = [s for s in self.spawns if s.path_id]
+        for s in patrol:
+            if len(s.path) < 2:
+                add("ERROR", "PATH_MISSING", "%s (%s) uses path %s which has %d point(s) in NPCPathData" % (
+                    s.uid, s.name, s.path_id, len(s.path)))
+        if patrol:
+            add("INFO", "PATROLS", "%d spawns walk a patrol path (%s). The stock MonsterData loader in 9555.py "
+                "does not read the PathId column, so these NPCs have no patrol data unless other code supplies it." % (
+                    len(patrol), ", ".join(sorted({s.path_id for s in patrol}))))
+
+        # Missions
+        spawned = {s.nid for s in self.spawns}
+        need: Dict[str, List[str]] = {}
+        for m in self.missions:
+            if m["accept_map"] == MAP_ID and m["accept_npc"]:
+                need.setdefault(m["accept_npc"], []).append(m["id"])
+            if m["submit_map"] == MAP_ID and m["submit_npc"]:
+                need.setdefault(m["submit_npc"], []).append(m["id"])
+            if m["target_map"] == MAP_ID and m["logic_type"] in (0, 2) and m["target"]:
+                need.setdefault(m["target"], []).append(m["id"])
+        absent = {n: ids for n, ids in need.items() if n not in spawned}
+        if absent:
+            for n, ids in sorted(absent.items()):
+                add("ERROR", "MISSION_NPC_ABSENT", "NPC %s (%s) is needed on map 101 by missions %s but is not spawned" % (
+                    n, self._npc_defs.get(n, {}).get("name", "?"), ids[:6]))
+        else:
+            add("OK", "MISSION_NPCS", "%d missions touch map 101; all %d NPC roles they need are spawned here" % (
+                len(self.missions), len(need)))
+        for d in self.multi_delivery:
+            if d["npc"] not in spawned:
+                add("ERROR", "DELIVERY_NPC_ABSENT", "multi-delivery %s step %s needs NPC %s on map 101" % (
+                    d["id"], d["index"], d["npc"]))
+
+        # Portals
+        outs = {p.dst for p in self.portals_out}
+        ins = {p.src for p in self.portals_in}
+        for dst in sorted(outs | ins):
+            if dst not in self._map_ids:
+                add("ERROR", "PORTAL_BAD_MAP", "portal refers to map %s which is not in MapInfoData" % dst)
+        for p in self.portals_out + self.portals_in:
+            if p.src == MAP_ID and not inside(p.x_cm, p.z_cm):
+                add("WARN", "PORTAL_OOB", "portal 101->%s at (%.1f, %.1f) m is outside the map" % (p.dst, p.x, p.z))
+        add("OK", "PORTALS", "exits to %s; entries from %s" % (sorted(outs), sorted(ins)))
+        one_way = sorted(outs - ins)
+        if one_way:
+            add("INFO", "ONE_WAY", "MapConnectInfoData has no row leading back into 101 from map(s) %s "
+                "(109 is Gotham City PvP); check how the server returns players from there" % one_way)
+
+        # Features that need server logic
+        if self.dances:
+            props = sorted({d["npc"] for d in self.dances if d["npc"]})
+            add("INFO", "DANCE", "%d dance modes on this map (CityDanceData %s); prop NPCs %s exist in NpcData but "
+                "are not static spawns - the server must spawn them when a dance starts" % (
+                    len(self.dances), [d["id"] for d in self.dances], props))
+        for a in self.activities:
+            add("INFO", "ACTIVITY_ICON", "activity %s icon %s at (%d, %d): the client shows it on this map" % (
+                a["activity_id"], a["icon"], a["x"], a["z"]))
+        if self.event_window[0]:
+            add("INFO", "EVENT_WINDOW", "MapInfoData + %d SceneComponentData rows carry the event window %s .. %s "
+                "(Christmas 2017 decor); expired, so nothing should be sent for it" % (
+                    len(self.decor), self.event_window[0], self.event_window[1]))
+        add("INFO", "AOI", "AOI radius is %s - spawn only NPCs within that distance of the player if the server "
+            "does per-player visibility" % self.info.get("aoi_radius"))
+        return F
+
+    def to_dict(self) -> dict:
+        return {
+            "map": self.map_config_entry(),
+            "portals_out": [asdict(p) for p in self.portals_out],
+            "portals_in": [asdict(p) for p in self.portals_in],
+            "spawns": [asdict(s) for s in self.spawns],
+            "paths": {k: v for k, v in self.paths.items() if k.startswith(MAP_ID)},
+            "missions": self.missions, "multi_delivery": self.multi_delivery,
+            "dances": self.dances, "activities": self.activities, "decor": self.decor,
+        }
+
+
+# --------------------------------------------------------------------------
+# Server integration
+# --------------------------------------------------------------------------
+def install_liberty_city(server_globals: dict, assets: Optional[str] = None, replace_spawns: bool = True) -> LibertyCity:
+    """
+    Patch the dictionaries 9555.py already uses so map 101 matches the client data.
+    Call once, after 9555.py has finished loading its tables:
+        LIBERTY_CITY = install_liberty_city(globals())
+    Existing keys keep their types; only extra keys are added.
+    """
+    base = os.path.dirname(server_globals.get("__file__", "") or os.path.abspath(__file__))
+    city = LibertyCity.load(assets=assets, base=base)
+    if not city.found:
+        print("[LIBERTY] map 101 data not found; nothing patched")
+        return city
+
+    cfg = server_globals.setdefault("MAP_CONFIG", {})
+    cfg.setdefault(MAP_ID, {}).update(city.map_config_entry())
+
+    static = server_globals.setdefault("STATIC_NPC_DATA", {})
+    if replace_spawns or MAP_ID not in static:
+        entries = city.spawn_entries()
+        # Preserve 9555.py's existing MonsterData classification. Current client
+        # data has 29 map-101 rows and all are Group=9999 (static NPCs).
+        static[MAP_ID] = [entry for entry in entries if int(entry.get("group", 0)) == 9999]
+        monsters = server_globals.setdefault("MONSTER_DATA", {})
+        map_monsters = [entry for entry in entries if int(entry.get("group", 0)) != 9999]
+        if map_monsters:
+            monsters[MAP_ID] = map_monsters
+        else:
+            monsters.pop(MAP_ID, None)
+
+    conn = server_globals.setdefault("MAP_CONNECT_DATA", {})
+    for p in city.portals_out + city.portals_in:
+        conn.setdefault((p.src, p.dst), (p.x, p.y, p.z))
+
+    server_globals["LIBERTY_CITY"] = city
+    errors = [f for f in city.validate() if f.level == "ERROR"]
+    print("[LIBERTY] map 101 installed: %d spawns, %d patrol paths, %d portals, %d errors" % (
+        len(city.spawns), len({s.path_id for s in city.spawns if s.path_id}),
+        len(city.portals_out) + len(city.portals_in), len(errors)))
+    return city
+
+# Load and apply map 101 after the existing TextAsset loaders finish.
+try:
+    LIBERTY_CITY = install_liberty_city(globals(), assets=globals().get("text_asset_root"))
+except Exception as _liberty_city_error:
+    LIBERTY_CITY = None
+    print(f"[LIBERTY] installation failed: {_liberty_city_error}")
+    traceback.print_exc()
+# LIBERTY_CITY_CLIENT_LOADER_END
 
 BAK_DB = CHAR_DB + ".bak"
 TMP_DB = CHAR_DB + ".tmp"
