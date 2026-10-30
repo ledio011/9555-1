@@ -115,26 +115,13 @@ GUILD_BOSS_SCENE_RANK_ROWS = 6
 GUILD_BOSS_RESULT_RANK_ROWS = 10
 GUILD_BOSS_SCHED_LAST = {}
 GUILD_BOSS_MISSING_REWARD_LOGGED = set()
-# Temporary server-side test packages for Gang Boss because the shipped APK
-# export omits explicit quantities for reward IDs 51001-51010 and 51011-51310.
-# These amounts follow the proposed test package list, not an authoritative
-# copy of the original live-service payout table. Complete ShowRewardData rows
-# always take precedence below. Disable this fallback once authoritative rows
-# have been added to the server's TextAsset data.
-GUILD_BOSS_TEST_REWARD_FALLBACK = True
+# The shipped ShowRewardData rows for these Guild Boss IDs have item IDs but
+# blank ItemCount fields. The APK defaults those counts to -1, so it does not
+# provide authoritative payout quantities. Fail closed instead of granting
+# proposed server-only test packages.
+GUILD_BOSS_TEST_REWARD_FALLBACK = False
 GUILD_BOSS_TEST_REWARD_LOGGED = set()
-GUILD_BOSS_TEST_REWARD_RANGES = (
-    # Match ShowRewardData 51001: 1001(Money), 1004(Contribution), 8801(Gang Stereo), 6002(Refine Stone)
-    # Only Rank 1 receives the Gang Stereo badge (8801) and Refine Stone (6002).
-    # Minimal amounts — Gang Boss is a daily activity, not a major reward source.
-    (51001, 51010, (('1001', 1, 500), ('1004', 1, 50),
-                    ('8801', 0, 1), ('6002', 1, 1))),        # Rank 1 — gets Gang Stereo badge (quality 0 = level 1) + 1 refine stone
-    (51011, 51020, (('1001', 1, 300), ('1004', 1, 30))),    # Rank 2
-    (51021, 51030, (('1001', 1, 100), ('1004', 1, 10))),    # Rank 3
-    (51101, 51110, (('1001', 1, 50), ('1004', 1, 5))),      # Participation
-    (51201, 51210, (('1001', 1, 100), ('1004', 1, 10))),    # Final hit
-    (51301, 51310, (('1001', 1, 10), ('1004', 1, 1))),      # All members (guild-wide)
-)
+GUILD_BOSS_TEST_REWARD_RANGES = ()
 KILL_TARGET_SPAWNS = {} # logicId -> list of spawns
 TARGET_CAR_SPAWNS = {}  # logicId -> list of car spawns
 MISSION_REQUIRE_DATA = {} # logicId -> dict
@@ -3615,15 +3602,26 @@ def update_street_race_checkpoint_progress(char, move_body, car_pos):
         print(f"[STREET RACE] checkpoint copy={copy_id} progress={progress}/{len(checkpoints)}")
     char['street_race_last_car_pos'] = list(car_pos)
 
+# These values mirror SceneManager.IsMultiScene(), IsRealPvPScene(),
+# IsBigWorld(), and IsCanAttackOtherPlayerScene() in the shipped Assembly-CSharp.
+# Unknown map types fail closed: the client still knows how to create a remote
+# player from AOI packets, but it does not expect those packets in local-only modes.
+CLIENT_PLAYER_AOI_MAP_TYPES = frozenset((1, 3, 5, 12, 14, 15, 16, 17, 20, 21, 22, 23, 24))
+
+def client_expects_player_aoi(map_id):
+    map_cfg = MAP_CONFIG.get(str(map_id), {})
+    try:
+        return int(map_cfg.get('type', -1)) in CLIENT_PLAYER_AOI_MAP_TYPES
+    except (TypeError, ValueError):
+        return False
+
 def is_single_player_map(map_id):
-    """Return True if the map should not have player-to-player AOI.
-    Map 11 = city (client-side NPCs only).
-    Map 502 = Domin arena (instanced, one player per fight).
-    Maps 220 and 223-229 = EXP stage scenes. Map 220 is the solo scene with
-    player AOI isolated per run; 223-229 are team-copy instances. Street Race
-    rows are MaxMember=1 copies, even though their physical map IDs are shared."""
+    """Return True when the client scene is not a shared player-AOI scene.
+    EXP and equipment copies are additionally scoped to their live run/team,
+    even though their client MAPTYPE is multiplayer-capable."""
     mid = str(map_id)
-    return (mid in ("11", "502") or is_exp_map(mid)
+    return (not client_expects_player_aoi(mid)
+            or is_exp_map(mid)
             or is_equipment_copy_map(mid)
             or street_race_config_for_map(mid) is not None)
 
@@ -4228,8 +4226,14 @@ def is_character_available_for_team(char):
             and not is_equipment_copy_map(char.get('map_id')) and not is_active_daily_copy_current(char))
 
 def can_aoi_exchange(source, target):
-    if not source or not target or source.get('id')==target.get('id') or str(source.get('map_id'))!=str(target.get('map_id')): return False
-    guild_boss_id = _guild_boss_map_id(source.get('map_id'))
+    if (not source or not target
+            or source.get('id') == target.get('id')
+            or str(source.get('map_id')) != str(target.get('map_id'))):
+        return False
+    map_id = str(source.get('map_id') or '')
+    if not client_expects_player_aoi(map_id):
+        return False
+    guild_boss_id = _guild_boss_map_id(map_id)
     if guild_boss_id:
         source_guild_id = _guild_id_for_character(source)
         target_guild_id = _guild_id_for_character(target)
@@ -10078,7 +10082,7 @@ def broadcast_aoi_remove(char_id, map_id):
         pf_p = sproto_pack(ph_p + aoi_data)
         pkt = struct.pack(">H", len(pf_p)) + pf_p
         for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-            if ch and (can_aoi_exchange(source_char, ch) if source_char else str(ch.get('map_id', '11')) == map_id):
+            if source_char and ch and can_aoi_exchange(source_char, ch):
                 try:
                     c_lock = CONNECTION_LOCKS.get(cid)
                     if c_lock:
@@ -10220,7 +10224,8 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
             broadcast_aoi_add(conn, picked_char)
             # Send existing players on this map to the new player
             for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-                if ch and ch.get('id', 0) != picked_char.get('id', 0) and str(ch.get('map_id', '11')) == target_map_id:
+                if (ch and ch.get('id', 0) != picked_char.get('id', 0)
+                        and can_aoi_exchange(picked_char, ch)):
                     # Send this existing player's aoi_add to the new player (conn)
                     pkt_ex = build_aoi_add_packet(ch)
                     if pkt_ex:
@@ -13463,7 +13468,8 @@ def client_handler(conn, addr):
                             broadcast_aoi_add(conn, picked_char)
                             # Send existing players on this map to the new player
                             for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-                                if ch and ch.get('id', 0) != picked_char.get('id', 0) and str(ch.get('map_id', '11')) == mid:
+                                if (ch and ch.get('id', 0) != picked_char.get('id', 0)
+                                        and can_aoi_exchange(picked_char, ch)):
                                     pkt_ex = build_aoi_add_packet(ch)
                                     if pkt_ex:
                                         conn.sendall(pkt_ex)
@@ -17109,8 +17115,7 @@ def client_handler(conn, addr):
                                 for cid, (other_conn, other_char) in list(ALL_CONNECTIONS.items()):
                                     if (other_char and int(other_char.get('id', 0)) != int(picked_char.get('id', 0))
                                             and str(other_char.get('map_id', '')) == current_map
-                                            and (not _guild_boss_map_id(current_map)
-                                                 or can_aoi_exchange(picked_char, other_char))):
+                                            and can_aoi_exchange(picked_char, other_char)):
                                         try:
                                             other_lock = CONNECTION_LOCKS.get(cid)
                                             if other_lock:
@@ -17225,7 +17230,8 @@ def client_handler(conn, addr):
                             r_pf = sproto_pack(r_ph + relife_frame_data)
                             r_pkt = struct.pack(">H", len(r_pf)) + r_pf
                             for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-                                if ch and ch.get('id', 0) != picked_char.get('id', 0) and str(ch.get('map_id', '11')) == map_id:
+                                if (ch and ch.get('id', 0) != picked_char.get('id', 0)
+                                        and can_aoi_exchange(picked_char, ch)):
                                     c_lock = CONNECTION_LOCKS.get(cid)
                                     if c_lock:
                                         with c_lock:
@@ -17621,7 +17627,10 @@ def client_handler(conn, addr):
                                 recipient_ids = {
                                     int(online_id)
                                     for online_id, (_, online_char) in list(ALL_CONNECTIONS.items())
-                                    if online_char and str(online_char.get('map_id', '11')) == current_map
+                                    if online_char and (
+                                            int(online_id) == sender_id
+                                            or can_aoi_exchange(picked_char, online_char)
+                                    )
                                 }
                             elif chat_type == 3:  # team
                                 team_id = CHAR_TEAM.get(sender_id)
