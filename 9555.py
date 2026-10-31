@@ -14094,7 +14094,7 @@ def client_handler(conn, addr):
                                 f"count={map101_move_count} pos={new_pos} "
                                 f"since_ready={(map101_last_move_at - map101_ready_at):.2f}s"
                                 if map101_ready_at is not None
-                                else f"[MAP101 MOVE RX] player={picked_char.get('id')} count={map101_last_move_count} pos={new_pos} ready_time=unknown"
+                                else f"[MAP101 MOVE RX] player={picked_char.get('id')} count={map101_move_count} pos={new_pos} ready_time=unknown"
                             )
                         last_aoi_update = picked_char.get('_last_npc_aoi_update', 0)
                         if int(time.time()) - last_aoi_update >= 2:
