@@ -1417,10 +1417,18 @@ class Sniffer:
 
     # ---------------- background janitor -----------------------------------
     def janitor(self):
+        t_wait = time.time()
         while not self.stop:
             time.sleep(0.2)
             now = time.time()
             with self.lock:
+                if not self.a.all and self.a.char and now - t_wait >= 30:
+                    active = any(c.char_id == self.a.char and not c.closed_flag for c in self.conns.values())
+                    if not active:
+                        ignored = sum(1 for c in self.conns.values() if c.muted)
+                        self.out.raw("[sniffer] waiting for character %d to log in ... (%d other player connection(s) seen and "
+                                     "ignored so far)" % (self.a.char, ignored), "INFO")
+                    t_wait = now
                 for conn in list(self.conns.values()):
                     for ex in list(conn.open):
                         waiting = ex.session is not None and ex.resp is None
@@ -1637,7 +1645,10 @@ def serve(sn, listen_port, target):
     srv.bind(("0.0.0.0", listen_port))
     srv.listen(50)
     sn.out.raw("[sniffer] listening on :%d  ->  game server %s:%d" % (listen_port, target[0], target[1]), "OK")
-    sn.out.raw("[sniffer] filter: %s" % ("ALL characters" if sn.a.all else "character id %d only" % sn.a.char), "OK")
+    if sn.a.all:
+        sn.out.raw("[sniffer] filter: *** OFF (--all) - logging ALL players. Remove --all to log only %d ***" % sn.a.char, "FAIL")
+    else:
+        sn.out.raw("[sniffer] filter: ON - only character id %d is logged, everybody else is ignored" % sn.a.char, "OK")
     sn.out.raw("[sniffer] data tables: %s" % sn.tables.source, "INFO")
     sn.out.raw("[sniffer] Press Ctrl+C to print the summary (problems, missing requests, to-do list)", "INFO")
     sn.out.raw("")
@@ -1648,8 +1659,10 @@ def serve(sn, listen_port, target):
     sn.out.raw("  SERVER SENT     an extra message the server pushed (screen refresh, reward popup, other players...)")
     sn.out.raw("  --              a server message that was not caused by your click")
     sn.out.raw("  <-- UNKNOWN     the sniffer has no name for it; raw bytes go to %s (summary lists them)" % (sn.a.unknown_log or "(off)"))
-    sn.out.raw("  Other players are NOT shown. Only character %s. (--all = every connection, --show-others = world updates)" % (
-        sn.a.char if not sn.a.all else "ALL"))
+    if sn.a.all:
+        sn.out.raw("  WARNING: --all is ON, so EVERY player is logged. Start WITHOUT --all to see only character %d." % sn.a.char, "FAIL")
+    else:
+        sn.out.raw("  Only character %d is logged. All other players are ignored completely." % sn.a.char)
     sn.out.raw("  RESULT OK       everything looked normal      RESULT INFO     worth knowing, not an error")
     sn.out.raw("  RESULT WARNING  suspicious                    RESULT MISSING  server lacks code the client needs")
     sn.out.raw("  RESULT PROBLEM  the server did something wrong (crash, no answer, double reward, wrong reward...)")
