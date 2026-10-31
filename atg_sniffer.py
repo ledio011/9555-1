@@ -449,6 +449,31 @@ def get_str(fields, tag, default=""):
     return default
 
 
+AOI_ENTITY_PUSHES = {505, 507, 508, 509, 510, 512, 513, 514}   # world updates about ONE entity
+
+
+def push_entity_id(body):
+    """Entity (player/NPC id) an AOI push is about: #0 is either the id or a struct whose #0 is the id."""
+    v = body.get(0)
+    if isinstance(v, int):
+        return v
+    if isinstance(v, (bytes, bytearray)):
+        st = parse_struct(v, 0)
+        if st and st[1] == len(v) and 0 in st[0]:
+            return get_int(st[0], 0)
+        return get_int(body, 0)
+    return None
+
+
+def summarize_tags(tags, limit=14):
+    """[538,538,538,537] -> '538x3, 537'  (keeps first-seen order)"""
+    c = collections.OrderedDict()
+    for t in tags:
+        c[t] = c.get(t, 0) + 1
+    parts = ["%s%s" % ("none" if t is None else t, "x%d" % n if n > 1 else "") for t, n in c.items()]
+    return "[" + ", ".join(parts[:limit]) + (", ... +%d more kinds" % (len(parts) - limit) if len(parts) > limit else "") + "]"
+
+
 def parse_list(b):
     """Array of length-prefixed elements covering b exactly -> list[bytes] or None."""
     out, p = [], 0
@@ -665,7 +690,7 @@ class Out:
 # ----------------------------------------------------------------------------
 class Exchange:
     __slots__ = ("seq", "msg", "session", "body", "t0", "t_last", "resp", "resp_t", "n_resp",
-                 "pushes", "done", "name", "cat", "raw_body", "noisy", "issues", "custom_ok")
+                 "pushes", "done", "name", "cat", "raw_body", "noisy", "issues", "custom_ok", "headerless")
 
     def __init__(self, seq, msg, session, body, raw_body, now):
         self.seq, self.msg, self.session, self.body, self.raw_body = seq, msg, session, body, raw_body
@@ -678,6 +703,7 @@ class Exchange:
         self.noisy = msg in NOISY_REQ
         self.issues = 0
         self.custom_ok = False
+        self.headerless = 0
 
 
 class Conn:
@@ -890,17 +916,33 @@ class Sniffer:
                     ex.seq, len(body), lat, render_fields(body)), ex.cat, now)
             return
         tag = get_int(pkg, 0)
-        # PUSH
+        if tag is None:
+            # Neither a push tag nor a session: the client cannot route this frame.  9555.py does this when it
+            # answers a request that carried no session (encode_sproto([(1, None)])).
+            owner = self.pick_owner(conn, None, now)
+            if owner is not None:
+                owner.headerless += 1
+                owner.t_last = now
+                if owner.headerless == 1:
+                    self.issue(conn, owner, "WARN", "server sent a frame with EMPTY header (no tag, no session) after "
+                               "msg %d (%s): a reply to a request that had no session. The client cannot match it. "
+                               "Body: %s" % (owner.msg, owner.name, render_fields(body)))
+            else:
+                self.emit(conn, "WARN", "--       << frame with empty header (no tag, no session) %s" % render_fields(body))
+            self.stat["headerless"]["n"] += 1
+            return
         self.push_seen[tag] += 1
-        owner = None
-        for ex in reversed(conn.open):               # attribute to newest still-open exchange
-            if now - ex.t_last < self.a.settle + 0.3 or now - ex.t0 < self.a.settle + 0.3:
-                owner = ex
-                break
+        other_entity = None
+        if tag in AOI_ENTITY_PUSHES and conn.char_id is not None:
+            eid = push_entity_id(body)
+            if eid is not None and eid != conn.char_id:
+                other_entity = eid
+        owner = None if other_entity is not None else self.pick_owner(conn, tag, now)
         cat = push_cat(tag) if owner is None else owner.cat
         if owner:
             owner.pushes.append((tag, body, raw_body, now))
-            owner.t_last = now
+            if tag not in NOISY_PUSH:
+                owner.t_last = now
         # duplicate push (same bytes within window)
         dup = False
         for (t2, b2, ts2) in conn.recent_pushes:
@@ -914,12 +956,26 @@ class Sniffer:
         if show:
             extra = " (+%d similar suppressed)" % sup if sup else ""
             lead = "#%d" % owner.seq if owner else "--"
-            self.emit(conn, "PUSH", "%s    << PUSH %-4d %-28s [%s] %s%s" % (
-                lead, tag, push_name(tag), push_cat(tag), render_fields(body), extra), cat, now)
+            who = " (other entity %s)" % other_entity if other_entity is not None else ""
+            self.emit(conn, "PUSH", "%s    << PUSH %-4d %-28s [%s]%s %s%s" % (
+                lead, tag, push_name(tag), push_cat(tag), who, render_fields(body), extra), cat, now)
         if dup:
             self.issue(conn, owner, "FAIL", "DUPLICATE PUSH %d (%s): byte-identical message sent twice within "
                        "%d ms -> client would apply it twice (damage / reward / spawn)" %
                        (tag, push_name(tag), int(self.a.dup_window * 1000)), cat=cat, tag_only=owner is None)
+
+    def pick_owner(self, conn, tag, now):
+        """Which open request does this push belong to?  Newest request inside the attribution window,
+        preferring the request whose handler (per the 9555.py source scan) is known to send this tag."""
+        cands = [ex for ex in conn.open if now - ex.t0 < self.a.attr_window]
+        if not cands:
+            return None
+        hints = PUSH_HINT.get(tag, []) if tag is not None else []
+        if hints:
+            for ex in reversed(cands):
+                if ex.name in hints:
+                    return ex
+        return cands[-1]
 
     # ---------------- verdicts -------------------------------------------
     def issue(self, conn, ex, level, text, cat=None, tag_only=False):
@@ -956,7 +1012,7 @@ class Sniffer:
             self.unhandled[msg][0] += 1
             self.issue(conn, ex, "MISS", "NOT IMPLEMENTED: 9555.py has no branch for msg %d (%s). The client got %s%s." % (
                 msg, ex.name, "only the generic empty ack" if resp_empty else "no/other reply",
-                " + pushes %s" % ptags if ptags else " and no pushes"))
+                " + pushes %s" % summarize_tags(ptags) if ptags else " and no pushes"))
         elif resp_empty and not ptags and ex.session is not None and msg not in NOISY_REQ:
             self.stat[msg]["empty_ack"] += 1
             ex.custom_ok = True
@@ -976,7 +1032,7 @@ class Sniffer:
             conn.verd["OK"] += 1
             self.emit(conn, "OK", "#%d       [OK] %s: reply %s, pushes %s%s" % (
                 ex.seq, ex.name, "%d field(s)" % len(ex.resp) if ex.resp is not None else "none",
-                ptags if ptags else "none", " +%dms" % lat if lat is not None else ""), ex.cat)
+                summarize_tags(ptags) if ptags else "none", " +%dms" % lat if lat is not None else ""), ex.cat)
 
     def check_claims(self, conn, ex, ptags):
         if ex.msg not in CLAIM_MSGS:
@@ -1307,6 +1363,10 @@ def selftest(args):
                     elif msg == 235:         # real data
                         reply([(0, 1), (1, "car_01")])
                         push(555, [(0, 3)])
+                        # AOI update about ANOTHER player (id 48671533) while this request is open:
+                        push(510, [(0, sp_encode([(0, 48671533), (1, 5)]))])
+                        # ... and about the watched character itself (must stay attached to the request)
+                        push(510, [(0, sp_encode([(0, 546880743), (1, 7)]))])
                     elif msg == 999:         # catch-all like 9555.py
                         reply()
                     else:
@@ -1371,7 +1431,11 @@ def selftest(args):
     time.sleep(1.0)
     sn.report()
     tv = sn.total_verdicts()
-    ok = (tv["FAIL"] == 5 and tv["MISS"] == 1 and tv["OK"] >= 2)
+    pushes_235 = sn.record["msgs"].get("235", {}).get("push", {})
+    attrib_ok = pushes_235.get("555") == 1 and pushes_235.get("510") == 1     # own 510 attached, Diana's NOT
+    sn.out.raw("attribution check (other player's AOI push must not belong to the request): %s" %
+               ("OK" if attrib_ok else "WRONG %s" % pushes_235), "OK" if attrib_ok else "FAIL")
+    ok = (tv["FAIL"] == 5 and tv["MISS"] == 1 and tv["OK"] >= 2 and attrib_ok)
     sn.out.raw("SELFTEST %s (FAIL=%d MISS=%d OK=%d)" % ("PASSED" if ok else "FAILED", tv["FAIL"], tv["MISS"], tv["OK"]),
                "OK" if ok else "FAIL")
     return 0 if ok else 1
@@ -1396,6 +1460,7 @@ def main():
     ap.add_argument("--timeout", type=float, default=5.0, help="seconds before an unanswered request is a FAIL")
     ap.add_argument("--settle", type=float, default=1.0, help="seconds of quiet after which an exchange is judged")
     ap.add_argument("--slow-ms", type=int, default=1500)
+    ap.add_argument("--attr-window", type=float, default=3.0, help="a push is only credited to a request younger than this (s)")
     ap.add_argument("--dup-window", type=float, default=0.3, help="identical pushes/requests within this many seconds are duplicates")
     ap.add_argument("--max-speed", type=float, default=0.0, help="flag client move packets faster than this (raw units/s); 0=off")
     ap.add_argument("--noisy", action="store_true", help="print every move / AOI-move packet (no throttling)")
