@@ -24,7 +24,9 @@ It does NOT edit or import 9555.py.  It only needs two ports:
 The client keeps connecting to 15678 and has no idea the sniffer is there.
 Only connections of --account (default 68086000311496; every character on that
 account is logged) and/or --char are logged, all other players are forwarded
-silently.  Use --all to see everybody.
+silently. Add --enforce-account to also reject other accounts and allow only
+character IDs returned in that account's message-103 character list. Use --all
+to see everybody (the account gate, when enabled, still applies).
 
 Python 3.8+, standard library only.   python atg_sniffer.py --help
 """
@@ -566,6 +568,33 @@ def parse_list(b):
     return out if out else None
 
 
+def extract_character_ids(body):
+    """Extract character IDs from the msg-103 response field #0 (list of character structs)."""
+    raw = body.get(0)
+    if not isinstance(raw, (bytes, bytearray)):
+        return set()
+    blob = bytes(raw)
+    rows = parse_list(blob)
+    if rows is None:
+        # Be tolerant of a single struct, but never infer IDs from undecodable bytes.
+        parsed = parse_struct(blob, 0)
+        rows = [blob] if parsed and parsed[1] == len(blob) else []
+    out = set()
+    for row in rows:
+        parsed = parse_struct(row, 0)
+        if not parsed or parsed[1] != len(row):
+            continue
+        fields = parsed[0]
+        char_id = get_int(fields, 0)
+        if char_id is not None:
+            out.add(str(char_id))
+        else:
+            char_text = get_str(fields, 0, "").strip()
+            if char_text:
+                out.add(char_text)
+    return out
+
+
 def printable(b):
     try:
         s = b.decode("utf-8")
@@ -820,6 +849,9 @@ class Conn:
         self.cid, self.peer = cid, peer
         self.char_id = None
         self.account = ""                # account id sent in the login request (msg 4, field #1)
+        self.allowed_chars = None        # set[str], populated from this account's msg-103 response
+        self.blocked = False             # access-control rejection; pump closes before forwarding packet
+        self.block_reason = ""
         self.target = None               # None = not decided yet, True = log it, False = ignore (muted)
         self.muted = False
         self.is_http = False
@@ -970,14 +1002,48 @@ class Sniffer:
         conn.buf = []
         conn.unk_buf = []
 
+    def deny_access(self, conn, reason):
+        """Reject this TCP connection before the disallowed frame is forwarded to 9555.py."""
+        if conn.blocked:
+            return
+        conn.blocked = True
+        conn.block_reason = reason
+        conn.target = False
+        conn.muted = True
+        conn.buf = []
+        conn.unk_buf = []
+        self.out.raw("[sniffer] ACCESS DENIED connection c%d (%s): %s" %
+                     (conn.cid, conn.peer, reason), "FAIL")
+
+    def authorize_character(self, conn, char_id):
+        """When enabled, only IDs returned by msg 103 for the configured account may be picked."""
+        if not self.a.enforce_account:
+            return True
+        wanted = str(self.a.account).strip()
+        if not wanted or conn.account != wanted:
+            self.deny_access(conn, "character selection is not authenticated as allowed account %s" % wanted)
+            return False
+        if conn.allowed_chars is None:
+            self.deny_access(conn, "character selection rejected: no msg-103 character list was received for account %s" % wanted)
+            return False
+        picked = str(char_id).strip()
+        if picked not in conn.allowed_chars:
+            self.deny_access(conn, "character %s is not in account %s's msg-103 character list" % (picked, wanted))
+            return False
+        return True
+
     def login_seen(self, conn, account):
         """msg 4 (login): the account id is known before any character is picked."""
-        conn.account = account
+        conn.account = str(account).strip()
+        if self.a.enforce_account and conn.account != str(self.a.account).strip():
+            self.deny_access(conn, "account %s is not allowed; only account %s may log in" %
+                             (conn.account or "(missing)", self.a.account))
+            return
         if self.a.all or conn.target is not None:
             return
         if self.a.account:
-            if account == self.a.account:
-                self.accept(conn, "account %s logged in" % account)
+            if conn.account == self.a.account:
+                self.accept(conn, "account %s logged in" % conn.account)
             elif not self.a.char:
                 self.reject(conn)            # not our account and no character filter -> decide right now
             # else: wait for the character pick (--char may still match)
@@ -1052,8 +1118,19 @@ class Sniffer:
         st["n"] += 1
         if msg == 4:
             self.login_seen(conn, get_str(body, 1))
+            if conn.blocked:
+                return
         if msg == 105:
-            cid = get_int(body, 0, 0)
+            raw_cid = get_int(body, 0)
+            cid_text = str(raw_cid) if raw_cid is not None else get_str(body, 0, "").strip()
+            if not cid_text:
+                cid_text = "0"
+            if not self.authorize_character(conn, cid_text):
+                return
+            try:
+                cid = int(cid_text)
+            except (TypeError, ValueError):
+                cid = 0
             self.identified(conn, cid)
         show = True
         sup = 0
@@ -1111,6 +1188,14 @@ class Sniffer:
                            "probably processed twice." % (human(ex.name), ex.n_resp))
                 return
             ex.resp, ex.resp_t = body, now
+            if ex.msg == 103 and self.a.enforce_account and conn.account == str(self.a.account).strip():
+                conn.allowed_chars = extract_character_ids(body)
+                if conn.allowed_chars:
+                    self.emit(conn, "INFO", "ACCESS LIST loaded from message 103: %d character(s) allowed for account %s" %
+                              (len(conn.allowed_chars), conn.account), "login", now)
+                else:
+                    self.emit(conn, "WARN", "message 103 returned no decodable character IDs; character selection will fail closed",
+                              "login", now)
             lat = (now - ex.t0) * 1000
             conn.S.lat[ex.msg].append(lat)
             if not body:
@@ -1648,6 +1733,9 @@ def pump(sn, conn, src, dst, direction):
                         tb = traceback.extract_tb(exc.__traceback__)[-1]
                         sn.out.raw("[sniffer] internal error in %s() line %d: %r  (game traffic is still forwarded "
                                    "normally; please report this line)" % (tb.name, tb.lineno, exc), "WARN")
+            if conn.blocked:
+                # Do not forward the login / character-pick frame that triggered the gate.
+                break
             try:
                 dst.sendall(data)
             except OSError:
@@ -1670,7 +1758,8 @@ def handle_client(sn, csock, peer, target):
         ssock = socket.create_connection(target, timeout=5)
         ssock.settimeout(None)
     except OSError as exc:
-        sn.out.raw("[sniffer] cannot reach game server %s:%s - %s" % (target[0], target[1], exc), "FAIL")
+        sn.out.raw("[sniffer] cannot reach game server %s:%s - %s (check that 9555.py is listening on this exact address/port)" %
+                   (target[0], target[1], exc), "FAIL")
         csock.close()
         return
     threading.Thread(target=pump, args=(sn, conn, csock, ssock, "C2S"), daemon=True).start()
@@ -1688,6 +1777,11 @@ def serve(sn, listen_port, target):
     else:
         sn.out.raw("[sniffer] filter: ON - only %s is logged%s, everybody else is ignored" % (
             sn.what_watched(), " (every character on the account)" if sn.a.account else ""), "OK")
+    if sn.a.enforce_account:
+        sn.out.raw("[sniffer] login gate: ON - only account %s and characters returned by its message-103 list are allowed" %
+                   sn.a.account, "OK")
+    else:
+        sn.out.raw("[sniffer] login gate: OFF - --account filters logs only; add --enforce-account to restrict access", "WARN")
     sn.out.raw("[sniffer] data tables: %s" % sn.tables.source, "INFO")
     sn.out.raw("[sniffer] Press Ctrl+C to print the summary (problems, missing requests, to-do list)", "INFO")
     sn.out.raw("")
@@ -1873,7 +1967,10 @@ def main():
     ap = argparse.ArgumentParser(description="ATG live protocol truth-log (transparent proxy in front of 9555.py)")
     ap.add_argument("--listen", type=int, default=15678, help="port the GAME CLIENT connects to (default 15678)")
     ap.add_argument("--server", default="127.0.0.1:15679", help="real 9555.py host:port (start it with PORT=15679)")
-    ap.add_argument("--account", default="68086000311496", help="log every character of this account id (default 68086000311496; '' = off)")
+    ap.add_argument("--account", default="68086000311496",
+                    help="account to log; with --enforce-account, the only account allowed (default 68086000311496)")
+    ap.add_argument("--enforce-account", "--restrict-account", dest="enforce_account", action="store_true",
+                    help="reject other accounts and allow only character IDs returned by this account's msg-103 list")
     ap.add_argument("--char", type=int, default=0, help="additionally log this single character id (0 = off)")
     ap.add_argument("--all", action="store_true", help="log every connection, ignore --char")
     ap.add_argument("--only", default="", help="only show these categories, e.g. team,gang,mission,combat,map,shop,items,reward,social,rank,dance,aoi,npc")
@@ -1902,6 +1999,8 @@ def main():
     ap.add_argument("--no-color", action="store_true")
     ap.add_argument("--selftest", action="store_true", help="run a built-in fake server/client check and exit")
     args = ap.parse_args()
+    if args.enforce_account and not args.account.strip():
+        ap.error("--enforce-account requires a non-empty --account value")
     if os.name == "nt":
         os.system("")
     if args.names:
