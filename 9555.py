@@ -13126,6 +13126,7 @@ def client_handler(conn, addr):
     guild_presence_announced = False
     # Map 101 joystick diagnostics: log movement packets sparsely and use
     # heartbeats to show when the client is not sending any movement input.
+    map101_pick_at = None
     map101_ready_at = None
     map101_last_move_at = None
     map101_last_move_log_at = 0.0
@@ -13338,8 +13339,7 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
                     picked_char['last_played'] = int(time.time())
-                    if 'map101_pick_at' in locals():
-                        map101_pick_at = time.monotonic()
+                    map101_pick_at = time.monotonic()
                     print(
                         f"[CHARACTER PICK] id={picked_char.get('id')} name={picked_char.get('name')} "
                         f"level={picked_char.get('level')} map={picked_char.get('map_id')} "
@@ -13741,12 +13741,14 @@ def client_handler(conn, addr):
                         map101_last_move_log_at = 0.0
                         map101_last_idle_log_at = 0.0
                         map101_move_count = 0
+                        pick_elapsed = (
+                            time.monotonic() - map101_pick_at
+                            if map101_pick_at is not None else -1.0
+                        )
                         print(
                             f"[MAP101 READY DIAG] player={picked_char.get('id')} "
                             f"pos={picked_char.get('pos')} "
-                            f"elapsed_since_pick={time.monotonic() - map101_pick_at:.2f}s"
-                            if 'map101_pick_at' in locals()
-                            else f"[MAP101 READY DIAG] player={picked_char.get('id')} pos={picked_char.get('pos')}"
+                            f"elapsed_since_pick={pick_elapsed:.2f}s"
                         )
                     if not guild_presence_announced and is_current_character_connection(conn, picked_char):
                         guild_id = _guild_id_for_character(picked_char)
@@ -14084,12 +14086,12 @@ def client_handler(conn, addr):
                     if str(move_map) == '101':
                         map101_move_count += 1
                         map101_last_move_at = time.monotonic()
-                        if (map101_last_move_count := map101_move_count) == 1 or (
+                        if map101_move_count == 1 or (
                                 map101_last_move_at - map101_last_move_log_at >= 2.0):
                             map101_last_move_log_at = map101_last_move_at
                             print(
                                 f"[MAP101 MOVE RX] player={picked_char.get('id')} "
-                                f"count={map101_last_move_count} pos={new_pos} "
+                                f"count={map101_move_count} pos={new_pos} "
                                 f"since_ready={(map101_last_move_at - map101_ready_at):.2f}s"
                                 if map101_ready_at is not None
                                 else f"[MAP101 MOVE RX] player={picked_char.get('id')} count={map101_last_move_count} pos={new_pos} ready_time=unknown"
