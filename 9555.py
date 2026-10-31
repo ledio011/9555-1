@@ -15335,8 +15335,11 @@ def client_handler(conn, addr):
                         current_level = max(0, int(picked_char.get('title_level', 0)))
                         title_exp = max(0, int(picked_char.get('title_exp', 0)))
                         threshold = int(TITLE_CONFIG.get(current_level, {}).get('exp', 0))
+                        power_before = None
                         if (current_level < 10 and threshold > 0 and title_exp >= threshold
                                 and current_level + 1 in TITLE_CONFIG):
+                            # Capture actual combat power before applying title bonuses.
+                            power_before = get_character_stats(picked_char)['power']
                             picked_char['title_level'] = current_level + 1
                             save_chars(all_accounts_chars)
                             sync_char_attrs_rpc(conn, picked_char)
@@ -15344,6 +15347,12 @@ def client_handler(conn, addr):
                             (0, int(picked_char.get('title_level', 0))),
                             (1, int(picked_char.get('title_exp', 0)))
                         ]))
+                        # Tag 510 synchronizes attributes; Tag 651 opens the APK power-gain popup.
+                        if power_before is not None:
+                            power_after = get_character_stats(picked_char)['power']
+                            send_combat_power_gain_tip(
+                                send_rpc_push, power_before, power_after
+                            )
                 send_rpc_response(session)
 
             elif msg == 185: # change_potion: persist the client's selected item-backpack potion
