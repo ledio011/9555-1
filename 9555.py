@@ -4782,6 +4782,18 @@ def character_attribute_other_fields(character, stats, hp_cur):
         guild_name = str(guild.get('name', '') or '')
     else:
         guild_id, guild_job, guild_name = 0, -1, ''
+    try:
+        pk_mode = int(character.get('pk_mode', 0) or 0)
+    except (TypeError, ValueError, OverflowError):
+        pk_mode = 0
+    if pk_mode not in (0, 1, 2):
+        pk_mode = 0
+    if pk_mode == 2:
+        pk_guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
+        pk_member = _guild_member_id(pk_guild, character.get('id', 0)) if pk_guild else None
+        if not pk_member or int(pk_member.get('job', 4)) == 4:
+            pk_mode = 0
+
     return [
         (0, hp_cur), (1, stats['exp']), (2, stats['lv']), (3, stats['power']),
         (4, int(character.get('title_level', 0))),
@@ -4791,7 +4803,7 @@ def character_attribute_other_fields(character, stats, hp_cur):
         # leaves the Gang panel on its no-guild path after a reconnect.
         (6, guild_id), (7, guild_job), (8, guild_name),
         (9, levels[1]), (10, levels[2]), (11, levels[3]), (12, levels[4]),
-        (13, sum(levels.values())), (15, 1),
+        (13, sum(levels.values())), (15, 1), (16, pk_mode),
         (17, 1 if dance_active else 0),
         (18, str(dance.get('dance_id', '')) if dance_active else '')
     ]
@@ -13129,12 +13141,19 @@ def client_handler(conn, addr):
             traceback.print_exc()
 
     def send_rpc_response(response_session, response_data=None):
-        if response_session is None:
-            return
+        # Client notifications have no session and must never receive an RPC
+        # response packet. Reject malformed/zero sessions as well.
+        try:
+            response_session = int(response_session)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if response_session <= 0:
+            return False
         ph_r = encode_sproto([(1, response_session)])
         pf_r = sproto_pack(ph_r + (response_data if response_data is not None else encode_sproto([])))
         with send_lock:
             conn.sendall(struct.pack(">H", len(pf_r)) + pf_r)
+        return True
 
     def use_personal_dance_speaker(index_id, x, z, consume_item=False):
         """Activate the configured personal speaker without consuming on failure."""
@@ -15601,6 +15620,55 @@ def client_handler(conn, addr):
                 if state == 0:
                     sync_all_backpacks(picked_char, send_rpc_push)
                 send_rpc_response(session, encode_sproto([(0, state)]))
+
+            elif msg == 200: # request_wild_boss_info
+                # The client expects TAG 605 with activity_info map field 0.
+                # This server currently has no live world-boss activity state;
+                # return a schema-valid empty map instead of leaving the UI waiting.
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    send_rpc_push(605, encode_sproto([(0, {})]))
+
+            elif msg == 226: # request_change_pk_mode
+                # Client enum: 0=PVE, 1=PVP, 2=guild mode. This is fire-and-forget.
+                requested_pk_mode = get_val_int(body, 0, -1)
+                if (picked_char and is_current_character_connection(conn, picked_char)
+                        and requested_pk_mode in (0, 1, 2)):
+                    allowed = True
+                    if requested_pk_mode == 2:
+                        guild_id = _guild_id_for_character(picked_char)
+                        guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
+                        member = _guild_member_id(guild, picked_char.get('id', 0)) if guild else None
+                        allowed = bool(member and int(member.get('job', 4)) != 4)
+                    if allowed:
+                        changed = False
+                        with get_character_transaction_lock(picked_char):
+                            try:
+                                old_pk_mode = int(picked_char.get('pk_mode', 0) or 0)
+                            except (TypeError, ValueError, OverflowError):
+                                old_pk_mode = 0
+                            if old_pk_mode != requested_pk_mode:
+                                picked_char['pk_mode'] = requested_pk_mode
+                                save_chars(all_accounts_chars)
+                                changed = True
+                        if changed:
+                            sync_char_attrs_rpc(conn, picked_char)
+                            broadcast_aoi_attribute(picked_char)
+                            print(f"[PK MODE] player={picked_char.get('id')} mode={requested_pk_mode}")
+                    else:
+                        print(f"[PK MODE] rejected guild mode for non-member player={picked_char.get('id')}")
+
+            elif msg == 274: # request_special_big_pack
+                # No special-pack purchase/state backend is configured yet.
+                # TAG 656 contains special_big_packs map field 0; send it empty
+                # rather than inventing products or purchase entitlements.
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    send_rpc_push(656, encode_sproto([(0, {})]))
+
+            elif msg == 299: # require_vip_info
+                # No VIP entitlement backend is configured. The empty TAG 678
+                # is valid: the client closes its wait UI and does not assume VIP.
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    send_rpc_push(678, encode_sproto([]))
 
             elif msg == 227: # request_dance_info
                 if picked_char:
@@ -18219,7 +18287,7 @@ def client_handler(conn, addr):
                 if session is not None:
                     ph=encode_sproto([(1,session)]);pf=sproto_pack(ph+encode_sproto([]));conn.sendall(struct.pack('>H',len(pf))+pf)
 
-            elif msg in [118, 218, 145, 202, 210, 225, 242, 252, 253, 254, 255, 256, 257, 258, 261, 262, 265, 266, 278, 296, 297, 299, 313, 319]:
+            elif msg in [118, 218, 145, 202, 210, 225, 242, 252, 253, 254, 255, 256, 257, 258, 261, 262, 265, 266, 278, 296, 297, 313, 319]:
                 resp_data = encode_sproto([])
                 if msg == 118:
                     # Check if this is a random name request (body has field 0 = type)
@@ -18265,8 +18333,7 @@ def client_handler(conn, addr):
                         activity_map = {}
                         resp_data = encode_sproto([(0, activity_map)])
                 elif msg == 218: resp_data = encode_sproto([(0, body.get(0, 0)), (1, int(time.time()))])
-                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp_data)
-                conn.sendall(struct.pack(">H", len(pf)) + pf)
+                send_rpc_response(session, resp_data)
 
                 if (msg == 218 and picked_char
                         and is_current_character_connection(conn, picked_char)):
