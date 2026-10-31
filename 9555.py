@@ -10395,6 +10395,17 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
     else:
         print(f"[MAP CONFIG MISSING] map_id={target_map_id}")
 
+    if target_map_id == "101":
+        print(
+            f"[MAP101 TRANSITION PREP] player={picked_char.get('id')} "
+            f"from={src_map} to={target_map_id} pos={picked_char.get('pos')} "
+            f"override_pos={override_pos} level={picked_char.get('level')} "
+            f"hp={picked_char.get('hp')} active_copy={picked_char.get('active_copy_id')} "
+            f"exp_state={bool(picked_char.get('exp_stage_state'))} "
+            f"equip_state={bool(picked_char.get('equipment_stage_state'))} "
+            f"conn_id={id(conn)}"
+        )
+
     save_chars(all_accounts_chars)
     # TAG 503: enter_map
     print("[DEBUG] BEFORE MAP ENTER")
@@ -13113,6 +13124,13 @@ def client_handler(conn, addr):
     street_race_result_restore_pending = False
     download_bag_resynced = False
     guild_presence_announced = False
+    # Map 101 joystick diagnostics: log movement packets sparsely and use
+    # heartbeats to show when the client is not sending any movement input.
+    map101_ready_at = None
+    map101_last_move_at = None
+    map101_last_move_log_at = 0.0
+    map101_last_idle_log_at = 0.0
+    map101_move_count = 0
     # ALL_CONNECTIONS will be updated when character is picked
     send_lock = threading.Lock()
 
@@ -13320,8 +13338,27 @@ def client_handler(conn, addr):
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
                 if picked_char:
                     picked_char['last_played'] = int(time.time())
-                    print(f"[CHARACTER PICK] id={picked_char['id']} level={picked_char.get('level')}")
+                    if 'map101_pick_at' in locals():
+                        map101_pick_at = time.monotonic()
+                    print(
+                        f"[CHARACTER PICK] id={picked_char.get('id')} name={picked_char.get('name')} "
+                        f"level={picked_char.get('level')} map={picked_char.get('map_id')} "
+                        f"pos={picked_char.get('pos')} hp={picked_char.get('hp')} "
+                        f"active_copy={picked_char.get('active_copy_id')} "
+                        f"exp_state={bool(picked_char.get('exp_stage_state'))} "
+                        f"equip_state={bool(picked_char.get('equipment_stage_state'))} "
+                        f"conn_id={conn_id}"
+                    )
                     init_character_fields(picked_char)
+                    print(
+                        f"[CHARACTER PICK READY] id={picked_char.get('id')} "
+                        f"map={picked_char.get('map_id')} pos={picked_char.get('pos')} "
+                        f"hp={picked_char.get('hp')} level={picked_char.get('level')} "
+                        f"active_copy={picked_char.get('active_copy_id')} "
+                        f"exp_state={bool(picked_char.get('exp_stage_state'))} "
+                        f"equip_state={bool(picked_char.get('equipment_stage_state'))} "
+                        f"current_socket={is_current_character_connection(conn, picked_char)}"
+                    )
                     _guild_reconcile_character_membership(picked_char)
                     # Completion from older versions is an ambiguous claim and
                     # must never trigger another payout. Only retry automatically
@@ -13690,8 +13727,27 @@ def client_handler(conn, addr):
 
             elif msg == 100: # map_ready
                 if picked_char:
-                    mid = picked_char.get('map_id', '11')
-                    print(f"[MAP READY RECEIVED] map_id={mid}")
+                    mid = str(picked_char.get('map_id', '11'))
+                    print(
+                        f"[MAP READY RECEIVED] map_id={mid} player={picked_char.get('id')} "
+                        f"pos={picked_char.get('pos')} hp={picked_char.get('hp')} "
+                        f"level={picked_char.get('level')} "
+                        f"current_socket={is_current_character_connection(conn, picked_char)} "
+                        f"conn_id={conn_id}"
+                    )
+                    if mid == "101":
+                        map101_ready_at = time.monotonic()
+                        map101_last_move_at = None
+                        map101_last_move_log_at = 0.0
+                        map101_last_idle_log_at = 0.0
+                        map101_move_count = 0
+                        print(
+                            f"[MAP101 READY DIAG] player={picked_char.get('id')} "
+                            f"pos={picked_char.get('pos')} "
+                            f"elapsed_since_pick={time.monotonic() - map101_pick_at:.2f}s"
+                            if 'map101_pick_at' in locals()
+                            else f"[MAP101 READY DIAG] player={picked_char.get('id')} pos={picked_char.get('pos')}"
+                        )
                     if not guild_presence_announced and is_current_character_connection(conn, picked_char):
                         guild_id = _guild_id_for_character(picked_char)
                         guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
@@ -14026,6 +14082,18 @@ def client_handler(conn, addr):
                     broadcast_aoi_move(picked_char)
                     # Update NPC AOI for Liberty City (map 101) — throttle to every 2 seconds
                     if str(move_map) == '101':
+                        map101_move_count += 1
+                        map101_last_move_at = time.monotonic()
+                        if (map101_last_move_count := map101_move_count) == 1 or (
+                                map101_last_move_at - map101_last_move_log_at >= 2.0):
+                            map101_last_move_log_at = map101_last_move_at
+                            print(
+                                f"[MAP101 MOVE RX] player={picked_char.get('id')} "
+                                f"count={map101_last_move_count} pos={new_pos} "
+                                f"since_ready={(map101_last_move_at - map101_ready_at):.2f}s"
+                                if map101_ready_at is not None
+                                else f"[MAP101 MOVE RX] player={picked_char.get('id')} count={map101_last_move_count} pos={new_pos} ready_time=unknown"
+                            )
                         last_aoi_update = picked_char.get('_last_npc_aoi_update', 0)
                         if int(time.time()) - last_aoi_update >= 2:
                             update_npc_aoi(conn, move_map, picked_char)
@@ -18246,6 +18314,29 @@ def client_handler(conn, addr):
 
                 if (msg == 218 and picked_char
                         and is_current_character_connection(conn, picked_char)):
+                    if str(picked_char.get('map_id', '')) == "101" and map101_ready_at is not None:
+                        now_mono = time.monotonic()
+                        if (map101_last_move_at is None
+                                and now_mono - map101_ready_at >= 3.0
+                                and now_mono - map101_last_idle_log_at >= 5.0):
+                            map101_last_idle_log_at = now_mono
+                            print(
+                                f"[MAP101 INPUT IDLE] player={picked_char.get('id')} "
+                                f"no MSG101 received since MAP READY; "
+                                f"ready_for={now_mono - map101_ready_at:.1f}s "
+                                f"move_packets={map101_move_count} "
+                                f"pos={picked_char.get('pos')} conn_id={conn_id}"
+                            )
+                        elif (map101_last_move_at is not None
+                              and now_mono - map101_last_move_at >= 5.0
+                              and now_mono - map101_last_idle_log_at >= 5.0):
+                            map101_last_idle_log_at = now_mono
+                            print(
+                                f"[MAP101 INPUT IDLE] player={picked_char.get('id')} "
+                                f"last_MSG101_ago={now_mono - map101_last_move_at:.1f}s "
+                                f"move_packets={map101_move_count} "
+                                f"pos={picked_char.get('pos')} conn_id={conn_id}"
+                            )
                     settle_personal_dance_if_due(picked_char)
 
                 elif msg == 145 and picked_char:
