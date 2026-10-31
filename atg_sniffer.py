@@ -22,8 +22,9 @@ It does NOT edit or import 9555.py.  It only needs two ports:
     python atg_sniffer.py --listen 15678 --server 127.0.0.1:15679
 
 The client keeps connecting to 15678 and has no idea the sniffer is there.
-Only the connection of --char (default 546880743) is logged, all other
-players are forwarded silently.  Use --all to see everybody.
+Only connections of --account (default 68086000311496; every character on that
+account is logged) and/or --char are logged, all other players are forwarded
+silently.  Use --all to see everybody.
 
 Python 3.8+, standard library only.   python atg_sniffer.py --help
 """
@@ -818,6 +819,8 @@ class Conn:
     def __init__(self, cid, peer):
         self.cid, self.peer = cid, peer
         self.char_id = None
+        self.account = ""                # account id sent in the login request (msg 4, field #1)
+        self.target = None               # None = not decided yet, True = log it, False = ignore (muted)
         self.muted = False
         self.is_http = False
         self.S = ConnStats()
@@ -867,7 +870,7 @@ class Sniffer:
         with self.lock:
             if conn.muted:
                 return
-            if conn.char_id is None and not self.a.all and not force:
+            if conn.target is None and not self.a.all and not force:
                 conn.buf.append((kind, text, ts, cat, unk))
                 if len(conn.buf) > 400:
                     conn.buf.pop(0)
@@ -902,7 +905,7 @@ class Sniffer:
                 reply if reply is not None else example, conn.cur_frame.hex()))
 
     def write_unk(self, conn, line):
-        if conn.char_id is None and not self.a.all:
+        if conn.target is None and not self.a.all:
             conn.unk_buf.append(line)
         elif not conn.muted:
             self.unknown_file(line)
@@ -943,27 +946,52 @@ class Sniffer:
             self.conns[cid] = c
         return c
 
+    def accept(self, conn, why):
+        """This connection belongs to the watched account/character: flush what was held back and log from now on."""
+        if conn.target is not None:
+            return
+        conn.target = True
+        buf, conn.buf = conn.buf, []
+        self.out.raw("[sniffer] %s on connection c%d (%s) - logging" % (why, conn.cid, conn.peer), "OK")
+        for kind, text, ts, cat, unk in buf:
+            if self.only and cat not in self.only and kind != "FAIL":
+                continue
+            if self.a.only_unknown and not unk and kind != "FAIL":
+                continue
+            self.out.line(kind, text, ts)
+        for line in conn.unk_buf:
+            self.unknown_file(line)
+        conn.unk_buf = []
+
+    def reject(self, conn):
+        """Somebody else: forward their traffic silently, never analyse, print or count it."""
+        conn.target = False
+        conn.muted = True
+        conn.buf = []
+        conn.unk_buf = []
+
+    def login_seen(self, conn, account):
+        """msg 4 (login): the account id is known before any character is picked."""
+        conn.account = account
+        if self.a.all or conn.target is not None:
+            return
+        if self.a.account:
+            if account == self.a.account:
+                self.accept(conn, "account %s logged in" % account)
+            elif not self.a.char:
+                self.reject(conn)            # not our account and no character filter -> decide right now
+            # else: wait for the character pick (--char may still match)
+
     def identified(self, conn, char_id):
         # (msg 105 character_pick: request field #0 is the character id)
         with self.lock:
             conn.char_id = char_id
-            if not self.a.all and self.a.char and char_id != self.a.char:
-                conn.muted = True
-                conn.buf = []
-                conn.unk_buf = []
-                return
-            buf, conn.buf = conn.buf, []
-            self.out.raw("[sniffer] character %d identified on connection c%d (%s) - logging" %
-                         (char_id, conn.cid, conn.peer), "OK")
-            for kind, text, ts, cat, unk in buf:
-                if self.only and cat not in self.only and kind != "FAIL":
-                    continue
-                if self.a.only_unknown and not unk and kind != "FAIL":
-                    continue
-                self.out.line(kind, text, ts)
-            for line in conn.unk_buf:
-                self.unknown_file(line)
-            conn.unk_buf = []
+            if self.a.all or conn.target is not None:
+                return                       # already accepted by account (or filter off) - char_id is now known
+            if self.a.char and char_id == self.a.char:
+                self.accept(conn, "character %d picked" % char_id)
+            else:
+                self.reject(conn)
 
     def closed(self, conn, who):
         with self.lock:
@@ -980,7 +1008,7 @@ class Sniffer:
                         self.issue(conn, ex, "WARN", "the client disconnected before the server answered '%s'" % human(ex.name))
                 self.finalize(conn, ex, force=True)
             self.emit(conn, "INFO", "--  CONNECTION       closed (%s hung up first)" % ("the game server" if who == "server" else "the game client"),
-                      force=conn.char_id is not None)
+                      force=bool(conn.target))
 
     # ---------------- frame handling ------------------------------------
     def on_frame(self, conn, direction, frame):
@@ -1022,6 +1050,8 @@ class Sniffer:
             conn.pending[session] = ex
         st = conn.S.stat[msg]
         st["n"] += 1
+        if msg == 4:
+            self.login_seen(conn, get_str(body, 1))
         if msg == 105:
             cid = get_int(body, 0, 0)
             self.identified(conn, cid)
@@ -1416,18 +1446,26 @@ class Sniffer:
         conn.last_move = (now, x, z)
 
     # ---------------- background janitor -----------------------------------
+    def what_watched(self):
+        parts = []
+        if self.a.account:
+            parts.append("account %s" % self.a.account)
+        if self.a.char:
+            parts.append("character %d" % self.a.char)
+        return " / ".join(parts) or "nobody"
+
     def janitor(self):
         t_wait = time.time()
         while not self.stop:
             time.sleep(0.2)
             now = time.time()
             with self.lock:
-                if not self.a.all and self.a.char and now - t_wait >= 30:
-                    active = any(c.char_id == self.a.char and not c.closed_flag for c in self.conns.values())
+                if not self.a.all and (self.a.char or self.a.account) and now - t_wait >= 30:
+                    active = any(c.target and not c.closed_flag for c in self.conns.values())
                     if not active:
                         ignored = sum(1 for c in self.conns.values() if c.muted)
-                        self.out.raw("[sniffer] waiting for character %d to log in ... (%d other player connection(s) seen and "
-                                     "ignored so far)" % (self.a.char, ignored), "INFO")
+                        self.out.raw("[sniffer] waiting for %s to log in ... (%d other player connection(s) seen and "
+                                     "ignored so far)" % (self.what_watched(), ignored), "INFO")
                     t_wait = now
                 for conn in list(self.conns.values()):
                     for ex in list(conn.open):
@@ -1646,9 +1684,10 @@ def serve(sn, listen_port, target):
     srv.listen(50)
     sn.out.raw("[sniffer] listening on :%d  ->  game server %s:%d" % (listen_port, target[0], target[1]), "OK")
     if sn.a.all:
-        sn.out.raw("[sniffer] filter: *** OFF (--all) - logging ALL players. Remove --all to log only %d ***" % sn.a.char, "FAIL")
+        sn.out.raw("[sniffer] filter: *** OFF (--all) - logging ALL players. Remove --all to log only %s ***" % sn.what_watched(), "FAIL")
     else:
-        sn.out.raw("[sniffer] filter: ON - only character id %d is logged, everybody else is ignored" % sn.a.char, "OK")
+        sn.out.raw("[sniffer] filter: ON - only %s is logged%s, everybody else is ignored" % (
+            sn.what_watched(), " (every character on the account)" if sn.a.account else ""), "OK")
     sn.out.raw("[sniffer] data tables: %s" % sn.tables.source, "INFO")
     sn.out.raw("[sniffer] Press Ctrl+C to print the summary (problems, missing requests, to-do list)", "INFO")
     sn.out.raw("")
@@ -1660,9 +1699,9 @@ def serve(sn, listen_port, target):
     sn.out.raw("  --              a server message that was not caused by your click")
     sn.out.raw("  <-- UNKNOWN     the sniffer has no name for it; raw bytes go to %s (summary lists them)" % (sn.a.unknown_log or "(off)"))
     if sn.a.all:
-        sn.out.raw("  WARNING: --all is ON, so EVERY player is logged. Start WITHOUT --all to see only character %d." % sn.a.char, "FAIL")
+        sn.out.raw("  WARNING: --all is ON, so EVERY player is logged. Start WITHOUT --all to see only %s." % sn.what_watched(), "FAIL")
     else:
-        sn.out.raw("  Only character %d is logged. All other players are ignored completely." % sn.a.char)
+        sn.out.raw("  Only %s is logged. All other players are ignored completely." % sn.what_watched())
     sn.out.raw("  RESULT OK       everything looked normal      RESULT INFO     worth knowing, not an error")
     sn.out.raw("  RESULT WARNING  suspicious                    RESULT MISSING  server lacks code the client needs")
     sn.out.raw("  RESULT PROBLEM  the server did something wrong (crash, no answer, double reward, wrong reward...)")
@@ -1775,6 +1814,7 @@ def selftest(args):
                "41002": {"exp": 1000, "cash": 2000, "items": ["10002"], "item_amounts": [1]},
                "41003": {"exp": 1000, "cash": 2000, "items": ["10003"], "item_amounts": [1]}},
               open(os.path.join(tmp, "mission_rewards.json"), "w"))
+    args.account, args.char = "", 546880743
     args.data, args.rewards_check = tmp, True
     args.unknown_log, args.names_todo = os.path.join(tmp, "unk.log"), ""
     args.timeout, args.settle, args.log = 1.0, 0.5, None
@@ -1833,7 +1873,8 @@ def main():
     ap = argparse.ArgumentParser(description="ATG live protocol truth-log (transparent proxy in front of 9555.py)")
     ap.add_argument("--listen", type=int, default=15678, help="port the GAME CLIENT connects to (default 15678)")
     ap.add_argument("--server", default="127.0.0.1:15679", help="real 9555.py host:port (start it with PORT=15679)")
-    ap.add_argument("--char", type=int, default=546880743, help="only log this character id (default 546880743)")
+    ap.add_argument("--account", default="68086000311496", help="log every character of this account id (default 68086000311496; '' = off)")
+    ap.add_argument("--char", type=int, default=0, help="additionally log this single character id (0 = off)")
     ap.add_argument("--all", action="store_true", help="log every connection, ignore --char")
     ap.add_argument("--only", default="", help="only show these categories, e.g. team,gang,mission,combat,map,shop,items,reward,social,rank,dance,aoi,npc")
     ap.add_argument("--log", default="", help="also append the log to this file")
