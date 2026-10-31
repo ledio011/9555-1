@@ -13132,6 +13132,12 @@ def client_handler(conn, addr):
     map101_last_move_log_at = 0.0
     map101_last_idle_log_at = 0.0
     map101_move_count = 0
+    map101_post_ready_rx_count = 0
+    map101_post_ready_move_count = 0
+    map101_last_rx_at = None
+    map101_last_rx_msg = None
+    map101_last_rx_session = None
+    map101_last_rx_body_keys = None
     # ALL_CONNECTIONS will be updated when character is picked
     send_lock = threading.Lock()
 
@@ -13155,6 +13161,49 @@ def client_handler(conn, addr):
         pf_r = sproto_pack(ph_r + (response_data if response_data is not None else encode_sproto([])))
         with send_lock:
             conn.sendall(struct.pack(">H", len(pf_r)) + pf_r)
+
+    def start_map101_watchdog(watch_ready_at, watch_char_id):
+        """Report post-map-ready input silence even when the client sends no heartbeats."""
+        def watch():
+            for milestone in (2.0, 5.0, 10.0, 20.0, 30.0):
+                remaining = milestone - (time.monotonic() - watch_ready_at)
+                if remaining > 0:
+                    time.sleep(remaining)
+                try:
+                    if conn.fileno() < 0:
+                        return
+                except Exception:
+                    return
+                if map101_ready_at != watch_ready_at:
+                    return
+                if (not picked_char
+                        or str(picked_char.get('id')) != watch_char_id
+                        or str(picked_char.get('map_id', '')) != '101'):
+                    return
+                now = time.monotonic()
+                last_rx_age = (
+                    f"{now - map101_last_rx_at:.1f}s"
+                    if map101_last_rx_at is not None else "none"
+                )
+                last_move_age = (
+                    f"{now - map101_last_move_at:.1f}s"
+                    if map101_last_move_at is not None else "none"
+                )
+                try:
+                    socket_current = is_current_character_connection(conn, picked_char)
+                except Exception:
+                    socket_current = False
+                print(
+                    f"[MAP101 WATCHDOG] player={watch_char_id} ready_for={now - watch_ready_at:.1f}s "
+                    f"rx_after_ready={map101_post_ready_rx_count} "
+                    f"msg101_after_ready={map101_post_ready_move_count} "
+                    f"accepted_moves={map101_move_count} "
+                    f"last_rx_msg={map101_last_rx_msg} last_rx_session={map101_last_rx_session} "
+                    f"last_rx_age={last_rx_age} last_move_age={last_move_age} "
+                    f"last_rx_body_keys={map101_last_rx_body_keys} "
+                    f"pos={picked_char.get('pos')} current_socket={socket_current} conn_id={conn_id}"
+                )
+        threading.Thread(target=watch, daemon=True).start()
 
     def use_personal_dance_speaker(index_id, x, z, consume_item=False):
         """Activate the configured personal speaker without consuming on failure."""
@@ -13265,6 +13314,28 @@ def client_handler(conn, addr):
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
             print(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
+            if (picked_char and str(picked_char.get('map_id', '')) == '101'
+                    and map101_ready_at is not None):
+                map101_post_ready_rx_count += 1
+                map101_last_rx_at = time.monotonic()
+                map101_last_rx_msg = msg
+                map101_last_rx_session = session
+                map101_last_rx_body_keys = sorted(str(k) for k in body.keys())
+                if msg == 101:
+                    map101_post_ready_move_count += 1
+                if map101_post_ready_rx_count <= 25 or msg == 101:
+                    payload0 = body.get(0)
+                    payload0_size = (
+                        len(payload0) if isinstance(payload0, (bytes, bytearray, str))
+                        else None
+                    )
+                    print(
+                        f"[MAP101 RX TRACE] n={map101_post_ready_rx_count} msg={msg} "
+                        f"session={session} body_keys={map101_last_rx_body_keys} "
+                        f"field0_type={type(payload0).__name__} field0_size={payload0_size} "
+                        f"current_socket={is_current_character_connection(conn, picked_char)} "
+                        f"conn_id={conn_id}"
+                    )
 
             if msg == 2: # visitor
                 new_id = acc_id if acc_id and acc_id != "0" else f"100{random.randint(1000, 9999)}"
@@ -13741,6 +13812,12 @@ def client_handler(conn, addr):
                         map101_last_move_log_at = 0.0
                         map101_last_idle_log_at = 0.0
                         map101_move_count = 0
+                        map101_post_ready_rx_count = 0
+                        map101_post_ready_move_count = 0
+                        map101_last_rx_at = None
+                        map101_last_rx_msg = None
+                        map101_last_rx_session = None
+                        map101_last_rx_body_keys = None
                         pick_elapsed = (
                             time.monotonic() - map101_pick_at
                             if map101_pick_at is not None else -1.0
@@ -13748,8 +13825,11 @@ def client_handler(conn, addr):
                         print(
                             f"[MAP101 READY DIAG] player={picked_char.get('id')} "
                             f"pos={picked_char.get('pos')} "
-                            f"elapsed_since_pick={pick_elapsed:.2f}s"
+                            f"elapsed_since_pick={pick_elapsed:.2f}s "
+                            f"current_socket={is_current_character_connection(conn, picked_char)} "
+                            f"conn_id={conn_id}"
                         )
+                        start_map101_watchdog(map101_ready_at, str(picked_char.get('id')))
                     if not guild_presence_announced and is_current_character_connection(conn, picked_char):
                         guild_id = _guild_id_for_character(picked_char)
                         guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
@@ -14058,9 +14138,37 @@ def client_handler(conn, addr):
                     and int(picked_char.get('id', 0)) in exp_member_ids(move_stage_state)
                     and int(picked_char.get('hp', 0)) > 0
                     and is_current_character_connection(conn, picked_char))
-                if p_raw and picked_char and (
+                move_packet_accepted = bool(
+                    p_raw and picked_char and (
                         (not is_exp_move_map and not is_equipment_move_map and not stale_race_socket)
-                        or stage_move_valid):
+                        or stage_move_valid
+                    )
+                )
+                if move_map == '101':
+                    if not p_raw:
+                        move_reject_reason = 'missing_body_field_0'
+                    elif not picked_char:
+                        move_reject_reason = 'no_picked_character'
+                    elif stale_race_socket:
+                        move_reject_reason = 'stale_race_socket'
+                    elif (is_exp_move_map or is_equipment_move_map) and not stage_move_valid:
+                        move_reject_reason = 'stage_move_validation_failed'
+                    else:
+                        move_reject_reason = 'accepted'
+                    payload_size = (
+                        len(p_raw) if isinstance(p_raw, (bytes, bytearray, str))
+                        else None
+                    )
+                    print(
+                        f"[MAP101 MOVE CHECK] player={picked_char.get('id') if picked_char else None} "
+                        f"phase={'after_ready' if map101_ready_at is not None else 'before_ready'} "
+                        f"payload_present={p_raw is not None} payload_type={type(p_raw).__name__} "
+                        f"payload_size={payload_size} body_keys={sorted(str(k) for k in body.keys())} "
+                        f"accepted={move_packet_accepted} reason={move_reject_reason} "
+                        f"current_socket={is_current_character_connection(conn, picked_char) if picked_char else False} "
+                        f"conn_id={conn_id}"
+                    )
+                if move_packet_accepted:
                     pd = decode_sproto(p_raw)
                     new_pos = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
                     if (street_race_config_for_map(move_map)
