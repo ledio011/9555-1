@@ -15116,6 +15116,11 @@ def client_handler(conn, addr):
                                         source['amount'] -= 1
                                         item = dict(source)
                                         item['index_id'] = allocate_backpack_index(picked_char)
+                                        # allocate_backpack_index() normalizes the character and rebuilds its backpack lists.
+                                        # Reacquire the rebuilt equipment list before appending the split badge; otherwise
+                                        # the client receives the new index but the server saves only the old list.
+                                        equipped = picked_char['equipped_badges']
+                                        bag = picked_char['badge_inventory']
                                         item['amount'] = 1
                                         item['parm'] = list(source.get('parm', [0] * 8))
                                         push_backpack_item_update(send_rpc_push, 3, source)
