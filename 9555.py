@@ -3500,6 +3500,28 @@ def street_race_return_point(char):
     return_pos = char.get('pre_copy_pos') or [29860, 100, -17005, 0]
     return return_map, list(return_pos)
 
+
+def recover_interrupted_street_race(char):
+    """Abort an unfinished race and restore the saved pre-race world location."""
+    return_map, return_pos = street_race_return_point(char)
+    char['map_id'] = return_map
+    char['pos'] = list(return_pos)
+    char['active_copy_id'] = None
+    char['pre_copy_map'] = None
+    char['pre_copy_pos'] = None
+    char['street_race_started_at'] = None
+    char['street_race_checkpoint_progress'] = 0
+    char['street_race_result_recorded'] = False
+    char['street_race_movement_valid'] = True
+    char['street_race_npc_drop_count'] = 0
+    char['street_race_npc_drop_times'] = []
+    for key in (
+            'street_race_elapsed_offset_cs', 'street_race_last_car_pos',
+            'street_race_last_move_at', 'street_race_pending_result',
+            'street_race_started', '_street_race_return_reconnect'):
+        char.pop(key, None)
+    return return_map, list(return_pos)
+
 def street_race_start_position(map_id):
     """Return the APK's local race-car start point, with MapInfo birth fallback."""
     cfg = street_race_config_for_map(map_id)
@@ -13354,29 +13376,18 @@ def client_handler(conn, addr):
                                                       or picked_char.get('pos')
                                                       or [29860, 100, -17005, 0])
                         else:
-                            picked_char.pop('street_race_pending_result', None)
-                            picked_char['pos'] = (street_race_start_position(current_map_id)
-                                                  or picked_char.get('pos')
-                                                  or [29860, 100, -17005, 0])
+                            # The client has no saved race-car/checkpoint restore path.
+                            # A full character login must return an unfinished run to
+                            # the pre-race world location instead of reopening the copy.
+                            return_map, _return_pos = recover_interrupted_street_race(picked_char)
+                            print(f"[STREET RACE] aborted interrupted run player={char_id} map={return_map}")
                     elif orphaned_race_map or (active_copy_cfg.get('subtype') == 7
                                                and not active_race):
                         # A disconnect during a half-finished transition can leave
                         # the route ID and physical map out of sync. Return to the
                         # saved entrance instead of loading a broken race scene.
-                        saved_map = str(picked_char.get('pre_copy_map') or '11')
-                        if street_race_config_for_map(saved_map):
-                            saved_map = '11'
-                        saved_pos = picked_char.get('pre_copy_pos') or [29860, 100, -17005, 0]
-                        picked_char['map_id'] = saved_map
-                        picked_char['pos'] = list(saved_pos)
-                        picked_char['active_copy_id'] = None
-                        picked_char['pre_copy_map'] = None
-                        picked_char['pre_copy_pos'] = None
-                        picked_char['street_race_started_at'] = None
-                        picked_char.pop('street_race_elapsed_offset_cs', None)
-                        picked_char['street_race_result_recorded'] = False
-                        picked_char.pop('street_race_pending_result', None)
-                        print(f"[STREET RACE] recovered stale route state player={char_id} map={saved_map}")
+                        return_map, _return_pos = recover_interrupted_street_race(picked_char)
+                        print(f"[STREET RACE] recovered stale route state player={char_id} map={return_map}")
                     # Initial Mission Assignment for new characters
                     has_active_main = False
                     for active_id in picked_char['active_missions']:
@@ -19776,6 +19787,15 @@ def client_handler(conn, addr):
                             broadcast_aoi_attribute(picked_char)
                         save_chars(all_accounts_chars)
                     broadcast_aoi_remove(char_id, picked_char.get('map_id', '11'))
+                    # An unexpected socket loss aborts an unfinished Street Race.
+                    # Keep the attempt consumed, but persist the pre-race world location
+                    # so the next character pick does not reopen the CAR_CHASE_COPY map.
+                    race_cfg = COPY_SCENE_CONFIG.get(str(picked_char.get('active_copy_id') or ''), {})
+                    if (race_cfg.get('subtype') == 7
+                            and not picked_char.get('street_race_result_recorded')):
+                        return_map, _return_pos = recover_interrupted_street_race(picked_char)
+                        save_chars(all_accounts_chars)
+                        print(f"[STREET RACE] disconnect recovery player={char_id} map={return_map}")
             RANDOM_NAME_CALLED.discard(conn_id)
             if picked_char:
                 if is_current_connection:
