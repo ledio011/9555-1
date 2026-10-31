@@ -13355,9 +13355,9 @@ def client_handler(conn, addr):
                     orphaned_race_map = street_race_config_for_map(current_map_id) is not None and not active_race
                     if active_race:
                         # A full login reconstructs CarChaseSceneManager from scene
-                        # data. An unfinished race restarts at the route start; a
-                        # completed race returns to its entrance to restore its result
-                        # page without silently starting another car run underneath it.
+                        # data. Unfinished races have no persisted car/checkpoint state
+                        # and return to the saved entrance. Completed results are
+                        # restored at the entrance after the client reports map_ready.
                         picked_char['street_race_started_at'] = None
                         picked_char.pop('street_race_elapsed_offset_cs', None)
                         picked_char['street_race_checkpoint_progress'] = 0
