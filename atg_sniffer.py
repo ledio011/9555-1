@@ -37,6 +37,7 @@ import struct
 import sys
 import threading
 import time
+import traceback
 
 # ----------------------------------------------------------------------------
 # Name tables.  Request names were extracted from the msg handlers of 9555.py.
@@ -228,6 +229,78 @@ PUSH_INFO = {   # tag: (name, category)
     650: ("rewards_display", "reward"), 658: ("retrieve_info", "reward"),
     674: ("level_reward_state", "reward"), 686: ("dance_state", "dance"),
 }
+LBL = {"REQ": "CLIENT ASKED", "RES": "SERVER REPLIED", "PUSH": "SERVER SENT", "OK": "RESULT OK",
+       "INFO": "RESULT INFO", "WARN": "RESULT WARNING", "MISS": "RESULT MISSING", "FAIL": "RESULT PROBLEM"}
+
+# Plain-English meaning of push tags (derived from comments/handlers in 9555.py, not from the client).
+PLAIN_PUSH = {
+    503: "map entered", 504: "your character created in the map", 505: "another player appeared nearby",
+    507: "a player/NPC moved", 508: "skill/hit effect", 509: "NPC appeared", 510: "player/NPC stats or health update",
+    511: "damage board update", 512: "player revived", 513: "a player/NPC stopped moving", 514: "hit action",
+    519: "mission list refresh", 520: "mission progress update", 521: "mission completion confirmed",
+    525: "inventory item changed", 529: "on-screen notice text", 540: "skill list refresh", 555: "daily copy list",
+    606: "tower copy info", 629: "dungeon start/timer info", 638: "reward popup", 644: "level gift state",
+    649: "activity list", 650: "rewards display", 658: "retrieve (recover) info", 674: "level reward state",
+    686: "dance state",
+}
+
+# Field names, ONLY where I verified the layout in 9555.py.  Anything else stays "#N".
+#   "name"  or  ("name", {sub-labels})  or  ("name", [{item-labels}])  for lists of structs
+_POS = ("position", {0: "x", 1: "y", 2: "z", 3: "direction"})
+_ENT = ("entity", {0: "entityId"})
+LABELS = {
+    ("req", 3): {0: "account"}, ("req", 4): {1: "account", 5: "serverId"},
+    ("req", 105): {0: "characterId"}, ("res", 105): {0: "success"},
+    ("req", 101): {0: _POS}, ("res", 101): {0: _POS},
+    ("req", 112): {0: "missionId"}, ("req", 113): {0: "missionId"}, ("req", 114): {0: "missionId"},
+    ("req", 116): {0: "itemIndex"}, ("req", 117): {0: "itemIndex"},
+    ("req", 197): {0: "itemIndex"}, ("req", 198): {0: "itemIndex"},
+    ("req", 218): {0: "clientTime"}, ("res", 218): {0: "clientTime", 1: "serverTime"},
+    ("res", 103): {0: ("characters", [{0: "characterId", 1: ("info", {0: "name", 3: "mapId"})}])},
+    ("push", 503): {0: "mapId"},
+    ("push", 504): {0: _ENT}, ("push", 505): {0: _ENT}, ("push", 509): {0: _ENT}, ("push", 510): {0: _ENT},
+    ("push", 507): {0: "entityId"}, ("push", 508): {0: "entityId"},
+    ("push", 519): {0: ("missions", [{0: "missionId", 1: "state"}])},
+    ("push", 520): {0: "missionId", 3: ("mission", {0: "missionId", 1: "state"})},
+    ("push", 521): {0: "missionId", 1: "result"},
+    ("push", 638): {0: ("rewards", [{0: "itemId", 1: "count", 2: "quality"}])},
+}
+
+
+def human(name):
+    m = re.match(r"^msg_(\d+)$", name)
+    return "unknown request %s" % m.group(1) if m else name.replace("_", " ")
+
+
+def req_label(msg):
+    n = req_name(msg)
+    return "request number %d" % msg if re.match(r"^msg_\d+$", n) else "'%s' (msg %d)" % (human(n), msg)
+
+
+def plain_push(tag):
+    if tag is None:
+        return "unlabelled message"
+    if tag in PLAIN_PUSH:
+        return PLAIN_PUSH[tag]
+    h = PUSH_HINT.get(tag)
+    return "update from the '%s' code" % human(h[0]) if h else "unnamed update"
+
+
+def item_label(i):
+    return {"2001": "EXP", "1001": "cash"}.get(str(i), "item %s" % i)
+
+
+def describe_pushes(tags):
+    if not tags:
+        return "no extra messages sent"
+    c = collections.OrderedDict()
+    for t in tags:
+        c[t] = c.get(t, 0) + 1
+    parts = ["%s%s" % (plain_push(t), " x%d" % n if n > 1 else "") for t, n in c.items()]
+    more = ", +%d more kinds" % (len(parts) - 6) if len(parts) > 6 else ""
+    return "%d extra message(s) sent: %s%s" % (len(tags), ", ".join(parts[:6]), more)
+
+
 NOISY_PUSH = {507, 513}          # AOI movement spam: throttled in the log
 NOISY_REQ = {101}                # client move packets (~10/s): throttled
 CLAIM_MSGS = {113, 254, 255, 262, 265, 279, 297, 320}   # one-shot reward claims
@@ -496,13 +569,14 @@ def printable(b):
     return s if s and all(ch.isprintable() for ch in s) else None
 
 
-def render_bytes(b, depth=0):
-    """Best-effort pretty print of an untyped sproto value (no schema available)."""
+def render_bytes(b, depth=0, sub=None):
+    """Best-effort pretty print of an untyped sproto value (no schema available).
+    sub = optional labels: dict (struct) or [dict] (list of structs)."""
     if not b:
         return '""'
     st = parse_struct(b, 0) if depth < 5 else None
     if st and st[1] == len(b) and (st[0] or len(b) == 2):
-        return render_fields(st[0], depth + 1)
+        return render_fields(st[0], depth + 1, sub if isinstance(sub, dict) else None)
     if len(b) in (4, 8):
         # 4/8 bytes is ambiguous (int32/int64 or a short string). Without the schema:
         # all-ASCII-alphanumeric -> text (item ids like "2001"), otherwise -> integer.
@@ -515,22 +589,29 @@ def render_bytes(b, depth=0):
         fmt = "<i" if w == 4 else "<q"
         return "[" + ",".join(str(struct.unpack_from(fmt, b, 1 + k * w)[0])
                               for k in range((len(b) - 1) // w)) + "]"
-    s = printable(b)
-    if s is not None:
-        return '"%s"' % s
+    s_ = printable(b)
+    if s_ is not None:
+        return '"%s"' % s_
     lst = parse_list(b) if depth < 5 else None
     if lst:
-        return "[" + ", ".join(render_bytes(x, depth + 1) for x in lst) + "]"
+        item_sub = sub[0] if isinstance(sub, list) and sub else None
+        return "[" + ", ".join(render_bytes(x, depth + 1, item_sub) for x in lst) + "]"
     return "0x" + b.hex() if len(b) <= 24 else "0x%s..(%dB)" % (b[:24].hex(), len(b))
 
 
-def render_fields(fields, depth=0):
+def render_fields(fields, depth=0, labels=None):
     if not fields:
         return "{}"
     parts = []
     for tag in sorted(fields):
         v = fields[tag]
-        parts.append("#%d=%s" % (tag, v if isinstance(v, int) else render_bytes(v, depth)))
+        lab = labels.get(tag) if labels else None
+        name, sub = "#%d" % tag, None
+        if isinstance(lab, str):
+            name = lab
+        elif isinstance(lab, tuple):
+            name, sub = lab
+        parts.append("%s=%s" % (name, v if isinstance(v, int) else render_bytes(v, depth, sub)))
     return "{" + ", ".join(parts) + "}"
 
 
@@ -713,6 +794,7 @@ class Conn:
         self.muted = False
         self.is_http = False
         self.verd = collections.Counter()
+        self.problems = {}               # (level, request, text-with-numbers-stripped) -> [count, example text]
         self.seq = 0                     # per-connection request counter (#1, #2, ...)
         self.eof_by = None               # which side hung up first
         self.closed_flag = False
@@ -812,13 +894,14 @@ class Sniffer:
             for ex in list(conn.open):
                 if ex.session is not None and ex.resp is None:
                     if who == "server":
-                        self.issue(conn, ex, "FAIL", "server closed the connection while msg %d (%s) was "
-                                   "unanswered -> the 9555.py handler most likely raised an exception "
-                                   "(read its console traceback)" % (ex.msg, ex.name))
+                        self.issue(conn, ex, "FAIL", "THE SERVER CLOSED THE CONNECTION while it was handling '%s'. "
+                                   "The code in 9555.py almost certainly crashed - read the error in the server console."
+                                   % human(ex.name))
                     else:
-                        self.issue(conn, ex, "WARN", "client disconnected while msg %d (%s) was unanswered" % (ex.msg, ex.name))
+                        self.issue(conn, ex, "WARN", "the client disconnected before the server answered '%s'" % human(ex.name))
                 self.finalize(conn, ex, force=True)
-            self.emit(conn, "INFO", "connection c%d closed (%s side ended first)" % (conn.cid, who), force=conn.char_id is not None)
+            self.emit(conn, "INFO", "--  CONNECTION       closed (%s hung up first)" % ("the game server" if who == "server" else "the game client"),
+                      force=conn.char_id is not None)
 
     # ---------------- frame handling ------------------------------------
     def on_frame(self, conn, direction, frame):
@@ -828,7 +911,8 @@ class Sniffer:
         raw = sp_unpack(frame)
         hdr = parse_struct(raw, 0)
         if not hdr:
-            self.emit(conn, "WARN", "undecodable %s frame (%d bytes) %s" % (direction, len(frame), frame[:24].hex()), force=True)
+            self.emit(conn, "WARN", "--  BAD PACKET       could not decode a %s packet (%d bytes): %s" % (
+                "client->server" if direction == "C2S" else "server->client", len(frame), frame[:24].hex()), force=True)
             return
         pkg, end = hdr
         body_p = parse_struct(raw, end)
@@ -844,7 +928,7 @@ class Sniffer:
         msg = get_int(pkg, 0)
         session = get_int(pkg, 1) if 1 in pkg else None
         if msg is None:
-            self.emit(conn, "WARN", "client frame without msg id: %s" % render_fields(pkg))
+            self.emit(conn, "WARN", "--  BAD PACKET       client packet without a request number: %s" % render_fields(pkg))
             return
         conn.seq += 1
         ex = Exchange(conn.seq, msg, session, body, raw_body, now)
@@ -852,7 +936,7 @@ class Sniffer:
         conn.open.append(ex)
         if session is not None:
             if session in conn.pending and conn.pending[session].resp is None:
-                self.issue(conn, conn.pending[session], "WARN", "session %d reused before the old request was answered" % session)
+                self.issue(conn, conn.pending[session], "WARN", "the client reused session number %d before the earlier request was answered" % session)
             conn.pending[session] = ex
         st = self.stat[msg]
         st["n"] += 1
@@ -867,8 +951,10 @@ class Sniffer:
             self.track_move(conn, body, now)
         if show:
             extra = " (+%d similar suppressed)" % sup if sup else ""
-            self.emit(conn, "REQ", "#%d >> REQ  %-4d %-28s [%s] s=%s %s%s" % (
-                ex.seq, msg, ex.name, ex.cat, session, render_fields(body), extra), ex.cat, now)
+            how = "waits for a reply" if session is not None else "notification, no reply expected"
+            self.emit(conn, "REQ", "#%d %-15s %s [%s]  (msg %d, %s)  %s%s" % (
+                ex.seq, LBL["REQ"], human(ex.name), ex.cat, msg, how,
+                render_fields(body, 0, LABELS.get(("req", msg))), extra), ex.cat, now)
         # duplicate request check (client double-send)
         key = ("req", msg, raw_body)
         last = conn.noise.get(key)
@@ -876,8 +962,8 @@ class Sniffer:
         if len(conn.noise) > 4000:
             conn.noise = {k: v for k, v in conn.noise.items() if k and k[0] != "req"}
         if last and now - last[0] < self.a.dup_window and msg not in NOISY_REQ and msg != 100:
-            self.issue(conn, ex, "WARN", "client sent the identical request again after %d ms (double click / "
-                       "resend) - the server must not pay twice" % int((now - last[0]) * 1000))
+            self.issue(conn, ex, "WARN", "the client sent the exact same '%s' request again after %d ms (double click or "
+                       "resend). Make sure the server does not process or pay it twice." % (human(ex.name), int((now - last[0]) * 1000)))
 
     def on_server(self, conn, pkg, body, raw_body, now, ok_body):
         is_resp = 1 in pkg and 0 not in pkg
@@ -888,20 +974,20 @@ class Sniffer:
                 old = conn.late.get(session)
                 if old is not None and old.resp is None:
                     old.resp, old.resp_t = body, now
-                    self.issue(conn, old, "WARN", "reply to msg %d (%s) arrived LATE (%.1fs) - after it was already "
-                               "reported as NO REPLY" % (old.msg, old.name, now - old.t0))
+                    self.issue(conn, old, "WARN", "the reply to '%s' finally arrived LATE (%.1f s) - after it had already "
+                               "been reported as 'never answered'" % (human(old.name), now - old.t0))
                 elif old is not None:
-                    self.issue(conn, old, "FAIL", "server answered msg %d (%s) a SECOND time (session %s) - "
-                               "double response / double processing" % (old.msg, old.name, session))
+                    self.issue(conn, old, "FAIL", "DOUBLE ANSWER: the server answered '%s' a second time. The request was "
+                               "probably processed twice." % human(old.name))
                 else:
-                    self.emit(conn, "WARN", "<< RES  for unknown session %s (no matching request) %s" % (
-                        session, render_fields(body)))
+                    self.emit(conn, "WARN", "--  SERVER REPLIED   with session number %s but the client never sent a request "
+                              "with that number: %s" % (session, render_fields(body)))
                 return
             ex.n_resp += 1
             ex.t_last = now
             if ex.n_resp > 1:
-                self.issue(conn, ex, "FAIL", "server answered the same request %d times (session %s) - double "
-                           "response / double processing" % (ex.n_resp, session))
+                self.issue(conn, ex, "FAIL", "DOUBLE ANSWER: the server answered '%s' %d times. The request was "
+                           "probably processed twice." % (human(ex.name), ex.n_resp))
                 return
             ex.resp, ex.resp_t = body, now
             lat = (now - ex.t0) * 1000
@@ -912,8 +998,9 @@ class Sniffer:
             if ex.noisy:
                 show, _ = self.throttle(conn, ("res", ex.msg))
             if show:
-                self.emit(conn, "RES", "#%d    << RES  %d field(s) +%dms %s" % (
-                    ex.seq, len(body), lat, render_fields(body)), ex.cat, now)
+                self.emit(conn, "RES", "#%d %-15s %s in %d ms  %s" % (
+                    ex.seq, LBL["RES"], "an empty OK (no data)" if not body else "%d value(s)" % len(body), lat,
+                    render_fields(body, 0, LABELS.get(("res", ex.msg)))), ex.cat, now)
             return
         tag = get_int(pkg, 0)
         if tag is None:
@@ -924,11 +1011,11 @@ class Sniffer:
                 owner.headerless += 1
                 owner.t_last = now
                 if owner.headerless == 1:
-                    self.issue(conn, owner, "WARN", "server sent a frame with EMPTY header (no tag, no session) after "
-                               "msg %d (%s): a reply to a request that had no session. The client cannot match it. "
-                               "Body: %s" % (owner.msg, owner.name, render_fields(body)))
+                    self.issue(conn, owner, "WARN", "the server sent a message with NO LABEL (empty header) after '%s'. It looks "
+                               "like a reply to a request that had no session number, so the client cannot match it "
+                               "to anything. Content: %s" % (human(owner.name), render_fields(body)))
             else:
-                self.emit(conn, "WARN", "--       << frame with empty header (no tag, no session) %s" % render_fields(body))
+                self.emit(conn, "WARN", "--  SERVER SENT      a message with NO LABEL (empty header) that the client cannot route: %s" % render_fields(body))
             self.stat["headerless"]["n"] += 1
             return
         self.push_seen[tag] += 1
@@ -956,13 +1043,15 @@ class Sniffer:
         if show:
             extra = " (+%d similar suppressed)" % sup if sup else ""
             lead = "#%d" % owner.seq if owner else "--"
-            who = " (other entity %s)" % other_entity if other_entity is not None else ""
-            self.emit(conn, "PUSH", "%s    << PUSH %-4d %-28s [%s]%s %s%s" % (
-                lead, tag, push_name(tag), push_cat(tag), who, render_fields(body), extra), cat, now)
+            who = ", about ANOTHER player/NPC %s - not caused by you" % other_entity if other_entity is not None else (
+                "" if owner else ", not caused by a click")
+            self.emit(conn, "PUSH", "%s %-15s %s [%s]  (push %d%s)  %s%s" % (
+                lead, LBL["PUSH"], plain_push(tag), push_cat(tag), tag, who,
+                render_fields(body, 0, LABELS.get(("push", tag))), extra), cat, now)
         if dup:
-            self.issue(conn, owner, "FAIL", "DUPLICATE PUSH %d (%s): byte-identical message sent twice within "
-                       "%d ms -> client would apply it twice (damage / reward / spawn)" %
-                       (tag, push_name(tag), int(self.a.dup_window * 1000)), cat=cat, tag_only=owner is None)
+            self.issue(conn, owner, "FAIL", "DUPLICATE: the server sent the identical message '%s' (push %d) twice within "
+                       "%d ms. The client will apply it twice (double damage / reward / spawn)." %
+                       (plain_push(tag), tag, int(self.a.dup_window * 1000)), cat=cat, tag_only=owner is None)
 
     def pick_owner(self, conn, tag, now):
         """Which open request does this push belong to?  Newest request inside the attribution window,
@@ -978,11 +1067,17 @@ class Sniffer:
         return cands[-1]
 
     # ---------------- verdicts -------------------------------------------
-    def issue(self, conn, ex, level, text, cat=None, tag_only=False):
-        conn.verd[level] += 1
+    def result(self, conn, ex, level, text, cat=None):
         lead = "#%d" % ex.seq if ex else "--"
         c = (ex.cat if ex else cat) or "other"
-        self.emit(conn, level, "%s       [%s] %s" % (lead, level, text), c)
+        self.emit(conn, level, "%s %-15s %s" % (lead, LBL[level], text), c)
+
+    def issue(self, conn, ex, level, text, cat=None, tag_only=False):
+        conn.verd[level] += 1
+        key = (level, human(ex.name) if ex else "-", re.sub(r"\d+", "#", text)[:110])
+        pr = conn.problems.setdefault(key, [0, text])
+        pr[0] += 1
+        self.result(conn, ex, level, text, cat)
         if ex is not None:
             ex.issues += 1
 
@@ -1004,22 +1099,23 @@ class Sniffer:
         lat = int((ex.resp_t - ex.t0) * 1000) if ex.resp_t else None
 
         if ex.session is not None and ex.resp is None and not force:
-            self.issue(conn, ex, "FAIL", "NO REPLY within %.1fs - client waits forever for msg %d (%s). "
-                       "Handler hung, crashed, or returned without answering." % (self.a.timeout, msg, ex.name))
+            self.issue(conn, ex, "FAIL", "NO ANSWER: the server never answered '%s' within %.0f s, so the client keeps "
+                       "waiting. The handler is stuck, crashed, or forgot to reply." % (human(ex.name), self.a.timeout))
         if not known:
             self.stat[msg]["unhandled"] += 1
             self.unhandled.setdefault(msg, [0, render_fields(ex.body), ptags])
             self.unhandled[msg][0] += 1
-            self.issue(conn, ex, "MISS", "NOT IMPLEMENTED: 9555.py has no branch for msg %d (%s). The client got %s%s." % (
-                msg, ex.name, "only the generic empty ack" if resp_empty else "no/other reply",
-                " + pushes %s" % summarize_tags(ptags) if ptags else " and no pushes"))
+            self.issue(conn, ex, "MISS", "MISSING IN SERVER: 9555.py has no code for %s. "
+                       "The client asked and got %s - %s. => This request still has to be implemented." % (
+                           req_label(msg), "only the server's generic empty OK" if resp_empty else "no useful reply",
+                           describe_pushes(ptags)))
         elif resp_empty and not ptags and ex.session is not None and msg not in NOISY_REQ:
             self.stat[msg]["empty_ack"] += 1
             ex.custom_ok = True
-            self.emit(conn, "INFO", "#%d       [INFO] handler exists but answered an empty body and pushed nothing "
-                      "(normal for ack-style messages; if the client expected data here it is a stub)" % ex.seq, ex.cat)
+            self.result(conn, ex, "INFO", "%s: the server answered with an empty OK and sent nothing else. Normal for simple "
+                        "'ack' requests, but if the client expects data here, this handler is only a stub." % human(ex.name))
         if lat is not None and lat > self.a.slow_ms:
-            self.issue(conn, ex, "WARN", "SLOW reply %d ms (> %d ms)" % (lat, self.a.slow_ms))
+            self.issue(conn, ex, "WARN", "SLOW: the server needed %d ms to answer '%s' (limit %d ms)" % (lat, human(ex.name), self.a.slow_ms))
         self.check_claims(conn, ex, ptags)
         if msg == 113 and self.a.rewards_check:
             self.check_mission_reward(conn, ex)
@@ -1030,9 +1126,14 @@ class Sniffer:
             self.stat[("push", t)]["n"] += 1
         if ex.issues == 0 and not ex.custom_ok and not ex.noisy:
             conn.verd["OK"] += 1
-            self.emit(conn, "OK", "#%d       [OK] %s: reply %s, pushes %s%s" % (
-                ex.seq, ex.name, "%d field(s)" % len(ex.resp) if ex.resp is not None else "none",
-                summarize_tags(ptags) if ptags else "none", " +%dms" % lat if lat is not None else ""), ex.cat)
+            if ex.session is None:
+                rtxt = "no reply was expected"
+            elif ex.resp is None:
+                rtxt = "no reply"
+            else:
+                rtxt = "answered with %s%s" % ("an empty OK" if not ex.resp else "%d value(s)" % len(ex.resp),
+                                               " in %d ms" % lat if lat is not None else "")
+            self.result(conn, ex, "OK", "%s: %s; %s" % (human(ex.name), rtxt, describe_pushes(ptags)))
 
     def check_claims(self, conn, ex, ptags):
         if ex.msg not in CLAIM_MSGS:
@@ -1043,29 +1144,30 @@ class Sniffer:
         key = (ex.msg, ex.raw_body)
         conn.claims[key] = conn.claims.get(key, 0) + 1
         if conn.claims[key] > 1:
-            self.issue(conn, ex, "FAIL", "DUPLICATE CLAIM: msg %d (%s) with the same arguments was paid out %d times "
-                       "in this session - reward must only be granted once" % (ex.msg, ex.name, conn.claims[key]))
+            self.issue(conn, ex, "FAIL", "DOUBLE PAYOUT: '%s' with the same arguments was paid out %d times in this "
+                       "session. A reward must only be given once." % (human(ex.name), conn.claims[key]))
         n_rew = sum(1 for t in ptags if t in REWARD_PUSHES)
         if n_rew > 1 and ex.issues == 0:
-            self.issue(conn, ex, "FAIL", "reward popup pushed %d times for ONE claim (more than expected)" % n_rew)
+            self.issue(conn, ex, "FAIL", "TOO MANY REWARD POPUPS: the server sent %d reward popups for ONE claim (should be 1)" % n_rew)
 
     def check_mission_reward(self, conn, ex):
         mid = get_str(ex.body, 0)
         pushed_ok = any(p[0] == 521 for p in ex.pushes)
         if not pushed_ok:
             ex.custom_ok = True
-            self.emit(conn, "INFO", "#%d       [INFO] mission %s: no 521 success push -> server refused/ignored the claim "
-                      "(not complete or already claimed)" % (ex.seq, mid), ex.cat)
+            self.result(conn, ex, "INFO", "mission %s: the server did NOT confirm completion (mission not finished yet, or "
+                        "already claimed). No reward expected." % mid)
             return
         pops = [p for p in ex.pushes if p[0] == 638]
         options = self.tables.expected_options(mid)
         if not options:
-            self.emit(conn, "INFO", "#%d       [INFO] mission %s: no reward row in client tables (%s) -> cannot verify" % (
-                ex.seq, mid, self.tables.source), ex.cat)
+            self.result(conn, ex, "INFO", "mission %s: no reward row found in the client data tables (%s), so the reward "
+                        "cannot be verified" % (mid, self.tables.source))
             return
         if not pops:
-            self.issue(conn, ex, "FAIL", "mission %s completed but NO reward popup (tag 638). Client tables say: %s" % (
-                mid, "; ".join("reward %s = %s" % (r, d) for r, d in options)))
+            self.issue(conn, ex, "FAIL", "NO REWARD: mission %s was completed but the server sent no reward popup. The client "
+                       "table says the reward is: %s" % (mid, " OR ".join(
+                           ", ".join("%d x %s" % (n, item_label(k)) for k, n in d.items()) or "nothing" for r, d in options)))
             return
         got = {}
         lst = parse_list(pops[0][1].get(0, b"")) if isinstance(pops[0][1].get(0), bytes) else None
@@ -1083,46 +1185,50 @@ class Sniffer:
                 best, best_diff = rid, diff
         name = self.tables.mission_names.get(mid, "")
         if not best_diff:
-            self.emit(conn, "OK" if ex.issues == 0 else "INFO",
-                      "#%d       [%s] mission %s %s reward EXACT: %s (matches client reward row %s)" % (
-                          ex.seq, "OK" if ex.issues == 0 else "INFO", mid, name, got, best), ex.cat)
+            self.result(conn, ex, "OK" if ex.issues == 0 else "INFO",
+                        "mission %s %s: the reward is EXACTLY what the client table says: %s" % (
+                            mid, name, ", ".join("%d x %s" % (n, item_label(k)) for k, n in got.items()) or "nothing"))
             conn.verd["OK"] += 1
             ex.custom_ok = ex.issues == 0
         else:
-            txt = ", ".join("item %s: server=%d client-table=%d" % (k, g, e) for k, (g, e) in sorted(best_diff.items()))
-            self.issue(conn, ex, "FAIL", "mission %s reward MISMATCH vs reward row %s -> %s (item 2001=exp, 1001=cash)" % (mid, best, txt))
+            txt = "; ".join("%s: server gave %d, table says %d" % (item_label(k), g, e) for k, (g, e) in sorted(best_diff.items()))
+            self.issue(conn, ex, "FAIL", "WRONG REWARD for mission %s: %s" % (mid, txt))
 
     def check_baseline(self, conn, ex):
         b = self.baseline.get("msgs", {}).get(str(ex.msg))
         if not b or not b.get("n"):
-            self.emit(conn, "INFO", "#%d       [INFO] msg %d not present in baseline" % (ex.seq, ex.msg), ex.cat)
+            self.result(conn, ex, "INFO", "'%s' is not in the baseline file, nothing to compare" % human(ex.name))
             return
         n = b["n"]
         exp_push = {int(t) for t, c in b.get("push", {}).items() if c / n >= self.a.baseline_ratio}
         got_push = {p[0] for p in ex.pushes}
         miss, extra = sorted(exp_push - got_push), sorted(got_push - exp_push)
         if miss:
-            self.issue(conn, ex, "MISS", "BASELINE: client expects push(es) %s after %s but server did not send them" % (
-                [(t, push_name(t)) for t in miss], ex.name))
+            self.issue(conn, ex, "MISS", "BASELINE SAYS MISSING: after '%s' the client normally gets %s, but the server did "
+                       "not send it this time" % (human(ex.name), ", ".join("'%s' (push %d)" % (plain_push(t), t) for t in miss)))
         if extra:
-            self.issue(conn, ex, "WARN", "BASELINE: server sent extra push(es) %s not seen in baseline" % (
-                [(t, push_name(t)) for t in extra],))
+            self.issue(conn, ex, "WARN", "BASELINE SAYS EXTRA: the server also sent %s, which the baseline does not have" % (
+                ", ".join("'%s' (push %d)" % (plain_push(t), t) for t in extra)))
         if ex.resp is not None:
             exp_tags = {int(t) for t, c in b.get("resp_tags", {}).items() if c / n >= self.a.baseline_ratio}
             got_tags = set(ex.resp)
             if exp_tags - got_tags:
-                self.issue(conn, ex, "MISS", "BASELINE: reply lacks sproto tag(s) %s that the baseline always had" % sorted(exp_tags - got_tags))
+                self.issue(conn, ex, "MISS", "BASELINE SAYS MISSING: the reply to '%s' lacks field number(s) %s that it normally "
+                           "contains" % (human(ex.name), sorted(exp_tags - got_tags)))
             if got_tags - exp_tags and exp_tags:
-                self.issue(conn, ex, "WARN", "BASELINE: reply has extra tag(s) %s not in baseline" % sorted(got_tags - exp_tags))
+                self.issue(conn, ex, "WARN", "BASELINE SAYS EXTRA: the reply to '%s' has extra field number(s) %s" % (
+                    human(ex.name), sorted(got_tags - exp_tags)))
         for tag, body, _, _ in ex.pushes:
             pb = self.baseline.get("pushes", {}).get(str(tag))
             if pb and pb.get("n"):
                 et = {int(t) for t, c in pb.get("fields", {}).items() if c / pb["n"] >= self.a.baseline_ratio}
                 if et - set(body):
-                    self.issue(conn, ex, "MISS", "BASELINE: push %d (%s) lacks field tag(s) %s" % (tag, push_name(tag), sorted(et - set(body))))
+                    self.issue(conn, ex, "MISS", "BASELINE SAYS MISSING: message '%s' (push %d) lacks field number(s) %s" % (
+                        plain_push(tag), tag, sorted(et - set(body))))
                 extra_t = set(body) - et
                 if extra_t and et:
-                    self.issue(conn, ex, "WARN", "BASELINE: push %d has extra field tag(s) %s" % (tag, sorted(extra_t)))
+                    self.issue(conn, ex, "WARN", "BASELINE SAYS EXTRA: message '%s' (push %d) has extra field number(s) %s" % (
+                        plain_push(tag), tag, sorted(extra_t)))
 
     def record_ex(self, ex):
         m = self.record["msgs"].setdefault(str(ex.msg), {"n": 0, "resp_tags": {}, "push": {}, "name": ex.name})
@@ -1157,7 +1263,7 @@ class Sniffer:
                     self.max_jump = (d, (x0, z0, x, z, dt))
                 if self.a.max_speed and sp > self.a.max_speed:
                     ex = conn.last_req
-                    self.issue(conn, ex, "WARN", "MOVE speed %.0f units/s exceeds --max-speed %.0f (jump %.0f units in %.0f ms)" % (
+                    self.issue(conn, ex, "WARN", "TOO FAST: the client reported a move of %.0f units/s (limit --max-speed %.0f); jumped %.0f units in %.0f ms" % (
                         sp, self.a.max_speed, d, dt * 1000))
         conn.last_move = (now, x, z)
 
@@ -1183,46 +1289,69 @@ class Sniffer:
         return t
 
     # ---------------- final report ------------------------------------------
+    def merged_problems(self):
+        out = {}
+        for c in self.conns.values():
+            if c.muted:
+                continue
+            for k, (n, text) in c.problems.items():
+                e = out.setdefault(k, [0, text])
+                e[0] += n
+        return out
+
     def report(self):
         o = self.out
         with self.lock:
             for conn in self.conns.values():
                 for ex in list(conn.open):
                     self.finalize(conn, ex, force=True)
+            tv = self.total_verdicts()
+            total = sum(s_["n"] for m, s_ in self.stat.items() if isinstance(m, int))
             o.raw("")
-            o.raw("=================== SESSION SUMMARY ===================", "REQ")
-            o.raw("verdicts: " + ", ".join("%s=%d" % kv for kv in sorted(self.total_verdicts().items())))
+            o.raw("============================== SUMMARY ==============================", "REQ")
+            o.raw("The client sent %d request(s).  OK: %d   MISSING: %d   PROBLEMS: %d   WARNINGS: %d" % (
+                total, tv["OK"], tv["MISS"], tv["FAIL"], tv["WARN"]))
+            groups = self.merged_problems()
+            for level, title in (("FAIL", "PROBLEMS - the server did something wrong (fix these first):"),
+                                 ("MISS", "MISSING - the client needs this, the server does not provide it:"),
+                                 ("WARN", "WARNINGS - suspicious, please check:")):
+                rows = [(k, v) for k, v in groups.items() if k[0] == level]
+                if rows:
+                    o.raw("")
+                    o.raw(title, level)
+                    for (lv, who, _), (cnt, text) in sorted(rows, key=lambda kv: -kv[1][0]):
+                        o.raw("  %s %s: %s" % ("(x%d)" % cnt if cnt > 1 else "    ", who, text), level)
             if self.unhandled:
                 o.raw("")
-                o.raw("MISSING FROM SERVER (client sent these, 9555.py has no handler) - your TODO list:", "MISS")
+                o.raw("TO-DO LIST - requests the client sent that 9555.py has no code for:", "MISS")
                 for msg, (n, sample, ptags) in sorted(self.unhandled.items(), key=lambda kv: -kv[1][0]):
-                    o.raw("  msg %-4d %-30s x%-4d example request %s" % (msg, req_name(msg), n, sample), "MISS")
-            empties = [(m, s) for m, s in self.stat.items() if isinstance(m, int) and s.get("empty_ack")]
+                    o.raw("  %s, sent %d time(s). Example data: %s" % (req_label(msg), n, sample), "MISS")
+            empties = [(m, s_) for m, s_ in self.stat.items() if isinstance(m, int) and s_.get("empty_ack")]
             if empties:
                 o.raw("")
-                o.raw("Handlers that only returned an empty ack + no pushes (verify the client does not need data):", "INFO")
-                for m, s in sorted(empties):
-                    o.raw("  msg %-4d %-30s x%d" % (m, req_name(m), s["empty_ack"]), "INFO")
+                o.raw("STUBS? - these only answered an empty OK and sent nothing (check the client does not need data):", "INFO")
+                for m, s_ in sorted(empties):
+                    o.raw("  '%s' (msg %d), %d time(s)" % (human(req_name(m)), m, s_["empty_ack"]), "INFO")
             o.raw("")
-            o.raw("per-request statistics (count / avg ms / max ms):")
+            o.raw("ALL REQUESTS SEEN (how many times, average / slowest answer):")
             for m in sorted(k for k in self.stat if isinstance(k, int)):
                 l = self.lat.get(m, [])
-                o.raw("  %-4d %-30s [%s] n=%-4d avg=%-5s max=%-5s" % (
-                    m, req_name(m), req_cat(m), self.stat[m]["n"],
-                    "%d" % (sum(l) / len(l)) if l else "-", "%d" % max(l) if l else "-"))
+                o.raw("  %-34s x%-4d %s" % ("%s (msg %d)" % (human(req_name(m)), m), self.stat[m]["n"],
+                                           "avg %d ms / max %d ms" % (sum(l) / len(l), max(l)) if l else "no direct reply"))
             if self.push_seen:
                 o.raw("")
-                o.raw("pushes received by client: " + ", ".join(
-                    "%d(%s)x%d" % (t, push_name(t), c) for t, c in sorted(self.push_seen.items())))
+                o.raw("EXTRA MESSAGES THE SERVER SENT (how many of each):")
+                for t, c in sorted(self.push_seen.items(), key=lambda kv: -kv[1]):
+                    o.raw("  %-44s x%d" % ("%s (push %s)" % (plain_push(t), t), c))
             if self.speeds:
-                s = sorted(self.speeds)
+                sp = sorted(self.speeds)
                 o.raw("")
-                o.raw("movement speed (client-reported positions, raw units/s): avg=%.0f p95=%.0f max=%.0f  biggest jump=%.0f units" % (
-                    sum(s) / len(s), s[int(len(s) * .95) - 1], s[-1], self.max_jump[0]))
+                o.raw("MOVEMENT (positions reported by the client, raw units per second): average %.0f, 95%% under %.0f, "
+                      "fastest %.0f, biggest single jump %.0f units" % (sum(sp) / len(sp), sp[max(0, int(len(sp) * .95) - 1)], sp[-1], self.max_jump[0]))
             if self.a.record:
                 json.dump(self.record, open(self.a.record, "w", encoding="utf-8"), indent=1)
                 o.raw("")
-                o.raw("baseline recorded to %s (edit it by hand if needed; use --baseline to compare later)" % self.a.record, "OK")
+                o.raw("Baseline saved to %s. Later run with --baseline %s to compare." % (self.a.record, self.a.record), "OK")
 
 
 # ----------------------------------------------------------------------------
@@ -1255,7 +1384,9 @@ def pump(sn, conn, src, dst, direction):
                     try:
                         sn.on_frame(conn, direction, frame)
                     except Exception as exc:
-                        sn.out.raw("[sniffer] decode error: %r" % (exc,), "WARN")
+                        tb = traceback.extract_tb(exc.__traceback__)[-1]
+                        sn.out.raw("[sniffer] internal error in %s() line %d: %r  (game traffic is still forwarded "
+                                   "normally; please report this line)" % (tb.name, tb.lineno, exc), "WARN")
             try:
                 dst.sendall(data)
             except OSError:
@@ -1293,7 +1424,19 @@ def serve(sn, listen_port, target):
     sn.out.raw("[sniffer] listening on :%d  ->  game server %s:%d" % (listen_port, target[0], target[1]), "OK")
     sn.out.raw("[sniffer] filter: %s" % ("ALL characters" if sn.a.all else "character id %d only" % sn.a.char), "OK")
     sn.out.raw("[sniffer] data tables: %s" % sn.tables.source, "INFO")
-    sn.out.raw("[sniffer] Ctrl+C prints the summary / TODO list", "INFO")
+    sn.out.raw("[sniffer] Press Ctrl+C to print the summary (problems, missing requests, to-do list)", "INFO")
+    sn.out.raw("")
+    sn.out.raw("HOW TO READ THIS LOG", "REQ")
+    sn.out.raw("  #12             every line with the same number belongs to the same click/request")
+    sn.out.raw("  CLIENT ASKED    the game client sent a request (what you clicked)")
+    sn.out.raw("  SERVER REPLIED  the server's direct answer to that request")
+    sn.out.raw("  SERVER SENT     an extra message the server pushed (screen refresh, reward popup, other players...)")
+    sn.out.raw("  --              a server message that was not caused by your click (other players/NPCs moving...)")
+    sn.out.raw("  RESULT OK       everything looked normal      RESULT INFO     worth knowing, not an error")
+    sn.out.raw("  RESULT WARNING  suspicious                    RESULT MISSING  server lacks code the client needs")
+    sn.out.raw("  RESULT PROBLEM  the server did something wrong (crash, no answer, double reward, wrong reward...)")
+    sn.out.raw("  {name=...}      field names are shown only where verified in 9555.py; otherwise #0, #1 = field numbers")
+    sn.out.raw("")
     while True:
         c, peer = srv.accept()
         threading.Thread(target=handle_client, args=(sn, c, peer, target), daemon=True).start()
