@@ -14318,14 +14318,39 @@ def client_handler(conn, addr):
                             attacker_id = picked_char.get('id', 0)
                             attacker_map = str(picked_char.get('map_id', '11'))
                             try:
-                                # Build attack_list from client-provided alist
+                                # MSG 102 field 3 is an Sproto object-list of attack_list
+                                # records (each record has #0=id and optional #1=value).
+                                # decode_sproto() leaves object-lists as raw length-prefixed bytes,
+                                # so treating `alist` as an already-decoded Python list silently
+                                # discarded every real hit entry.
                                 attack_list_data = []
-                                if isinstance(alist, list):
-                                    for atk in alist:
-                                        if isinstance(atk, (int, str)):
-                                            attack_list_data.append(atk)
-                                        elif isinstance(atk, bytes):
-                                            attack_list_data.append(atk)
+                                if isinstance(alist, (bytes, bytearray)):
+                                    attack_records = decode_sproto_list(bytes(alist))
+                                elif isinstance(alist, list):
+                                    attack_records = alist
+                                else:
+                                    attack_records = []
+                                for attack_record in attack_records:
+                                    if isinstance(attack_record, (bytes, bytearray)):
+                                        attack_fields = decode_sproto(bytes(attack_record))
+                                    elif isinstance(attack_record, dict):
+                                        attack_fields = attack_record
+                                    elif isinstance(attack_record, int):
+                                        attack_fields = {0: attack_record}
+                                    else:
+                                        continue
+                                    target_attack_id = get_val_int(attack_fields, 0, -1)
+                                    if target_attack_id <= 0:
+                                        continue
+                                    attack_fields_out = [(0, target_attack_id)]
+                                    if 1 in attack_fields or '1' in attack_fields:
+                                        attack_fields_out.append((1, get_val_int(attack_fields, 1,
+                                                                                 get_val_int(attack_fields, '1', 0))))
+                                    # encode_sproto expects a list of encoded Sproto objects
+                                    # for this field; bytes preserves the client's exact schema.
+                                    attack_list_data.append(encode_sproto(attack_fields_out))
+                                print(f"[SKILL] relay attack_list entries={len(attack_list_data)} "
+                                      f"skill={sid} target={tid} attacker={picked_char.get('id')}")
                                 # ret_skill_use: senderId(0), targetId(1), skillId(2), attack_list(3)
                                 skill_resp = encode_sproto([
                                     (0, attacker_id),
