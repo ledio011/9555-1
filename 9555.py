@@ -10399,13 +10399,14 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
     # TAG 503: enter_map
     print("[DEBUG] BEFORE MAP ENTER")
     try:
-        ph_p = encode_sproto([(0, 503)])
+        # TAG 503 must use the same per-character send lock as TAG 504 and
+        # timer-driven pushes. A raw conn.sendall here can interleave a
+        # length-prefixed Sproto frame with an EXP-stage callback packet,
+        # corrupting the scene-load sequence and leaving the client UI unready.
         # mapInfoId(0), line_index(1), line_count(2)
         data = encode_sproto([(0, target_map_id), (1, 0), (2, 1)])
-        pf_p = sproto_pack(ph_p + data)
-        conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
+        send_rpc_push(503, data)
         print(f"[M1003 DEBUG] TX 503 map_id={target_map_id}")
-        print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
         print(f"[MAP ENTER SEND] map_id={target_map_id} scene={scene_name} pos={picked_char['pos']}")
 
         # TAG 504: main_player_create
