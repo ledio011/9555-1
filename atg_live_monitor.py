@@ -8,6 +8,7 @@ the configured Serv00 host and runs the same script remotely.
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib.util
 import json
 import os
@@ -76,6 +77,143 @@ PROTOCOLS = {
     608: "car_copy_result", 611: "inventory", 614: "server_time", 628: "guild_boss_entry_result",
     629: "copy_timer", 652: "guild_shop_purchase_result", 654: "start_enter_game",
     681: "team_match_state",
+}
+
+
+# Human-readable action labels are protocol hints inferred from the server's
+# request handler names. They are NOT proof of the exact Unity button text.
+# Requests without a mapping are still recorded with their numeric tag.
+UI_ACTIONS = {
+    100: "Scene load complete / map-ready",
+    101: "Movement joystick / player position update",
+    102: "Combat skill button / skill activation",
+    103: "Login: character selection list",
+    104: "Character creation submit",
+    105: "Character selection / enter character",
+    108: "Leave copy scene / exit instance",
+    111: "Combat damage or hit report",
+    112: "Mission: accept mission",
+    113: "Mission: complete/claim mission",
+    114: "Mission: abandon mission",
+    115: "Backpack: use item",
+    119: "World pickup: request pickup item",
+    120: "Chat: send message",
+    121: "Daily missions: request daily data",
+    122: "Mail: send mail",
+    123: "Mail: mailbox operation",
+    124: "Social: add friend or enemy",
+    125: "Social: remove friend or enemy",
+    126: "Social: refresh friend profile",
+    128: "Combat: local-player attack event",
+    129: "Backpack: sell item",
+    130: "Skills: upgrade skill",
+    132: "Death/revive UI: request revival",
+    137: "PVP: player-death/ranking event",
+    143: "Gang shop: request shop list",
+    144: "Gang shop: buy item",
+    146: "Gang: create gang",
+    147: "Gang: apply to join / join",
+    148: "Gang: leave gang",
+    149: "Gang: kick member",
+    150: "Gang: change member rank/position",
+    151: "Gang: upgrade gang skill",
+    152: "Gang: request application list",
+    153: "Gang: request application details",
+    154: "Gang: approve/reject application",
+    156: "Title/honor: level-up request",
+    158: "Social: approve friend request",
+    159: "Social: list online players",
+    160: "Social: search online player",
+    165: "Team: request team list/state",
+    167: "Equipment: enhance equipped item",
+    168: "Chat: request offline messages",
+    169: "Gang: request announcement",
+    170: "Gang: request member details",
+    173: "Gang: configure application approval",
+    174: "Gang: open gang log",
+    175: "Gang: donate resources",
+    176: "Gang: search gang",
+    178: "Mission: update mission parameter",
+    183: "Equipment: refine accessory",
+    184: "Equipment: transfer/inherit equipment experience",
+    185: "Backpack: select potion",
+    191: "Ranking: request top list",
+    192: "Skills: change skill-bar position",
+    193: "Car/race: submit car chase result",
+    195: "Gang activity: request gang-boss overview",
+    199: "Badge: merge badges",
+    201: "World boss: interact/request action",
+    212: "Gang: request gang skill data",
+    218: "Connection heartbeat (automatic)",
+    220: "Street Race / EXP Stage: start battle",
+    223: "Character appearance: toggle fashion display",
+    224: "Backpack: open item package/box",
+    227: "Dance: request dance information",
+    228: "Dance: pause/stop participation",
+    229: "Dance: select/use dance",
+    231: "Gang boss: request battle/rank information",
+    233: "Gang boss: enter/open activity",
+    235: "Garage: request vehicle information",
+    240: "Backpack: mark item read/seen",
+    241: "Garage: select/purchase vehicle colour",
+    247: "Gang: invite player",
+    267: "Garage: change vehicle active/riding state",
+    268: "Tutorial/function unlock: report completion",
+    270: "Resource download: report finished",
+    275: "Social: play emote/dance",
+    281: "Social: refresh online state",
+    284: "Mail: request system mailbox",
+    285: "Gang battle: request battle info",
+    286: "Gang battle: enter battle",
+    287: "Gang battle: request ranking",
+    288: "Gang battle: request members",
+    289: "Gang battle: update member selection",
+    291: "Gang battle: request score",
+    293: "Gang: request star-upgrade info",
+    294: "Gang: upgrade gang star",
+    295: "Gang battle: request battle state",
+    298: "Vehicle: impact/collision with NPC",
+    301: "Character: rename",
+    303: "Equipment: appraise",
+    306: "Tutorial: report completion",
+    307: "Combat/NPC: gameplay event report (semantics need client verification)",
+    310: "Domin/Capture: request activity information",
+    311: "Domin/PVP: enter PK scene",
+    314: "Dance: use dance sound box",
+    315: "Gang dance: update dance time",
+    316: "Skills: change skill index/slot",
+    318: "Gang city: request domination ranking",
+    319: "Gang city: request map/capture information",
+    320: "Gang city: claim configured map reward",
+    321: "Social/world: move to another player",
+    322: "Gang city: capture information/action",
+    323: "Garage: buy vehicle",
+    324: "Social/PVP: request player map/location",
+}
+
+PUSH_LABELS = {
+    503: "Scene transition / enter map",
+    504: "Create local main-player object",
+    505: "AOI: another player entered visibility range",
+    509: "AOI: create NPC",
+    510: "AOI: update player visual/equipment appearance",
+    519: "Mission: full mission-state synchronization",
+    520: "Mission: accepted mission push",
+    521: "Mission: completed mission push",
+    522: "Mission: abandoned mission push",
+    523: "Mission: update mission state",
+    524: "Mission: update mission parameter",
+    540: "Skills: synchronize skills",
+    554: "Shop: deliver shop list",
+    555: "Copy: synchronize remaining attempts",
+    608: "Car copy: result/reward",
+    611: "Backpack: inventory synchronization",
+    614: "Login/scene: server-time synchronization",
+    628: "Gang boss: entry result",
+    629: "Copy/boss: timer state",
+    652: "Gang shop: purchase result",
+    654: "Login: start entering game",
+    681: "Team: match-state update",
 }
 
 CATEGORY_TAGS = {
@@ -149,7 +287,8 @@ def safe_value(value: Any, decoder: Callable, depth: int = 0) -> Any:
 
 class MonitorState:
     def __init__(self, target_id: str, server_ns: dict, log_dir: Path,
-                 timeout_sec: float, show_fields: bool, handler_tags: set[int]):
+                 timeout_sec: float, show_fields: bool, handler_tags: set[int],
+                 field_hints: dict[int, dict[int, list[str]]]):
         self.target_id = str(target_id)
         self.server_ns = server_ns
         self.log_dir = log_dir
@@ -159,7 +298,13 @@ class MonitorState:
         self.timeout_sec = timeout_sec
         self.show_fields = show_fields
         self.handler_tags = handler_tags
+        self.field_hints = field_hints
         self.lock = threading.RLock()
+        self.server_pending: dict[tuple[int, int], dict] = {}
+        self.thread_connections: dict[int, Any] = {}
+        self.thread_unpacked: dict[int, dict] = {}
+        self.original_unpacker: Callable | None = None
+        self.original_decoder: Callable | None = None
         self.output_lock = threading.Lock()
         self.pending: dict[tuple[int, int], dict] = {}
         self.target_name = ""
@@ -232,14 +377,40 @@ class MonitorState:
             pass
         return {"character_id": self.target_id}
 
+
+    def bind_current_thread(self, conn) -> None:
+        self.thread_connections[threading.get_ident()] = conn
+
+    def note_sproto_unpacked(self, raw: bytes) -> None:
+        thread_id = threading.get_ident()
+        conn = self.thread_connections.get(thread_id)
+        if conn is not None:
+            self.thread_unpacked[thread_id] = {"raw": raw, "conn": conn, "header": None}
+
+    def note_sproto_decoded(self, raw: bytes, offset: int, result: Any) -> None:
+        thread_id = threading.get_ident()
+        pending = self.thread_unpacked.get(thread_id)
+        if not pending or pending.get("raw") is not raw:
+            return
+        if offset == 0:
+            pending["header"] = result if isinstance(result, dict) else None
+            return
+        self.thread_unpacked.pop(thread_id, None)
+        header = pending.get("header") or {}
+        conn = pending.get("conn")
+        if conn is None:
+            return
+        self.on_request(conn, as_int(header.get(0)), as_int(header.get(1)),
+                        result if isinstance(result, dict) else {})
+
     def decode_frame(self, frame: bytes) -> dict:
         if len(frame) < 3:
             raise ValueError("frame too short")
         frame_len = struct.unpack(">H", frame[:2])[0]
         if frame_len != len(frame) - 2:
             raise ValueError("length prefix mismatch")
-        unpacker = self.server_ns.get("sproto_unpack")
-        decoder = self.server_ns.get("decode_sproto")
+        unpacker = self.original_unpacker or self.server_ns.get("sproto_unpack")
+        decoder = self.original_decoder or self.server_ns.get("decode_sproto")
         if not callable(unpacker) or not callable(decoder):
             raise RuntimeError("server Sproto decoder is not initialized")
         raw = unpacker(frame[2:])
@@ -262,16 +433,14 @@ class MonitorState:
             fields = {key: "<redacted-auth-field>" for key in fields}
         return {"tag": tag, "session": session, "fields": fields, "raw_body": body}
 
-    def observe(self, conn, direction: str, frame: bytes) -> None:
-        try:
-            decoded = self.decode_frame(frame)
-            tag = decoded["tag"]
-            session = decoded["session"]
-            fields = decoded["fields"]
-            raw_body = decoded.get("raw_body", {})
 
-            if direction == "C2S" and tag == 105:
-                picked_id = as_int(raw_body.get(0))
+    def on_request(self, conn, tag: int | None, session: int | None, body: dict) -> None:
+        """Log the exact decoded client packet before the server dispatches it."""
+        try:
+            if not isinstance(body, dict):
+                body = {}
+            if tag == 105:
+                picked_id = as_int(body.get(0))
                 if picked_id is not None and str(picked_id) == self.target_id:
                     conn._atg_target = True
                     with self.output_lock:
@@ -283,36 +452,116 @@ class MonitorState:
             if not getattr(conn, "_atg_target", False):
                 return
 
-            protocol = PROTOCOLS.get(tag, f"unknown_tag_{tag}" if tag is not None else "unknown")
-            kind = "REQUEST" if direction == "C2S" else ("RESPONSE" if session is not None else "PUSH")
-            dispatch_status = ("FOUND" if tag in self.handler_tags else "NO_EXPLICIT_HANDLER_BRANCH") if kind == "REQUEST" else None
-            matched = None
-            now_mono = time.monotonic()
-            if direction == "C2S" and tag is not None and session is not None:
+            is_request = tag is not None
+            protocol = PROTOCOLS.get(tag, f"unknown_tag_{tag}") if is_request else "client_rpc_response"
+            kind = "REQUEST" if is_request else "CLIENT_RESPONSE"
+            dispatch_status = (
+                "FOUND" if tag in self.handler_tags else "NO_EXPLICIT_HANDLER_BRANCH"
+            ) if is_request else None
+            decoder = self.original_decoder or self.server_ns.get("decode_sproto")
+            fields = {str(k): safe_value(v, decoder) for k, v in body.items()}
+            if tag in (2, 3, 4):
+                fields = {key: "<redacted-auth-field>" for key in fields}
+
+            matched_server_request = None
+            if is_request and session is not None:
                 with self.lock:
                     self.pending[(conn.connection_id, session)] = {
                         "tag": tag, "protocol": protocol, "category": category_for(tag),
-                        "dispatch_status": dispatch_status, "started": now_mono,
-                        "timestamp": datetime.now().astimezone().isoformat(timespec="milliseconds")
+                        "dispatch_status": dispatch_status, "started": time.monotonic(),
                     }
-            elif direction == "S2C" and session is not None:
+            elif not is_request and session is not None:
                 with self.lock:
-                    matched = self.pending.pop((conn.connection_id, session), None)
+                    matched_server_request = self.server_pending.pop(
+                        (conn.connection_id, session), None
+                    )
 
-            category = category_for(tag)
-            if kind == "RESPONSE" and matched:
-                protocol = matched["protocol"] + "_response"
-                category = matched["category"]
             ctx = self.player_context(conn)
             event = {
                 "timestamp": datetime.now().astimezone().isoformat(timespec="milliseconds"),
-                "direction": direction,
+                "direction": "C2S",
+                "kind": kind,
+                "category": category_for(tag),
+                "tag": tag,
+                "protocol_label": protocol,
+                "ui_action_hint": (
+                    UI_ACTIONS.get(tag, f"Unknown/unmapped UI action for request tag {tag}")
+                    if is_request else "Client response to a server-initiated RPC"
+                ),
+                "server_dispatch": dispatch_status,
+                "server_field_hints": self.field_hints.get(tag, {}) if is_request else {},
+                "client_expectation": "NOT_ASSERTED: verify against Assembly-CSharp and client Sproto schema",
+                "session": session,
+                "connection_id": conn.connection_id,
+                **ctx,
+                "fields": fields,
+            }
+            if matched_server_request:
+                event["response_to_server_request"] = {
+                    "tag": matched_server_request["tag"],
+                    "protocol_label": matched_server_request["protocol"],
+                    "status": "MATCHED_BY_SESSION",
+                }
+            self.append_json(event)
+            self.display_event(event)
+        except Exception as exc:
+            with self.output_lock:
+                sys.__stdout__.write(f"[MONITOR REQUEST TAP ERROR] {exc}\n")
+                sys.__stdout__.flush()
+
+
+    def observe(self, conn, direction: str, frame: bytes) -> None:
+        """Capture only outgoing packets; inbound requests use the real decoder hook."""
+        if direction != "S2C" or not getattr(conn, "_atg_target", False):
+            return
+        try:
+            decoded = self.decode_frame(frame)
+            tag = decoded["tag"]
+            session = decoded["session"]
+            fields = decoded["fields"]
+            now_mono = time.monotonic()
+            matched = None
+            if session is not None and tag is None:
+                with self.lock:
+                    matched = self.pending.pop((conn.connection_id, session), None)
+                kind = "RESPONSE"
+                protocol = (matched["protocol"] + "_response") if matched else "response_by_session"
+                category = matched["category"] if matched else "OTHER"
+            elif session is not None and tag is not None:
+                with self.lock:
+                    self.server_pending[(conn.connection_id, session)] = {
+                        "tag": tag, "protocol": PROTOCOLS.get(tag, f"unknown_tag_{tag}")
+                    }
+                kind = "SERVER_REQUEST"
+                protocol = PROTOCOLS.get(tag, f"unknown_server_request_tag_{tag}")
+                category = category_for(tag)
+            elif tag is not None:
+                kind = "PUSH"
+                protocol = PROTOCOLS.get(tag, f"unknown_push_tag_{tag}")
+                category = category_for(tag)
+            else:
+                kind = "UNCLASSIFIED"
+                protocol = "empty_sproto_message"
+                category = "OTHER"
+
+            ctx = self.player_context(conn)
+            if kind == "PUSH":
+                action_hint = PUSH_LABELS.get(tag, "Server push; client handler still needs verification")
+            elif kind == "RESPONSE":
+                action_hint = "RPC response to the matching client request"
+            elif kind == "SERVER_REQUEST":
+                action_hint = "Server-initiated RPC request"
+            else:
+                action_hint = "Unclassified server protocol packet"
+            event = {
+                "timestamp": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+                "direction": "S2C",
                 "kind": kind,
                 "category": category,
                 "tag": tag,
                 "protocol_label": protocol,
-                "server_dispatch": dispatch_status,
-                "client_expectation": "UNVERIFIED_CLIENT_SCHEMA_NOT_LINKED",
+                "ui_action_hint": action_hint,
+                "client_expectation": "NOT_ASSERTED: verify against Assembly-CSharp and client Sproto schema",
                 "session": session,
                 "connection_id": conn.connection_id,
                 **ctx,
@@ -331,17 +580,20 @@ class MonitorState:
             self.append_json(event)
             self.display_event(event)
         except Exception as exc:
-            if getattr(conn, "_atg_target", False):
-                event = {
-                    "timestamp": datetime.now().astimezone().isoformat(timespec="milliseconds"),
-                    "direction": direction, "kind": "DECODE_ERROR",
-                    "connection_id": conn.connection_id, "error": str(exc)[:300],
-                    "frame_bytes": len(frame), "character_id": self.target_id,
-                }
-                self.append_json(event)
-                with self.output_lock:
-                    sys.__stdout__.write(f"[DECODE ERROR] {direction}: {exc}\n")
-                    sys.__stdout__.flush()
+            event = {
+                "timestamp": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+                "direction": direction,
+                "kind": "DECODE_ERROR",
+                "connection_id": conn.connection_id,
+                "error": str(exc)[:300],
+                "frame_bytes": len(frame),
+                "character_id": self.target_id,
+            }
+            self.append_json(event)
+            with self.output_lock:
+                sys.__stdout__.write(f"[MONITOR RESPONSE TAP ERROR] {exc}\n")
+                sys.__stdout__.flush()
+
 
     def display_event(self, event: dict) -> None:
         ts = event["timestamp"].split("T")[-1]
@@ -352,16 +604,26 @@ class MonitorState:
         protocol = event["protocol_label"]
         session = event.get("session")
         context = event.get("map_id", "?")
-        title = (f"\n[{ts}] {direction} | {kind} | {category}\n"
-                 f"  TAG={tag}  SPROTO={protocol}  SESSION={session}  MAP={context}")
+        title = (
+            f"\n[{ts}] {direction} | {kind} | {category}\n"
+            f"  TAG={tag}  SPROTO={protocol}  SESSION={session}  MAP={context}"
+        )
+        title += f"\n  UI / ACTION HINT: {event.get('ui_action_hint', 'Unmapped protocol event')}"
         if kind == "REQUEST":
             title += f"\n  SERVER DISPATCH: {event.get('server_dispatch')}"
+            hints = event.get("server_field_hints") or {}
+            if hints:
+                hint_lines = []
+                for field_index, descriptions in sorted(hints.items(), key=lambda item: int(item[0])):
+                    hint_lines.extend(descriptions if isinstance(descriptions, list) else [str(descriptions)])
+                title += "\n  SERVER FIELD USAGE: " + "; ".join(hint_lines[:20])
         response_to = event.get("response_to")
         if response_to:
             if response_to.get("status") == "MATCHED_BY_SESSION":
-                title += (f"\n  RESPONSE TO TAG={response_to['tag']} "
-                          f"({response_to['protocol_label']})  "
-                          f"LATENCY={response_to['latency_ms']} ms")
+                title += (
+                    f"\n  RESPONSE TO TAG={response_to['tag']} "
+                    f"({response_to['protocol_label']})  LATENCY={response_to['latency_ms']} ms"
+                )
             else:
                 title += "\n  RESPONSE WARNING: no matching request session was captured"
         with self.output_lock:
@@ -408,14 +670,15 @@ class MonitorState:
                     "request_tag": request["tag"], "request_protocol": request["protocol"],
                     "server_dispatch": request.get("dispatch_status"),
                     "session": session, "timeout_seconds": self.timeout_sec,
-                    "status": "NO_RESPONSE_OBSERVED_WITHIN_TIMEOUT",
+                    "status": "NO_SESSION_RESPONSE_WITHIN_TIMEOUT",
+                    "note": "Not proof of no UI response; related server pushes are logged separately.",
                 }
                 self.append_json(event)
                 with self.output_lock:
                     sys.__stdout__.write(
-                        f"\n[NO RESPONSE OBSERVED] tag={request['tag']} "
+                        f"\n[NO SESSION RESPONSE] tag={request['tag']} "
                         f"{request['protocol']} session={session} "
-                        f"after {self.timeout_sec:g}s (check any delayed push too)\n"
+                        f"after {self.timeout_sec:g}s (server pushes are logged separately)\n"
                     )
                     sys.__stdout__.flush()
 
@@ -424,58 +687,48 @@ class MonitoredConnection:
     def __init__(self, raw_socket, address, monitor: MonitorState):
         self._sock = raw_socket
         self._monitor = monitor
-        self._rx_buffer = bytearray()
         self._tx_buffer = bytearray()
         self._buffer_lock = threading.Lock()
         self._atg_target = False
-        self._is_http = False
         self.connection_id = id(self)
         self.address = address
 
     def __getattr__(self, name):
         return getattr(self._sock, name)
 
-    def _ingest(self, buffer: bytearray, data: bytes, direction: str) -> None:
+    def recv(self, bufsize: int, flags: int = 0):
+        data = self._sock.recv(bufsize, flags)
+        if data:
+            self._monitor.bind_current_thread(self)
+        return data
+
+    def _ingest_outgoing(self, data: bytes) -> None:
         if not data:
             return
         with self._buffer_lock:
-            buffer.extend(data)
-            while len(buffer) >= 2:
-                size = struct.unpack(">H", buffer[:2])[0]
+            self._tx_buffer.extend(data)
+            while len(self._tx_buffer) >= 2:
+                size = struct.unpack(">H", self._tx_buffer[:2])[0]
                 if size == 0 or size > 65535:
-                    # This is not a framed game packet; avoid blocking or changing
-                    # the real stream, and stop interpreting this direction.
-                    buffer.clear()
-                    if direction == "C2S":
-                        self._is_http = True
+                    self._tx_buffer.clear()
                     return
-                if len(buffer) < size + 2:
+                if len(self._tx_buffer) < size + 2:
                     return
-                frame = bytes(buffer[:size + 2])
-                del buffer[:size + 2]
-                self._monitor.observe(self, direction, frame)
-
-    def recv(self, bufsize: int, flags: int = 0):
-        data = self._sock.recv(bufsize, flags)
-        if data and (flags & MSG_PEEK):
-            if data.startswith((b"GET ", b"HEAD", b"POST ")):
-                self._is_http = True
-        elif data and not self._is_http:
-            self._ingest(self._rx_buffer, data, "C2S")
-        return data
+                frame = bytes(self._tx_buffer[:size + 2])
+                del self._tx_buffer[:size + 2]
+                self._monitor.observe(self, "S2C", frame)
 
     def sendall(self, data, flags: int = 0):
         if flags:
             self._sock.sendall(data, flags)
         else:
             self._sock.sendall(data)
-        if not self._is_http:
-            self._ingest(self._tx_buffer, bytes(data), "S2C")
+        self._ingest_outgoing(bytes(data))
 
     def send(self, data, flags: int = 0):
         sent = self._sock.send(data, flags)
-        if sent and not self._is_http:
-            self._ingest(self._tx_buffer, bytes(data[:sent]), "S2C")
+        if sent:
+            self._ingest_outgoing(bytes(data[:sent]))
         return sent
 
     def close(self):
@@ -516,6 +769,87 @@ def extract_handler_tags(source: str) -> set[int]:
     return {int(x) for x in re.findall(r"(?:if|elif)\s+msg\s*==\s*(\d+)", handler)}
 
 
+
+def extract_request_field_hints(source: str) -> dict[int, dict[int, list[str]]]:
+    """Infer server-side field-use labels from each client_handler msg==TAG branch.
+
+    These are names used by 9555.py, not official Sproto schema names.
+    Numeric field indices remain authoritative in the displayed output.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return {}
+    handler = next((node for node in ast.walk(tree)
+                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name == "client_handler"), None)
+    if handler is None:
+        return {}
+
+    parents: dict[int, ast.AST] = {}
+    for parent in ast.walk(handler):
+        for child in ast.iter_child_nodes(parent):
+            parents[id(child)] = parent
+
+    result: dict[int, dict[int, set[str]]] = {}
+    for node in ast.walk(handler):
+        if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
+            continue
+        test = node.test
+        if not isinstance(test.left, ast.Name) or test.left.id != "msg" or len(test.comparators) != 1:
+            continue
+        if not isinstance(test.comparators[0], ast.Constant) or not isinstance(test.comparators[0].value, int):
+            continue
+        tag = test.comparators[0].value
+
+        # Only inspect this branch body, never its sibling elif/else handlers.
+        calls = []
+        for statement in node.body:
+            calls.extend(ast.walk(statement))
+        for call in calls:
+            if not isinstance(call, ast.Call):
+                continue
+            func_name = (call.func.id if isinstance(call.func, ast.Name)
+                         else call.func.attr if isinstance(call.func, ast.Attribute) else "")
+            index = None
+            getter = ""
+            if func_name in ("get_val_int", "get_val_str", "get_val_bool", "get_val_float"):
+                if len(call.args) >= 2 and isinstance(call.args[0], ast.Name) and call.args[0].id == "body":
+                    idx = call.args[1]
+                    if isinstance(idx, ast.Constant) and isinstance(idx.value, int):
+                        index, getter = idx.value, func_name.replace("get_val_", "")
+            elif func_name == "get" and isinstance(call.func, ast.Attribute):
+                if isinstance(call.func.value, ast.Name) and call.func.value.id == "body" and call.args:
+                    idx = call.args[0]
+                    if isinstance(idx, ast.Constant) and isinstance(idx.value, int):
+                        index, getter = idx.value, "raw"
+            if index is None:
+                continue
+
+            assigned = []
+            cursor: ast.AST = call
+            for _ in range(8):
+                parent = parents.get(id(cursor))
+                if parent is None:
+                    break
+                if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+                    targets = parent.targets if isinstance(parent, ast.Assign) else [parent.target]
+                    for target in targets:
+                        if isinstance(target, ast.Name):
+                            assigned.append(target.id)
+                        elif isinstance(target, (ast.Tuple, ast.List)):
+                            assigned.extend(x.id for x in target.elts if isinstance(x, ast.Name))
+                    break
+                cursor = parent
+            label = "/".join(dict.fromkeys(assigned)) if assigned else f"body[{index}]"
+            result.setdefault(tag, {}).setdefault(index, set()).add(
+                f"field {index} -> {label} ({getter})"
+            )
+
+    return {tag: {index: sorted(values) for index, values in fields.items()}
+            for tag, fields in result.items()}
+
+
 def run_server(args) -> int:
     server_path = Path(args.server_file).expanduser().resolve()
     if not server_path.is_file():
@@ -533,18 +867,52 @@ def run_server(args) -> int:
     except OSError as exc:
         print(f"ERROR: cannot read {server_path}: {exc}", file=sys.stderr)
         return 2
+
     handler_tags = extract_handler_tags(source)
-    spec = importlib.util.spec_from_file_location("_atg_server_runtime", server_path)
+    field_hints = extract_request_field_hints(source)
+    spec = importlib.util.spec_from_file_location("_atg_server_monitored", server_path)
     if spec is None or spec.loader is None:
         print(f"ERROR: cannot load {server_path}", file=sys.stderr)
         return 2
     server_module = importlib.util.module_from_spec(spec)
     server_ns = server_module.__dict__
-    monitor = MonitorState(args.character_id, server_ns, Path(args.log_dir).expanduser(),
-                           args.timeout, not args.compact, handler_tags)
+    sys.modules[server_module.__name__] = server_module
+    monitor = MonitorState(
+        args.character_id, server_ns, Path(args.log_dir).expanduser(),
+        args.timeout, not args.compact, handler_tags, field_hints
+    )
+    server_ns["print"] = monitor.server_print
+
+    try:
+        spec.loader.exec_module(server_module)
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return 1
+
+    # Tap the real codec functions after startup data has loaded. The request
+    # hook triggers on the exact header/body decode pair used in client_handler.
+    monitor.original_unpacker = server_module.sproto_unpack
+    monitor.original_decoder = server_module.decode_sproto
+    original_unpacker = monitor.original_unpacker
+    original_decoder = monitor.original_decoder
+
+    def monitored_unpacker(payload):
+        raw = original_unpacker(payload)
+        monitor.note_sproto_unpacked(raw)
+        return raw
+
+    def monitored_decoder(raw, offset):
+        decoded = original_decoder(raw, offset)
+        monitor.note_sproto_decoded(raw, offset, decoded)
+        return decoded
+
+    server_module.sproto_unpack = monitored_unpacker
+    server_module.decode_sproto = monitored_decoder
+
+    # Only accepted client sockets are wrapped. Bytes are forwarded unchanged.
     InstrumentedListener.monitor = monitor
     socket.socket = InstrumentedListener
-    server_ns["print"] = monitor.server_print
 
     print("=" * 76)
     print("ATG SINGLE-CHARACTER LIVE SPROTO MONITOR")
@@ -553,15 +921,15 @@ def run_server(args) -> int:
     print(f"Game port        : {args.port}")
     print(f"Protocol events  : {monitor.event_path}")
     print(f"Target server log: {monitor.server_path}")
-    print("Mode             : in-process socket observation; no 9555.py edits")
-    print("Other characters : hidden from this terminal and target logs")
-    print("Client validation : not guessed; client schema fields remain UNVERIFIED")
+    print("Mode             : actual Sproto decoder hook + outgoing response/push tap; no 9555.py edits")
+    print("Other characters : hidden from this terminal and target event files")
+    print("UI labels         : protocol action hints + server-side field-use descriptions")
+    print("Client expectations: not guessed; UI-only clicks require Unity-side tracing")
+    print(f"Handler tags      : {len(handler_tags)} explicit branches; field hints for {len(field_hints)} tags")
     print("=" * 76)
     print("Starting the game server under the monitor. Press Ctrl+C to stop it.\n")
 
     try:
-        sys.modules[spec.name] = server_module
-        spec.loader.exec_module(server_module)
         server_module.start_server()
     except KeyboardInterrupt:
         print("\nMonitor stopped by user.")
