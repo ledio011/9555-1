@@ -10411,17 +10411,13 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
     # TAG 503: enter_map
     print("[DEBUG] BEFORE MAP ENTER")
     try:
-        # TAG 503: enter_map. Serialize this scene-change frame with every
-        # other packet on this character socket. EXP timers and AI callbacks
-        # can still emit pushes while the player exits a stage; a direct
-        # conn.sendall() here bypasses send_lock and can interleave Sproto
-        # frames, leaving the client stuck during LoadingWindow.LoadScene().
-        # send_rpc_push uses the same per-connection writer lock as TAG 504,
-        # RPC responses, and the background send_push_to_char path.
+        ph_p = encode_sproto([(0, 503)])
         # mapInfoId(0), line_index(1), line_count(2)
         data = encode_sproto([(0, target_map_id), (1, 0), (2, 1)])
-        send_rpc_push(503, data)
+        pf_p = sproto_pack(ph_p + data)
+        conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
         print(f"[M1003 DEBUG] TX 503 map_id={target_map_id}")
+        print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
         print(f"[MAP ENTER SEND] map_id={target_map_id} scene={scene_name} pos={picked_char['pos']}")
 
         # TAG 504: main_player_create
