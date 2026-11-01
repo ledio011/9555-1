@@ -13750,6 +13750,21 @@ def client_handler(conn, addr):
                     and not current.get("result_recorded")
                     and str(picked_char.get("map_id", "")) == RANK_PVP_MAP_ID
                     and is_current_character_connection(conn, picked_char)):
+                # Prime ObjZombiePlayer's head-HP cache at full health. Its
+                # PlayerHeadInfoLogic displays the bar on the following HP change.
+                opponent_id = int(current.get("opponent_id", 0) or 0)
+                opponent = _rank_pvp_find_character(opponent_id)
+                if opponent is not None and opponent_id > 0:
+                    opponent_stats = get_character_stats(opponent)
+                    hp_now = max(1, int(current.get(
+                        "opponent_hp", opponent_stats.get("hp_max", 1)
+                    )))
+                    current["opponent_hp"] = min(
+                        hp_now, max(1, int(opponent_stats.get("hp_max", 1)))
+                    )
+                    hp_other = encode_sproto([(0, current["opponent_hp"])])
+                    hp_character = encode_sproto([(0, opponent_id), (1, hp_other)])
+                    send_rpc_push(510, encode_sproto([(0, hp_character)]))
                 send_rpc_push(629, encode_sproto([(0, deadline), (1, 0)]))
 
         countdown_notice = threading.Timer(0.5, send_rank_pvp_countdown)
@@ -16852,6 +16867,130 @@ def client_handler(conn, addr):
                             continue
 
                         print(f"[COMBAT] accept_damge target={target_id} client_dmg={client_dmg} skill={skill_id} eff={requested_effinfo_id} cri={is_cri}")
+
+                        # Rank PVP uses a client-created ObjZombiePlayer (not an
+                        # online character and not an NPC_INST_MAP entry). Handle
+                        # only the selected opponent in the active map-501 match.
+                        if str(picked_char.get("map_id", "")) == RANK_PVP_MAP_ID:
+                            rank_match = picked_char.get("_rank_pvp_match")
+                            if (not is_current_character_connection(conn, picked_char)
+                                    or not isinstance(rank_match, dict)
+                                    or rank_match.get("result_recorded")
+                                    or not rank_match.get("started_at")
+                                    or int(time.time()) > int(rank_match.get("deadline", 0) or 0)
+                                    or int(rank_match.get("opponent_id", 0) or 0) != target_id):
+                                print(f"[RANK PVP HIT] rejected stale/invalid opponent hit attacker={picked_char.get('id')} target={target_id}")
+                                continue
+
+                            rank_opponent = _rank_pvp_find_character(target_id)
+                            if rank_opponent is None:
+                                print(f"[RANK PVP HIT] rejected missing opponent target={target_id}")
+                                continue
+
+                            defender_stats = get_character_stats(rank_opponent)
+
+                            # Apply the same ownership checks used by the normal
+                            # combat path; the opponent's real saved HP is never
+                            # modified because this is a local arena clone.
+                            char_skill_levels = {
+                                str(key): value for key, value in
+                                (picked_char.get("skill_levels") or {}).items()
+                            }
+                            learned_skill_ids = learned_non_weapon_skill_ids(char_skill_levels)
+                            starter_skills = get_character_combat_skills(
+                                picked_char.get("prof", 0),
+                                picked_char.get("equipped_equip", [])
+                            )
+                            always_available = set(starter_skills.get("atk", []))
+                            always_available.add(starter_skills.get("dodge", ""))
+                            always_available.add(starter_skills.get("starter_active", ""))
+                            always_available.update(equipped_weapon_skill_ids(picked_char))
+                            if skill_id not in learned_skill_ids and skill_id not in always_available:
+                                skill_id = "50001"
+                            skill_lv = max(0, int(char_skill_levels.get(skill_id, 0) or 0))
+                            skill_cfg = SKILL_CONFIG.get(skill_id, {})
+                            mapped_skill = EFF_TO_SKILL.get(requested_effinfo_id)
+                            effinfo_id = (
+                                requested_effinfo_id if str(mapped_skill) == str(skill_id)
+                                else skill_cfg.get("eff0", "10000")
+                            )
+
+                            # Check that the client-reported hit/crit result is
+                            # possible, then cap damage against server-side stats.
+                            eff_cfg_for_hit = EFF_CONFIG.get(effinfo_id, {"adds": {}})
+                            hit_bonus = eff_cfg_for_hit.get("adds", {}).get(3001, 0) / 10000.0
+                            hit_p = min(
+                                (attacker_stats["hit"] + 1.0) /
+                                (attacker_stats["hita"] + attacker_stats["hit"] + 1.0), 1.0
+                            )
+                            dodge_p = min(
+                                (defender_stats["eva"] + 1.0) /
+                                (defender_stats["dgea"] + defender_stats["eva"] + 1.0), 0.5
+                            )
+                            hit_prob = 1.0 + hit_p - dodge_p + hit_bonus
+                            crit_bonus = eff_cfg_for_hit.get("adds", {}).get(3002, 0) / 10000.0
+                            crit_p = min(
+                                (attacker_stats["cri"] + 1.0) /
+                                (attacker_stats["cri"] + attacker_stats["cria"] + 1.0), 0.9
+                            )
+                            resist_p = min(
+                                (defender_stats["res"] + 1.0) /
+                                (defender_stats["res"] + defender_stats["resa"] + 1.0), 0.8
+                            )
+                            crit_prob = crit_p - resist_p + crit_bonus
+                            if (client_dmg < 0 or client_cri_flag != is_cri
+                                    or (client_dmg == 0 and (client_hit_flag or is_cri))
+                                    or (client_dmg > 0 and not client_hit_flag)
+                                    or (client_hit_flag and hit_prob < 0)
+                                    or (not client_hit_flag and hit_prob >= 0.99)
+                                    or (is_cri and crit_prob < 0)
+                                    or (not is_cri and crit_prob >= 0.99)):
+                                print(f"[RANK PVP HIT] rejected impossible result target={target_id} damage={client_dmg}")
+                                continue
+
+                            if client_dmg == 0:
+                                actual_rank_damage = 0
+                            else:
+                                max_rank_damage, can_rank_hit, possible_rank_crit = get_combat_damage(
+                                    attacker_stats, defender_stats, skill_id, skill_lv,
+                                    effinfo_id=effinfo_id, forced_hit=True,
+                                    forced_crit=is_cri, max_variance=True, is_pvp=True
+                                )
+                                if (not can_rank_hit
+                                        or (is_cri and not possible_rank_crit)
+                                        or client_dmg > max_rank_damage + 2):
+                                    print(f"[RANK PVP HIT] rejected out-of-range damage target={target_id} damage={client_dmg} max={max_rank_damage}")
+                                    continue
+                                actual_rank_damage = client_dmg
+
+                            if actual_rank_damage > 0:
+                                with RANK_PVP_LOCK:
+                                    live_match = picked_char.get("_rank_pvp_match")
+                                    if (live_match is not rank_match
+                                            or live_match.get("result_recorded")):
+                                        continue
+                                    hp_max = max(1, int(defender_stats.get("hp_max", 1)))
+                                    hp_before = max(0, min(
+                                        int(live_match.get("opponent_hp", hp_max)), hp_max
+                                    ))
+                                    if hp_before <= 0:
+                                        print(f"[RANK PVP HIT] ignored hit on defeated opponent target={target_id}")
+                                        continue
+                                    hp_after = max(0, hp_before - actual_rank_damage)
+                                    live_match["opponent_hp"] = hp_after
+                                    live_match["last_opponent_hit_at"] = int(time.time())
+                                    save_chars(all_accounts_chars)
+
+                                # TAG 510 -> character_aoi_attribute -> attribute_other.hp
+                                # calls ObjZombiePlayer.ChangeHPVal(), updating the
+                                # visible health bar and raising OnZombiePlayerDie at 0.
+                                hp_other = encode_sproto([(0, hp_after)])
+                                hp_character = encode_sproto([(0, target_id), (1, hp_other)])
+                                send_rpc_push(510, encode_sproto([(0, hp_character)]))
+                                print(f"[RANK PVP HIT] attacker={picked_char.get('id')} "
+                                      f"opponent={target_id} damage={actual_rank_damage} "
+                                      f"hp={hp_before}->{hp_after}")
+                            continue
 
                         if _guild_boss_map_id(picked_char.get('map_id', '')):
                             _guild_boss_apply_hit(
