@@ -9761,18 +9761,37 @@ def _rank_pvp_character_look(character):
 
 
 def _rank_pvp_zombie_character(character):
-    """Clone a real character into map 501's zombie camp for local AI combat."""
+    """Build map 501's zombie opponent using the APK's character Sproto schema."""
     stats = get_character_stats(character)
-    packed = decode_sproto(get_full_char(character))
+
+    # get_full_char() is the server's full-login layout.  The Arena tag 544
+    # instead declares SprotoType.character, whose fields after attribute_other
+    # are two positions earlier (property=3, visual=4, movement=5, skills=6,
+    # equip=7, badge=8, fashion=9, potionIndex=10, runtime=11,
+    # equip_enhance=12, download=13, skill_index=14).
+    login_fields = decode_sproto(get_full_char(character))
+    field_map = {
+        0: 0, 1: 1, 2: 2,
+        5: 3, 6: 4, 7: 5, 8: 6, 9: 7, 10: 8, 11: 9,
+        12: 10, 13: 11, 14: 12, 15: 13, 16: 14
+    }
+    packed = {
+        target_tag: login_fields[source_tag]
+        for source_tag, target_tag in field_map.items()
+        if source_tag in login_fields
+    }
+
     general_data = decode_sproto(packed.get(1, b""))
     general_data[3] = RANK_PVP_MAP_ID
     packed[1] = encode_sproto(list(general_data.items()))
+
     other_data = decode_sproto(packed.get(2, b""))
     other_data[0] = int(stats.get("hp_max", 1))
-    other_data[15] = 2
+    other_data[15] = 2  # CAMP_TYPE.NORMAL_NPC: the client's Rank PVP target camp
     packed[2] = encode_sproto(list(other_data.items()))
-    packed[7] = get_movement(400, 120, 0, -9000)
-    packed[13] = get_runtime_aoi(character)
+
+    packed[5] = get_movement(400, 120, 0, -9000)
+    packed[11] = get_runtime_aoi(character)
     return encode_sproto(list(packed.items()))
 
 
@@ -9865,8 +9884,9 @@ def _rank_pvp_sort_items(sort_type=3):
         rows.append(encode_sproto([
             (0, int(character.get("id", 0))),
             (1, int(stats.get("power", 0))),
-            # RankItemLogic reads LADDER's secondary value from name#rank.
-            (2, f"{character.get('name', 'Hero')}#{rank_pos}"),
+            # RankItemLogic displays the LADDER power column from name#value;
+            # the row's actual rank is its sorted list position (and tag 5).
+            (2, f"{character.get('name', 'Hero')}#{int(stats.get('power', 0))}"),
             (3, int(character.get("prof", 0))),
             (4, str(int(sort_type))),
             (5, rank_pos)
@@ -13734,8 +13754,24 @@ def client_handler(conn, addr):
             finish_rank_pvp_match(False, "timeout_reconnect", True)
             return
         save_chars(all_accounts_chars)
-        send_rpc_push(629, encode_sproto([(0, deadline), (1, 0)]))
+        # StartGame() creates/shows the default battle UI.  TAG 629 is ignored
+        # by CountDownTimeLogic when its UI is not active, so show the battle
+        # first and deliver the visible one-minute countdown just after it.
         send_rpc_push(547, encode_sproto([]))
+
+        def send_rank_pvp_countdown():
+            current = picked_char.get("_rank_pvp_match") if picked_char else None
+            if (isinstance(current, dict)
+                    and str(current.get("match_id")) == str(expected_match_id)
+                    and not current.get("result_recorded")
+                    and str(picked_char.get("map_id", "")) == RANK_PVP_MAP_ID
+                    and is_current_character_connection(conn, picked_char)):
+                send_rpc_push(629, encode_sproto([(0, deadline), (1, 0)]))
+
+        countdown_notice = threading.Timer(0.5, send_rank_pvp_countdown)
+        countdown_notice.daemon = True
+        countdown_notice.start()
+
         old_timer = picked_char.pop("_rank_pvp_timer", None)
         if old_timer is not None:
             try:
@@ -17633,6 +17669,22 @@ def client_handler(conn, addr):
                         (2, all_rows[(page - 1) * page_size:page * page_size])
                     ]))
                 send_rpc_response(session)
+
+            elif msg == 142: # ask_character_info (Arena ranking model preview)
+                response_data = None
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    target_id = get_val_int(body, 0, 0)
+                    target = _rank_pvp_find_character(target_id)
+                    if target is not None:
+                        target_state = _rank_pvp_state(target)
+                        target_rank = int(target_state.get("rank_pos", RANK_PVP_MAX_RANK + 1))
+                        if 1 <= target_rank <= RANK_PVP_MAX_RANK:
+                            response_data = encode_sproto([
+                                (0, _rank_pvp_character_look(target))
+                            ])
+                            print(f"[RANK PVP] ranking preview player={picked_char.get('id')} "
+                                  f"target={target_id} rank={target_rank}")
+                send_rpc_response(session, response_data)
 
             elif msg == 135: # select_pk_character
                 if picked_char and is_current_character_connection(conn, picked_char):
