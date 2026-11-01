@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-One-time ATG grant: add 100 standard healing potions (ItemData ID 9001)
+One-time ATG grant: add 100 standard healing potions (ItemData ID 9004)
 to every saved character in characters_final.json.
 
 Run from this repository with the 9555 game server and its watchdog stopped:
@@ -17,11 +17,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 SERVER_FILE = ROOT / "9555.py"
-ITEM_ID = "9001"
+ITEM_ID = "9004"
 AMOUNT = 100
 DEFAULT_PORT = 15678
-MARKER = ROOT / ".grant_medkits_9001_100_all.done"
-LOCK = ROOT / ".grant_medkits_9001_100_all.lock"
+MARKER = ROOT / ".grant_medkits_9004_100_all.done"
+LOCK = ROOT / ".grant_medkits_9004_100_all.lock"
 
 BACKPACK_FIELDS = (
     "inventory", "equip_inventory", "badge_inventory", "fashion_inventory",
@@ -181,7 +181,7 @@ def main():
     if "--confirm" not in sys.argv[1:]:
         print("No changes made. Review this operation, then run:")
         print("  python3 grant_medkits.py --confirm")
-        print("This grants +100 of ItemData 9001 to every saved character.")
+        print("This grants +100 of ItemData 9004 to every saved character.")
         return 2
 
     if not SERVER_FILE.is_file():
@@ -232,7 +232,7 @@ def main():
         expected = (
             int(item_cfg.get("type", -1)) == 3
             and int(item_cfg.get("level", -1)) == 1
-            and int(item_cfg.get("function", -1)) == 30000
+            and int(item_cfg.get("function", -1)) == 5000
             and int(item_cfg.get("max_stack", 0)) > AMOUNT
         )
         if not expected:
