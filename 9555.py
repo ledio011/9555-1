@@ -2868,6 +2868,22 @@ def get_equipped_mount(c):
     color = str(saved.get('select') or cfg.get('default_color', ''))
     return mount_id, color, 1 if c.get('mount_riding', False) else 0
 
+def get_mount_driving_speed(c, normal_mov):
+    """Use MountData.MaxSpeed only while mounted in a BIG_WORLD scene."""
+    try:
+        if (not c.get('mount_riding')
+                or int(MAP_CONFIG.get(str(c.get('map_id', '')), {}).get('type', -1)) != 1):
+            return int(normal_mov)
+        mount_id, _, _ = get_equipped_mount(c)
+        max_speed = float(MOUNT_CONFIG.get(mount_id, {}).get('max_speed', 0) or 0)
+        if not mount_id or max_speed <= 0:
+            return int(normal_mov)
+        # Client MountData.MaxSp is MaxSpeed / 100 (m/s), while
+        # attribute_all.mov is interpreted as mov / 100 (m/s).
+        return int(round(max_speed * 100.0))
+    except (TypeError, ValueError):
+        return int(normal_mov)
+
 def build_main_player_visual(c):
     mount_id, mount_color, mount_state = get_equipped_mount(c)
     return get_visual(c.get('name', 'Hero'), c.get('prof', 0),
@@ -4972,7 +4988,7 @@ def get_character_stats(c):
         'hita': ld['hita'], 'cria': ld['cria'],
         'anti_stun': ld.get('anti_stun', 0), 'anti_knock_down': ld.get('anti_knock_down', 0),
         'exd': totals['exd'], 'exr': totals['exr'], 'crd': totals['crd'], 'crr': totals['crr'],
-        'rec': totals['rec'], 'mov': totals['mov'],
+        'rec': totals['rec'], 'mov': get_mount_driving_speed(c, totals['mov']),
         'ate': 0, 'satp': 0, 'satm': 0, 'satc': 0
     }
 
@@ -16799,8 +16815,33 @@ def client_handler(conn, addr):
                 send_rpc_push(526, encode_sproto([(0, success), (1, index_id)]))
                 send_rpc_response(session)
             elif msg in (238, 239): # use_mount / unuse_mount
-                # The APK applies the visual mount/dismount locally.  Persist
-                # the packet acknowledgement so it never stalls on a request.
+                # City mount cars use the player's NavMeshAgent speed for both
+                # movement and wheel rotation. Override CurSpeed with this
+                # equipped car's MaxSpeed only between use_mount/unuse_mount.
+                if picked_char:
+                    if msg == 238:
+                        mount_id, _, _ = get_equipped_mount(picked_char)
+                        mount_cfg = MOUNT_CONFIG.get(mount_id, {})
+                        is_big_world = (
+                            int(MAP_CONFIG.get(str(picked_char.get('map_id', '')), {}).get('type', -1)) == 1
+                        )
+                        should_ride = bool(
+                            is_big_world and mount_id
+                            and float(mount_cfg.get('max_speed', 0) or 0) > 0
+                        )
+                    else:
+                        should_ride = False
+
+                    if bool(picked_char.get('mount_riding', False)) != should_ride:
+                        picked_char['mount_riding'] = should_ride
+                        save_chars(all_accounts_chars)
+                        # TAG 510 updates CurSpeed locally; while mounted it
+                        # is exactly MountData.MaxSp. Dismount restores normal MOV.
+                        sync_char_attrs_rpc(conn, picked_char)
+                        sync_equipment_status_to_peers(picked_char)
+                        # Keep the server riding flag and remote car visual aligned.
+                        sync_main_player_visual(picked_char, send_rpc_push)
+
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
