@@ -9761,37 +9761,21 @@ def _rank_pvp_character_look(character):
 
 
 def _rank_pvp_zombie_character(character):
-    """Build map 501's zombie opponent using the APK's character Sproto schema."""
+    """Clone a real character into map 501's zombie camp for local AI combat."""
     stats = get_character_stats(character)
-
-    # get_full_char() is the server's full-login layout.  The Arena tag 544
-    # instead declares SprotoType.character, whose fields after attribute_other
-    # are two positions earlier (property=3, visual=4, movement=5, skills=6,
-    # equip=7, badge=8, fashion=9, potionIndex=10, runtime=11,
-    # equip_enhance=12, download=13, skill_index=14).
-    login_fields = decode_sproto(get_full_char(character))
-    field_map = {
-        0: 0, 1: 1, 2: 2,
-        5: 3, 6: 4, 7: 5, 8: 6, 9: 7, 10: 8, 11: 9,
-        12: 10, 13: 11, 14: 12, 15: 13, 16: 14
-    }
-    packed = {
-        target_tag: login_fields[source_tag]
-        for source_tag, target_tag in field_map.items()
-        if source_tag in login_fields
-    }
-
+    # TAG 544 contains SprotoType.character.  Its wire tags intentionally match
+    # get_full_char(): property=5, visual=6, movement=7, skills=8,
+    # equip=9, badge=10, fashion=11, potion=12, runtime=13, enhance=14.
+    packed = decode_sproto(get_full_char(character))
     general_data = decode_sproto(packed.get(1, b""))
     general_data[3] = RANK_PVP_MAP_ID
     packed[1] = encode_sproto(list(general_data.items()))
-
     other_data = decode_sproto(packed.get(2, b""))
     other_data[0] = int(stats.get("hp_max", 1))
-    other_data[15] = 2  # CAMP_TYPE.NORMAL_NPC: the client's Rank PVP target camp
+    other_data[15] = 2
     packed[2] = encode_sproto(list(other_data.items()))
-
-    packed[5] = get_movement(400, 120, 0, -9000)
-    packed[11] = get_runtime_aoi(character)
+    packed[7] = get_movement(400, 120, 0, -9000)
+    packed[13] = get_runtime_aoi(character)
     return encode_sproto(list(packed.items()))
 
 
