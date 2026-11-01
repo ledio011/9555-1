@@ -2875,8 +2875,10 @@ def get_mount_driving_speed(c, normal_mov):
                 or int(MAP_CONFIG.get(str(c.get('map_id', '')), {}).get('type', -1)) != 1):
             return int(normal_mov)
         mount_id, _, _ = get_equipped_mount(c)
-        max_speed = float(MOUNT_CONFIG.get(mount_id, {}).get('max_speed', 0) or 0)
-        if not mount_id or max_speed <= 0:
+        mount_cfg = MOUNT_CONFIG.get(mount_id, {})
+        max_speed = float(mount_cfg.get('max_speed', 0) or 0)
+        if (not mount_id or int(mount_cfg.get('need_show', 0)) != 1
+                or max_speed <= 0):
             return int(normal_mov)
         # Client MountData.MaxSp is MaxSpeed / 100 (m/s), while
         # attribute_all.mov is interpreted as mov / 100 (m/s).
@@ -16827,6 +16829,7 @@ def client_handler(conn, addr):
                         )
                         should_ride = bool(
                             is_big_world and mount_id
+                            and int(mount_cfg.get('need_show', 0)) == 1
                             and float(mount_cfg.get('max_speed', 0) or 0) > 0
                         )
                     else:
