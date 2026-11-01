@@ -9779,6 +9779,19 @@ def _rank_pvp_zombie_character(character):
     return encode_sproto(list(packed.items()))
 
 
+def _rank_pvp_opponent_hp_update(character, hp, stats=None):
+    """Build TAG 510 data without resetting the local zombie's other attributes."""
+    stats = stats or get_character_stats(character)
+    fields = character_attribute_other_fields(character, stats, max(0, int(hp)))
+    # Arena's spawned clone is always CAMP_TYPE.NORMAL_NPC; the generic
+    # attribute builder uses the ordinary player camp for a real character.
+    fields = [(tag, 2 if tag == 15 else value) for tag, value in fields]
+    return encode_sproto([
+        (0, int(character.get("id", 0))),
+        (1, encode_sproto(fields))
+    ])
+
+
 def _rank_pvp_append_log(character, message, timestamp):
     state = _rank_pvp_state(character)
     logs = state.setdefault("logs", [])
@@ -13762,8 +13775,9 @@ def client_handler(conn, addr):
                     current["opponent_hp"] = min(
                         hp_now, max(1, int(opponent_stats.get("hp_max", 1)))
                     )
-                    hp_other = encode_sproto([(0, current["opponent_hp"])])
-                    hp_character = encode_sproto([(0, opponent_id), (1, hp_other)])
+                    hp_character = _rank_pvp_opponent_hp_update(
+                        opponent, current["opponent_hp"], opponent_stats
+                    )
                     send_rpc_push(510, encode_sproto([(0, hp_character)]))
                 send_rpc_push(629, encode_sproto([(0, deadline), (1, 0)]))
 
@@ -16984,8 +16998,9 @@ def client_handler(conn, addr):
                                 # TAG 510 -> character_aoi_attribute -> attribute_other.hp
                                 # calls ObjZombiePlayer.ChangeHPVal(), updating the
                                 # visible health bar and raising OnZombiePlayerDie at 0.
-                                hp_other = encode_sproto([(0, hp_after)])
-                                hp_character = encode_sproto([(0, target_id), (1, hp_other)])
+                                hp_character = _rank_pvp_opponent_hp_update(
+                                    rank_opponent, hp_after, defender_stats
+                                )
                                 send_rpc_push(510, encode_sproto([(0, hp_character)]))
                                 print(f"[RANK PVP HIT] attacker={picked_char.get('id')} "
                                       f"opponent={target_id} damage={actual_rank_damage} "
