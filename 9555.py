@@ -9401,6 +9401,10 @@ RANK_PVP_MAP_ID = "501"
 RANK_PVP_FIGHT_SECONDS = 60
 RANK_PVP_CANDIDATE_COUNT = 3
 RANK_PVP_LOG_LIMIT = 30
+# Rank PVP HP is transient during a 60-second match. Debounce persistence so
+# combat packets never wait for a full character-database backup/fsync.
+RANK_PVP_HP_SAVE_LOCK = threading.Lock()
+RANK_PVP_HP_SAVE_TIMERS = {}
 RANK_PVP_TIERS = (
     (1, 1, "33201", 200, "33201", "33001", "33101"),
     (2, 2, "33202", 100, "33202", "33002", "33102"),
@@ -9790,6 +9794,37 @@ def _rank_pvp_opponent_hp_update(character, hp, stats=None):
         (0, int(character.get("id", 0))),
         (1, encode_sproto(fields))
     ])
+
+
+def _rank_pvp_schedule_hp_save(character, expected_match_id, delay=0.25):
+    """Coalesce temporary Arena HP writes instead of fsyncing the whole DB per hit."""
+    try:
+        char_id = int(character.get("id", 0) or 0)
+    except (AttributeError, TypeError, ValueError):
+        return
+    expected_match_id = str(expected_match_id or "")
+    if char_id <= 0 or not expected_match_id:
+        return
+
+    def persist():
+        with RANK_PVP_HP_SAVE_LOCK:
+            if RANK_PVP_HP_SAVE_TIMERS.get(char_id) is not timer:
+                return
+            RANK_PVP_HP_SAVE_TIMERS.pop(char_id, None)
+        match = character.get("_rank_pvp_match")
+        if (isinstance(match, dict)
+                and str(match.get("match_id")) == expected_match_id
+                and not match.get("result_recorded")):
+            save_chars(all_accounts_chars)
+
+    with RANK_PVP_HP_SAVE_LOCK:
+        previous = RANK_PVP_HP_SAVE_TIMERS.get(char_id)
+        if previous is not None:
+            previous.cancel()
+        timer = threading.Timer(max(0.05, float(delay)), persist)
+        timer.daemon = True
+        RANK_PVP_HP_SAVE_TIMERS[char_id] = timer
+        timer.start()
 
 
 def _rank_pvp_append_log(character, message, timestamp):
@@ -13719,6 +13754,50 @@ def client_handler(conn, addr):
               f"opponent={match.get('opponent_id')}")
         return True
 
+    def rank_pvp_send_opponent_hp_step(
+            expected_match_id, expected_sync_seq, opponent_id, opponent_stats,
+            start_hp, target_hp, step=1, total_steps=5):
+        """Feed stepped TAG 510 HP values because the APK's HPLineLogic snaps on each update."""
+        next_timer = None
+        with RANK_PVP_LOCK:
+            current = picked_char.get("_rank_pvp_match") if picked_char else None
+            if (not isinstance(current, dict)
+                    or str(current.get("match_id")) != str(expected_match_id)
+                    or current.get("result_recorded")
+                    or int(current.get("opponent_hp_sync_seq", -1)) != int(expected_sync_seq)
+                    or int(current.get("opponent_id", 0) or 0) != int(opponent_id)
+                    or str(picked_char.get("map_id", "")) != RANK_PVP_MAP_ID
+                    or not is_current_character_connection(conn, picked_char)):
+                return
+
+            opponent = _rank_pvp_find_character(opponent_id)
+            if opponent is None:
+                return
+            hp_max = max(1, int(opponent_stats.get("hp_max", 1)))
+            total_steps = max(1, int(total_steps))
+            step = max(1, min(int(step), total_steps))
+            interpolated = start_hp + (target_hp - start_hp) * (float(step) / total_steps)
+            hp_value = max(0, min(int(round(interpolated)), hp_max))
+            if step >= total_steps:
+                hp_value = max(0, min(int(target_hp), hp_max))
+
+            hp_character = _rank_pvp_opponent_hp_update(
+                opponent, hp_value, opponent_stats
+            )
+            send_rpc_push(510, encode_sproto([(0, hp_character)]))
+            current["opponent_hp_wire"] = hp_value
+
+            if step < total_steps and hp_value > 0:
+                next_timer = threading.Timer(
+                    0.04, rank_pvp_send_opponent_hp_step,
+                    args=(expected_match_id, expected_sync_seq, opponent_id,
+                          opponent_stats, start_hp, target_hp, step + 1, total_steps)
+                )
+                next_timer.daemon = True
+        if next_timer is not None:
+            next_timer.start()
+
+
     def rank_pvp_timeout(expected_match_id):
         match = picked_char.get("_rank_pvp_match") if picked_char else None
         if (not isinstance(match, dict)
@@ -13775,6 +13854,8 @@ def client_handler(conn, addr):
                     current["opponent_hp"] = min(
                         hp_now, max(1, int(opponent_stats.get("hp_max", 1)))
                     )
+                    current["opponent_hp_wire"] = current["opponent_hp"]
+                    current.setdefault("opponent_hp_sync_seq", 0)
                     hp_character = _rank_pvp_opponent_hp_update(
                         opponent, current["opponent_hp"], opponent_stats
                     )
@@ -16990,18 +17071,29 @@ def client_handler(conn, addr):
                                     if hp_before <= 0:
                                         print(f"[RANK PVP HIT] ignored hit on defeated opponent target={target_id}")
                                         continue
+                                    hp_wire_before = max(0, min(
+                                        int(live_match.get("opponent_hp_wire", hp_before)), hp_max
+                                    ))
                                     hp_after = max(0, hp_before - actual_rank_damage)
                                     live_match["opponent_hp"] = hp_after
                                     live_match["last_opponent_hit_at"] = int(time.time())
-                                    save_chars(all_accounts_chars)
+                                    sync_seq = int(live_match.get("opponent_hp_sync_seq", 0)) + 1
+                                    live_match["opponent_hp_sync_seq"] = sync_seq
 
-                                # TAG 510 -> character_aoi_attribute -> attribute_other.hp
-                                # calls ObjZombiePlayer.ChangeHPVal(), updating the
-                                # visible health bar and raising OnZombiePlayerDie at 0.
-                                hp_character = _rank_pvp_opponent_hp_update(
-                                    rank_opponent, hp_after, defender_stats
+                                # Save Arena HP after a short quiet window; never block the
+                                # incoming combat packet on whole-database backup/fsync.
+                                _rank_pvp_schedule_hp_save(
+                                    picked_char, str(rank_match.get("match_id", ""))
                                 )
-                                send_rpc_push(510, encode_sproto([(0, hp_character)]))
+
+                                # The APK's PlayerHeadInfoLogic calls HPLineLogic.ChangeVal(),
+                                # which ForceSetVal()s immediately instead of lerping. Feed
+                                # five short HP steps to make the displayed bar move smoothly.
+                                rank_pvp_send_opponent_hp_step(
+                                    str(rank_match.get("match_id", "")), sync_seq,
+                                    target_id, defender_stats, hp_wire_before, hp_after,
+                                    1, 1 if hp_after <= 0 else 5
+                                )
                                 print(f"[RANK PVP HIT] attacker={picked_char.get('id')} "
                                       f"opponent={target_id} damage={actual_rank_damage} "
                                       f"hp={hp_before}->{hp_after}")
