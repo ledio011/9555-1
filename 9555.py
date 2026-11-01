@@ -13854,12 +13854,16 @@ def client_handler(conn, addr):
                     current["opponent_hp"] = min(
                         hp_now, max(1, int(opponent_stats.get("hp_max", 1)))
                     )
-                    current["opponent_hp_wire"] = current["opponent_hp"]
                     current.setdefault("opponent_hp_sync_seq", 0)
-                    hp_character = _rank_pvp_opponent_hp_update(
-                        opponent, current["opponent_hp"], opponent_stats
-                    )
-                    send_rpc_push(510, encode_sproto([(0, hp_character)]))
+                    # A player may already have landed a hit before this delayed
+                    # timer runs. Do not reset the visual HP baseline or send a
+                    # stale full-health update over an active stepped correction.
+                    if "opponent_hp_wire" not in current:
+                        current["opponent_hp_wire"] = current["opponent_hp"]
+                        hp_character = _rank_pvp_opponent_hp_update(
+                            opponent, current["opponent_hp"], opponent_stats
+                        )
+                        send_rpc_push(510, encode_sproto([(0, hp_character)]))
                 send_rpc_push(629, encode_sproto([(0, deadline), (1, 0)]))
 
         countdown_notice = threading.Timer(0.5, send_rank_pvp_countdown)
