@@ -23,6 +23,14 @@ DEFAULT_PORT = 15678
 MARKER = ROOT / ".grant_medkits_9001_100_all.done"
 LOCK = ROOT / ".grant_medkits_9001_100_all.lock"
 
+BACKPACK_FIELDS = (
+    "inventory", "equip_inventory", "badge_inventory", "fashion_inventory",
+    "equipped_equip", "equipped_badges", "equipped_fashion",
+    "equip", "equips", "equippedEquip", "Equip",
+    "badge_equip", "equipped_badges_items", "badgeEquip", "BadgeEquip",
+    "fashion_equip", "equippedFashion", "fashionEquip", "FashionEquip",
+)
+
 
 def game_port_is_open(port):
     try:
@@ -39,6 +47,134 @@ def write_json_atomic(path, data):
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temp_path, path)
+
+
+def record_item_id(item):
+    for key in ("id", "itemId", "item_id", "itemID", "ItemId", "ID"):
+        value = item.get(key)
+        if value is not None and str(value):
+            return str(value)
+    return ""
+
+
+def record_amount_key(item):
+    for key in ("amount", "stack", "StackNum"):
+        if key in item:
+            return key
+    return "amount"
+
+
+def record_amount(item, key):
+    try:
+        return max(0, int(item.get(key, 1)))
+    except (TypeError, ValueError):
+        return 1
+
+
+def plan_character_grant(server, character, item_cfg):
+    """Plan only item-bag changes; do not run backpack migrations on other bags."""
+    inventory_records = server._backpack_records(character.get("inventory"))
+    remaining = AMOUNT
+    stack_updates = []
+    max_stack = max(1, int(item_cfg.get("max_stack", 1)))
+
+    for item in inventory_records:
+        if record_item_id(item) != ITEM_ID:
+            continue
+        amount_key = record_amount_key(item)
+        current = record_amount(item, amount_key)
+        room = max(0, max_stack - current)
+        moved = min(remaining, room)
+        if moved:
+            stack_updates.append((item, amount_key, current + moved))
+            remaining -= moved
+        if remaining <= 0:
+            break
+
+    new_items = []
+    next_item_index = None
+    if remaining > 0:
+        slots_needed = (remaining + max_stack - 1) // max_stack
+        if len(inventory_records) + slots_needed > 100:
+            return None
+
+        all_records = []
+        seen_records = set()
+        used_indexes = set()
+        for field in BACKPACK_FIELDS:
+            for item in server._backpack_records(character.get(field)):
+                marker = id(item)
+                if marker in seen_records:
+                    continue
+                seen_records.add(marker)
+                all_records.append(item)
+                for index_key in ("index_id", "indexId", "indexID", "IndexId"):
+                    if index_key in item:
+                        try:
+                            value = int(item[index_key])
+                            if value >= 0:
+                                used_indexes.add(value)
+                        except (TypeError, ValueError):
+                            pass
+                        break
+
+        try:
+            saved_next = int(character.get("next_item_index", 10000))
+        except (TypeError, ValueError):
+            saved_next = 10000
+        # Reserve room for legacy records that receive generated indexes when
+        # the normal server backpack loader next normalizes this character.
+        next_item_index = max(
+            10000,
+            saved_next,
+            max(used_indexes, default=9999) + 1,
+            10000 + len(all_records),
+        )
+
+        quality = int(item_cfg.get("quality", 0))
+        while remaining > 0:
+            while next_item_index in used_indexes:
+                next_item_index += 1
+            stack = min(remaining, max_stack)
+            new_items.append({
+                "index_id": next_item_index,
+                "id": ITEM_ID,
+                "amount": stack,
+                "bindflag": True,
+                "level": 0,
+                "quality": quality,
+                "appraise": 0,
+                "parm": [0] * 8,
+                "random_attri": {},
+                "inlay": {},
+            })
+            used_indexes.add(next_item_index)
+            next_item_index += 1
+            remaining -= stack
+
+    return {
+        "stack_updates": stack_updates,
+        "new_items": new_items,
+        "next_item_index": next_item_index,
+        "inventory_records": inventory_records,
+        "original_inventory": character.get("inventory"),
+    }
+
+
+def apply_character_grant(character, plan):
+    for item, amount_key, new_amount in plan["stack_updates"]:
+        item[amount_key] = new_amount
+
+    new_items = plan["new_items"]
+    if new_items:
+        original_inventory = plan["original_inventory"]
+        if isinstance(original_inventory, list):
+            target = original_inventory
+        else:
+            target = list(plan["inventory_records"])
+            character["inventory"] = target
+        target.extend(new_items)
+        character["next_item_index"] = plan["next_item_index"]
 
 
 def main():
@@ -93,11 +229,11 @@ def main():
             print(f"ERROR: ItemData entry {ITEM_ID} was not loaded.")
             return 1
 
-        # Guard against a changed or mismatched ItemData table.
         expected = (
             int(item_cfg.get("type", -1)) == 3
             and int(item_cfg.get("level", -1)) == 1
             and int(item_cfg.get("function", -1)) == 30000
+            and int(item_cfg.get("max_stack", 0)) > AMOUNT
         )
         if not expected:
             print(f"ERROR: ItemData {ITEM_ID} does not match the expected healing-potion row: {item_cfg}")
@@ -124,12 +260,16 @@ def main():
             print("ERROR: the character database contains no characters.")
             return 1
 
+        plans = []
         blocked = []
         for character in targets:
-            if not server.can_add_to_inventory(character, ITEM_ID, AMOUNT):
+            plan = plan_character_grant(server, character, item_cfg)
+            if plan is None:
                 blocked.append(
                     f"{character.get('name', 'Unknown')} (id={character.get('id', 'unknown')})"
                 )
+            else:
+                plans.append(plan)
 
         if blocked:
             print("ERROR: grant cancelled; these characters do not have room in their item backpack:")
@@ -138,8 +278,6 @@ def main():
             print("No character database changes were saved.")
             return 1
 
-        # Write an in-progress marker before changing data so an interrupted
-        # run cannot silently grant the same 100 items twice.
         marker_data = {
             "status": "in_progress",
             "item_id": ITEM_ID,
@@ -149,18 +287,13 @@ def main():
         }
         write_json_atomic(MARKER, marker_data)
 
-        # Re-check after loading and preflight. The server must remain stopped.
         if game_port_is_open(port):
             print(f"ERROR: port {port} became active before the grant was saved.")
             print("The in-progress marker was retained; inspect it and the database before retrying.")
             return 1
 
-        for character in targets:
-            if not server.add_to_inventory(character, ITEM_ID, AMOUNT):
-                raise RuntimeError(
-                    f"add_to_inventory failed for {character.get('name')} "
-                    f"(id={character.get('id')}) after successful preflight"
-                )
+        for character, plan in zip(targets, plans):
+            apply_character_grant(character, plan)
 
         if not server.save_chars(database):
             raise RuntimeError("save_chars() did not confirm the atomic database save")
