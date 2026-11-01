@@ -1127,7 +1127,15 @@ try:
                         'model_id': parts[15] if len(parts) > 15 else '',
                         'gta_link_car_id': parts[38] if len(parts) > 38 and parts[38] else parts[1],
                         'price_type': int(parts[43]) if len(parts) > 43 and parts[43].lstrip('-').isdigit() else -1,
-                        'price': int(parts[44]) if len(parts) > 44 and parts[44].isdigit() else 0
+                        'price': int(parts[44]) if len(parts) > 44 and parts[44].isdigit() else 0,
+                        # MountData Status1..Status4 are the vehicle's passive
+                        # player attributes (including MOV); retain all four.
+                        'stats': [
+                            (int(parts[i]), int(parts[i + 1]))
+                            for i in (7, 9, 11, 13)
+                            if (len(parts) > i + 1 and parts[i].isdigit()
+                                and parts[i + 1].lstrip('-').isdigit())
+                        ]
                     }
         garage_count = sum(1 for v in MOUNT_CONFIG.values() if v.get('need_show') == 1)
         motor_count = sum(1 for v in MOUNT_CONFIG.values() if v.get('is_motor') == 1)
@@ -4915,6 +4923,17 @@ def get_character_stats(c):
             add_item_attribute(badge_cfg.get('status2'), badge_cfg.get('value2', 0))
             add_extra_combat_power(badge_cfg.get('status1'), badge_cfg.get('value1', 0))
             add_extra_combat_power(badge_cfg.get('status2'), badge_cfg.get('value2', 0))
+
+    # The equipped garage vehicle contributes its MountData bonuses even
+    # when the player is not currently riding it. In city maps, the client
+    # drives the mounted character from attribute_all.mov; MaxSpeed belongs
+    # to the separate physics-driven race car and is not this movement value.
+    mount_id, _, _ = get_equipped_mount(c)
+    mount_cfg = MOUNT_CONFIG.get(mount_id, {})
+    if mount_id and int(mount_cfg.get('need_show', 0)) == 1:
+        for attribute_id, value in mount_cfg.get('stats', []):
+            add_item_attribute(attribute_id, value)
+            add_extra_combat_power(attribute_id, value)
 
     # The APK displays TitleData bonuses in Chara > Title. Apply the owned
     # title's configured attributes through the same percentage/stat path as
@@ -15309,27 +15328,38 @@ def client_handler(conn, addr):
             elif msg in (236, 237): # mount_equip / mount_unequip
                 mount_id = field_text(body, 0)
                 if picked_char and mount_id in MOUNT_CONFIG:
-                    mounts = picked_char.setdefault('mounts', {})
-                    target = mounts.setdefault(mount_id, {})
-                    if int(target.get('state', 0)) > 0:
-                        if msg == 236:
-                            for state in mounts.values():
-                                if int(state.get('state', 0)) == 2:
-                                    state['state'] = 1
-                            target['state'] = 2
-                            picked_char['equipped_mount_id'] = mount_id
-                        else:
-                            target['state'] = 1
-                            if str(picked_char.get('equipped_mount_id', '')) == mount_id:
-                                picked_char['equipped_mount_id'] = ''
-                        save_chars(all_accounts_chars)
-                        send_rpc_push(631, encode_sproto([(0, build_mount_info(picked_char)), (1, mount_id)]))
-                        # The normal city garage response updates only the
-                        # garage panel.  The APK's Street Race gate reads
-                        # MainPlayer.MountId, so mirror the equipped vehicle
-                        # into the live player visual immediately.
-                        sync_main_player_visual(picked_char, send_rpc_push)
-                        print(f"[MOUNT] {'equipped' if msg == 236 else 'unequipped'} id={mount_id}")
+                    with get_character_transaction_lock(picked_char):
+                        mounts = picked_char.setdefault('mounts', {})
+                        target = mounts.setdefault(mount_id, {})
+                        if int(target.get('state', 0)) > 0:
+                            # Compare the authoritative combat power before and
+                            # after changing the equipped MountData attributes.
+                            power_before = get_character_stats(picked_char)['power']
+                            if msg == 236:
+                                for state in mounts.values():
+                                    if int(state.get('state', 0)) == 2:
+                                        state['state'] = 1
+                                target['state'] = 2
+                                picked_char['equipped_mount_id'] = mount_id
+                            else:
+                                target['state'] = 1
+                                if str(picked_char.get('equipped_mount_id', '')) == mount_id:
+                                    picked_char['equipped_mount_id'] = ''
+                            save_chars(all_accounts_chars)
+                            send_rpc_push(631, encode_sproto([(0, build_mount_info(picked_char)), (1, mount_id)]))
+                            # Mount bonuses affect the same server attributes as
+                            # equipment, including the MOV value used by mounted
+                            # movement in every city map.
+                            sync_char_attrs_rpc(conn, picked_char)
+                            send_combat_power_gain_tip(
+                                send_rpc_push, power_before,
+                                get_character_stats(picked_char)['power']
+                            )
+                            sync_equipment_status_to_peers(picked_char)
+                            # Keep MainPlayer.MountId and visible player visuals
+                            # in sync with the equipped vehicle.
+                            sync_main_player_visual(picked_char, send_rpc_push)
+                            print(f"[MOUNT] {'equipped' if msg == 236 else 'unequipped'} id={mount_id}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
