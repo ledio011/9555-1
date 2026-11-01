@@ -1117,6 +1117,16 @@ try:
                         max_speed = float(parts[24]) / 100.0 if len(parts) > 24 and parts[24] else 0.0
                     except (TypeError, ValueError):
                         max_speed = 0.0
+                    # World-map mounted movement uses MountData's MOV (2011)
+                    # percentage bonus. MaxSpeed is reserved for physics cars
+                    # such as the separate Street Race vehicle.
+                    world_mov_bonus = sum(
+                        int(parts[i + 1])
+                        for i in (7, 9, 11, 13)
+                        if (len(parts) > i + 1 and parts[i].isdigit()
+                            and parts[i + 1].lstrip('-').isdigit()
+                            and int(parts[i]) == 2011)
+                    )
                     MOUNT_CONFIG[parts[1]] = {
                         'colors': colors,
                         'default_color': parts[29] if parts[29] else (colors[0] if colors else "1"),
@@ -1124,6 +1134,7 @@ try:
                         'need_show': int(parts[36]) if parts[36].isdigit() else 0,
                         'is_motor': is_motor,
                         'max_speed': max_speed,
+                        'world_mov_bonus': world_mov_bonus,
                         'model_id': parts[15] if len(parts) > 15 else '',
                         'gta_link_car_id': parts[38] if len(parts) > 38 and parts[38] else parts[1],
                         'price_type': int(parts[43]) if len(parts) > 43 and parts[43].lstrip('-').isdigit() else -1,
@@ -2869,20 +2880,21 @@ def get_equipped_mount(c):
     return mount_id, color, 1 if c.get('mount_riding', False) else 0
 
 def get_mount_driving_speed(c, normal_mov):
-    """Use MountData.MaxSpeed only while mounted in a BIG_WORLD scene."""
+    """Apply the car's MOV bonus only while mounted in a BIG_WORLD scene."""
     try:
         if (not c.get('mount_riding')
                 or int(MAP_CONFIG.get(str(c.get('map_id', '')), {}).get('type', -1)) != 1):
             return int(normal_mov)
         mount_id, _, _ = get_equipped_mount(c)
         mount_cfg = MOUNT_CONFIG.get(mount_id, {})
-        max_speed = float(mount_cfg.get('max_speed', 0) or 0)
+        mov_bonus = int(mount_cfg.get('world_mov_bonus', 0) or 0)
         if (not mount_id or int(mount_cfg.get('need_show', 0)) != 1
-                or max_speed <= 0):
+                or mov_bonus <= 0):
             return int(normal_mov)
-        # Client MountData.MaxSp is MaxSpeed / 100 (m/s), while
-        # attribute_all.mov is interpreted as mov / 100 (m/s).
-        return int(round(max_speed * 100.0))
+        # MountData Status/Value ID 2011 is the world-mount MOV percentage.
+        # Add it to normal MOV only while mounted. Street Race instead reads
+        # MaxSpeed directly into CarControl.maxSpeed from the client table.
+        return int(normal_mov) + math.floor(int(normal_mov) * mov_bonus / 10000.0)
     except (TypeError, ValueError):
         return int(normal_mov)
 
@@ -16830,7 +16842,7 @@ def client_handler(conn, addr):
                         should_ride = bool(
                             is_big_world and mount_id
                             and int(mount_cfg.get('need_show', 0)) == 1
-                            and float(mount_cfg.get('max_speed', 0) or 0) > 0
+                            and int(mount_cfg.get('world_mov_bonus', 0) or 0) > 0
                         )
                     else:
                         should_ride = False
