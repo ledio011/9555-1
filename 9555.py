@@ -17655,7 +17655,7 @@ def client_handler(conn, addr):
                         isinstance(opponent_match, dict) and not opponent_match.get("result_recorded")
                     )
                     if (invalid or opponent is None or opponent_busy
-                            or int(opponent.get("id", 0)) == int(picked_char.get("id", 0)):
+                            or int(opponent.get("id", 0)) == int(picked_char.get("id", 0))):
                         send_rpc_push(541, _rank_pvp_sync_payload(picked_char))
                         print(f"[RANK PVP] rejected selection player={picked_char.get('id')} "
                               f"opponent={opponent_id} times={state.get('times')}")
