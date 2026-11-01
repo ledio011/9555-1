@@ -16840,6 +16840,7 @@ def client_handler(conn, addr):
                     print(f"[RELIFE] ignored repeated attack on downed player={picked_char.get('id')} map={current_map}")
                 elif picked_char and target_id == picked_char['id']:
                     is_area = (picked_char.get('map_id') == "502")
+                    is_rank_pvp = (current_map == RANK_PVP_MAP_ID)
                     if is_area:
                         # Server-authoritative boss->player damage calculation
                         boss_id = picked_char.get('boss_inst_id')
@@ -16879,13 +16880,95 @@ def client_handler(conn, addr):
                             server_dmg = 0
                             calc_cri = False
                             print(f"[AREA BOSS ATTACK] No boss_inst_id found, damage rejected")
+                    elif is_rank_pvp:
+                        # In Rank PVP the only AI opponent is the selected character
+                        # cloned as OBJ_ZOMBIE_PLAYER. TAG 128 identifies the player
+                        # being hit, so resolve the attacker from this active match
+                        # instead of the unrelated generic NPC 100 template.
+                        rank_match = picked_char.get("_rank_pvp_match")
+                        rank_opponent = None
+                        valid_counter = bool(
+                            is_current_character_connection(conn, picked_char)
+                            and isinstance(rank_match, dict)
+                            and not rank_match.get("result_recorded")
+                            and rank_match.get("started_at")
+                            and int(time.time()) <= int(rank_match.get("deadline", 0) or 0)
+                        )
+                        if valid_counter:
+                            rank_opponent = _rank_pvp_find_character(
+                                rank_match.get("opponent_id")
+                            )
+                        if rank_opponent is None or client_dmg < 0 or not effinfo_id:
+                            print(f"[RANK PVP COUNTER] rejected invalid opponent attack player={picked_char.get('id')} damage={client_dmg} eff={effinfo_id}")
+                            server_dmg = 0
+                        else:
+                            opponent_stats = get_character_stats(rank_opponent)
+                            player_stats = get_character_stats(picked_char)
+                            opponent_skills = build_skills_map(
+                                rank_opponent.get("prof", 0),
+                                rank_opponent.get("level", 1),
+                                rank_opponent.get("skill_levels", {}),
+                                rank_opponent.get("equipped_equip", []),
+                                rank_opponent.get("skill_positions", {})
+                            )
+                            matching_skills = []
+                            for candidate_skill_id in opponent_skills:
+                                candidate_cfg = SKILL_CONFIG.get(str(candidate_skill_id), {})
+                                candidate_effects = {
+                                    str(candidate_cfg.get(key) or "")
+                                    for key in ("eff0", "eff1", "eff2")
+                                    if candidate_cfg.get(key)
+                                }
+                                if effinfo_id in candidate_effects:
+                                    matching_skills.append(str(candidate_skill_id))
+
+                            preferred_skill = str(EFF_TO_SKILL.get(effinfo_id, ""))
+                            if preferred_skill in matching_skills:
+                                opponent_skill_id = preferred_skill
+                            elif len(matching_skills) == 1:
+                                opponent_skill_id = matching_skills[0]
+                            else:
+                                opponent_skill_id = ""
+
+                            if not opponent_skill_id:
+                                print(f"[RANK PVP COUNTER] rejected unknown opponent skill player={picked_char.get('id')} opponent={rank_opponent.get('id')} eff={effinfo_id} candidates={matching_skills}")
+                                server_dmg = 0
+                            elif client_dmg == 0:
+                                # The client already resolved the local hit/miss.
+                                server_dmg = 0
+                            else:
+                                opponent_skill_level = max(
+                                    0, int((rank_opponent.get("skill_levels") or {}).get(
+                                        opponent_skill_id, 0
+                                    ) or 0)
+                                )
+                                # Validate against the selected zombie player's real
+                                # ATK/DEF, skill level, EffInfoData, SAT/PvP rules and
+                                # maximum random roll, then retain the exact damage
+                                # already applied by the client's deterministic scene.
+                                max_counter_damage, can_counter_hit, possible_counter_crit = get_combat_damage(
+                                    opponent_stats, player_stats, opponent_skill_id,
+                                    opponent_skill_level, pvp_scale=1.0,
+                                    effinfo_id=effinfo_id, forced_hit=True,
+                                    forced_crit=True, max_variance=True, is_pvp=True
+                                )
+                                if (not can_counter_hit
+                                        or client_dmg > max_counter_damage + 2):
+                                    print(f"[RANK PVP COUNTER] rejected out-of-range damage player={picked_char.get('id')} opponent={rank_opponent.get('id')} skill={opponent_skill_id} damage={client_dmg} max={max_counter_damage}")
+                                    server_dmg = 0
+                                else:
+                                    server_dmg = client_dmg
+                                    calc_cri = bool(possible_counter_crit)
+
+                            print(f"[RANK PVP COUNTER] player={picked_char.get('id')} opponent={rank_opponent.get('id') if rank_opponent else 0} skill={opponent_skill_id or '-'} eff={effinfo_id} client_damage={client_dmg} accepted_damage={server_dmg}")
+
                     # For non-arena Tag 128, the attacker is a local NPC/zombie in a single-copy scene.
                     # The client sends Tag 128 with characterId = player's ServerId (the target),
                     # not the attacker's ID. Without knowing which NPC attacked, the server cannot
                     # look up the correct attacker stats for exact server-authoritative calculation.
                     # However, we should NOT trust client_dmg directly as it allows damage manipulation.
                     # Use a reasonable default NPC attacker stats for server-authoritative calculation.
-                    if not is_area and not guild_boss_id and picked_char:
+                    if not is_area and not is_rank_pvp and not guild_boss_id and picked_char:
                         # Use a generic NPC attacker with basic stats for non-arena single-copy scenes
                         # The original game trusted client-authoritative damage, but server-side validation
                         # prevents extreme manipulation while still allowing the attack to deal damage.
@@ -17008,9 +17091,19 @@ def client_handler(conn, addr):
                                 skill_id = "50001"
                             skill_lv = max(0, int(char_skill_levels.get(skill_id, 0) or 0))
                             skill_cfg = SKILL_CONFIG.get(skill_id, {})
-                            mapped_skill = EFF_TO_SKILL.get(requested_effinfo_id)
+                            # MSG 111 carries the exact EffInfoData row used for
+                            # this hit. Check it against this skill directly;
+                            # the global eff->skill reverse map can point to a
+                            # different skill when effects are shared, causing
+                            # valid eff1/eff2 damage to be checked as eff0.
+                            valid_skill_effects = {
+                                str(skill_cfg.get(key) or "")
+                                for key in ("eff0", "eff1", "eff2")
+                                if skill_cfg.get(key)
+                            }
                             effinfo_id = (
-                                requested_effinfo_id if str(mapped_skill) == str(skill_id)
+                                requested_effinfo_id
+                                if requested_effinfo_id in valid_skill_effects
                                 else skill_cfg.get("eff0", "10000")
                             )
 
