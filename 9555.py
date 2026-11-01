@@ -13789,7 +13789,7 @@ def client_handler(conn, addr):
 
             if step < total_steps and hp_value > 0:
                 next_timer = threading.Timer(
-                    0.04, rank_pvp_send_opponent_hp_step,
+                    0.02, rank_pvp_send_opponent_hp_step,
                     args=(expected_match_id, expected_sync_seq, opponent_id,
                           opponent_stats, start_hp, target_hp, step + 1, total_steps)
                 )
@@ -17096,7 +17096,7 @@ def client_handler(conn, addr):
                                 rank_pvp_send_opponent_hp_step(
                                     str(rank_match.get("match_id", "")), sync_seq,
                                     target_id, defender_stats, hp_wire_before, hp_after,
-                                    1, 1 if hp_after <= 0 else 5
+                                    1, 1 if hp_after <= 0 else 10
                                 )
                                 print(f"[RANK PVP HIT] attacker={picked_char.get('id')} "
                                       f"opponent={target_id} damage={actual_rank_damage} "
