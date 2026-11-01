@@ -9616,31 +9616,83 @@ def _rank_pvp_reward_rows(reward_id):
 
 
 def _rank_pvp_settle_daily_reward(character, conn=None, send_rpc_push=None):
-    """Settle the previous day's confirmed LadderDailyReward for ranks 1-100."""
+    """Mail the previous day's LadderDailyReward to ranks 1-100, once per reset."""
     state = _rank_pvp_state(character)
     stamp = current_daily_stamp()
     previous_stamp = str(state.get("last_settlement_stamp") or stamp)
     if previous_stamp == stamp:
         return False
+
     rank_pos = int(state.get("rank_pos", RANK_PVP_MAX_RANK + 1))
-    rewards = []
     tier = _rank_pvp_tier_for_rank(rank_pos)
-    if rank_pos <= RANK_PVP_DAILY_REWARD_MAX_RANK and tier:
-        rewards = _rank_pvp_reward_rows(tier[4])
+    rewards = _rank_pvp_reward_rows(tier[4]) if (
+        rank_pos <= RANK_PVP_DAILY_REWARD_MAX_RANK and tier
+    ) else []
+
     if rewards:
-        grant_item_rewards(
-            character, [(item_id, quality, amount) for item_id, quality, amount in rewards],
-            conn, send_rpc_push, save=False
-        )
-        state["reward_count"] = int(state.get("reward_count", 0)) + 1
-        print(f"[RANK PVP] daily settlement player={character.get('id')} "
-              f"rank={rank_pos} reward={tier[4]} items={len(rewards)}")
-    elif rank_pos <= RANK_PVP_DAILY_REWARD_MAX_RANK:
+        reward_key = f"rank-pvp-daily:{previous_stamp}:{int(character.get('id', 0))}"
+        mails = character.setdefault("mails", [])
+        existing_mail = next((
+            mail for mail in mails
+            if isinstance(mail, dict) and mail.get("rankPvpDailyRewardKey") == reward_key
+        ), None)
+        if existing_mail:
+            state["last_settlement_stamp"] = stamp
+            save_chars(all_accounts_chars)
+            if conn is not None and send_rpc_push is not None:
+                send_rpc_push(531, build_mail_update(existing_mail))
+            return True
+
+        by_item_id = {}
+        for item_id, quality, amount in rewards:
+            item_id = str(item_id)
+            if item_id in by_item_id:
+                by_item_id[item_id]["count"] += int(amount)
+            else:
+                by_item_id[item_id] = {
+                    "itemId": item_id, "count": int(amount),
+                    "quality": int(quality), "count2": 0
+                }
+        now_ts = int(time.time())
+        mail_entry = {
+            "mailId": next_mail_id(),
+            "sendertype": 0,
+            "title": "Arena Daily Ranking Reward",
+            "senderTime": now_ts,
+            "receiveId": int(character.get("id", 0)),
+            "readTime": 0,
+            "context": f"Your Arena ranking reward for rank {rank_pos} is attached.",
+            "mailState": 0,
+            "sortTime": now_ts,
+            "items": list(by_item_id.values()),
+            "expireday": 7,
+            "rankPvpDailyRewardKey": reward_key
+        }
+        mails.append(mail_entry)
+        previous_reward_count = int(state.get("reward_count", 0))
+        state["reward_count"] = previous_reward_count + 1
+        state["last_settlement_stamp"] = stamp
+        if not save_chars(all_accounts_chars):
+            try:
+                mails.remove(mail_entry)
+            except ValueError:
+                pass
+            state["reward_count"] = previous_reward_count
+            state["last_settlement_stamp"] = previous_stamp
+            print(f"[RANK PVP] daily reward mail save failed player={character.get('id')}")
+            return False
+        if conn is not None and send_rpc_push is not None:
+            send_rpc_push(531, build_mail_update(mail_entry))
+        print(f"[RANK PVP] daily mail delivered player={character.get('id')} "
+              f"rank={rank_pos} reward={tier[4]} items={len(by_item_id)}")
+        return True
+
+    if rank_pos <= RANK_PVP_DAILY_REWARD_MAX_RANK:
         print(f"[RANK PVP] missing daily reward ShowRewardData id={tier[4] if tier else '-'} "
               f"player={character.get('id')}")
     state["last_settlement_stamp"] = stamp
     save_chars(all_accounts_chars)
-    return bool(rewards)
+    return False
 
 
 def _rank_pvp_ranked_characters():
@@ -9711,7 +9763,6 @@ def _rank_pvp_character_look(character):
 def _rank_pvp_zombie_character(character):
     """Clone a real character into map 501's zombie camp for local AI combat."""
     stats = get_character_stats(character)
-    character["hp"] = int(stats.get("hp_max", 1))
     packed = decode_sproto(get_full_char(character))
     general_data = decode_sproto(packed.get(1, b""))
     general_data[3] = RANK_PVP_MAP_ID
@@ -9771,17 +9822,30 @@ def _rank_pvp_finalize_state(character, win, reason):
         match["result_win"] = bool(win)
         match["result_reason"] = str(reason)
         match["result_at"] = now_ts
-        _rank_pvp_append_log(
-            character, f"Rank PVP {'victory' if win else 'defeat'} ({old_rank} -> {new_rank})", now_ts
-        )
+        opponent_name = str((opponent or {}).get("name", "Hero")).replace("*", "")
+        challenger_name = str(character.get("name", "Hero")).replace("*", "")
+        if win and opponent is not None and swapped:
+            own_log = f"#{'{'}101016{'}'}*{opponent_old_rank}*{opponent_name}*{new_rank}"
+        elif not win and opponent is not None:
+            own_log = f"#{'{'}101017{'}'}*{opponent_old_rank}*{opponent_name}"
+        elif win and opponent is not None:
+            own_log = f"You defeated {opponent_name}; your rank remains {new_rank}."
+        else:
+            own_log = f"Rank PVP {'victory' if win else 'defeat'}; rank {new_rank}."
+        _rank_pvp_append_log(character, own_log, now_ts)
+        if opponent is not None:
+            if win and swapped:
+                opponent_log = f"#{'{'}101019{'}'}*{old_rank}*{challenger_name}*{opponent_new_rank}"
+            elif win:
+                opponent_log = f"You were defeated by {challenger_name}; rank remains {opponent_old_rank}."
+            else:
+                opponent_log = f"#{'{'}101018{'}'}*{old_rank}*{challenger_name}"
+            _rank_pvp_append_log(opponent, opponent_log, now_ts)
         if swapped and opponent is not None:
             opponent_state["pre_rank_pos"] = opponent_old_rank
             old_best = int(opponent_state.get("best_rank_pos", RANK_PVP_MAX_RANK + 1))
             if opponent_new_rank <= RANK_PVP_MAX_RANK and (old_best > RANK_PVP_MAX_RANK or opponent_new_rank < old_best):
                 opponent_state["best_rank_pos"] = opponent_new_rank
-            _rank_pvp_append_log(
-                opponent, f"Rank PVP rank exchanged ({opponent_old_rank} -> {opponent_new_rank})", now_ts
-            )
         result = {
             "old_rank": old_rank, "new_rank": new_rank, "best_rank": best_rank,
             "opponent": opponent, "opponent_old_rank": opponent_old_rank,
@@ -9797,13 +9861,15 @@ def _rank_pvp_sort_items(sort_type=3):
     for character in _rank_pvp_ranked_characters():
         state = _rank_pvp_state(character)
         stats = get_character_stats(character)
+        rank_pos = int(state.get("rank_pos", RANK_PVP_MAX_RANK + 1))
         rows.append(encode_sproto([
             (0, int(character.get("id", 0))),
             (1, int(stats.get("power", 0))),
-            (2, str(character.get("name", "Hero"))),
+            # RankItemLogic reads LADDER's secondary value from name#rank.
+            (2, f"{character.get('name', 'Hero')}#{rank_pos}"),
             (3, int(character.get("prof", 0))),
             (4, str(int(sort_type))),
-            (5, int(state.get("rank_pos", RANK_PVP_MAX_RANK + 1)))
+            (5, rank_pos)
         ]))
     return rows
 
@@ -13602,8 +13668,9 @@ def client_handler(conn, addr):
                 conn, send_rpc_push, save=False
             )
             for item_id, quality, amount in reward_rows:
+                # item.quality is wire tag 3; wire tag 2 is reserved.
                 item_payload.append(encode_sproto([
-                    (0, item_id), (1, amount), (2, quality)
+                    (0, item_id), (1, amount), (3, quality)
                 ]))
             state = _rank_pvp_state(picked_char)
             if win:
@@ -13628,7 +13695,7 @@ def client_handler(conn, addr):
             save_chars(all_accounts_chars)
             if is_current_character_connection(conn, picked_char):
                 send_rpc_push(551, result_data)
-                picked_char.pop("rank_pvp_pending_result", None)
+                # Retain until leave; map_ready replays after a reconnect.
         save_chars(all_accounts_chars)
         print(f"[RANK PVP] result player={picked_char.get('id')} win={bool(win)} "
               f"reason={reason} rank={result['old_rank']}->{result['new_rank']} "
@@ -14421,7 +14488,15 @@ def client_handler(conn, addr):
                             print(f"[RELIFE] replayed pending offer after reconnect player={picked_char.get('id')} map={mid}")
                     if mid == "501":
                         rank_match = picked_char.get("_rank_pvp_match")
-                        if isinstance(rank_match, dict) and not rank_match.get("result_recorded"):
+                        pending_result = picked_char.get("rank_pvp_pending_result")
+                        if isinstance(rank_match, dict) and rank_match.get("result_recorded"):
+                            if pending_result and is_current_character_connection(conn, picked_char):
+                                try:
+                                    send_rpc_push(551, bytes.fromhex(str(pending_result)))
+                                    print(f"[RANK PVP] replayed pending result player={picked_char.get('id')}")
+                                except Exception as replay_error:
+                                    print(f"[RANK PVP] result replay failed player={picked_char.get('id')}: {replay_error}")
+                        elif isinstance(rank_match, dict):
                             if not is_current_character_connection(conn, picked_char):
                                 print(f"[RANK PVP] map-ready ignored stale socket player={picked_char.get('id')}")
                             else:
@@ -17530,6 +17605,11 @@ def client_handler(conn, addr):
                             remaining, min(RANK_PVP_CANDIDATE_COUNT - len(chosen), len(remaining))
                         ))
                     chosen = chosen[:RANK_PVP_CANDIDATE_COUNT]
+                    # The client enables Refresh only after all three preview
+                    # objects initialize. Repeat a valid candidate for small rosters.
+                    if chosen:
+                        while len(chosen) < RANK_PVP_CANDIDATE_COUNT:
+                            chosen.append(chosen[0])
                     state["offered_opponents"] = [int(c.get("id", 0)) for c in chosen]
                     state["offered_at"] = int(time.time())
                     send_rpc_push(542, encode_sproto([
@@ -17570,7 +17650,12 @@ def client_handler(conn, addr):
                         or (isinstance(existing_match, dict) and not existing_match.get("result_recorded"))
                     )
                     opponent = None if invalid else _rank_pvp_find_character(opponent_id)
-                    if invalid or opponent is None or int(opponent.get("id", 0)) == int(picked_char.get("id", 0)):
+                    opponent_match = opponent.get("_rank_pvp_match") if opponent else None
+                    opponent_busy = (
+                        isinstance(opponent_match, dict) and not opponent_match.get("result_recorded")
+                    )
+                    if (invalid or opponent is None or opponent_busy
+                            or int(opponent.get("id", 0)) == int(picked_char.get("id", 0)):
                         send_rpc_push(541, _rank_pvp_sync_payload(picked_char))
                         print(f"[RANK PVP] rejected selection player={picked_char.get('id')} "
                               f"opponent={opponent_id} times={state.get('times')}")
