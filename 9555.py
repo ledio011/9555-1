@@ -9390,6 +9390,424 @@ def street_race_rewards(level, copy_id=None):
         return []
     return SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(str(reward_id), [])
 
+
+# ---------------------------------------------------------------------------
+# Rank PVP (map 501) - isolated from the Domin mission arena (map 502).
+# ---------------------------------------------------------------------------
+RANK_PVP_LOCK = threading.RLock()
+RANK_PVP_MAX_RANK = 1000
+RANK_PVP_MAX_TIMES = 10
+RANK_PVP_MAP_ID = "501"
+RANK_PVP_FIGHT_SECONDS = 60
+RANK_PVP_CANDIDATE_COUNT = 3
+RANK_PVP_LOG_LIMIT = 30
+RANK_PVP_TIERS = (
+    (1, 1, "33201", 200, "33201", "33001", "33101"),
+    (2, 2, "33202", 100, "33202", "33002", "33102"),
+    (3, 3, "33203", 50, "33203", "33003", "33103"),
+    (4, 10, "33204", 10, "33204", "33004", "33104"),
+    (11, 20, "33205", 8, "33205", "33005", "33105"),
+    (21, 40, "33206", 6, "33206", "33006", "33106"),
+    (41, 80, "33207", 4, "33207", "33007", "33107"),
+    (81, 150, "33208", 3, "33208", "33008", "33108"),
+    (151, 400, "33209", 2, "33209", "33009", "33109"),
+    (401, 1000, "33210", 1, "33210", "33010", "33110"),
+)
+RANK_PVP_DAILY_REWARD_MAX_RANK = 100
+
+
+def _rank_pvp_all_characters():
+    found = {}
+    for area_chars in all_accounts_chars.values():
+        if not isinstance(area_chars, dict):
+            continue
+        for char_list in area_chars.values():
+            if not isinstance(char_list, list):
+                continue
+            for character in char_list:
+                if not isinstance(character, dict):
+                    continue
+                try:
+                    char_id = int(character.get("id", 0))
+                except (TypeError, ValueError):
+                    continue
+                if char_id > 0:
+                    found[char_id] = character
+    return list(found.values())
+
+
+def _rank_pvp_find_character(char_id):
+    try:
+        target_id = int(char_id)
+    except (TypeError, ValueError):
+        return None
+    for character in _rank_pvp_all_characters():
+        try:
+            if int(character.get("id", 0)) == target_id:
+                return character
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _rank_pvp_ensure_world():
+    """Create unique rank slots once, retaining every rank already persisted."""
+    changed = False
+    with RANK_PVP_LOCK:
+        characters = _rank_pvp_all_characters()
+        if not characters:
+            return []
+        valid_positions = set()
+        missing = []
+        for character in characters:
+            state = character.get("rank_pvp_state")
+            if not isinstance(state, dict) or "rank_pos" not in state:
+                missing.append(character)
+                continue
+            try:
+                rank_pos = int(state.get("rank_pos", RANK_PVP_MAX_RANK + 1))
+            except (TypeError, ValueError):
+                rank_pos = RANK_PVP_MAX_RANK + 1
+            if 1 <= rank_pos <= RANK_PVP_MAX_RANK:
+                if rank_pos in valid_positions:
+                    missing.append(character)
+                else:
+                    valid_positions.add(rank_pos)
+            else:
+                state["rank_pos"] = RANK_PVP_MAX_RANK + 1
+                state.setdefault("best_rank_pos", RANK_PVP_MAX_RANK + 1)
+                changed = True
+
+        if not valid_positions and missing:
+            # No ladder exists yet: seed it by the server's real combat-power formula.
+            try:
+                missing.sort(key=lambda c: (
+                    -int(get_character_stats(c).get("power", 0)),
+                    str(c.get("name", "")), int(c.get("id", 0))
+                ))
+            except Exception:
+                missing.sort(key=lambda c: int(c.get("id", 0)))
+            next_rank = 1
+            for character in missing:
+                state = character.setdefault("rank_pvp_state", {})
+                rank_pos = next_rank if next_rank <= RANK_PVP_MAX_RANK else RANK_PVP_MAX_RANK + 1
+                state["rank_pos"] = rank_pos
+                state["best_rank_pos"] = rank_pos
+                state.setdefault("times", RANK_PVP_MAX_TIMES)
+                state.setdefault("daily_stamp", current_daily_stamp())
+                state.setdefault("logs", [])
+                state.setdefault("win_count", 0)
+                state.setdefault("loss_count", 0)
+                state.setdefault("reward_count", 0)
+                state.setdefault("win_reward_count", 0)
+                state.setdefault("last_settlement_stamp", current_daily_stamp())
+                next_rank += 1
+                changed = True
+        elif missing:
+            free_positions = (p for p in range(1, RANK_PVP_MAX_RANK + 1)
+                              if p not in valid_positions)
+            next_free = iter(free_positions)
+            missing.sort(key=lambda c: int(c.get("id", 0)))
+            for character in missing:
+                state = character.setdefault("rank_pvp_state", {})
+                rank_pos = next(next_free, RANK_PVP_MAX_RANK + 1)
+                state["rank_pos"] = rank_pos
+                state["best_rank_pos"] = rank_pos
+                state.setdefault("times", RANK_PVP_MAX_TIMES)
+                state.setdefault("daily_stamp", current_daily_stamp())
+                state.setdefault("logs", [])
+                state.setdefault("win_count", 0)
+                state.setdefault("loss_count", 0)
+                state.setdefault("reward_count", 0)
+                state.setdefault("win_reward_count", 0)
+                state.setdefault("last_settlement_stamp", current_daily_stamp())
+                changed = True
+
+        for character in characters:
+            state = character.get("rank_pvp_state")
+            if not isinstance(state, dict):
+                state = {}
+                character["rank_pvp_state"] = state
+                changed = True
+            defaults = {
+                "rank_pos": RANK_PVP_MAX_RANK + 1,
+                "best_rank_pos": RANK_PVP_MAX_RANK + 1,
+                "times": RANK_PVP_MAX_TIMES,
+                "daily_stamp": current_daily_stamp(),
+                "logs": [],
+                "win_count": 0,
+                "loss_count": 0,
+                "reward_count": 0,
+                "win_reward_count": 0,
+                "last_settlement_stamp": current_daily_stamp()
+            }
+            for key, value in defaults.items():
+                if key not in state:
+                    state[key] = copy.deepcopy(value)
+                    changed = True
+            try:
+                state["rank_pos"] = max(1, int(state.get("rank_pos", RANK_PVP_MAX_RANK + 1)))
+                state["best_rank_pos"] = max(1, int(state.get("best_rank_pos", RANK_PVP_MAX_RANK + 1)))
+                state["times"] = max(0, min(RANK_PVP_MAX_TIMES, int(state.get("times", RANK_PVP_MAX_TIMES))))
+            except (TypeError, ValueError):
+                state["rank_pos"] = RANK_PVP_MAX_RANK + 1
+                state["best_rank_pos"] = RANK_PVP_MAX_RANK + 1
+                state["times"] = RANK_PVP_MAX_TIMES
+                changed = True
+            if not isinstance(state.get("logs"), list):
+                state["logs"] = []
+                changed = True
+        if changed:
+            save_chars(all_accounts_chars)
+        return characters
+
+
+def _rank_pvp_state(character):
+    state = character.setdefault("rank_pvp_state", {})
+    stamp = current_daily_stamp()
+    if state.get("daily_stamp") != stamp:
+        state["daily_stamp"] = stamp
+        state["times"] = RANK_PVP_MAX_TIMES
+    try:
+        state["times"] = max(0, min(RANK_PVP_MAX_TIMES, int(state.get("times", RANK_PVP_MAX_TIMES))))
+        state["rank_pos"] = max(1, int(state.get("rank_pos", RANK_PVP_MAX_RANK + 1)))
+        state["best_rank_pos"] = max(1, int(state.get("best_rank_pos", RANK_PVP_MAX_RANK + 1)))
+    except (TypeError, ValueError):
+        state.update({
+            "rank_pos": RANK_PVP_MAX_RANK + 1,
+            "best_rank_pos": RANK_PVP_MAX_RANK + 1,
+            "times": RANK_PVP_MAX_TIMES
+        })
+    if not isinstance(state.get("logs"), list):
+        state["logs"] = []
+    for key in ("win_count", "loss_count", "reward_count", "win_reward_count"):
+        try:
+            state[key] = max(0, int(state.get(key, 0)))
+        except (TypeError, ValueError):
+            state[key] = 0
+    return state
+
+
+def _rank_pvp_tier_for_rank(rank_pos):
+    try:
+        rank_pos = int(rank_pos)
+    except (TypeError, ValueError):
+        return None
+    for row in RANK_PVP_TIERS:
+        if row[0] <= rank_pos <= row[1]:
+            return row
+    return None
+
+
+def _rank_pvp_reward_rows(reward_id):
+    """Resolve only real, explicit-count ShowRewardData entries."""
+    rows = SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(str(reward_id), [])
+    valid = []
+    for item_id, quality, amount in rows:
+        item_id = str(item_id)
+        try:
+            quality = int(quality)
+            amount = int(amount)
+        except (TypeError, ValueError):
+            continue
+        if amount > 0 and (item_id in ITEM_CONFIG or item_id in DIRECT_REWARD_RESOURCE_IDS):
+            valid.append((item_id, quality, amount))
+    return valid
+
+
+def _rank_pvp_settle_daily_reward(character, conn=None, send_rpc_push=None):
+    """Settle the previous day's confirmed LadderDailyReward for ranks 1-100."""
+    state = _rank_pvp_state(character)
+    stamp = current_daily_stamp()
+    previous_stamp = str(state.get("last_settlement_stamp") or stamp)
+    if previous_stamp == stamp:
+        return False
+    rank_pos = int(state.get("rank_pos", RANK_PVP_MAX_RANK + 1))
+    rewards = []
+    tier = _rank_pvp_tier_for_rank(rank_pos)
+    if rank_pos <= RANK_PVP_DAILY_REWARD_MAX_RANK and tier:
+        rewards = _rank_pvp_reward_rows(tier[4])
+    if rewards:
+        grant_item_rewards(
+            character, [(item_id, quality, amount) for item_id, quality, amount in rewards],
+            conn, send_rpc_push, save=False
+        )
+        state["reward_count"] = int(state.get("reward_count", 0)) + 1
+        print(f"[RANK PVP] daily settlement player={character.get('id')} "
+              f"rank={rank_pos} reward={tier[4]} items={len(rewards)}")
+    elif rank_pos <= RANK_PVP_DAILY_REWARD_MAX_RANK:
+        print(f"[RANK PVP] missing daily reward ShowRewardData id={tier[4] if tier else '-'} "
+              f"player={character.get('id')}")
+    state["last_settlement_stamp"] = stamp
+    save_chars(all_accounts_chars)
+    return bool(rewards)
+
+
+def _rank_pvp_ranked_characters():
+    characters = _rank_pvp_ensure_world()
+    ranked = []
+    for character in characters:
+        state = _rank_pvp_state(character)
+        rank_pos = int(state.get("rank_pos", RANK_PVP_MAX_RANK + 1))
+        if 1 <= rank_pos <= RANK_PVP_MAX_RANK:
+            ranked.append(character)
+    ranked.sort(key=lambda c: (
+        int(_rank_pvp_state(c).get("rank_pos", RANK_PVP_MAX_RANK + 1)),
+        int(c.get("id", 0))
+    ))
+    return ranked
+
+
+def _rank_pvp_sync_payload(character):
+    state = _rank_pvp_state(character)
+    stats = get_character_stats(character)
+    return encode_sproto([
+        (0, int(stats.get("power", 0))),
+        (1, int(state.get("times", RANK_PVP_MAX_TIMES))),
+        (2, int(state.get("rank_pos", RANK_PVP_MAX_RANK + 1))),
+        (3, int(state.get("best_rank_pos", RANK_PVP_MAX_RANK + 1))),
+        (4, int(state.get("reward_count", 0))),
+        (5, int(state.get("pre_rank_pos", state.get("rank_pos", RANK_PVP_MAX_RANK + 1)))),
+        (6, int(state.get("win_count", 0))),
+        (7, int(state.get("win_reward_count", 0)))
+    ])
+
+
+def _rank_pvp_character_look(character):
+    """Create the exact character_look layout used by opponent cards."""
+    ensure_backpack_state(character)
+    stats = get_character_stats(character)
+    pos = list(character.get("pos") or [0, 100, 0, 0])
+    if len(pos) < 4:
+        pos.extend([0] * (4 - len(pos)))
+    equip_map = {int(item["index_id"]): _gameitem_sproto(item)
+                 for item in character.get("equipped_equip", [])}
+    fashion_map = {int(item["index_id"]): _gameitem_sproto(item)
+                   for item in character.get("equipped_fashion", [])}
+    badge_map = {int(item["index_id"]): _gameitem_sproto(item)
+                 for item in character.get("equipped_badges", [])}
+    skills_map = build_skills_map(
+        character.get("prof", 0), stats["lv"],
+        character.get("skill_levels", {}), character.get("equipped_equip", []),
+        character.get("skill_positions", {})
+    )
+    return encode_sproto([
+        (0, int(character.get("id", 0))),
+        (1, get_general(character)),
+        (2, encode_sproto(character_attribute_fields(stats))),
+        (3, encode_sproto(character_attribute_other_fields(
+            character, stats, current_character_hp(character, stats)
+        ))),
+        (4, build_main_player_visual(character)),
+        (5, equip_map),
+        (6, fashion_map),
+        (7, badge_map),
+        (8, equipment_enhance_sproto(character)),
+        (9, get_movement(pos[0], pos[1], pos[2], pos[3])),
+        (10, skills_map)
+    ])
+
+
+def _rank_pvp_zombie_character(character):
+    """Clone a real character into map 501's zombie camp for local AI combat."""
+    stats = get_character_stats(character)
+    character["hp"] = int(stats.get("hp_max", 1))
+    packed = decode_sproto(get_full_char(character))
+    general_data = decode_sproto(packed.get(1, b""))
+    general_data[3] = RANK_PVP_MAP_ID
+    packed[1] = encode_sproto(list(general_data.items()))
+    other_data = decode_sproto(packed.get(2, b""))
+    other_data[0] = int(stats.get("hp_max", 1))
+    other_data[15] = 2
+    packed[2] = encode_sproto(list(other_data.items()))
+    packed[7] = get_movement(400, 120, 0, -9000)
+    packed[13] = get_runtime_aoi(character)
+    return encode_sproto(list(packed.items()))
+
+
+def _rank_pvp_append_log(character, message, timestamp):
+    state = _rank_pvp_state(character)
+    logs = state.setdefault("logs", [])
+    logs.append(f"{message}^{int(timestamp)}")
+    del logs[:-RANK_PVP_LOG_LIMIT]
+
+
+def _rank_pvp_finalize_state(character, win, reason):
+    """Apply the rank exchange rule once, record the result, and persist it."""
+    with RANK_PVP_LOCK:
+        match = character.get("_rank_pvp_match")
+        if not isinstance(match, dict) or match.get("result_recorded"):
+            return None
+        state = _rank_pvp_state(character)
+        old_rank = int(state.get("rank_pos", RANK_PVP_MAX_RANK + 1))
+        opponent = _rank_pvp_find_character(match.get("opponent_id"))
+        opponent_old_rank = None
+        opponent_new_rank = None
+        swapped = False
+        now_ts = int(time.time())
+        if opponent is not None:
+            opponent_state = _rank_pvp_state(opponent)
+            opponent_old_rank = int(opponent_state.get("rank_pos", RANK_PVP_MAX_RANK + 1))
+        if win:
+            state["win_count"] = int(state.get("win_count", 0)) + 1
+            if opponent is not None and opponent_old_rank < old_rank:
+                state["rank_pos"] = opponent_old_rank
+                opponent_state["rank_pos"] = old_rank
+                opponent_new_rank = old_rank
+                swapped = True
+            elif opponent is not None:
+                opponent_new_rank = opponent_old_rank
+        else:
+            state["loss_count"] = int(state.get("loss_count", 0)) + 1
+            if opponent is not None:
+                opponent_new_rank = opponent_old_rank
+        new_rank = int(state.get("rank_pos", RANK_PVP_MAX_RANK + 1))
+        best_rank = int(state.get("best_rank_pos", RANK_PVP_MAX_RANK + 1))
+        if 1 <= new_rank <= RANK_PVP_MAX_RANK and (best_rank > RANK_PVP_MAX_RANK or new_rank < best_rank):
+            state["best_rank_pos"] = new_rank
+            best_rank = new_rank
+        state["pre_rank_pos"] = old_rank
+        match["result_recorded"] = True
+        match["result_win"] = bool(win)
+        match["result_reason"] = str(reason)
+        match["result_at"] = now_ts
+        _rank_pvp_append_log(
+            character, f"Rank PVP {'victory' if win else 'defeat'} ({old_rank} -> {new_rank})", now_ts
+        )
+        if swapped and opponent is not None:
+            opponent_state["pre_rank_pos"] = opponent_old_rank
+            old_best = int(opponent_state.get("best_rank_pos", RANK_PVP_MAX_RANK + 1))
+            if opponent_new_rank <= RANK_PVP_MAX_RANK and (old_best > RANK_PVP_MAX_RANK or opponent_new_rank < old_best):
+                opponent_state["best_rank_pos"] = opponent_new_rank
+            _rank_pvp_append_log(
+                opponent, f"Rank PVP rank exchanged ({opponent_old_rank} -> {opponent_new_rank})", now_ts
+            )
+        result = {
+            "old_rank": old_rank, "new_rank": new_rank, "best_rank": best_rank,
+            "opponent": opponent, "opponent_old_rank": opponent_old_rank,
+            "opponent_new_rank": opponent_new_rank, "opponent_swapped": swapped,
+            "timestamp": now_ts
+        }
+        save_chars(all_accounts_chars)
+        return result
+
+
+def _rank_pvp_sort_items(sort_type=3):
+    rows = []
+    for character in _rank_pvp_ranked_characters():
+        state = _rank_pvp_state(character)
+        stats = get_character_stats(character)
+        rows.append(encode_sproto([
+            (0, int(character.get("id", 0))),
+            (1, int(stats.get("power", 0))),
+            (2, str(character.get("name", "Hero"))),
+            (3, int(character.get("prof", 0))),
+            (4, str(int(sort_type))),
+            (5, int(state.get("rank_pos", RANK_PVP_MAX_RANK + 1)))
+        ]))
+    return rows
+
+
 def sync_copy_scenes(picked_char):
     """Build TAG 555 from the APK's CopySceneData definitions."""
     now = int(time.time())
@@ -13162,6 +13580,110 @@ def client_handler(conn, addr):
         with send_lock:
             conn.sendall(struct.pack(">H", len(pf_r)) + pf_r)
 
+
+    def finish_rank_pvp_match(win, reason="result", show_result=True):
+        if not picked_char or str(picked_char.get("map_id", "")) != RANK_PVP_MAP_ID:
+            return False
+        match = picked_char.get("_rank_pvp_match")
+        if not isinstance(match, dict) or match.get("result_recorded"):
+            return False
+        result = _rank_pvp_finalize_state(picked_char, bool(win), reason)
+        if not result:
+            return False
+        # 33001/33101 are client reward references but their drop definitions
+        # are absent from the supplied APK data. Grant only a verified mapping.
+        reward_id = "33001" if win else "33101"
+        reward_rows = _rank_pvp_reward_rows(reward_id)
+        item_payload = []
+        if reward_rows:
+            grant_item_rewards(
+                picked_char,
+                [(item_id, quality, amount) for item_id, quality, amount in reward_rows],
+                conn, send_rpc_push, save=False
+            )
+            for item_id, quality, amount in reward_rows:
+                item_payload.append(encode_sproto([
+                    (0, item_id), (1, amount), (2, quality)
+                ]))
+            state = _rank_pvp_state(picked_char)
+            if win:
+                state["win_reward_count"] = int(state.get("win_reward_count", 0)) + 1
+        else:
+            print(f"[RANK PVP REWARD] unresolved client reward reference={reward_id}; "
+                  f"ZIP has no matching reward/drop definition")
+
+        send_rpc_push(541, _rank_pvp_sync_payload(picked_char))
+        if result["opponent_swapped"] and result["opponent"] is not None:
+            send_push_to_char(
+                result["opponent"].get("id", 0), 541,
+                _rank_pvp_sync_payload(result["opponent"])
+            )
+        result_data = encode_sproto([
+            (0, bool(win)), (1, item_payload),
+            (2, int(result["old_rank"])), (3, int(result["new_rank"])),
+            (4, int(result["best_rank"])), (5, 0)
+        ])
+        if show_result:
+            picked_char["rank_pvp_pending_result"] = result_data.hex()
+            save_chars(all_accounts_chars)
+            if is_current_character_connection(conn, picked_char):
+                send_rpc_push(551, result_data)
+                picked_char.pop("rank_pvp_pending_result", None)
+        save_chars(all_accounts_chars)
+        print(f"[RANK PVP] result player={picked_char.get('id')} win={bool(win)} "
+              f"reason={reason} rank={result['old_rank']}->{result['new_rank']} "
+              f"opponent={match.get('opponent_id')}")
+        return True
+
+    def rank_pvp_timeout(expected_match_id):
+        match = picked_char.get("_rank_pvp_match") if picked_char else None
+        if (not isinstance(match, dict)
+                or str(match.get("match_id")) != str(expected_match_id)
+                or match.get("result_recorded")
+                or str(picked_char.get("map_id", "")) != RANK_PVP_MAP_ID):
+            return
+        deadline = int(match.get("deadline", 0) or 0)
+        if deadline and int(time.time()) < deadline:
+            timer = threading.Timer(deadline - time.time(), rank_pvp_timeout, args=(expected_match_id,))
+            timer.daemon = True
+            picked_char["_rank_pvp_timer"] = timer
+            timer.start()
+            return
+        finish_rank_pvp_match(False, "timeout", True)
+
+    def start_rank_pvp_after_vs(expected_match_id):
+        match = picked_char.get("_rank_pvp_match") if picked_char else None
+        if (not isinstance(match, dict)
+                or str(match.get("match_id")) != str(expected_match_id)
+                or match.get("result_recorded")
+                or str(picked_char.get("map_id", "")) != RANK_PVP_MAP_ID):
+            return
+        now_ts = int(time.time())
+        if not match.get("started_at"):
+            match["started_at"] = now_ts
+            match["deadline"] = now_ts + RANK_PVP_FIGHT_SECONDS
+        deadline = int(match.get("deadline", now_ts + RANK_PVP_FIGHT_SECONDS))
+        if deadline <= now_ts:
+            finish_rank_pvp_match(False, "timeout_reconnect", True)
+            return
+        save_chars(all_accounts_chars)
+        send_rpc_push(629, encode_sproto([(0, deadline), (1, 0)]))
+        send_rpc_push(547, encode_sproto([]))
+        old_timer = picked_char.pop("_rank_pvp_timer", None)
+        if old_timer is not None:
+            try:
+                old_timer.cancel()
+            except Exception:
+                pass
+        timeout = threading.Timer(max(0.1, deadline - time.time()),
+                                  rank_pvp_timeout, args=(expected_match_id,))
+        timeout.daemon = True
+        picked_char["_rank_pvp_timer"] = timeout
+        timeout.start()
+        print(f"[RANK PVP] battle started player={picked_char.get('id')} "
+              f"opponent={match.get('opponent_id')} remaining={deadline-now_ts}s")
+
+
     def start_map101_watchdog(watch_ready_at, watch_char_id):
         """Report post-map-ready input silence even when the client sends no heartbeats."""
         def watch():
@@ -13897,7 +14419,35 @@ def client_handler(conn, addr):
                                 and supports_normal_relife(mid)):
                             send_rpc_push(618, encode_pending_relife_offer(pending_relife))
                             print(f"[RELIFE] replayed pending offer after reconnect player={picked_char.get('id')} map={mid}")
-                    if mid == "502":
+                    if mid == "501":
+                        rank_match = picked_char.get("_rank_pvp_match")
+                        if isinstance(rank_match, dict) and not rank_match.get("result_recorded"):
+                            if not is_current_character_connection(conn, picked_char):
+                                print(f"[RANK PVP] map-ready ignored stale socket player={picked_char.get('id')}")
+                            else:
+                                opponent = _rank_pvp_find_character(rank_match.get("opponent_id"))
+                                if opponent is None:
+                                    finish_rank_pvp_match(False, "opponent_missing", True)
+                                else:
+                                    send_rpc_push(544, encode_sproto([
+                                        (0, _rank_pvp_zombie_character(opponent))
+                                    ]))
+                                    old_start_timer = picked_char.pop("_rank_pvp_start_timer", None)
+                                    if old_start_timer is not None:
+                                        try:
+                                            old_start_timer.cancel()
+                                        except Exception:
+                                            pass
+                                    match_id = str(rank_match.get("match_id"))
+                                    start_timer = threading.Timer(
+                                        2.5, start_rank_pvp_after_vs, args=(match_id,)
+                                    )
+                                    start_timer.daemon = True
+                                    picked_char["_rank_pvp_start_timer"] = start_timer
+                                    start_timer.start()
+                                    print(f"[RANK PVP] opponent spawned player={picked_char.get('id')} "
+                                          f"opponent={opponent.get('id')} map=501")
+                    elif mid == "502":
                         # Map 502 exposes its match timer only through this APK tag.
                         # Cancel any previous arena timer to prevent stale timers from
                         # repeated map_ready events affecting a new arena run.
@@ -16949,12 +17499,147 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+
+            elif msg == 133: # request_random_rank_pvp_opponent
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    _rank_pvp_ensure_world()
+                    _rank_pvp_settle_daily_reward(picked_char, conn, send_rpc_push)
+                    state = _rank_pvp_state(picked_char)
+                    current_rank = int(state.get("rank_pos", RANK_PVP_MAX_RANK + 1))
+                    candidates = [
+                        c for c in _rank_pvp_ranked_characters()
+                        if int(c.get("id", 0)) != int(picked_char.get("id", 0))
+                        and not (isinstance(c.get("_rank_pvp_match"), dict)
+                                 and not c["_rank_pvp_match"].get("result_recorded"))
+                    ]
+                    nearby = [c for c in candidates
+                              if abs(int(_rank_pvp_state(c).get("rank_pos", RANK_PVP_MAX_RANK + 1))
+                                     - current_rank) <= 50]
+                    pool = nearby if nearby else candidates
+                    higher = [c for c in pool
+                              if int(_rank_pvp_state(c).get("rank_pos", RANK_PVP_MAX_RANK + 1)) < current_rank]
+                    lower = [c for c in pool
+                             if int(_rank_pvp_state(c).get("rank_pos", RANK_PVP_MAX_RANK + 1)) > current_rank]
+                    chosen = []
+                    if higher and lower:
+                        chosen.extend(random.sample(higher, 1))
+                        chosen.extend(random.sample(lower, 1))
+                    remaining = [c for c in pool if c not in chosen]
+                    if remaining and len(chosen) < RANK_PVP_CANDIDATE_COUNT:
+                        chosen.extend(random.sample(
+                            remaining, min(RANK_PVP_CANDIDATE_COUNT - len(chosen), len(remaining))
+                        ))
+                    chosen = chosen[:RANK_PVP_CANDIDATE_COUNT]
+                    state["offered_opponents"] = [int(c.get("id", 0)) for c in chosen]
+                    state["offered_at"] = int(time.time())
+                    send_rpc_push(542, encode_sproto([
+                        (0, len(chosen)),
+                        (1, [_rank_pvp_character_look(c) for c in chosen]),
+                        (2, [int(_rank_pvp_state(c).get("rank_pos", RANK_PVP_MAX_RANK + 1)) for c in chosen])
+                    ]))
+                    save_chars(all_accounts_chars)
+                send_rpc_response(session)
+
+            elif msg == 134: # request_top_rank_pvp_list
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    _rank_pvp_ensure_world()
+                    page = max(1, get_val_int(body, 0, 1))
+                    all_rows = _rank_pvp_sort_items(3)
+                    page_size = 10
+                    max_page = max(1, (len(all_rows) + page_size - 1) // page_size)
+                    page = min(page, max_page)
+                    send_rpc_push(543, encode_sproto([
+                        (0, page), (1, max_page),
+                        (2, all_rows[(page - 1) * page_size:page * page_size])
+                    ]))
+                send_rpc_response(session)
+
+            elif msg == 135: # select_pk_character
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    _rank_pvp_ensure_world()
+                    _rank_pvp_settle_daily_reward(picked_char, conn, send_rpc_push)
+                    state = _rank_pvp_state(picked_char)
+                    opponent_id = get_val_int(body, 0, 0)
+                    offered = {str(value) for value in state.get("offered_opponents", [])}
+                    offered_at = int(state.get("offered_at", 0) or 0)
+                    existing_match = picked_char.get("_rank_pvp_match")
+                    invalid = (
+                        int(state.get("times", 0)) <= 0 or opponent_id <= 0
+                        or str(opponent_id) not in offered
+                        or int(time.time()) - offered_at > 600
+                        or (isinstance(existing_match, dict) and not existing_match.get("result_recorded"))
+                    )
+                    opponent = None if invalid else _rank_pvp_find_character(opponent_id)
+                    if invalid or opponent is None or int(opponent.get("id", 0)) == int(picked_char.get("id", 0)):
+                        send_rpc_push(541, _rank_pvp_sync_payload(picked_char))
+                        print(f"[RANK PVP] rejected selection player={picked_char.get('id')} "
+                              f"opponent={opponent_id} times={state.get('times')}")
+                    else:
+                        opponent_state = _rank_pvp_state(opponent)
+                        player_rank = int(state.get("rank_pos", RANK_PVP_MAX_RANK + 1))
+                        opponent_rank = int(opponent_state.get("rank_pos", RANK_PVP_MAX_RANK + 1))
+                        if opponent_rank > RANK_PVP_MAX_RANK:
+                            send_rpc_push(541, _rank_pvp_sync_payload(picked_char))
+                        else:
+                            state["times"] = max(0, int(state.get("times", 0)) - 1)
+                            picked_char["pre_arena_map"] = str(picked_char.get("map_id") or "11")
+                            picked_char["pre_arena_pos"] = list(picked_char.get("pos") or [29860, 100, -17005, 0])
+                            picked_char["hp"] = int(get_character_stats(picked_char).get("hp_max", 1))
+                            match_id = f"{picked_char.get('id')}:{int(time.time()*1000)}:{random.randint(1,999999)}"
+                            picked_char["_rank_pvp_match"] = {
+                                "match_id": match_id,
+                                "opponent_id": int(opponent_id),
+                                "opponent_rank_at_select": opponent_rank,
+                                "player_rank_at_select": player_rank,
+                                "selected_at": int(time.time()),
+                                "started_at": 0,
+                                "deadline": 0,
+                                "result_recorded": False
+                            }
+                            state["offered_opponents"] = []
+                            save_chars(all_accounts_chars)
+                            send_rpc_response(session)
+                            session = None
+                            start_map_transition(
+                                conn, picked_char, RANK_PVP_MAP_ID, send_rpc_push,
+                                override_pos=[-400, 120, 0, 9000]
+                            )
+                            send_rpc_push(541, _rank_pvp_sync_payload(picked_char))
+                            print(f"[RANK PVP] selected player={picked_char.get('id')} "
+                                  f"opponent={opponent_id} ranks={player_rank}/{opponent_rank}")
+                send_rpc_response(session)
+
+            elif msg == 210: # request_rank_pvp_data
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    _rank_pvp_ensure_world()
+                    _rank_pvp_settle_daily_reward(picked_char, conn, send_rpc_push)
+                    send_rpc_push(541, _rank_pvp_sync_payload(picked_char))
+                send_rpc_response(session)
+
+            elif msg == 211: # request_rank_pvp_history
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    state = _rank_pvp_state(picked_char)
+                    send_rpc_push(546, encode_sproto([(0, list(state.get("logs", [])))]))
+                send_rpc_response(session)
+
             elif msg == 137: # rank_pvp_other_player_die
-                # DominSceneManager.SuccessMission() is EMPTY — the client does NOT
-                # send MSG 137 for the Domin flow. Only RankPVPLocalSceneManager
-                # sends this, which is a different scene type (not map 502).
-                # Ignore MSG 137 for map 502 to prevent forged victory claims.
-                if picked_char and picked_char.get('map_id') == '502':
+                # Only RankPVPLocalSceneManager on map 501 sends this. Keep
+                # the separate Domin map-502 anti-forgery guard intact.
+                if picked_char and str(picked_char.get("map_id", "")) == RANK_PVP_MAP_ID:
+                    if is_current_character_connection(conn, picked_char):
+                        match = picked_char.get("_rank_pvp_match")
+                        if (isinstance(match, dict) and match.get("started_at")
+                                and not match.get("result_recorded")
+                                and int(time.time()) <= int(match.get("deadline", 0) or 0)):
+                            finish_rank_pvp_match(True, "client_zombie_death", True)
+                        elif isinstance(match, dict) and not match.get("result_recorded"):
+                            finish_rank_pvp_match(False, "late_death_claim", True)
+                        else:
+                            print(f"[RANK PVP SECURITY] ignored victory claim player={picked_char.get('id')} "
+                                  f"match_active={bool(match)}")
+                    else:
+                        print(f"[RANK PVP SECURITY] rejected stale socket player={picked_char.get('id')}")
+                elif picked_char and str(picked_char.get("map_id", "")) == "502":
                     print('[M1003 SECURITY] MSG 137 ignored for Domin arena — DominSceneManager.SuccessMission() is empty')
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -17406,7 +18091,10 @@ def client_handler(conn, addr):
             elif msg == 191: # request_top_rank_list
                 sort_type = get_val_int(body, 0)
                 items = []
-                if sort_type == 7: # RANK_TYPE.CAR (Street Race)
+                if sort_type == 3: # RANK_TYPE.LADDER (Rank PVP)
+                    _rank_pvp_ensure_world()
+                    items = _rank_pvp_sort_items(sort_type)
+                elif sort_type == 7: # RANK_TYPE.CAR (Street Race)
                     # CAR sort_items use character ID, name#mountId[#colorId],
                     # and (day-centiseconds - elapsed) in score's high word.
                     race_copy_id = street_race_daily_copy_id()
@@ -18968,8 +19656,10 @@ def client_handler(conn, addr):
                     in_equipment_stage = picked_char.get('equipment_stage_state') is not None
                     active_copy_cfg = COPY_SCENE_CONFIG.get(str(picked_char.get('active_copy_id') or ''))
                     in_street_race = bool(active_copy_cfg and active_copy_cfg.get('subtype') == 7)
+                    in_rank_pvp = (str(picked_char.get('map_id', '')) == RANK_PVP_MAP_ID
+                                   and isinstance(picked_char.get('_rank_pvp_match'), dict))
                     has_leave_timer = '_exp_leave_timer' in picked_char
-                    if (in_exp_stage or in_equipment_stage or in_street_race or has_leave_timer) and not is_current_character_connection(conn, picked_char):
+                    if (in_exp_stage or in_equipment_stage or in_street_race or in_rank_pvp or has_leave_timer) and not is_current_character_connection(conn, picked_char):
                         print(f"[LEAVE COPY] denied stale character socket player={picked_char.get('id')}")
                         if session is not None:
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -18977,7 +19667,7 @@ def client_handler(conn, addr):
                         continue
                     # Fix: After exp stage win, state is already cleaned up but client still sends leave_copy_scene
                     # from the StarRewardPageRoot. Accept it gracefully — just send an ACK.
-                    if not in_copy and not in_exp_stage and not in_equipment_stage and not has_leave_timer:
+                    if not in_copy and not in_exp_stage and not in_equipment_stage and not in_rank_pvp and not has_leave_timer:
                         print(f"[LEAVE COPY] denied for player {picked_char['id']}; not in a copy scene")
                         if session is not None:
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -18995,6 +19685,34 @@ def client_handler(conn, addr):
                         picked_char['street_race_checkpoint_progress'] = 0
                         picked_char.pop('street_race_last_car_pos', None)
                         picked_char.pop('street_race_pending_result', None)
+
+                    if in_rank_pvp:
+                        rank_match = picked_char.get("_rank_pvp_match")
+                        if isinstance(rank_match, dict) and not rank_match.get("result_recorded"):
+                            finish_rank_pvp_match(False, "early_leave", False)
+                        for timer_key in ("_rank_pvp_start_timer", "_rank_pvp_timer"):
+                            rank_timer = picked_char.pop(timer_key, None)
+                            if rank_timer is not None:
+                                try:
+                                    rank_timer.cancel()
+                                except Exception:
+                                    pass
+                        return_map = str(picked_char.pop("pre_arena_map", None) or "11")
+                        return_pos = picked_char.pop("pre_arena_pos", None)
+                        picked_char.pop("_rank_pvp_match", None)
+                        picked_char.pop("rank_pvp_pending_result", None)
+                        send_rpc_push(629, encode_sproto([(0, int(time.time())), (1, 2)]))
+                        start_map_transition(
+                            conn, picked_char, return_map, send_rpc_push,
+                            override_pos=return_pos
+                        )
+                        save_chars(all_accounts_chars)
+                        print(f"[RANK PVP] player left arena id={picked_char.get('id')} "
+                              f"return_map={return_map}")
+                        if session is not None:
+                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                            conn.sendall(struct.pack(">H", len(pf)) + pf)
+                        continue
 
                     # Handle leaving Guild Boss scene early
                     in_guild_boss = bool(_guild_boss_map_id(picked_char.get('map_id', '')))
