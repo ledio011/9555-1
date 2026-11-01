@@ -24,15 +24,14 @@ It does NOT edit or import 9555.py.  It only needs two ports:
 The client keeps connecting to 15678 and has no idea the sniffer is there.
 Only connections of --account (default 68086000311496; every character on that
 account is logged) and/or --char are logged, all other players are forwarded
-silently. Add --enforce-account to also reject other accounts and allow only
-character IDs returned in that account's message-103 character list. Use --all
-to see everybody (the account gate, when enabled, still applies).
+silently.  Use --all to see everybody.
 
 Python 3.8+, standard library only.   python atg_sniffer.py --help
 """
 import argparse
 import collections
 import json
+import math
 import os
 import re
 import socket
@@ -233,7 +232,8 @@ PUSH_INFO = {   # tag: (name, category)
     674: ("level_reward_state", "reward"), 686: ("dance_state", "dance"),
 }
 LBL = {"REQ": "CLIENT ASKED", "RES": "SERVER REPLIED", "PUSH": "SERVER SENT", "OK": "RESULT OK",
-       "INFO": "RESULT INFO", "WARN": "RESULT WARNING", "MISS": "RESULT MISSING", "FAIL": "RESULT PROBLEM"}
+       "INFO": "RESULT INFO", "WARN": "RESULT WARNING", "MISS": "RESULT MISSING", "FAIL": "RESULT PROBLEM",
+       "ME": "YOUR CHARACTER", "MOVE": "MOVEMENT", "SCENE": "SCENE CHECK", "COMBAT": "COMBAT"}
 
 # Plain-English meaning of push tags (derived from comments/handlers in 9555.py, not from the client).
 PLAIN_PUSH = {
@@ -272,6 +272,57 @@ LABELS = {
     ("push", 521): {0: "missionId", 1: "result"},
     ("push", 638): {0: ("rewards", [{0: "itemId", 1: "count", 2: "quality"}])},
 }
+
+
+# ---- layouts verified in 9555.py (character_attribute_fields / _other_fields / get_full_char / get_movement) ----
+ATTR_OTHER = {0: "hp", 1: "exp", 2: "level", 3: "power", 4: "titleLevel", 5: "titleExp", 6: "guildId", 7: "guildJob",
+              8: "guildName", 9: "refine1", 10: "refine2", 11: "refine3", 12: "refine4", 13: "refineTotal",
+              17: "dancing", 18: "danceId"}
+ATTR = {0: "hpMax", 2: "atk", 3: "def", 4: "hit", 5: "eva", 6: "cri", 7: "res", 8: "exd", 9: "exr", 10: "crd",
+        11: "crr", 12: "defa", 13: "moveSpeed", 14: "rec", 15: "antiStun", 16: "antiKnockDown", 17: "dgea",
+        18: "resa", 19: "hita", 20: "cria", 21: "ate", 22: "satm", 23: "satc", 24: "satp"}
+CURRENCY = {13: "cash", 14: "gold", 15: "diamond", 16: "gangContribute", 17: "battleCoin", 18: "activityCoin"}
+_MOVEBLOCK = ("movement", {0: _POS, 1: _POS})
+_FULLCHAR = ("character", {0: "characterId", 1: ("general", {0: "name", 3: "mapId"}), 2: ("current", ATTR_OTHER),
+                           5: ("currency", CURRENCY), 7: _MOVEBLOCK,
+                           13: ("run", {6: ("attributes", ATTR), 7: ("attributesAll", ATTR)}),
+                           15: "downloadState", 16: "skillIndex"})
+LABELS.update({
+    ("push", 503): {0: "mapId", 1: "lineIndex", 2: "lineCount"},
+    ("push", 504): {0: _FULLCHAR, 1: _MOVEBLOCK},
+    ("push", 510): {0: ("entity", {0: "entityId", 1: ("current", ATTR_OTHER), 2: ("attributes", ATTR),
+                                   3: ("attributesAll", ATTR), 5: ("currency", CURRENCY)})},
+    ("req", 102): {0: "targetId", 1: "skillId", 3: ("targets", [{0: "targetId"}])},
+    ("req", 111): {0: ("hits", [{0: "targetId", 1: "clientDamage", 2: "skillId", 3: "effectId", 4: "crit",
+                                 5: "critEcho", 6: "hitResult"}])},
+})
+STAT_NAMES = (("hp", "HP"), ("hpMax", "max HP"), ("level", "level"), ("power", "combat power"), ("atk", "ATK"),
+              ("def", "DEF"), ("mov", "move speed"), ("exp", "EXP"), ("cash", "cash"), ("gold", "gold"),
+              ("diamond", "diamond"), ("gangContribute", "gang points"), ("battleCoin", "battle coin"),
+              ("activityCoin", "activity coin"))
+
+
+def sub_struct(b):
+    """bytes of a nested struct -> fields dict ({} if it is not a clean struct)."""
+    if isinstance(b, (bytes, bytearray)) and b:
+        st = parse_struct(b, 0)
+        if st and st[1] == len(b):
+            return st[0]
+    return {}
+
+
+def read_stats(cur, attr, prop):
+    d = {}
+    for k, n in ((0, "hp"), (1, "exp"), (2, "level"), (3, "power")):
+        if k in cur:
+            d[n] = get_int(cur, k)
+    for k, n in ((0, "hpMax"), (2, "atk"), (3, "def"), (13, "mov")):
+        if k in attr:
+            d[n] = get_int(attr, k)
+    for k, n in CURRENCY.items():
+        if k in prop:
+            d[n] = get_int(prop, k)
+    return {k: v for k, v in d.items() if v is not None}
 
 
 def human(name):
@@ -568,33 +619,6 @@ def parse_list(b):
     return out if out else None
 
 
-def extract_character_ids(body):
-    """Extract character IDs from the msg-103 response field #0 (list of character structs)."""
-    raw = body.get(0)
-    if not isinstance(raw, (bytes, bytearray)):
-        return set()
-    blob = bytes(raw)
-    rows = parse_list(blob)
-    if rows is None:
-        # Be tolerant of a single struct, but never infer IDs from undecodable bytes.
-        parsed = parse_struct(blob, 0)
-        rows = [blob] if parsed and parsed[1] == len(blob) else []
-    out = set()
-    for row in rows:
-        parsed = parse_struct(row, 0)
-        if not parsed or parsed[1] != len(row):
-            continue
-        fields = parsed[0]
-        char_id = get_int(fields, 0)
-        if char_id is not None:
-            out.add(str(char_id))
-        else:
-            char_text = get_str(fields, 0, "").strip()
-            if char_text:
-                out.add(char_text)
-    return out
-
-
 def printable(b):
     try:
         s = b.decode("utf-8")
@@ -762,7 +786,8 @@ class Tables:
 # ----------------------------------------------------------------------------
 class Out:
     COL = {"OK": "32", "INFO": "36", "WARN": "33", "MISS": "35", "FAIL": "31",
-           "REQ": "1;37", "RES": "37", "PUSH": "34", "DIM": "90"}
+           "REQ": "1;37", "RES": "37", "PUSH": "34", "DIM": "90",
+           "ME": "1;36", "MOVE": "1;32", "SCENE": "1;35", "COMBAT": "1;33"}
 
     def __init__(self, color, logfile, maxlen=0):
         self.maxlen = maxlen
@@ -819,6 +844,7 @@ class ConnStats:
         self.record = {"version": 1, "msgs": {}, "pushes": {}}
         self.unknown = {}                # (kind, id) -> {"n", "example", "reply", "after", "hex"}
         self.layouts = {}                # (kind, id) -> [count, example]  formats nobody has labelled yet
+        self.scene_log = []              # one dict per map entry (for the joystick / movement summary)
         self.hidden = collections.Counter()   # world updates about other players / NPCs that were not shown
 
 
@@ -849,9 +875,6 @@ class Conn:
         self.cid, self.peer = cid, peer
         self.char_id = None
         self.account = ""                # account id sent in the login request (msg 4, field #1)
-        self.allowed_chars = None        # set[str], populated from this account's msg-103 response
-        self.blocked = False             # access-control rejection; pump closes before forwarding packet
-        self.block_reason = ""
         self.target = None               # None = not decided yet, True = log it, False = ignore (muted)
         self.muted = False
         self.is_http = False
@@ -859,6 +882,15 @@ class Conn:
         self.npc_ids = set()             # entity ids learned from npc_create pushes
         self.unk_buf = []                # unknown-log lines held back until we know whose connection this is
         self.cur_frame = b""
+        self.me = {}                     # last known stats of YOUR character (from pushes 504 / 510)
+        self.me_flags = set()
+        self.scene = None                # map-entry checklist (503 -> 504 -> map_ready -> first move)
+        self.mv = {}                     # current movement session
+        self.t218 = None                 # last time_sync from the client (heartbeat)
+        self.hb_warned = False
+        self.npc_hp = {}                 # npc entity id -> last known HP
+        self.npc_delta = {}              # npc entity id -> (old hp, new hp) from the latest update
+        self.last_hits = {}              # npc entity id -> (client damage, skill, time)
         self.verd = collections.Counter()
         self.problems = {}               # (level, request, text-with-numbers-stripped) -> [count, example text]
         self.seq = 0                     # per-connection request counter (#1, #2, ...)
@@ -1002,48 +1034,14 @@ class Sniffer:
         conn.buf = []
         conn.unk_buf = []
 
-    def deny_access(self, conn, reason):
-        """Reject this TCP connection before the disallowed frame is forwarded to 9555.py."""
-        if conn.blocked:
-            return
-        conn.blocked = True
-        conn.block_reason = reason
-        conn.target = False
-        conn.muted = True
-        conn.buf = []
-        conn.unk_buf = []
-        self.out.raw("[sniffer] ACCESS DENIED connection c%d (%s): %s" %
-                     (conn.cid, conn.peer, reason), "FAIL")
-
-    def authorize_character(self, conn, char_id):
-        """When enabled, only IDs returned by msg 103 for the configured account may be picked."""
-        if not self.a.enforce_account:
-            return True
-        wanted = str(self.a.account).strip()
-        if not wanted or conn.account != wanted:
-            self.deny_access(conn, "character selection is not authenticated as allowed account %s" % wanted)
-            return False
-        if conn.allowed_chars is None:
-            self.deny_access(conn, "character selection rejected: no msg-103 character list was received for account %s" % wanted)
-            return False
-        picked = str(char_id).strip()
-        if picked not in conn.allowed_chars:
-            self.deny_access(conn, "character %s is not in account %s's msg-103 character list" % (picked, wanted))
-            return False
-        return True
-
     def login_seen(self, conn, account):
         """msg 4 (login): the account id is known before any character is picked."""
-        conn.account = str(account).strip()
-        if self.a.enforce_account and conn.account != str(self.a.account).strip():
-            self.deny_access(conn, "account %s is not allowed; only account %s may log in" %
-                             (conn.account or "(missing)", self.a.account))
-            return
+        conn.account = account
         if self.a.all or conn.target is not None:
             return
         if self.a.account:
-            if conn.account == self.a.account:
-                self.accept(conn, "account %s logged in" % conn.account)
+            if account == self.a.account:
+                self.accept(conn, "account %s logged in" % account)
             elif not self.a.char:
                 self.reject(conn)            # not our account and no character filter -> decide right now
             # else: wait for the character pick (--char may still match)
@@ -1118,26 +1116,13 @@ class Sniffer:
         st["n"] += 1
         if msg == 4:
             self.login_seen(conn, get_str(body, 1))
-            if conn.blocked:
-                return
         if msg == 105:
-            raw_cid = get_int(body, 0)
-            cid_text = str(raw_cid) if raw_cid is not None else get_str(body, 0, "").strip()
-            if not cid_text:
-                cid_text = "0"
-            if not self.authorize_character(conn, cid_text):
-                return
-            try:
-                cid = int(cid_text)
-            except (TypeError, ValueError):
-                cid = 0
+            cid = get_int(body, 0, 0)
             self.identified(conn, cid)
         show = True
         sup = 0
         if ex.noisy:
             show, sup = self.throttle(conn, ("req", msg))
-        if msg == 101:
-            self.track_move(conn, body, now)
         if show:
             extra = " (+%d similar suppressed)" % sup if sup else ""
             how = ("waits for a direct reply" if session is not None
@@ -1150,6 +1135,7 @@ class Sniffer:
                 self.note_unknown(conn, "undecodable data", "request %d" % msg, txt, after=ex.name)
             if not ex.unknown:
                 self.check_fields(conn, "request", msg, body, LABELS.get(("req", msg)), txt, after=ex.name)
+        self.trace_request(conn, ex, body, now)
         if ex.unknown:
             self.note_unknown(conn, "request", msg, render_fields(body),
                               after="9555.py has %s" % ("a handler" if msg in SERVER_MSGS else "NO handler"))
@@ -1188,14 +1174,6 @@ class Sniffer:
                            "probably processed twice." % (human(ex.name), ex.n_resp))
                 return
             ex.resp, ex.resp_t = body, now
-            if ex.msg == 103 and self.a.enforce_account and conn.account == str(self.a.account).strip():
-                conn.allowed_chars = extract_character_ids(body)
-                if conn.allowed_chars:
-                    self.emit(conn, "INFO", "ACCESS LIST loaded from message 103: %d character(s) allowed for account %s" %
-                              (len(conn.allowed_chars), conn.account), "login", now)
-                else:
-                    self.emit(conn, "WARN", "message 103 returned no decodable character IDs; character selection will fail closed",
-                              "login", now)
             lat = (now - ex.t0) * 1000
             conn.S.lat[ex.msg].append(lat)
             if not body:
@@ -1243,6 +1221,8 @@ class Sniffer:
                 conn.npc_ids.add(eid)
             if eid is not None and eid != conn.char_id:
                 other = ("npc" if (tag == 509 or eid in conn.npc_ids) else "player", eid)
+                if tag == 510 and other[0] == "npc":
+                    self.record_npc_hp(conn, eid, body)
         owner = None
         if other is None:
             owner = self.pick_owner(conn, tag, now)
@@ -1302,6 +1282,7 @@ class Sniffer:
             self.issue(conn, owner, "FAIL", "DUPLICATE: the server sent the identical message '%s' (push %d) twice within "
                        "%d ms. The client will apply it twice (double damage / reward / spawn)." %
                        (plain_push(tag), tag, int(self.a.dup_window * 1000)), cat=cat, tag_only=owner is None)
+        self.trace_push(conn, tag, body, owner, other, now)
 
     def pick_owner(self, conn, tag, now):
         """Which open request does this push belong to?  Newest request inside the attribution window,
@@ -1507,28 +1488,258 @@ class Sniffer:
                 p["fields"][str(t)] = p["fields"].get(str(t), 0) + 1
 
     # ---------------- movement / speed -------------------------------------
-    def track_move(self, conn, body, now):
+    # ---------------- scene / movement / own character / combat tracing ----------------
+    def say(self, conn, kind, ex, text, cat="map", ts=None):
+        lead = "#%d" % ex.seq if ex else "--"
+        self.emit(conn, kind, "%s %-15s %s" % (lead, LBL[kind], text), cat, ts)
+
+    @staticmethod
+    def checklist(sc):
+        def mark(t, wait_for):
+            return "OK" if t else ("MISSING" if wait_for else "-")
+        return ("map entered [%s] -> your character created [%s] -> client sent map_ready [%s] -> first move packet [%s]" % (
+            mark(sc["t503"], True), mark(sc["t504"], sc["t503"]), mark(sc["t_ready"], sc["t504"]),
+            mark(sc["t_move"], sc["t_ready"])))
+
+    def trace_request(self, conn, ex, body, now):
+        msg = ex.msg
+        if msg == 101:
+            self.track_move(conn, ex, body, now)
+        elif msg == 100:
+            sc = conn.scene
+            if sc and not sc["t_ready"]:
+                sc["t_ready"] = now
+                self.say(conn, "SCENE", ex, "the client sent map_ready: it says the scene is loaded, so the joystick/analog "
+                         "should be usable now. (%.1f s after your character was created)" % (
+                             now - sc["t504"] if sc["t504"] else 0.0))
+        elif msg == 218:
+            conn.t218 = now
+            conn.hb_warned = False
+        elif msg == 102:
+            lst = [get_int(sub_struct(x), 0) for x in (parse_list(body.get(3)) or [])] if isinstance(body.get(3), bytes) else []
+            self.say(conn, "COMBAT", ex, "you used skill %s on target %s%s" % (
+                get_str(body, 1), get_int(body, 0), " (hits %s)" % lst if lst else ""), "combat")
+        elif msg == 111:
+            hits = parse_list(body.get(0)) if isinstance(body.get(0), bytes) else None
+            for n, h in enumerate(hits or []):
+                d = sub_struct(h)
+                tid, dmg = get_int(d, 0), get_int(d, 1, 0)
+                if tid is not None:
+                    conn.last_hits[tid] = (dmg, get_str(d, 2), now)
+                if n < 5:
+                    self.say(conn, "COMBAT", ex, "you hit target %s with skill %s: the client reports %s damage%s%s" % (
+                        tid, get_str(d, 2), dmg, " (critical)" if get_int(d, 4, 0) == 1 else "",
+                        "" if get_int(d, 6, 1) == 1 else " - client says it MISSED"), "combat")
+            if hits and len(hits) > 5:
+                self.say(conn, "COMBAT", ex, "... and %d more hit(s) in the same packet" % (len(hits) - 5), "combat")
+
+    def track_move(self, conn, ex, body, now):
         p = body.get(0)
         st = parse_struct(p, 0) if isinstance(p, bytes) else None
         if not st:
+            self.issue(conn, ex, "WARN", "the client sent a move request WITHOUT a position (field #0), the server cannot move you")
             return
-        x, z = get_int(st[0], 0), get_int(st[0], 2)
+        x, y, z, o = (get_int(st[0], i) for i in range(4))
         if x is None or z is None:
             return
-        if conn.last_move:
-            t0, x0, z0 = conn.last_move
-            dt = now - t0
-            if 0.03 <= dt <= 2.0:
-                d = ((x - x0) ** 2 + (z - z0) ** 2) ** 0.5
-                sp = d / dt
-                conn.S.speeds.append(sp)
-                if d > conn.S.max_jump[0]:
-                    conn.S.max_jump = (d, (x0, z0, x, z, dt))
-                if self.a.max_speed and sp > self.a.max_speed:
-                    ex = conn.last_req
-                    self.issue(conn, ex, "WARN", "TOO FAST: the client reported a move of %.0f units/s (limit --max-speed %.0f); jumped %.0f units in %.0f ms" % (
-                        sp, self.a.max_speed, d, dt * 1000))
-        conn.last_move = (now, x, z)
+        mv, sc = conn.mv, conn.scene
+        if sc:
+            sc["moves"] += 1
+            if sc["t_move"] is None:
+                sc["t_move"] = now
+                self.say(conn, "SCENE", ex, "FIRST MOVE %s: the joystick works, move packets reach the server.  Checklist: %s" % (
+                    "%.1f s after map_ready" % (now - sc["t_ready"]) if sc["t_ready"] else
+                    "(the client never sent map_ready!)", self.checklist(sc)))
+        last = mv.get("last")
+        if last is None or now - last[0] > 1.0 or not mv.get("active"):
+            mv.clear()
+            mv.update(active=True, start=(now, x, z), n=0, dist=0.0, maxsp=0.0, same=0, stuck=False, printed=now,
+                      last=(now, x, z), first_ex=ex.seq)
+            if not self.a.no_move_trace:
+                self.say(conn, "MOVE", ex, "START: the player starts moving at x=%s z=%s direction=%s (move speed of your character: %s)" % (
+                    x, z, o, conn.me.get("mov", "unknown")))
+            return
+        t0, x0, z0 = mv["last"]
+        dt = now - t0
+        d = math.hypot(x - x0, z - z0)
+        mv["n"] += 1
+        mv["dist"] += d
+        if dt >= 0.03:
+            sp = d / dt
+            mv["maxsp"] = max(mv["maxsp"], sp)
+            conn.S.speeds.append(sp)
+            if d > conn.S.max_jump[0]:
+                conn.S.max_jump = (d, (x0, z0, x, z, dt))
+            if self.a.max_speed and sp > self.a.max_speed:
+                self.issue(conn, ex, "WARN", "TOO FAST: the client reported a move of %.0f units/s (limit --max-speed %.0f); "
+                           "jumped %.0f units in %.0f ms" % (sp, self.a.max_speed, d, dt * 1000))
+        if d > self.a.jump_units and dt < 2.0:
+            self.issue(conn, ex, "WARN", "JUMP: the position changed by %.0f units in %.0f ms (from x=%s z=%s to x=%s z=%s). "
+                       "That looks like a teleport / rubber-band, not walking." % (d, dt * 1000, x0, z0, x, z))
+        mv["same"] = mv["same"] + 1 if d == 0 else 0
+        if mv["same"] >= 6 and not mv["stuck"]:
+            mv["stuck"] = True
+            self.issue(conn, ex, "WARN", "STUCK: the client keeps sending move packets but the position does not change "
+                       "(x=%s z=%s, direction=%s). The character is blocked, has move speed 0 (yours: %s), or the joystick "
+                       "sends no movement. NOTE: on EXP / equipment-copy maps 9555.py silently ignores move packets unless the "
+                       "stage is valid - look for '[EXP MOVE] rejected' in the server console." % (
+                           x, z, o, conn.me.get("mov", "unknown")))
+        mv["last"] = (now, x, z)
+        if not self.a.no_move_trace and now - mv["printed"] >= 2.0:
+            mv["printed"] = now
+            el = now - mv["start"][0]
+            self.say(conn, "MOVE", ex, "moving: %d packets in %.1f s, %.0f units, average %.0f units/s, now at x=%s z=%s" % (
+                mv["n"], el, mv["dist"], mv["dist"] / el if el else 0, x, z))
+
+    def move_stop(self, conn, now):
+        mv = conn.mv
+        mv["active"] = False
+        t_end, x, z = mv["last"]
+        el = max(t_end - mv["start"][0], 0.001)
+        if self.a.no_move_trace:
+            return
+        if mv["n"] == 0:
+            self.say(conn, "MOVE", None, "a single move packet at x=%s z=%s (the player did not keep moving)" % (x, z))
+        else:
+            self.say(conn, "MOVE", None, "STOP: the player stopped at x=%s z=%s after %d packets, %.1f s, %.0f units "
+                     "(average %.0f units/s, fastest %.0f units/s)%s" % (
+                         x, z, mv["n"], el, mv["dist"], mv["dist"] / el, mv["maxsp"],
+                         "  <-- NEVER ACTUALLY MOVED" if mv["dist"] == 0 else ""))
+
+    def record_npc_hp(self, conn, eid, body):
+        aoi = sub_struct(body.get(0))
+        cur = sub_struct(aoi.get(1))
+        hp = get_int(cur, 0) if 0 in cur else None
+        if hp is None:
+            return
+        if len(conn.npc_hp) > 5000:
+            conn.npc_hp.clear()
+        conn.npc_delta[eid] = (conn.npc_hp.get(eid), hp)
+        conn.npc_hp[eid] = hp
+
+    def me_report(self, conn, ex, new, name=None, where=None, quiet_initial=False):
+        if not new:
+            return
+        old = conn.me
+        if not old and quiet_initial:
+            conn.me = dict(new)              # first stats push comes BEFORE the map-entry push: remember it, print later
+            return
+        if not old:
+            conn.me = dict(new)
+            conn.me.update({"name": name or ""})
+            bits = []
+            for k, label in STAT_NAMES:
+                if k in new:
+                    bits.append("%s %s" % (label, new[k]) if k != "mov" else "move speed %s (= %.1f m/s for the client)" % (new[k], new[k] / 100.0))
+            self.say(conn, "ME", ex, "%s%s: %s" % (name or "your character", " at %s" % where if where else "", ", ".join(bits)), "me")
+        else:
+            ch = []
+            for k, label in STAT_NAMES:
+                if k in new and new[k] != old.get(k):
+                    o = old.get(k)
+                    delta = " (%+d)" % (new[k] - o) if isinstance(o, int) else ""
+                    ch.append("%s %s -> %s%s" % (label, o, new[k], delta))
+            old.update(new)
+            if ch:
+                self.say(conn, "ME", ex, "stats changed: %s" % ", ".join(ch), "me")
+        me = conn.me
+        mov = me.get("mov")
+        if mov is not None and mov <= 0 and "mov0" not in conn.me_flags:
+            conn.me_flags.add("mov0")
+            self.issue(conn, ex, "FAIL", "YOUR MOVE SPEED IS %s (attribute #13 'moveSpeed'). The client reads it divided by 100, "
+                       "so the character cannot walk. This alone can make the joystick do nothing." % mov, cat="me")
+        elif mov and mov > 0:
+            conn.me_flags.discard("mov0")
+        hp = me.get("hp")
+        if hp is not None and hp <= 0 and "dead" not in conn.me_flags:
+            conn.me_flags.add("dead")
+            self.issue(conn, ex, "WARN", "YOUR HP IS 0: the character is dead, a dead character cannot move or attack", cat="me")
+        elif hp:
+            conn.me_flags.discard("dead")
+
+    def trace_push(self, conn, tag, body, owner, other, now):
+        sc = conn.scene
+        if sc and sc["t_ready"] and now - sc["t_ready"] <= 3.0 and tag not in NOISY_PUSH:
+            sc["ready_pushes"] += 1
+        if tag == 503:
+            mid = get_str(body, 0)
+            conn.scene = {"map": mid, "t503": now, "t504": None, "t_ready": None, "t_move": None, "moves": 0,
+                          "ready_pushes": 0, "warned": set()}
+            conn.S.scene_log.append(conn.scene)
+            conn.mv = {}
+            self.say(conn, "SCENE", owner, "map %s entered. Expected next: your character is created (504), the client loads the "
+                     "scene and sends map_ready, then joystick input produces move packets." % mid)
+        elif tag == 504 and other is None:
+            ch = sub_struct(body.get(0))
+            general = sub_struct(ch.get(1))
+            attr = sub_struct(sub_struct(ch.get(13)).get(7)) or sub_struct(sub_struct(ch.get(13)).get(6))
+            st = read_stats(sub_struct(ch.get(2)), attr, sub_struct(ch.get(5)))
+            pos = sub_struct(sub_struct(ch.get(7)).get(0))
+            xyz = [get_int(pos, i) for i in range(4)] if pos else None
+            if sc:
+                sc["t504"] = now
+            if 1 not in body:
+                self.issue(conn, owner, "WARN", "push 504 (your character created) has no movement block (#1)", cat="me")
+            if xyz and not any(v for v in xyz[:3]):
+                self.issue(conn, owner, "WARN", "your spawn position is x=0 y=0 z=0, probably wrong", cat="me")
+            conn.me = {}
+            self.me_report(conn, owner, st, name=get_str(general, 0), where="x=%s z=%s on map %s" % (
+                xyz[0] if xyz else "?", xyz[2] if xyz else "?", get_str(general, 3) or (sc["map"] if sc else "?")))
+            if not st.get("mov") and "mov" not in st:
+                self.issue(conn, owner, "WARN", "push 504 carries no move speed (attribute #13), the client may not be able to move you", cat="me")
+        elif tag == 510 and other is None and conn.char_id is not None and push_entity_id(body) == conn.char_id:
+            aoi = sub_struct(body.get(0))
+            st = read_stats(sub_struct(aoi.get(1)), sub_struct(aoi.get(3)) or sub_struct(aoi.get(2)), sub_struct(aoi.get(5)))
+            self.me_report(conn, owner, st, quiet_initial=True)
+        elif tag == 510 and other and other[0] == "npc" and owner is not None:
+            eid = other[1]
+            old, new = conn.npc_delta.pop(eid, (None, None))
+            if new is not None and old is not None and new < old:
+                lost = old - new
+                rep = conn.last_hits.get(eid)
+                txt = "NPC %s lost %d HP (%d -> %d)." % (eid, lost, old, new)
+                if rep and now - rep[2] < 3.0:
+                    txt += (" This matches the damage your client reported." if rep[0] == lost else
+                            " Your client reported %d damage but the server applied %d (the server recalculates damage)." % (rep[0], lost))
+                self.say(conn, "COMBAT", owner, txt, "combat")
+                if new <= 0:
+                    self.say(conn, "COMBAT", owner, "NPC %s DIED." % eid, "combat")
+            elif new is not None and old is not None and new > old:
+                self.say(conn, "COMBAT", owner, "NPC %s healed %d HP (%d -> %d)." % (eid, new - old, old, new), "combat")
+
+    def watch(self, conn, now):
+        """Timers: things that did NOT happen (no character created, no map_ready, no move, no heartbeat)."""
+        a, sc = self.a, conn.scene
+        if sc:
+            w = sc["warned"]
+            if sc["t503"] and not sc["t504"] and now - sc["t503"] > 3.0 and "no504" not in w:
+                w.add("no504")
+                self.issue(conn, None, "FAIL", "THE MAP WAS ENTERED BUT YOUR CHARACTER WAS NEVER CREATED: no push 504 within 3 s. "
+                           "The client cannot build your character, so there is no joystick.  Checklist: %s" % self.checklist(sc), cat="map")
+            if sc["t504"] and not sc["t_ready"] and now - sc["t504"] > a.ready_timeout and "noready" not in w:
+                w.add("noready")
+                self.issue(conn, None, "WARN", "THE CLIENT HAS NOT SENT map_ready %.0f s after your character was created. The scene is "
+                           "probably still loading or stuck (asset download / scene error). The joystick normally only works after "
+                           "the scene is ready.  Checklist: %s" % (now - sc["t504"], self.checklist(sc)), cat="map")
+            if sc["t_ready"] and "readyreply" not in w and now - sc["t_ready"] > 3.0:
+                w.add("readyreply")
+                if sc["ready_pushes"] == 0:
+                    self.issue(conn, None, "WARN", "the server sent NOTHING after map_ready (expected e.g. mission list, gang info). "
+                               "The client may wait for it before enabling controls.", cat="map")
+                else:
+                    self.say(conn, "SCENE", None, "the server answered map_ready with %d message(s)" % sc["ready_pushes"])
+            if sc["t_ready"] and sc["moves"] == 0 and now - sc["t_ready"] > a.idle_move and "nomove" not in w:
+                w.add("nomove")
+                self.say(conn, "SCENE", None, "no move packet has arrived %.0f s after map_ready. Either the joystick was not touched, "
+                         "it is not shown/enabled, or the client does not send movement.  Checklist: %s" % (
+                             now - sc["t_ready"], self.checklist(sc)))
+        mv = conn.mv
+        if mv.get("active") and now - mv["last"][0] > 1.0:
+            self.move_stop(conn, now)
+        if conn.t218 and not conn.hb_warned and now - conn.t218 > a.heartbeat_s:
+            conn.hb_warned = True
+            self.issue(conn, None, "WARN", "HEARTBEAT: no time_sync from the client for %.0f s (it normally sends one about every 15 s). "
+                       "The client is frozen, lagging or about to disconnect." % (now - conn.t218), cat="other")
 
     # ---------------- background janitor -----------------------------------
     def what_watched(self):
@@ -1553,6 +1764,12 @@ class Sniffer:
                                      "ignored so far)" % (self.what_watched(), ignored), "INFO")
                     t_wait = now
                 for conn in list(self.conns.values()):
+                    if not conn.muted and not conn.closed_flag and (conn.target or self.a.all):
+                        try:
+                            self.watch(conn, now)
+                        except Exception as exc:
+                            tb = traceback.extract_tb(exc.__traceback__)[-1]
+                            self.out.raw("[sniffer] internal error in %s() line %d: %r" % (tb.name, tb.lineno, exc), "WARN")
                     for ex in list(conn.open):
                         waiting = ex.session is not None and ex.resp is None
                         if waiting and now - ex.t0 > self.a.timeout:
@@ -1596,6 +1813,7 @@ class Sniffer:
             if S.max_jump[0] > M.max_jump[0]:
                 M.max_jump = S.max_jump
             M.hidden.update(S.hidden)
+            M.scene_log.extend(S.scene_log)
             for k, v in S.layouts.items():
                 e = M.layouts.setdefault(k, [0, v[1]])
                 e[0] += v[0]
@@ -1635,6 +1853,12 @@ class Sniffer:
             if M.hidden:
                 o.raw("Not shown (not about your character): %d update(s) about other players, %d about NPCs not caused by "
                       "your actions.  --show-others prints them." % (M.hidden["player"], M.hidden["npc"]))
+            if M.scene_log:
+                o.raw("")
+                o.raw("JOYSTICK / MOVEMENT CHECK (one line per map entry):", "SCENE")
+                for sc in M.scene_log[-12:]:
+                    o.raw("  map %s: %s - %d move packet(s) received" % (sc["map"], self.checklist(sc), sc["moves"]),
+                          "SCENE" if sc["t_move"] else "WARN")
             groups = self.merged_problems()
             for level, title in (("FAIL", "PROBLEMS - the server did something wrong (fix these first):"),
                                  ("MISS", "MISSING - the client needs this, the server does not provide it:"),
@@ -1733,9 +1957,6 @@ def pump(sn, conn, src, dst, direction):
                         tb = traceback.extract_tb(exc.__traceback__)[-1]
                         sn.out.raw("[sniffer] internal error in %s() line %d: %r  (game traffic is still forwarded "
                                    "normally; please report this line)" % (tb.name, tb.lineno, exc), "WARN")
-            if conn.blocked:
-                # Do not forward the login / character-pick frame that triggered the gate.
-                break
             try:
                 dst.sendall(data)
             except OSError:
@@ -1758,8 +1979,7 @@ def handle_client(sn, csock, peer, target):
         ssock = socket.create_connection(target, timeout=5)
         ssock.settimeout(None)
     except OSError as exc:
-        sn.out.raw("[sniffer] cannot reach game server %s:%s - %s (check that 9555.py is listening on this exact address/port)" %
-                   (target[0], target[1], exc), "FAIL")
+        sn.out.raw("[sniffer] cannot reach game server %s:%s - %s" % (target[0], target[1], exc), "FAIL")
         csock.close()
         return
     threading.Thread(target=pump, args=(sn, conn, csock, ssock, "C2S"), daemon=True).start()
@@ -1777,11 +1997,6 @@ def serve(sn, listen_port, target):
     else:
         sn.out.raw("[sniffer] filter: ON - only %s is logged%s, everybody else is ignored" % (
             sn.what_watched(), " (every character on the account)" if sn.a.account else ""), "OK")
-    if sn.a.enforce_account:
-        sn.out.raw("[sniffer] login gate: ON - only account %s and characters returned by its message-103 list are allowed" %
-                   sn.a.account, "OK")
-    else:
-        sn.out.raw("[sniffer] login gate: OFF - --account filters logs only; add --enforce-account to restrict access", "WARN")
     sn.out.raw("[sniffer] data tables: %s" % sn.tables.source, "INFO")
     sn.out.raw("[sniffer] Press Ctrl+C to print the summary (problems, missing requests, to-do list)", "INFO")
     sn.out.raw("")
@@ -1796,6 +2011,10 @@ def serve(sn, listen_port, target):
         sn.out.raw("  WARNING: --all is ON, so EVERY player is logged. Start WITHOUT --all to see only %s." % sn.what_watched(), "FAIL")
     else:
         sn.out.raw("  Only %s is logged. All other players are ignored completely." % sn.what_watched())
+    sn.out.raw("  SCENE CHECK     map entry checklist: map entered -> character created -> map_ready -> first move (joystick)")
+    sn.out.raw("  MOVEMENT        the player starts / keeps moving / stops, with distance and speed (STUCK = packets but no movement)")
+    sn.out.raw("  YOUR CHARACTER  your HP, level, power, ATK, DEF, move speed, money - and every change")
+    sn.out.raw("  COMBAT          your skill use / hits and what happened to the NPC's HP")
     sn.out.raw("  RESULT OK       everything looked normal      RESULT INFO     worth knowing, not an error")
     sn.out.raw("  RESULT WARNING  suspicious                    RESULT MISSING  server lacks code the client needs")
     sn.out.raw("  RESULT PROBLEM  the server did something wrong (crash, no answer, double reward, wrong reward...)")
@@ -1850,6 +2069,13 @@ def selftest(args):
                     push = lambda tag, f=(): c.sendall(frame([(0, tag)], list(f)))
                     if msg == 105:
                         reply([(0, 1)])
+                        pos = sp_encode([(0, 1000), (1, 0), (2, 1000), (3, 0)])
+                        mvb = sp_encode([(0, pos), (1, pos)])
+                        full = sp_encode([(0, 546880743), (1, sp_encode([(0, "Quinn"), (3, "101")])),
+                                          (2, sp_encode([(0, 100), (1, 5), (2, 5), (3, 10)])), (7, mvb),
+                                          (13, sp_encode([(7, sp_encode([(0, 1000), (2, 50), (3, 20), (13, 0)]))]))])
+                        push(503, [(0, "101"), (1, 0), (2, 1)])
+                        push(504, [(0, full), (1, mvb)])
                     elif msg == 113:
                         mid = get_str(body, 0)
                         reply()
@@ -1876,9 +2102,13 @@ def selftest(args):
                         push(510, [(0, sp_encode([(0, 546880743), (1, 7)]))])
                         # NPC spawn + NPC update during an unrelated (inventory) request -> must be hidden
                         push(509, [(0, sp_encode([(0, 3000001), (1, 5)]))])
-                        push(510, [(0, sp_encode([(0, 3000001), (1, 9)]))])
+                        push(510, [(0, sp_encode([(0, 3000001), (1, sp_encode([(0, 1000), (2, 1)])),
+                                                  (2, sp_encode([(0, 1000)]))]))])
                         # a push tag nobody has named yet -> must be marked UNKNOWN and written to the unknown log
                         push(777, [(0, 42), (1, "mystery")])
+                    elif msg == 111:         # client reports 400 damage on NPC 3000001 -> NPC HP 1000 -> 600
+                        reply()
+                        push(510, [(0, sp_encode([(0, 3000001), (1, sp_encode([(0, 600), (2, 1)]))]))])
                     elif msg == 999:         # catch-all like 9555.py
                         reply()
                     else:
@@ -1911,7 +2141,8 @@ def selftest(args):
     args.account, args.char = "", 546880743
     args.data, args.rewards_check = tmp, True
     args.unknown_log, args.names_todo = os.path.join(tmp, "unk.log"), ""
-    args.timeout, args.settle, args.log = 1.0, 0.5, None
+    args.timeout, args.settle = 1.0, 0.5
+    args.log = os.path.join(tmp, "run.log")
     sn = Sniffer(args)
     threading.Thread(target=serve, args=(sn, pp, ("127.0.0.1", sp)), daemon=True).start()
     time.sleep(0.4)
@@ -1937,7 +2168,10 @@ def selftest(args):
     mv = lambda x, z: [(0, sp_encode([(0, x), (1, 0), (2, z), (3, 0)]))]
     other = threading.Thread(target=client, args=(1, [(105, [(0, 111222333)], .3), (113, [(0, "1")], .8)]))
     other.start()
-    me = [(105, [(0, 546880743)], .3), (235, [], .8), (101, mv(1000, 1000), .1), (101, mv(1900, 1000), .1),
+    hit = [(0, [sp_encode([(0, 3000001), (1, 400), (2, "13001"), (3, "130011"), (4, 0), (6, 1)])])]
+    me = [(105, [(0, 546880743)], .4), (100, [], .3), (235, [], .8), (101, mv(1000, 1000), .1), (101, mv(1900, 1000), .1),
+          (101, mv(1900, 1000), .1), (101, mv(1900, 1000), .1), (101, mv(1900, 1000), .1), (101, mv(1900, 1000), .1),
+          (101, mv(1900, 1000), .1), (101, mv(1900, 1000), .1), (111, hit, .6),
           (113, [(0, "1")], .9), (113, [(0, "1")], .9), (113, [(0, "2")], .9), (113, [(0, "3")], .9),
           (999, [(0, "x")], .8), (150, [(0, 5)], 1.6), (160, [(0, "bob")], .8)]
     client(546880743, me)
@@ -1956,7 +2190,15 @@ def selftest(args):
     hid_ok = M.hidden["player"] >= 1 and M.hidden["npc"] >= 2 and 509 not in pushes_235 and "509" not in pushes_235
     sn.out.raw("unknown log written with raw bytes: %s | other players/NPC updates hidden (%s): %s" % (
         "OK" if unk_ok else "WRONG", dict(M.hidden), "OK" if hid_ok else "WRONG"), "OK" if (unk_ok and hid_ok) else "FAIL")
-    ok = (tv["FAIL"] == 5 and tv["MISS"] == 1 and tv["OK"] >= 2 and attrib_ok and unk_ok and hid_ok)
+    run_log = open(args.log, encoding="utf-8").read()
+    need = ["map 101 entered", "FIRST MOVE", "START: the player starts moving", "STOP: the player stopped", "STUCK:",
+            "YOUR MOVE SPEED IS 0", "NPC 3000001 lost 400 HP", "matches the damage your client reported",
+            "you hit target 3000001 with skill 13001"]
+    missing = [n for n in need if n not in run_log]
+    trace_ok = not missing
+    sn.out.raw("movement / scene / stats / combat tracing: %s" % ("OK" if trace_ok else "MISSING %s" % missing),
+               "OK" if trace_ok else "FAIL")
+    ok = (tv["FAIL"] == 6 and tv["MISS"] == 1 and tv["OK"] >= 2 and attrib_ok and unk_ok and hid_ok and trace_ok)
     sn.out.raw("SELFTEST %s (FAIL=%d MISS=%d OK=%d)" % ("PASSED" if ok else "FAILED", tv["FAIL"], tv["MISS"], tv["OK"]),
                "OK" if ok else "FAIL")
     return 0 if ok else 1
@@ -1967,10 +2209,7 @@ def main():
     ap = argparse.ArgumentParser(description="ATG live protocol truth-log (transparent proxy in front of 9555.py)")
     ap.add_argument("--listen", type=int, default=15678, help="port the GAME CLIENT connects to (default 15678)")
     ap.add_argument("--server", default="127.0.0.1:15679", help="real 9555.py host:port (start it with PORT=15679)")
-    ap.add_argument("--account", default="68086000311496",
-                    help="account to log; with --enforce-account, the only account allowed (default 68086000311496)")
-    ap.add_argument("--enforce-account", "--restrict-account", dest="enforce_account", action="store_true",
-                    help="reject other accounts and allow only character IDs returned by this account's msg-103 list")
+    ap.add_argument("--account", default="68086000311496", help="log every character of this account id (default 68086000311496; '' = off)")
     ap.add_argument("--char", type=int, default=0, help="additionally log this single character id (0 = off)")
     ap.add_argument("--all", action="store_true", help="log every connection, ignore --char")
     ap.add_argument("--only", default="", help="only show these categories, e.g. team,gang,mission,combat,map,shop,items,reward,social,rank,dance,aoi,npc")
@@ -1985,6 +2224,11 @@ def main():
     ap.add_argument("--timeout", type=float, default=5.0, help="seconds before an unanswered request is a FAIL")
     ap.add_argument("--settle", type=float, default=1.0, help="seconds of quiet after which an exchange is judged")
     ap.add_argument("--slow-ms", type=int, default=1500)
+    ap.add_argument("--ready-timeout", type=float, default=12.0, help="warn if the client sends no map_ready this long after your character was created")
+    ap.add_argument("--idle-move", type=float, default=25.0, help="note if no move packet arrives this long after map_ready")
+    ap.add_argument("--jump-units", type=float, default=5000.0, help="flag a single move step longer than this (raw units)")
+    ap.add_argument("--heartbeat-s", type=float, default=45.0, help="warn if the client sends no time_sync for this long")
+    ap.add_argument("--no-move-trace", action="store_true", help="do not print MOVEMENT start/stop/progress lines")
     ap.add_argument("--attr-window", type=float, default=3.0, help="a push is only credited to a request younger than this (s)")
     ap.add_argument("--dup-window", type=float, default=0.3, help="identical pushes/requests within this many seconds are duplicates")
     ap.add_argument("--max-speed", type=float, default=0.0, help="flag client move packets faster than this (raw units/s); 0=off")
@@ -1999,8 +2243,6 @@ def main():
     ap.add_argument("--no-color", action="store_true")
     ap.add_argument("--selftest", action="store_true", help="run a built-in fake server/client check and exit")
     args = ap.parse_args()
-    if args.enforce_account and not args.account.strip():
-        ap.error("--enforce-account requires a non-empty --account value")
     if os.name == "nt":
         os.system("")
     if args.names:
