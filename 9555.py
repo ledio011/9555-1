@@ -6614,7 +6614,7 @@ def equipment_stage_result_items(copy_id, character):
         for equip_id, equip_cfg in EQUIP_CONFIG.items():
             equip_id = str(equip_id)
             if (int(equip_cfg.get('class', 0)) != tier
-                    or not 0 <= int(equip_cfg.get('position', -1)) < 6
+                    or not 1 <= int(equip_cfg.get('position', -1)) < 6
                     or int(ITEM_CONFIG.get(equip_id, {}).get('type', -1)) != 2
                     or int(ITEM_CONFIG.get(equip_id, {}).get('level', 1)) > int(character.get('level', 1) if character else 1)):
                 continue
