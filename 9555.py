@@ -9744,6 +9744,54 @@ def _rank_pvp_ranked_characters():
     return ranked
 
 
+def _rank_pvp_random_opponent_payload(character):
+    """Create the client TAG 542 opponent list and remember the exact offered IDs."""
+    state = _rank_pvp_state(character)
+    current_rank = int(state.get("rank_pos", RANK_PVP_MAX_RANK + 1))
+    own_id = int(character.get("id", 0))
+    candidates = [
+        c for c in _rank_pvp_ranked_characters()
+        if int(c.get("id", 0)) != own_id
+        and not (isinstance(c.get("_rank_pvp_match"), dict)
+                 and not c["_rank_pvp_match"].get("result_recorded"))
+    ]
+    nearby = [
+        c for c in candidates
+        if abs(int(_rank_pvp_state(c).get("rank_pos", RANK_PVP_MAX_RANK + 1))
+               - current_rank) <= 50
+    ]
+    pool = nearby if nearby else candidates
+    higher = [
+        c for c in pool
+        if int(_rank_pvp_state(c).get("rank_pos", RANK_PVP_MAX_RANK + 1)) < current_rank
+    ]
+    lower = [
+        c for c in pool
+        if int(_rank_pvp_state(c).get("rank_pos", RANK_PVP_MAX_RANK + 1)) > current_rank
+    ]
+    chosen = []
+    if higher and lower:
+        chosen.extend(random.sample(higher, 1))
+        chosen.extend(random.sample(lower, 1))
+    remaining = [c for c in pool if c not in chosen]
+    if remaining and len(chosen) < RANK_PVP_CANDIDATE_COUNT:
+        chosen.extend(random.sample(
+            remaining, min(RANK_PVP_CANDIDATE_COUNT - len(chosen), len(remaining))
+        ))
+    chosen = chosen[:RANK_PVP_CANDIDATE_COUNT]
+    # The client enables Refresh only after all three preview objects initialize.
+    if chosen:
+        while len(chosen) < RANK_PVP_CANDIDATE_COUNT:
+            chosen.append(chosen[0])
+    state["offered_opponents"] = [int(c.get("id", 0)) for c in chosen]
+    state["offered_at"] = int(time.time())
+    return encode_sproto([
+        (0, len(chosen)),
+        (1, [_rank_pvp_character_look(c) for c in chosen]),
+        (2, [int(_rank_pvp_state(c).get("rank_pos", RANK_PVP_MAX_RANK + 1)) for c in chosen])
+    ])
+
+
 def _rank_pvp_sync_payload(character):
     state = _rank_pvp_state(character)
     stats = get_character_stats(character)
@@ -17040,7 +17088,15 @@ def client_handler(conn, addr):
                     picked_char['hp'] = new_hp
                     sync_char_attrs_rpc(conn, picked_char)
                     if old_hp > 0 and new_hp == 0:
-                        if current_map == '502':
+                        if current_map == RANK_PVP_MAP_ID:
+                            # RankPVP's client expects TAG 551 (tiantti_result, win=false),
+                            # whose handler opens CopyFailShowRoot and completes the scene.
+                            # TAG 618 would incorrectly open the generic RebirthUI.
+                            picked_char.pop('_pending_relife', None)
+                            finish_rank_pvp_match(False, "player_dead", True)
+                            print(f"[RANK PVP] player defeated player={picked_char.get('id')} "
+                                  f"result=failure_ui relife_suppressed=1")
+                        elif current_map == '502':
                             print('[M1003 DEBUG] Player died in arena; scheduling loss return')
                             schedule_domin_return(restore_hp=True)
                         elif supports_normal_relife(current_map):
@@ -17996,44 +18052,7 @@ def client_handler(conn, addr):
                 if picked_char and is_current_character_connection(conn, picked_char):
                     _rank_pvp_ensure_world()
                     _rank_pvp_settle_daily_reward(picked_char, conn, send_rpc_push)
-                    state = _rank_pvp_state(picked_char)
-                    current_rank = int(state.get("rank_pos", RANK_PVP_MAX_RANK + 1))
-                    candidates = [
-                        c for c in _rank_pvp_ranked_characters()
-                        if int(c.get("id", 0)) != int(picked_char.get("id", 0))
-                        and not (isinstance(c.get("_rank_pvp_match"), dict)
-                                 and not c["_rank_pvp_match"].get("result_recorded"))
-                    ]
-                    nearby = [c for c in candidates
-                              if abs(int(_rank_pvp_state(c).get("rank_pos", RANK_PVP_MAX_RANK + 1))
-                                     - current_rank) <= 50]
-                    pool = nearby if nearby else candidates
-                    higher = [c for c in pool
-                              if int(_rank_pvp_state(c).get("rank_pos", RANK_PVP_MAX_RANK + 1)) < current_rank]
-                    lower = [c for c in pool
-                             if int(_rank_pvp_state(c).get("rank_pos", RANK_PVP_MAX_RANK + 1)) > current_rank]
-                    chosen = []
-                    if higher and lower:
-                        chosen.extend(random.sample(higher, 1))
-                        chosen.extend(random.sample(lower, 1))
-                    remaining = [c for c in pool if c not in chosen]
-                    if remaining and len(chosen) < RANK_PVP_CANDIDATE_COUNT:
-                        chosen.extend(random.sample(
-                            remaining, min(RANK_PVP_CANDIDATE_COUNT - len(chosen), len(remaining))
-                        ))
-                    chosen = chosen[:RANK_PVP_CANDIDATE_COUNT]
-                    # The client enables Refresh only after all three preview
-                    # objects initialize. Repeat a valid candidate for small rosters.
-                    if chosen:
-                        while len(chosen) < RANK_PVP_CANDIDATE_COUNT:
-                            chosen.append(chosen[0])
-                    state["offered_opponents"] = [int(c.get("id", 0)) for c in chosen]
-                    state["offered_at"] = int(time.time())
-                    send_rpc_push(542, encode_sproto([
-                        (0, len(chosen)),
-                        (1, [_rank_pvp_character_look(c) for c in chosen]),
-                        (2, [int(_rank_pvp_state(c).get("rank_pos", RANK_PVP_MAX_RANK + 1)) for c in chosen])
-                    ]))
+                    send_rpc_push(542, _rank_pvp_random_opponent_payload(picked_char))
                     save_chars(all_accounts_chars)
                 send_rpc_response(session)
 
@@ -18072,32 +18091,63 @@ def client_handler(conn, addr):
                     _rank_pvp_ensure_world()
                     _rank_pvp_settle_daily_reward(picked_char, conn, send_rpc_push)
                     state = _rank_pvp_state(picked_char)
+                    now_ts = int(time.time())
                     opponent_id = get_val_int(body, 0, 0)
                     offered = {str(value) for value in state.get("offered_opponents", [])}
                     offered_at = int(state.get("offered_at", 0) or 0)
                     existing_match = picked_char.get("_rank_pvp_match")
-                    invalid = (
-                        int(state.get("times", 0)) <= 0 or opponent_id <= 0
-                        or str(opponent_id) not in offered
-                        or int(time.time()) - offered_at > 600
-                        or (isinstance(existing_match, dict) and not existing_match.get("result_recorded"))
+                    own_match_active = (
+                        isinstance(existing_match, dict)
+                        and not existing_match.get("result_recorded")
                     )
-                    opponent = None if invalid else _rank_pvp_find_character(opponent_id)
+                    reasons = []
+                    if int(state.get("times", 0)) <= 0:
+                        reasons.append("no_attempts_left")
+                    if opponent_id <= 0:
+                        reasons.append("invalid_opponent_id")
+                    if str(opponent_id) not in offered:
+                        reasons.append("opponent_not_in_current_offer")
+                    if offered_at <= 0 or now_ts - offered_at > 600:
+                        reasons.append("offer_expired")
+                    if own_match_active:
+                        reasons.append("challenger_already_in_match")
+
+                    opponent = _rank_pvp_find_character(opponent_id) if opponent_id > 0 else None
                     opponent_match = opponent.get("_rank_pvp_match") if opponent else None
                     opponent_busy = (
-                        isinstance(opponent_match, dict) and not opponent_match.get("result_recorded")
+                        isinstance(opponent_match, dict)
+                        and not opponent_match.get("result_recorded")
                     )
-                    if (invalid or opponent is None or opponent_busy
-                            or int(opponent.get("id", 0)) == int(picked_char.get("id", 0))):
+                    if opponent is None:
+                        reasons.append("opponent_not_found")
+                    elif opponent_busy:
+                        reasons.append("opponent_already_in_match")
+                    elif int(opponent.get("id", 0)) == int(picked_char.get("id", 0)):
+                        reasons.append("self_challenge")
+
+                    if reasons:
                         send_rpc_push(541, _rank_pvp_sync_payload(picked_char))
+                        # A card can become stale/busy after TAG 542 was shown.
+                        # Send a fresh client-native TAG 542 list so the player
+                        # can select a currently valid opponent without guessing.
+                        if not own_match_active and int(state.get("times", 0)) > 0:
+                            send_rpc_push(542, _rank_pvp_random_opponent_payload(picked_char))
+                            save_chars(all_accounts_chars)
                         print(f"[RANK PVP] rejected selection player={picked_char.get('id')} "
-                              f"opponent={opponent_id} times={state.get('times')}")
+                              f"opponent={opponent_id} times={state.get('times')} "
+                              f"reasons={','.join(reasons)} offer_age={now_ts-offered_at if offered_at else -1} "
+                              f"opponent_match={opponent_match.get('match_id') if isinstance(opponent_match, dict) else '-'} "
+                              f"opponent_deadline={opponent_match.get('deadline') if isinstance(opponent_match, dict) else 0}")
                     else:
                         opponent_state = _rank_pvp_state(opponent)
                         player_rank = int(state.get("rank_pos", RANK_PVP_MAX_RANK + 1))
                         opponent_rank = int(opponent_state.get("rank_pos", RANK_PVP_MAX_RANK + 1))
                         if opponent_rank > RANK_PVP_MAX_RANK:
                             send_rpc_push(541, _rank_pvp_sync_payload(picked_char))
+                            send_rpc_push(542, _rank_pvp_random_opponent_payload(picked_char))
+                            save_chars(all_accounts_chars)
+                            print(f"[RANK PVP] rejected selection player={picked_char.get('id')} "
+                                  f"opponent={opponent_id} reasons=opponent_outside_rank_limit rank={opponent_rank}")
                         else:
                             state["times"] = max(0, int(state.get("times", 0)) - 1)
                             picked_char["pre_arena_map"] = str(picked_char.get("map_id") or "11")
@@ -18643,6 +18693,19 @@ def client_handler(conn, addr):
                     # Security: require a live EXP run and a server-recorded death
                     # before accepting the client's revive choice.
                     current_map = str(picked_char.get('map_id', ''))
+                    if current_map == RANK_PVP_MAP_ID:
+                        # Death Duel is resolved by TAG 551, never by the generic
+                        # TAG 132 revive flow. Ignore stale revive requests safely.
+                        picked_char.pop('_pending_relife', None)
+                        rank_match = picked_char.get("_rank_pvp_match")
+                        if isinstance(rank_match, dict) and not rank_match.get("result_recorded"):
+                            finish_rank_pvp_match(False, "relife_request_blocked", True)
+                        print(f"[RANK PVP] ignored relife request player={picked_char.get('id')}")
+                        if session is not None:
+                            ph = encode_sproto([(1, session)])
+                            pf = sproto_pack(ph + encode_sproto([]))
+                            conn.sendall(struct.pack(">H", len(pf)) + pf)
+                        continue
                     if not is_exp_map(current_map):
                         try:
                             request_raw = body.get(0, b"")
