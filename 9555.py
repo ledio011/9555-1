@@ -18096,11 +18096,66 @@ def client_handler(conn, addr):
                     offered = {str(value) for value in state.get("offered_opponents", [])}
                     offered_at = int(state.get("offered_at", 0) or 0)
                     existing_match = picked_char.get("_rank_pvp_match")
+                    stale_match_recovered = False
+                    match_map = str(picked_char.get("map_id", ""))
+                    if (isinstance(existing_match, dict)
+                            and not existing_match.get("result_recorded")
+                            and match_map != RANK_PVP_MAP_ID):
+                        stale_match_id = str(existing_match.get("match_id", ""))
+                        try:
+                            stale_started_at = int(existing_match.get("started_at", 0) or 0)
+                        except (TypeError, ValueError):
+                            stale_started_at = 0
+                        try:
+                            stale_deadline = int(existing_match.get("deadline", 0) or 0)
+                        except (TypeError, ValueError):
+                            stale_deadline = 0
+
+                        for timer_key in ("_rank_pvp_start_timer", "_rank_pvp_timer"):
+                            stale_timer = picked_char.pop(timer_key, None)
+                            if stale_timer is not None:
+                                try:
+                                    stale_timer.cancel()
+                                except Exception:
+                                    pass
+
+                        with RANK_PVP_LOCK:
+                            current_match = picked_char.get("_rank_pvp_match")
+                            if (current_match is existing_match
+                                    and isinstance(current_match, dict)
+                                    and not current_match.get("result_recorded")):
+                                if stale_started_at > 0:
+                                    recovered_result = _rank_pvp_finalize_state(
+                                        picked_char, False, "stale_match_recovered"
+                                    )
+                                    recovery_action = (
+                                        "recorded_early_leave"
+                                        if recovered_result else "already_resolved"
+                                    )
+                                else:
+                                    state["times"] = min(
+                                        RANK_PVP_MAX_TIMES,
+                                        max(0, int(state.get("times", 0))) + 1
+                                    )
+                                    recovery_action = "refunded_unstarted_attempt"
+                                picked_char.pop("_rank_pvp_match", None)
+                                stale_match_recovered = True
+
+                        if stale_match_recovered:
+                            save_chars(all_accounts_chars)
+                            print(f"[RANK PVP] recovered stale match player={picked_char.get('id')} "
+                                  f"match={stale_match_id or '-'} map={match_map} "
+                                  f"started_at={stale_started_at} deadline={stale_deadline} "
+                                  f"action={recovery_action}")
+
+                    existing_match = picked_char.get("_rank_pvp_match")
                     own_match_active = (
                         isinstance(existing_match, dict)
                         and not existing_match.get("result_recorded")
                     )
                     reasons = []
+                    if stale_match_recovered:
+                        reasons.append("stale_match_recovered")
                     if int(state.get("times", 0)) <= 0:
                         reasons.append("no_attempts_left")
                     if opponent_id <= 0:
