@@ -11893,14 +11893,14 @@ def _guild_boss_reward_rows(reward_key, char):
                 if reward_id not in GUILD_BOSS_TEST_REWARD_LOGGED:
                     GUILD_BOSS_TEST_REWARD_LOGGED.add(reward_id)
                     print(f"[GUILD BOSS TEST REWARD FALLBACK] "
-                          f"key={reward_key} level={guild_level} reward={reward_id}; "
+                          f"key={reward_key} level={character_level} reward={reward_id}; "
                           "using proposed test quantities, not client-authoritative values")
                 return list(fallback_rewards)
-    missing_key = (reward_key, guild_level, reward_id)
+    missing_key = (reward_key, character_level, reward_id)
     if missing_key not in GUILD_BOSS_MISSING_REWARD_LOGGED:
         GUILD_BOSS_MISSING_REWARD_LOGGED.add(missing_key)
         print(f"[GUILD BOSS REWARD BLOCKED] no explicit payout quantities "
-              f"key={reward_key} level={guild_level} reward={reward_id}; "
+              f"key={reward_key} level={character_level} reward={reward_id}; "
               "grant skipped")
     return None
 
