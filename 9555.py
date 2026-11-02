@@ -12476,6 +12476,9 @@ def _guild_boss_entry_check(char, boss_id):
         return False, GUILD_BOSS_MSG_NO_GUILD, guild, row
     if not row:
         return False, GUILD_BOSS_MSG_CLOSED, guild, row
+    active_copy = str(char.get('active_copy_id') or '')
+    if active_copy and active_copy != str(row.get('map_id', '')):
+        return False, "Leave your current instance before entering the Gang Boss.", guild, row
     # FunctionData 4077 (Gang activity menu) is the client's player-level gate (level 8).
     need_level = int(FUNCTION_DATA.get('4077', {}).get('condition', 0) or 0)
     guild_level = _guild_level(guild)
