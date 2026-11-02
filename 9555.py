@@ -11860,19 +11860,11 @@ def _guild_boss_battle_info(char, include_state=True):
         return battle_info
     return encode_sproto([(0, battle_info), (1, 1 if record else 0)])
 
-def _guild_boss_reward_rows(reward_key, char):
-    """Resolve reward IDs from recipient character level, not guild level.
-
-    AdaptData is keyed by player level; GuildBossData LevelMin/LevelMax
-    constrain guild level only and do not select reward packages.
-    """
+def _guild_boss_reward_rows(reward_key, guild):
     reward_key = str(reward_key or '')
-    try:
-        character_level = max(1, min(80, int((char or {}).get('level', 1) or 1)))
-    except (AttributeError, TypeError, ValueError):
-        character_level = 1
+    guild_level = _guild_level(guild)
     reward_id = str(
-        STREET_RACE_REWARD_BY_KEY_LEVEL.get(reward_key, {}).get(character_level, '') or ''
+        STREET_RACE_REWARD_BY_KEY_LEVEL.get(reward_key, {}).get(guild_level, '') or ''
     )
     if not reward_id:
         return None
@@ -11893,14 +11885,14 @@ def _guild_boss_reward_rows(reward_key, char):
                 if reward_id not in GUILD_BOSS_TEST_REWARD_LOGGED:
                     GUILD_BOSS_TEST_REWARD_LOGGED.add(reward_id)
                     print(f"[GUILD BOSS TEST REWARD FALLBACK] "
-                          f"key={reward_key} level={character_level} reward={reward_id}; "
+                          f"key={reward_key} level={guild_level} reward={reward_id}; "
                           "using proposed test quantities, not client-authoritative values")
                 return list(fallback_rewards)
-    missing_key = (reward_key, character_level, reward_id)
+    missing_key = (reward_key, guild_level, reward_id)
     if missing_key not in GUILD_BOSS_MISSING_REWARD_LOGGED:
         GUILD_BOSS_MISSING_REWARD_LOGGED.add(missing_key)
         print(f"[GUILD BOSS REWARD BLOCKED] no explicit payout quantities "
-              f"key={reward_key} level={character_level} reward={reward_id}; "
+              f"key={reward_key} level={guild_level} reward={reward_id}; "
               "grant skipped")
     return None
 
@@ -11909,14 +11901,6 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
     """Deliver a completed Gang Boss payout once; offline/retry payouts go to mail."""
     char_id_int = int(char_id)
     print(f"[GUILD BOSS AWARD ENTER] player={char_id_int} reward_sets={len(reward_sets)} force_mail={force_mail}")
-    conn, online_char = ALL_CONNECTIONS.get(char_id_int, (None, None))
-    online = bool(conn and online_char
-                  and is_current_character_connection(conn, online_char))
-    char = online_char if online else _guild_char_by_id(char_id_int)
-    if not char:
-        print(f"[GUILD BOSS REWARD] deferred; character missing player={char_id_int}")
-        return False
-
     claims = record.setdefault('reward_claims', {})
     claim_key = str(char_id_int)
     claimed = set(claims.get(claim_key, []))
@@ -11928,7 +11912,7 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
         if reward_key in claimed:
             print(f"[GUILD BOSS AWARD SKIP] player={char_id_int} {reward_key} already claimed")
             continue
-        rewards = _guild_boss_reward_rows(selector, char)
+        rewards = _guild_boss_reward_rows(selector, guild)
         if rewards is None:
             unresolved = True
             audit_packages.append(
@@ -11948,6 +11932,9 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
         claims[claim_key] = sorted(claimed)
         return not unresolved
 
+    conn, online_char = ALL_CONNECTIONS.get(char_id_int, (None, None))
+    online = bool(conn and online_char
+                  and is_current_character_connection(conn, online_char))
     boss_config = GUILD_BOSS_DATA.get(str(boss_id or ''), {})
     boss_map_id = str(boss_config.get('map_id', '') or '')
     online_in_boss_scene = bool(
@@ -11958,6 +11945,11 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
     print(f"[GUILD BOSS AWARD CHECK] player={char_id_int} online={online} "
           f"in_boss_scene={online_in_boss_scene} boss_map={boss_map_id} "
           f"player_map={str(online_char.get('map_id', '') if online_char else 'N/A')}")
+    char = online_char if online else _guild_char_by_id(char_id_int)
+    if not char:
+        print(f"[GUILD BOSS REWARD] deferred; character missing player={char_id_int}")
+        return False
+
     reward_totals = {}
     for item_id, quality, amount in pending:
         total_key = (str(item_id), int(quality))
@@ -12307,7 +12299,7 @@ def _guild_boss_send_result(guild, boss_id, record):
         item_list = []
         reward_sets = awards_by_player.get(str(char_id), [])
         for reward_key, selector in reward_sets:
-            rewards = _guild_boss_reward_rows(selector, char)
+            rewards = _guild_boss_reward_rows(selector, guild)
             if rewards is None:
                 continue
             for item_id, quality, amount in rewards:
