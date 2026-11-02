@@ -13198,7 +13198,7 @@ def _wild_boss_activity_info(boss_id, char=None, now=None):
     return encode_sproto([
         (0, str(boss_id)), (1, remaining), (2, 5), (3, state),
         (4, parm), (5, "#".join(rank_names)), (6, 0),
-        (7, day_start + int((cfg.get("start_times") or [0])[0])), (8, int(slot)
+        (7, day_start + int((cfg.get("start_times") or [0])[0])), (8, int(slot))
     ])
 
 def _wild_boss_activity_response(char=None, now=None):
@@ -13250,6 +13250,9 @@ def _wild_boss_entry_check(char, boss_id, now=None):
     level = int(char.get("level", 1) or 1)
     if not int(cfg.get("min_level", 1) or 1) <= level <= int(cfg.get("max_level", 80) or 80):
         return False, f"Requires level {cfg.get('min_level', 1)}-{cfg.get('max_level', 80)}.", None, None
+    active_copy = str(char.get("active_copy_id") or "")
+    if active_copy and active_copy != str(cfg.get("map_id", "")):
+        return False, "Leave your current instance before entering this boss.", None, None
     slot, slot_start, slot_end, active, _day_start = _wild_boss_schedule(cfg, now)
     if not active or (int(cfg.get("pvp", 0) or 0) == 1 and slot != 3) or (
             int(cfg.get("pvp", 0) or 0) == 0 and slot not in (1, 2)):
@@ -13282,6 +13285,12 @@ def _wild_boss_enter(char, boss_id, event_key, event_times):
         used = max(0, int(counts.get(str(boss_id), 0) or 0))
         if not same_event:
             if used >= max(1, int(cfg.get("limit", 1) or 1)):
+                return False
+            in_scene = sum(
+                1 for _cid, (_peer_conn, peer) in list(ALL_CONNECTIONS.items())
+                if peer and str(peer.get("_wild_boss_event_key", "")) == str(event_key)
+            )
+            if in_scene >= max(1, int(cfg.get("max_player", 50) or 50)):
                 return False
             counts[str(boss_id)] = used + 1
         char["_wild_boss_event_key"] = str(event_key)
@@ -13409,9 +13418,18 @@ def _wild_boss_distribute_rewards(boss_id, event_key, record):
     for player_id in (record.get("participants") or {}):
         award_map.setdefault(str(player_id), []).append(("participate", cfg.get("participate_drop_id", "")))
     for rank, player in enumerate(rows, 1):
+        rank_drop_ids = cfg.get("rank_drop_ids", [])
+        rank_limits = cfg.get("rank_limits", [])
         for rank_index, (drop_id, rank_limit) in enumerate(
-                zip(cfg.get("rank_drop_ids", []), cfg.get("rank_limits", [])), 1):
-            if int(rank_limit or 0) == rank:
+                zip(rank_drop_ids, rank_limits), 1):
+            if rank_index <= 3:
+                rank_eligible = rank == int(rank_limit or 0)
+            elif rank_index == 4:
+                rank_eligible = 4 <= rank <= int(rank_limit or 6)
+            else:
+                previous_limit = int(rank_limits[3] or 6) if len(rank_limits) > 3 else 6
+                rank_eligible = previous_limit < rank <= int(rank_limit or 10)
+            if rank_eligible and drop_id:
                 award_map.setdefault(str(int(player.get("id", 0))), []).append(
                     (f"rank-{rank_index}", drop_id))
         if int(player.get("id", 0) or 0) == int(record.get("last_kill_id", 0) or 0):
@@ -13470,6 +13488,9 @@ def _wild_boss_finish(event_key, killer_id):
     if killer:
         record["last_kill_name"] = str(killer.get("name", ""))
     _save_wild_boss_states()
+    expiry_timer = WILD_BOSS_TIMERS.pop(str(event_key), None)
+    if expiry_timer is not None:
+        expiry_timer.cancel()
     boss_id = str(record.get("boss_id", ""))
     _wild_boss_distribute_rewards(boss_id, event_key, record)
     _wild_boss_start_exit(event_key, boss_id, record,
