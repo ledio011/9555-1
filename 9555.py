@@ -18017,8 +18017,11 @@ def client_handler(conn, addr):
                                 print(f"[WORLD BOSS SECURITY] rejected non-boss target={target_id} player={picked_char.get('id')}")
                                 continue
                             _target_id, _target_conn, _target_char = find_player_connection(target_id)
-                            if _target_char is None:
-                                print(f"[WORLD BOSS SECURITY] rejected unknown PVP target={target_id} player={picked_char.get('id')}")
+                            if (not _target_char or not _target_conn
+                                    or not is_current_character_connection(_target_conn, _target_char)
+                                    or str(_target_char.get("map_id", "")) != str(picked_char.get("map_id", ""))
+                                    or str(_target_char.get("_wild_boss_event_key", "")) != wild_event_key):
+                                print(f"[WORLD BOSS SECURITY] rejected target outside this PVP boss event target={target_id} player={picked_char.get('id')} event={wild_event_key}")
                                 continue
 
                         # --- Check if target is an online player (PvP) ---
