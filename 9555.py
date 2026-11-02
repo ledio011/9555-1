@@ -15852,7 +15852,7 @@ def client_handler(conn, addr):
                                         )
                                         if current_level >= 10:
                                             broadcast_global_tele_announcement(
-                                                "#{101905}", [4, part], [player_name]
+                                                "#{101906}", [4, part], [player_name]
                                             )
                                     print(f"[BACKPACK] refine part={part} level={current_level} "
                                           f"state={response_state} protected={use_safety}")
