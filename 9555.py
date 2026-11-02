@@ -11869,6 +11869,21 @@ def _guild_boss_record(guild, boss_id, create=False, now=None, char=None):
     state, _remaining = _guild_boss_activity_state(row, now, char, guild)
     events = guild.setdefault('guild_boss_events', {})
     record = events.get(str(boss_id))
+    if (isinstance(record, dict) and _guild_boss_test_guild_enabled(guild)):
+        # Migrate an in-progress/finished record created by the previous
+        # scheduled-window implementation without discarding HP, damage,
+        # participant history, or already-delivered reward claims.
+        legacy_start = (
+            now - now % 86400
+            + max(0, int(row.get('start_time', 0) or 0)) % 86400
+        )
+        if int(record.get('event_start', 0) or 0) == legacy_start and legacy_start != event_start:
+            record['event_start'] = event_start
+            record['end_time'] = event_start + 86400
+            if record.get('expired') and not record.get('finished'):
+                record['expired'] = False
+            _save_guild_states()
+            print(f"[GUILD BOSS TEST] migrated existing record guild={guild.get('id')} boss={boss_id}")
     if (isinstance(record, dict)
             and int(record.get('event_start', 0) or 0) == event_start):
         return record
