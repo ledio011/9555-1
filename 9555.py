@@ -113,7 +113,7 @@ GUILD_BATTLE_DATA = {} # id -> configured Gang Battle schedule/selection data
 GUILD_STAR_DATA = {} # id -> configured Gang Star upgrade data
 GUILD_SHOP_DATA = {} # shop item ID -> ShopData row for Guild shop
 GUILD_BOSS_DATA = {} # guild boss/activity rows shown by the Gang activity panel
-GUILD_BOSS_TEST_ALWAYS_OPEN = os.environ.get('GUILD_BOSS_TEST_ALWAYS_OPEN', '0') == '1'
+GUILD_BOSS_TEST_GUILD_NAME = 'ATG Revival'
 GUILD_BOSS_POST_KILL_EXIT_SECONDS = 5  # fallback only; GuildBossData.WaitTime is used
 # The in-scene rank panel has no scroll/sort (client Bar-Fight variant caps at 6 rows).
 GUILD_BOSS_SCENE_RANK_ROWS = 6
@@ -7807,7 +7807,7 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
             or int(record.get('hp', 0) or 0) <= 0
             or GUILD_BOSS_INSTANCES.get(runtime_key) != inst_id):
         return
-    if _guild_boss_activity_state(boss_cfg)[0] != 1:
+    if _guild_boss_activity_state(boss_cfg, guild=guild)[0] != 1:
         return  # window closed; the scheduler expires the run
     members = _guild_boss_scene_members(guild, boss_cfg.get('map_id', ''))
     if not members:
@@ -11696,7 +11696,16 @@ def _guild_boss_daily_id(now=None):
     return boss_ids[weekday_index % len(boss_ids)]
 
 
-def _guild_boss_activity_state(row, now=None):
+def _guild_boss_test_always_open(guild):
+    """Keep 24/7 Gang Boss testing limited to the named test gang."""
+    return bool(
+        isinstance(guild, dict)
+        and str(guild.get('name', '')).strip().casefold()
+        == GUILD_BOSS_TEST_GUILD_NAME.casefold()
+    )
+
+
+def _guild_boss_activity_state(row, now=None, guild=None):
     now = int(time.time()) if now is None else int(now)
     seconds_today = now % 86400
     boss_id = str(row.get('boss_id', '') or '')
@@ -11709,7 +11718,7 @@ def _guild_boss_activity_state(row, now=None):
     if boss_id and boss_id != _guild_boss_daily_id(now):
         # The row is not today's boss; keep it closed even during 24-hour testing.
         return 0, 86400 - seconds_today
-    if GUILD_BOSS_TEST_ALWAYS_OPEN:
+    if _guild_boss_test_always_open(guild):
         return 1, 86400 - seconds_today
     start = max(0, int(row.get('start_time', 0) or 0)) % 86400
     duration = max(0, int(row.get('duration', 0) or 0))
@@ -11719,9 +11728,9 @@ def _guild_boss_activity_state(row, now=None):
     until = (start - seconds_today) % 86400
     return 0, until if until else 86400
 
-def _guild_boss_event_start(row, now=None):
+def _guild_boss_event_start(row, now=None, guild=None):
     now = int(time.time()) if now is None else int(now)
-    if GUILD_BOSS_TEST_ALWAYS_OPEN:
+    if _guild_boss_test_always_open(guild):
         return now - now % 86400
     return now - now % 86400 + max(0, int(row.get('start_time', 0) or 0)) % 86400
 
@@ -11732,8 +11741,8 @@ def _guild_boss_record(guild, boss_id, create=False, now=None):
     now = int(time.time()) if now is None else int(now)
     if str(boss_id) != _guild_boss_daily_id(now):
         return None
-    event_start = _guild_boss_event_start(row, now)
-    state, _remaining = _guild_boss_activity_state(row, now)
+    event_start = _guild_boss_event_start(row, now, guild)
+    state, _remaining = _guild_boss_activity_state(row, now, guild)
     events = guild.setdefault('guild_boss_events', {})
     record = events.get(str(boss_id))
     if (isinstance(record, dict)
@@ -11749,7 +11758,7 @@ def _guild_boss_record(guild, boss_id, create=False, now=None):
         stats = get_npc_attr(npc_id)
         record = {
             'event_start': event_start, 'end_time': event_start + (
-                86400 if GUILD_BOSS_TEST_ALWAYS_OPEN else int(row.get('duration', 0) or 0)
+                86400 if _guild_boss_test_always_open(guild) else int(row.get('duration', 0) or 0)
             ),
             'hp_max': int(stats.get('hp_max', 0)), 'hp': int(stats.get('hp_max', 0)),
             'damage_players': {}, 'participants': {}, 'last_kill_id': 0,
@@ -11781,7 +11790,7 @@ def _guild_boss_member(guild, char, boss_id, now=None):
     if (not member or int(member.get('job', 4)) == 4
             or level < int(row.get('level_min', 0))
             or level > int(row.get('level_max', 10))
-            or _guild_boss_activity_state(row, now)[0] != 1):
+            or _guild_boss_activity_state(row, now, guild)[0] != 1):
         return None
     return member
 
@@ -11794,7 +11803,7 @@ def _guild_boss_rank_rows(record):
 
 def _guild_boss_activity_item(boss_id, guild, now=None):
     row = GUILD_BOSS_DATA.get(str(boss_id), {})
-    state, remaining = _guild_boss_activity_state(row, now)
+    state, remaining = _guild_boss_activity_state(row, now, guild)
     record = _guild_boss_record(guild, boss_id, now=now)
     if record:
         if record.get('finished') and state == 1:
@@ -12356,12 +12365,12 @@ GUILD_BOSS_MSG_CLOSED = "The activity has not been activated, you cannot attend 
 GUILD_BOSS_MSG_DEFEATED = "The BOSS has been defeated. Please wait for the next challenge."
 GUILD_BOSS_MSG_FULL = "The Gang Boss scene is full. Please try again later."
 
-def _guild_boss_featured_id(now=None):
+def _guild_boss_featured_id(now=None, guild=None):
     """The single row the client should see: today's boss, or tomorrow's once today's window is over."""
     now = int(time.time()) if now is None else int(now)
     today = _guild_boss_daily_id(now)
     row = GUILD_BOSS_DATA.get(today)
-    if not row or GUILD_BOSS_TEST_ALWAYS_OPEN:
+    if not row or _guild_boss_test_always_open(guild):
         return today or None
     end = (max(0, int(row.get('start_time', 0) or 0)) % 86400) + max(0, int(row.get('duration', 0) or 0))
     return _guild_boss_daily_id(now + 86400) if (now % 86400) >= end else today
@@ -12383,7 +12392,7 @@ def _guild_boss_entry_check(char, boss_id):
             or guild_level < int(row.get('level_min', 0))
             or guild_level > int(row.get('level_max', 10))):
         return False, GUILD_BOSS_MSG_LEVEL, guild, row
-    if _guild_boss_activity_state(row)[0] != 1:
+    if _guild_boss_activity_state(row, guild=guild)[0] != 1:
         return False, GUILD_BOSS_MSG_CLOSED, guild, row
     existing = _guild_boss_record(guild, boss_id)
     if existing and (existing.get('finished') or existing.get('expired')):
@@ -12397,9 +12406,8 @@ def _guild_boss_entry_check(char, boss_id):
         return False, GUILD_BOSS_MSG_FULL, guild, row
     return True, '', guild, row
 
-def _guild_boss_broadcast_state(boss_id, state):
-    """528 chat (chattype 6, [ACTIVITY_TYPE.GUILD_BOSS=6, state]) flips the client's activity
-    state / red dot / world icon without a re-request; 599 refreshes the list. Own-guild members only."""
+def _guild_boss_broadcast_state(boss_id, state, target_guild_id=None):
+    """Push the Gang Boss state to members of the affected guild only."""
     row = GUILD_BOSS_DATA.get(str(boss_id), {})
     if not row:
         return
@@ -12408,6 +12416,8 @@ def _guild_boss_broadcast_state(boss_id, state):
         if not peer_conn or not peer_char:
             continue
         guild_id = _guild_id_for_character(peer_char)
+        if target_guild_id is not None and int(guild_id or 0) != int(target_guild_id):
+            continue
         guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
         member = _guild_member_id(guild, char_id) if guild else None
         if not member or int(member.get('job', 4)) == 4:
@@ -12469,13 +12479,19 @@ def _guild_boss_scheduler_tick(now=None):
     now = int(time.time()) if now is None else int(now)
     today_id = _guild_boss_daily_id(now)
     row = GUILD_BOSS_DATA.get(today_id)
+    guilds = list(GUILD_STATES.values())
     if row:
-        current = (today_id, _guild_boss_activity_state(row, now)[0] == 1)
-        previous = GUILD_BOSS_SCHED_LAST.get('open')
-        GUILD_BOSS_SCHED_LAST['open'] = current
-        if previous is not None and previous != current and (current[1] or previous[1]):
-            _guild_boss_broadcast_state(today_id, 1 if current[1] else 0)
-    for guild in list(GUILD_STATES.values()):
+        for guild in guilds:
+            guild_id = int(guild.get('id', 0) or 0)
+            schedule_key = f"open:{guild_id}"
+            current = (today_id, _guild_boss_activity_state(row, now, guild)[0] == 1)
+            previous = GUILD_BOSS_SCHED_LAST.get(schedule_key)
+            GUILD_BOSS_SCHED_LAST[schedule_key] = current
+            if previous is not None and previous != current and (current[1] or previous[1]):
+                _guild_boss_broadcast_state(
+                    today_id, 1 if current[1] else 0, target_guild_id=guild_id
+                )
+    for guild in guilds:
         for boss_id, record in list((guild.get('guild_boss_events') or {}).items()):
             if (isinstance(record, dict) and not record.get('finished')
                     and not record.get('expired')
@@ -12963,7 +12979,7 @@ def _guild_activity_response(guild=None, char=None):
 def _guild_boss_activity_map(guild=None):
     now = int(time.time())
     result = {}
-    featured = _guild_boss_featured_id(now)
+    featured = _guild_boss_featured_id(now, guild)
     for boss_id, row in sorted(GUILD_BOSS_DATA.items(), key=lambda item: int(item[0]) if item[0].isdigit() else 0):
         if featured and str(boss_id) != featured:
             continue  # the client picks the first state==1 row else row 0: list only the day's boss
@@ -13611,7 +13627,7 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
     elif msg == 233:  # open_guild_boss
         boss_id = get_val_str(body, 0, '')
         boss_cfg = GUILD_BOSS_DATA.get(boss_id)
-        state, remaining = _guild_boss_activity_state(boss_cfg) if boss_cfg else (0, 0)
+        state, remaining = _guild_boss_activity_state(boss_cfg, guild=guild) if boss_cfg else (0, 0)
         can_open = False
         record = None
         if boss_cfg and guild and state == 1 and _guild_boss_member(guild, char, boss_id):
