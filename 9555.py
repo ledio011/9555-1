@@ -11824,7 +11824,12 @@ def _guild_boss_test_player(char, guild):
             or guild_id != char_guild_id):
         return False
     member = _guild_member_id(guild, char_id)
-    return bool(member and int(member.get('job', 4) or 4) != 4)
+    if not isinstance(member, dict):
+        return False
+    try:
+        return int(member.get('job', 4)) != 4
+    except (TypeError, ValueError):
+        return False
 
 
 def _guild_boss_activity_state(row, now=None, char=None, guild=None):
