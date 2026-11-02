@@ -138,7 +138,7 @@ SKILL_CONFIG = {} # skillId -> skill info template
 EFF_TO_SKILL = {} # effId -> skillId (reverse lookup for Tag 128)
 MOUNT_CONFIG = {} # garage vehicle id -> client MountData definition
 COLOR_CONFIG = {} # color id -> authoritative PriceType/PriceCost from ColorData
-WILD_BOSS_CONFIG = {} # ID -> configured PVE world boss and required level band
+WILD_BOSS_CONFIG = {} # ID -> full WildBossData configuration (PVE/PVP, schedule, HP and reward selectors)
 COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
 SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
 SHOW_REWARD_EXPLICIT_COUNT_CONFIG = {} # ShowRewardData id -> rewards with an explicit positive item count
@@ -1166,11 +1166,38 @@ try:
             for line in f:
                 parts = line.strip().split(",")
                 if len(parts) > 14 and parts[0] == "*" and parts[1]:
+                    _start_times = []
+                    for _value in str(parts[7] if len(parts) > 7 else '').split('#'):
+                        try:
+                            _start_times.append(int(_value))
+                        except (TypeError, ValueError):
+                            continue
+                    _rank_drop_ids = [str(parts[i]).strip() for i in (19, 21, 23, 25, 27)]
+                    _rank_limits = [int(parts[i] or 0) if len(parts) > i else 0
+                                    for i in (20, 22, 24, 26, 28)]
                     WILD_BOSS_CONFIG[parts[1]] = {
-                        'map_id': parts[2],
+                        'boss_id': str(parts[1]), 'map_id': str(parts[2]),
+                        'pvp': int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0,
+                        'time_count': int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 3,
                         'type': int(parts[5]) if parts[5].isdigit() else 0,
+                        'subtype': int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else 0,
+                        'start_times': _start_times,
+                        'limit': int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else 0,
+                        'duration': int(parts[9]) if len(parts) > 9 and parts[9].isdigit() else 0,
+                        'wait_time': int(parts[10]) if len(parts) > 10 and parts[10].isdigit() else 0,
+                        'exist_time': int(parts[11]) if len(parts) > 11 and parts[11].isdigit() else 0,
+                        'max_player': int(parts[12]) if len(parts) > 12 and parts[12].isdigit() else 50,
                         'min_level': int(parts[13]) if parts[13].isdigit() else 1,
                         'max_level': int(parts[14]) if parts[14].isdigit() else 80,
+                        'min_hp': int(parts[15]) if len(parts) > 15 and parts[15].isdigit() else 0,
+                        'max_hp': int(parts[16]) if len(parts) > 16 and parts[16].isdigit() else 0,
+                        'single_hp': int(parts[17]) if len(parts) > 17 and parts[17].isdigit() else 0,
+                        'last_kill_drop_id': str(parts[18]).strip() if len(parts) > 18 else '',
+                        'rank_drop_ids': _rank_drop_ids,
+                        'rank_limits': _rank_limits,
+                        'participate_drop_id': str(parts[29]).strip() if len(parts) > 29 else '',
+                        'show_reward_id': str(parts[30]).strip() if len(parts) > 30 else '',
+                        'boss_npc_id': str(parts[31]).strip() if len(parts) > 31 else '',
                     }
         print(f"[WILD BOSS CONFIG LOADED] count={len(WILD_BOSS_CONFIG)}")
 
@@ -2585,6 +2612,41 @@ GUILD_CITY_EVENT_STATE = {}
 GUILD_BOSS_LOCK = threading.RLock()
 GUILD_BOSS_INSTANCES = {}
 GUILD_BOSS_RUNTIMES = {}
+
+# World/Raid Boss events are shared by every eligible player in the same
+# scheduled window. Persist their HP, damage ranking and terminal state apart
+# from guild state so a server restart cannot revive a defeated boss.
+WILD_BOSS_LOCK = threading.RLock()
+WILD_BOSS_STATE_PATH = os.path.join(SCRIPT_DIR, "wild_boss.json")
+WILD_BOSS_INSTANCES = {}
+WILD_BOSS_TIMERS = {}
+def _load_wild_boss_states():
+    try:
+        with open(WILD_BOSS_STATE_PATH, "r", encoding="utf-8") as state_file:
+            loaded = json.load(state_file)
+        if isinstance(loaded, dict):
+            return loaded
+    except FileNotFoundError:
+        pass
+    except Exception as wild_boss_error:
+        print(f"[WILD BOSS] failed to read {WILD_BOSS_STATE_PATH}: {wild_boss_error}")
+    return {"events": {}}
+
+WILD_BOSS_STATES = _load_wild_boss_states()
+if not isinstance(WILD_BOSS_STATES.get("events"), dict):
+    WILD_BOSS_STATES["events"] = {}
+
+def _save_wild_boss_states():
+    with WILD_BOSS_LOCK:
+        temp_path = WILD_BOSS_STATE_PATH + ".tmp"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as state_file:
+                json.dump(WILD_BOSS_STATES, state_file, ensure_ascii=False, indent=2)
+                state_file.flush()
+                os.fsync(state_file.fileno())
+            os.replace(temp_path, WILD_BOSS_STATE_PATH)
+        except Exception as wild_boss_error:
+            print(f"[WILD BOSS] failed to save {WILD_BOSS_STATE_PATH}: {wild_boss_error}")
 try:
     with open(GUILD_CITY_OWNER_PATH, "r", encoding="utf-8") as city_file:
         _loaded_city_owners = json.load(city_file)
@@ -6359,10 +6421,14 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     # Client uses Mathf.CeilToInt(num5) - use ceiling, not truncation
     return int(math.ceil(max(1, final_dmg))), True, is_cri
 
-def build_npc_attr_sproto(nid, name, x, z, o, existing_inst_id=None):
-    """Build NPC attribute sproto for TAG 509 (npc_create).
-    Bug 1/6: Shared function to eliminate code duplication between send_npc_create and send_npc_wrapper."""
-    npc_stats = get_npc_attr(nid)
+def build_npc_attr_sproto(nid, name, x, z, o, existing_inst_id=None, hp_max_override=None):
+    """Build NPC attribute sproto for TAG 509 (npc_create)."""
+    npc_stats = dict(get_npc_attr(nid))
+    if hp_max_override is not None:
+        try:
+            npc_stats['hp_max'] = max(1, int(hp_max_override))
+        except (TypeError, ValueError, OverflowError):
+            pass
     hp_max = npc_stats['hp_max']
     atk = npc_stats['atk']
     df = npc_stats['def']
@@ -8264,6 +8330,11 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
     if boss_id:
         if picked_char:
             _spawn_guild_boss(conn, picked_char, boss_id, map_str)
+        return
+    wild_boss_id = _wild_boss_map_id(map_str)
+    if wild_boss_id:
+        if picked_char:
+            _spawn_wild_boss(conn, picked_char, wild_boss_id, map_str)
         return
     if is_equipment_copy_map(map_str):
         # Equipment-copy maps use ordered MonsterData groups and share their
@@ -13008,6 +13079,543 @@ def _guild_boss_activity_map(guild=None):
         result[str(boss_id)] = _guild_boss_activity_item(boss_id, guild, now)
     return result
 
+
+def _wild_boss_map_id(map_id):
+    map_id = str(map_id)
+    return next((boss_id for boss_id, row in WILD_BOSS_CONFIG.items()
+                 if str(row.get('map_id', '')) == map_id), None)
+
+def _wild_boss_schedule(cfg, now=None):
+    """Return (slot, slot_start, slot_end, active, day_start) for StartTime."""
+    now = int(time.time()) if now is None else int(now)
+    starts = sorted(int(value) for value in (cfg or {}).get('start_times', [])
+                    if int(value) >= 0)
+    if not starts:
+        starts = [12 * 3600, 16 * 3600 + 30 * 60, 19 * 3600 + 30 * 60]
+    day_start = now - (now % 86400)
+    duration = max(1, int((cfg or {}).get('duration', 3540) or 3540))
+    for slot_index, seconds in enumerate(starts, 1):
+        slot_start = day_start + seconds
+        slot_end = slot_start + duration
+        if slot_start <= now < slot_end:
+            return slot_index, slot_start, slot_end, True, day_start
+        if now < slot_start:
+            return slot_index, slot_start, slot_end, False, day_start
+    slot_index = min(len(starts), max(1, int((cfg or {}).get('time_count', len(starts)) or len(starts))))
+    slot_start = day_start + starts[-1]
+    return slot_index, slot_start, slot_start + duration, False, day_start
+
+def _wild_boss_event_key(boss_id, event_start):
+    return f"{str(boss_id)}:{int(event_start)}"
+
+def _wild_boss_record(boss_id, event_start, create=False):
+    cfg = WILD_BOSS_CONFIG.get(str(boss_id))
+    if not cfg:
+        return None
+    key = _wild_boss_event_key(boss_id, event_start)
+    events = WILD_BOSS_STATES.setdefault("events", {})
+    record = events.get(key)
+    if isinstance(record, dict):
+        return record
+    if not create:
+        return None
+    hp_max = max(1, int(cfg.get("max_hp", 0) or 0))
+    record = {
+        "boss_id": str(boss_id), "event_key": key,
+        "event_start": int(event_start),
+        "end_time": int(event_start) + max(1, int(cfg.get("duration", 3540) or 3540)),
+        "hp_max": hp_max, "hp": hp_max,
+        "damage_players": {}, "participants": {},
+        "last_kill_id": 0, "last_kill_name": "",
+        "finished": False, "expired": False,
+        "finished_at": 0, "reward_claims": {}, "rewards_pending": False
+    }
+    events[key] = record
+    # Keep recent event records for rankings/reward retries without unbounded growth.
+    cutoff = int(event_start) - 7 * 86400
+    for old_key, old_record in list(events.items()):
+        if old_key != key and isinstance(old_record, dict):
+            if int(old_record.get("event_start", 0) or 0) < cutoff and not old_record.get("rewards_pending"):
+                events.pop(old_key, None)
+    _save_wild_boss_states()
+    return record
+
+def _wild_boss_rank_rows(record):
+    return sorted(
+        (value for value in (record or {}).get("damage_players", {}).values()
+         if isinstance(value, dict)),
+        key=lambda entry: (-int(entry.get("damage", 0) or 0), int(entry.get("id", 0) or 0))
+    )
+
+def _wild_boss_attempt_state(char, create=False):
+    if not isinstance(char, dict):
+        return {"date": "", "counts": {}}
+    today = str(current_daily_stamp())
+    state = char.get("wild_boss_daily_attempts")
+    if not isinstance(state, dict) or str(state.get("date", "")) != today:
+        if not create:
+            return {"date": today, "counts": {}}
+        state = {"date": today, "counts": {}}
+        char["wild_boss_daily_attempts"] = state
+    if not isinstance(state.get("counts"), dict):
+        state["counts"] = {}
+    return state
+
+def _wild_boss_activity_info(boss_id, char=None, now=None):
+    now = int(time.time()) if now is None else int(now)
+    cfg = WILD_BOSS_CONFIG.get(str(boss_id), {})
+    slot, slot_start, slot_end, active, day_start = _wild_boss_schedule(cfg, now)
+    pvp_slot = int(cfg.get("pvp", 0) or 0) == 1
+    # WildBossData.Time=3 is the number of schedule windows. The client shows
+    # PVE rows while next != 3 and PVP rows while next == 3.
+    slot_matches = (slot == 3) if pvp_slot else (slot in (1, 2))
+    state = 1 if active and slot_matches else 0
+    if not active and now >= slot_end and slot >= 3:
+        state = 2
+    if char:
+        attempts = _wild_boss_attempt_state(char).get("counts", {})
+        used = max(0, int(attempts.get(str(boss_id), 0) or 0))
+    else:
+        used = 0
+    limit = max(0, int(cfg.get("limit", 0) or 0))
+    remaining = max(0, limit - used)
+    event_key = _wild_boss_event_key(boss_id, slot_start)
+    record = WILD_BOSS_STATES.get("events", {}).get(event_key)
+    if isinstance(record, dict):
+        if record.get("finished") or record.get("expired"):
+            state = 2
+        if not record.get("finished") and not record.get("expired") and now >= int(record.get("end_time", 0) or 0):
+            state = 2
+    if remaining <= 0 and now > day_start + (int((cfg.get("start_times") or [0])[0])) + 5400:
+        state = 2
+    rank_names = []
+    if isinstance(record, dict):
+        for rank, entry in enumerate(_wild_boss_rank_rows(record)[:5], 1):
+            rank_names.append(f"{rank}@{str(entry.get('name', ''))}")
+    parm = int(slot_start)
+    if state == 2 and not active:
+        parm = int(slot_start)
+    return encode_sproto([
+        (0, str(boss_id)), (1, remaining), (2, 5), (3, state),
+        (4, parm), (5, "#".join(rank_names)), (6, 0),
+        (7, day_start + int((cfg.get("start_times") or [0])[0]),), (8, int(slot)
+    ])
+
+def _wild_boss_activity_response(char=None, now=None):
+    result = {}
+    for boss_id in sorted(WILD_BOSS_CONFIG, key=lambda value: int(value) if str(value).isdigit() else 0):
+        result[str(boss_id)] = _wild_boss_activity_info(boss_id, char, now)
+    return encode_sproto([(0, result)])
+
+def _wild_boss_battle_info(char):
+    boss_id = _wild_boss_map_id(char.get("map_id", "")) if char else None
+    event_key = str((char or {}).get("_wild_boss_event_key") or "")
+    record = WILD_BOSS_STATES.get("events", {}).get(event_key) if event_key else None
+    if not record and boss_id:
+        cfg = WILD_BOSS_CONFIG.get(boss_id, {})
+        _slot, _start, _end, _active, _day_start = _wild_boss_schedule(cfg)
+        record = _wild_boss_record(boss_id, _start)
+    rows = _wild_boss_rank_rows(record)
+    char_id = int((char or {}).get("id", 0) or 0)
+    mine = next((entry for entry in rows if int(entry.get("id", 0) or 0) == char_id), None)
+    my_rank = next((index for index, entry in enumerate(rows, 1)
+                    if int(entry.get("id", 0) or 0) == char_id), len(rows) + 1)
+    damage_list = [encode_sproto([
+        (0, str(entry.get("name", ""))),
+        (1, int(entry.get("damage", 0) or 0)),
+        (2, int(entry.get("id", 0) or 0))
+    ]) for entry in rows[:50]]
+    return encode_sproto([
+        (0, damage_list), (1, my_rank),
+        (2, int((mine or {}).get("damage", 0) or 0)),
+        (3, sum(int(entry.get("damage", 0) or 0) for entry in rows)),
+        (4, str((record or {}).get("last_kill_name", ""))),
+        (5, int((record or {}).get("end_time", 0) or 0))
+    ])
+
+def _wild_boss_scene_chars(event_key):
+    result = []
+    for char_id, (conn, char) in list(ALL_CONNECTIONS.items()):
+        if (conn and char and str(char.get("_wild_boss_event_key", "")) == str(event_key)
+                and is_current_character_connection(conn, char)):
+            result.append((int(char_id), conn, char))
+    return result
+
+def _wild_boss_entry_check(char, boss_id, now=None):
+    cfg = WILD_BOSS_CONFIG.get(str(boss_id))
+    if not cfg or not char:
+        return False, "This boss is not available.", None, None
+    if int(cfg.get("type", 0) or 0) != 5 or str(cfg.get("map_id", "")) != str(boss_id):
+        return False, "This boss is not available.", None, None
+    level = int(char.get("level", 1) or 1)
+    if not int(cfg.get("min_level", 1) or 1) <= level <= int(cfg.get("max_level", 80) or 80):
+        return False, f"Requires level {cfg.get('min_level', 1)}-{cfg.get('max_level', 80)}.", None, None
+    slot, slot_start, slot_end, active, _day_start = _wild_boss_schedule(cfg, now)
+    if not active or (int(cfg.get("pvp", 0) or 0) == 1 and slot != 3) or (
+            int(cfg.get("pvp", 0) or 0) == 0 and slot not in (1, 2)):
+        return False, "The boss event is not open now.", None, None
+    attempts = _wild_boss_attempt_state(char).get("counts", {})
+    used = max(0, int(attempts.get(str(boss_id), 0) or 0))
+    if used >= max(1, int(cfg.get("limit", 1) or 1)):
+        return False, "You have no attempts remaining for this boss today.", None, None
+    event_key = _wild_boss_event_key(boss_id, slot_start)
+    record = _wild_boss_record(boss_id, slot_start)
+    if record and (record.get("finished") or record.get("expired")):
+        return False, "This boss event has ended.", None, None
+    in_scene = sum(1 for _cid, (_conn, peer) in list(ALL_CONNECTIONS.items())
+                   if peer and str(peer.get("_wild_boss_event_key", "")) == event_key)
+    if in_scene >= max(1, int(cfg.get("max_player", 50) or 50)):
+        return False, "The boss scene is full.", None, None
+    return True, "", event_key, (slot_start, slot_end)
+
+def _wild_boss_enter(char, boss_id, event_key, event_times):
+    cfg = WILD_BOSS_CONFIG.get(str(boss_id), {})
+    start_time, end_time = event_times
+    with WILD_BOSS_LOCK:
+        record = _wild_boss_record(boss_id, start_time, create=True)
+        if not record or record.get("finished") or record.get("expired"):
+            return False
+        attempt_state = _wild_boss_attempt_state(char, create=True)
+        counts = attempt_state.setdefault("counts", {})
+        current_key = str(char.get("_wild_boss_event_key") or "")
+        same_event = current_key == str(event_key)
+        used = max(0, int(counts.get(str(boss_id), 0) or 0))
+        if not same_event:
+            if used >= max(1, int(cfg.get("limit", 1) or 1)):
+                return False
+            counts[str(boss_id)] = used + 1
+        char["_wild_boss_event_key"] = str(event_key)
+        char["_wild_boss_return_pending"] = False
+        record.setdefault("participants", {})[str(int(char.get("id", 0) or 0))] = True
+        _save_wild_boss_states()
+    save_chars(all_accounts_chars)
+    return True
+
+def _spawn_wild_boss(conn, char, boss_id, map_id):
+    cfg = WILD_BOSS_CONFIG.get(str(boss_id), {})
+    event_key = str((char or {}).get("_wild_boss_event_key") or "")
+    record = WILD_BOSS_STATES.get("events", {}).get(event_key)
+    if not conn or not char or not record or record.get("finished") or record.get("expired"):
+        return
+    if str(cfg.get("map_id", "")) != str(map_id):
+        return
+    monster = next((entry for entry in MONSTER_DATA.get(str(map_id), [])
+                    if str(entry.get("nid", "")) == str(cfg.get("boss_npc_id", ""))), {})
+    x = int(monster.get("x", 0) or 0)
+    z = int(monster.get("z", 0) or 0)
+    heading = int(monster.get("o", 0) or 0)
+    hp_max = max(1, int(record.get("hp_max", cfg.get("max_hp", 1)) or 1))
+    hp_cur = max(0, min(int(record.get("hp", hp_max) or 0), hp_max))
+    with WILD_BOSS_LOCK:
+        inst_id = WILD_BOSS_INSTANCES.get(event_key)
+        if inst_id is None or inst_id not in NPC_ATTR_MAP:
+            inst_id = next_global_inst_id()
+            WILD_BOSS_INSTANCES[event_key] = int(inst_id)
+        NPC_HP_MAP[int(inst_id)] = hp_cur
+        NPC_INST_MAP[int(inst_id)] = str(cfg.get("boss_npc_id", ""))
+        NPC_INSTANCE_MAP[int(inst_id)] = str(map_id)
+        _inst_id, attr = build_npc_attr_sproto(
+            str(cfg.get("boss_npc_id", "")),
+            NPC_CONFIG.get(str(cfg.get("boss_npc_id", "")), {}).get("name", "World Boss"),
+            x, z, heading, existing_inst_id=int(inst_id), hp_max_override=hp_max
+        )
+    send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
+    stats = dict(get_npc_attr(str(cfg.get("boss_npc_id", ""))))
+    stats["hp_max"] = hp_max
+    sync_npc_attrs_rpc(conn, int(inst_id), stats, hp_cur)
+    _wild_boss_schedule_expiry(event_key, record)
+
+def _wild_boss_sync_npc(event_key, inst_id, stats, hp_cur):
+    for _char_id, peer_conn, _peer_char in _wild_boss_scene_chars(event_key):
+        sync_npc_attrs_rpc(peer_conn, int(inst_id), stats, hp_cur)
+
+def _wild_boss_schedule_expiry(event_key, record):
+    if record.get("finished") or record.get("expired"):
+        return
+    if event_key in WILD_BOSS_TIMERS:
+        return
+    delay = max(0.1, int(record.get("end_time", 0) or 0) - time.time())
+    timer = threading.Timer(delay, _wild_boss_expire, args=(str(event_key),))
+    timer.daemon = True
+    WILD_BOSS_TIMERS[str(event_key)] = timer
+    timer.start()
+
+def _wild_boss_remove_instance(event_key, inst_id):
+    with WILD_BOSS_LOCK:
+        if WILD_BOSS_INSTANCES.get(str(event_key)) != int(inst_id):
+            return
+        WILD_BOSS_INSTANCES.pop(str(event_key), None)
+    for _char_id, conn, _char in _wild_boss_scene_chars(event_key):
+        send_rpc_push_safe(conn, 506, encode_sproto([(0, int(inst_id))]))
+    NPC_HP_MAP.pop(int(inst_id), None)
+    NPC_INST_MAP.pop(int(inst_id), None)
+    NPC_INSTANCE_MAP.pop(int(inst_id), None)
+    NPC_ATTR_MAP.pop(int(inst_id), None)
+    DEAD_NPC_SET.discard(int(inst_id))
+
+def _wild_boss_auto_exit(event_key):
+    for _char_id, conn, char in _wild_boss_scene_chars(event_key):
+        return_map = str(char.get("pre_copy_map") or "11")
+        return_pos = char.get("pre_copy_pos")
+        if return_map == str(char.get("map_id", "")) or _wild_boss_map_id(return_map) or _guild_boss_map_id(return_map):
+            return_map, return_pos = "11", None
+        char["pre_copy_pos"] = None
+        char["pre_copy_map"] = None
+        char["active_copy_id"] = None
+        char.pop("_wild_boss_event_key", None)
+        char["_wild_boss_return_pending"] = False
+        if int(char.get("hp", 0) or 0) <= 0:
+            char["hp"] = get_character_stats(char)["hp_max"]
+            char.pop("_pending_relife", None)
+            sync_char_attrs_rpc(conn, char)
+        send_rpc_push_safe(conn, 629, encode_sproto([(0, int(time.time())), (1, 2)]))
+        start_map_transition(conn, char, return_map,
+                             lambda tag, data, cid=_char_id: send_push_to_char(cid, tag, data),
+                             override_pos=return_pos)
+    save_chars(all_accounts_chars)
+
+def _wild_boss_start_exit(event_key, boss_id, record, message):
+    cfg = WILD_BOSS_CONFIG.get(str(boss_id), {})
+    wait = max(1, int(cfg.get("wait_time", 600) or 600))
+    exit_at = int(time.time()) + wait
+    for _char_id, conn, _char in _wild_boss_scene_chars(event_key):
+        send_rpc_push_safe(conn, 627, encode_sproto([
+            (0, _wild_boss_battle_info(_char)), (1, 5)
+        ]))
+        send_rpc_push_safe(conn, 629, encode_sproto([(0, exit_at), (1, 2)]))
+        send_rpc_push_safe(conn, 529, encode_sproto([(0, str(message)), (1, True)]))
+    inst_id = WILD_BOSS_INSTANCES.get(str(event_key))
+    if inst_id is not None:
+        cleanup = threading.Timer(wait, _wild_boss_remove_instance,
+                                  args=(str(event_key), int(inst_id)))
+        cleanup.daemon = True
+        cleanup.start()
+    timer = threading.Timer(wait, _wild_boss_auto_exit, args=(str(event_key),))
+    timer.daemon = True
+    timer.start()
+
+def _wild_boss_reward_rows(drop_id):
+    """Resolve only explicit, positive-count boss reward rows; never infer quantities."""
+    reward_id = str(drop_id or "")
+    rows = SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(reward_id)
+    if rows:
+        return list(rows)
+    return None
+
+def _wild_boss_distribute_rewards(boss_id, event_key, record):
+    cfg = WILD_BOSS_CONFIG.get(str(boss_id), {})
+    rows = _wild_boss_rank_rows(record)
+    award_map = {}
+    for player_id in (record.get("participants") or {}):
+        award_map.setdefault(str(player_id), []).append(("participate", cfg.get("participate_drop_id", "")))
+    for rank, player in enumerate(rows, 1):
+        for rank_index, (drop_id, rank_limit) in enumerate(
+                zip(cfg.get("rank_drop_ids", []), cfg.get("rank_limits", [])), 1):
+            if int(rank_limit or 0) == rank:
+                award_map.setdefault(str(int(player.get("id", 0))), []).append(
+                    (f"rank-{rank_index}", drop_id))
+        if int(player.get("id", 0) or 0) == int(record.get("last_kill_id", 0) or 0):
+            award_map.setdefault(str(int(player.get("id", 0))), []).append(
+                ("last-kill", cfg.get("last_kill_drop_id", "")))
+    pending = False
+    claims = record.setdefault("reward_claims", {})
+    for player_id, awards in award_map.items():
+        claimed = set(claims.get(player_id, []))
+        reward_plan = []
+        unresolved = []
+        for reward_key, drop_id in awards:
+            if reward_key in claimed:
+                continue
+            rewards = _wild_boss_reward_rows(drop_id)
+            if not rewards:
+                unresolved.append(f"{reward_key}:{drop_id}")
+                continue
+            reward_plan.extend(rewards)
+            claimed.add(reward_key)
+        if unresolved:
+            pending = True
+            print(f"[WORLD BOSS REWARD BLOCKED] event={event_key} player={player_id} "
+                  f"selectors={','.join(unresolved)}; authoritative item counts/drop rows absent")
+        if reward_plan:
+            try:
+                player_id_int = int(player_id)
+            except (TypeError, ValueError):
+                continue
+            _conn, player_char = ALL_CONNECTIONS.get(player_id_int, (None, None))
+            if player_char is None:
+                player_char = _guild_char_by_id(player_id_int)
+            if player_char is None:
+                pending = True
+                continue
+            grant_item_rewards(player_char, reward_plan, _conn, None, save=False)
+            save_chars(all_accounts_chars)
+            claims[player_id] = sorted(claimed)
+    record["rewards_pending"] = pending or any(
+        set(award_key for award_key, _drop in awards) - set(claims.get(player_id, []))
+        for player_id, awards in award_map.items()
+    )
+    _save_wild_boss_states()
+    return not record["rewards_pending"]
+
+def _wild_boss_finish(event_key, killer_id):
+    record = WILD_BOSS_STATES.get("events", {}).get(str(event_key))
+    if not record or record.get("finished") or record.get("expired"):
+        return False
+    record["finished"] = True
+    record["finished_at"] = int(time.time())
+    record["hp"] = 0
+    record["last_kill_id"] = int(killer_id or 0)
+    killer = next((entry for entry in _wild_boss_rank_rows(record)
+                   if int(entry.get("id", 0) or 0) == int(killer_id or 0)), None)
+    if killer:
+        record["last_kill_name"] = str(killer.get("name", ""))
+    _save_wild_boss_states()
+    boss_id = str(record.get("boss_id", ""))
+    _wild_boss_distribute_rewards(boss_id, event_key, record)
+    _wild_boss_start_exit(event_key, boss_id, record,
+                          "The World Boss has been defeated. You will leave the scene after the countdown.")
+    print(f"[WORLD BOSS] defeated boss={boss_id} event={event_key} killer={killer_id} "
+          f"reward_pending={bool(record.get('rewards_pending'))}")
+    return True
+
+def _wild_boss_expire(event_key):
+    record = WILD_BOSS_STATES.get("events", {}).get(str(event_key))
+    if not record or record.get("finished") or record.get("expired"):
+        return False
+    record["expired"] = True
+    record["finished_at"] = int(time.time())
+    _save_wild_boss_states()
+    WILD_BOSS_TIMERS.pop(str(event_key), None)
+    boss_id = str(record.get("boss_id", ""))
+    _wild_boss_start_exit(event_key, boss_id, record,
+                          "The World Boss event has ended. You will leave the scene after the countdown.")
+    print(f"[WORLD BOSS] expired boss={boss_id} event={event_key} hp={record.get('hp')}")
+    return True
+
+def _wild_boss_apply_hit(conn, char, target_id, client_dmg, skill_id,
+                         requested_effinfo_id, is_cri, client_cri_flag,
+                         client_hit_flag):
+    boss_id = _wild_boss_map_id(char.get("map_id", "")) if char else None
+    event_key = str((char or {}).get("_wild_boss_event_key") or "")
+    cfg = WILD_BOSS_CONFIG.get(str(boss_id), {})
+    record = WILD_BOSS_STATES.get("events", {}).get(event_key)
+    inst_id = WILD_BOSS_INSTANCES.get(event_key)
+    if (not boss_id or not record or record.get("finished") or record.get("expired")
+            or not is_current_character_connection(conn, char)
+            or int(char.get("hp", 0) or 0) <= 0
+            or inst_id is None or int(inst_id) != int(target_id)
+            or str(NPC_INST_MAP.get(int(target_id), "")) != str(cfg.get("boss_npc_id", ""))
+            or str(NPC_INSTANCE_MAP.get(int(target_id), "")) != str(char.get("map_id", ""))):
+        print(f"[WORLD BOSS SECURITY] rejected stale/invalid hit player={char.get('id') if char else 0} target={target_id}")
+        return False
+    if int(client_dmg) < 0 or bool(client_cri_flag) != bool(is_cri):
+        return False
+    skill_id = str(skill_id)
+    skill_cfg = SKILL_CONFIG.get(skill_id)
+    if not skill_cfg:
+        print(f"[WORLD BOSS SECURITY] rejected unknown skill={skill_id} player={char.get('id')}")
+        return False
+    levels = {str(key): value for key, value in (char.get("skill_levels") or {}).items()}
+    starter = get_character_combat_skills(char.get("prof", 0), char.get("equipped_equip", []))
+    available = set(starter.get("atk", []))
+    available.update((starter.get("dodge", ""), starter.get("starter_active", "")))
+    available.update(equipped_weapon_skill_ids(char))
+    if skill_id not in learned_non_weapon_skill_ids(levels) and skill_id not in available:
+        print(f"[WORLD BOSS SECURITY] rejected unlearned skill={skill_id} player={char.get('id')}")
+        return False
+    try:
+        skill_level = max(0, int(levels.get(skill_id, 0) or 0))
+    except (TypeError, ValueError):
+        return False
+    valid_effects = {str(skill_cfg.get(field, "")) for field in ("eff0", "eff1", "eff2")
+                     if skill_cfg.get(field)}
+    effinfo_id = str(requested_effinfo_id or "")
+    if not effinfo_id:
+        effinfo_id = str(skill_cfg.get("eff0", "") or "")
+    if effinfo_id not in valid_effects:
+        print(f"[WORLD BOSS SECURITY] rejected mismatched effect skill={skill_id} effect={effinfo_id}")
+        return False
+    player_pos = char.get("pos")
+    if not isinstance(player_pos, (list, tuple)) or len(player_pos) < 3:
+        return False
+    effect_cfg = EFF_CONFIG.get(effinfo_id, {})
+    params = effect_cfg.get("params", [])
+    try:
+        p1 = abs(int(params[0] if len(params) > 0 else 0)) / 100.0
+        p2 = abs(int(params[1] if len(params) > 1 else 0)) / 100.0
+        area_type = int(effect_cfg.get("area_type", 0) or 0)
+        trace = max(0, int(skill_cfg.get("trace_distance_cm", 0) or 0)) / 100.0
+        px, pz = float(player_pos[0]) / 100.0, float(player_pos[2]) / 100.0
+        monster = next((entry for entry in MONSTER_DATA.get(str(char.get("map_id", "")), [])
+                        if str(entry.get("nid", "")) == str(cfg.get("boss_npc_id", ""))), {})
+        bx, bz = float(monster.get("x", 0) or 0) / 100.0, float(monster.get("z", 0) or 0) / 100.0
+    except (TypeError, ValueError, OverflowError):
+        return False
+    if area_type == 1:
+        reach = trace + p1
+    elif area_type == 2:
+        reach = math.hypot(p1, p2 / 2.0)
+    elif area_type in (3, 4, 5):
+        reach = p1
+    else:
+        reach = trace
+    if math.hypot(bx - px, bz - pz) > max(trace, reach) + 3.0:
+        print(f"[WORLD BOSS SECURITY] rejected out-of-range hit player={char.get('id')} target={target_id}")
+        return False
+    attacker_stats = get_character_stats(char)
+    defender_stats = dict(get_npc_attr(str(cfg.get("boss_npc_id", ""))))
+    defender_stats["hp_max"] = max(1, int(record.get("hp_max", cfg.get("max_hp", 1)) or 1))
+    max_damage, can_hit, possible_crit = get_combat_damage(
+        attacker_stats, defender_stats, skill_id, skill_level,
+        effinfo_id=effinfo_id, sat_type="satm", forced_hit=True,
+        forced_crit=bool(is_cri), max_variance=True
+    )
+    if (client_dmg == 0 and (client_hit_flag or is_cri)
+            or client_dmg > 0 and (not client_hit_flag or not can_hit or client_dmg > max_damage + 2)
+            or is_cri and not possible_crit):
+        print(f"[WORLD BOSS SECURITY] rejected impossible damage player={char.get('id')} dmg={client_dmg} max={max_damage}")
+        return False
+    killed = False
+    with WILD_BOSS_LOCK, npc_hp_lock(target_id):
+        hp_now = NPC_HP_MAP.get(int(target_id))
+        if (record.get("finished") or record.get("expired") or hp_now is None
+                or int(hp_now) <= 0 or int(record.get("hp", 0) or 0) <= 0):
+            return False
+        actual = min(int(client_dmg), int(hp_now))
+        hp_after = max(0, int(hp_now) - actual)
+        NPC_HP_MAP[int(target_id)] = hp_after
+        record["hp"] = hp_after
+        if actual > 0:
+            player_id = str(int(char.get("id", 0)))
+            player = record.setdefault("damage_players", {}).setdefault(player_id, {
+                "id": int(char.get("id", 0)), "name": str(char.get("name", "")),
+                "profession": int(char.get("prof", 0) or 0), "damage": 0
+            })
+            player["name"] = str(char.get("name", player.get("name", "")))
+            player["profession"] = int(char.get("prof", player.get("profession", 0)) or 0)
+            player["damage"] = int(player.get("damage", 0) or 0) + actual
+            record.setdefault("participants", {})[player_id] = True
+        if hp_after == 0:
+            DEAD_NPC_SET.add(int(target_id))
+            killed = _wild_boss_finish(event_key, int(char.get("id", 0)))
+        _save_wild_boss_states()
+    _wild_boss_sync_npc(event_key, target_id, defender_stats, hp_after)
+    hit_entry = encode_sproto([
+        (0, int(target_id)), (1, actual), (2, skill_id),
+        (3, effinfo_id), (4, bool(is_cri and client_dmg > 0))
+    ])
+    dmg_board = encode_sproto([(0, [hit_entry])])
+    for _peer_id, peer_conn, _peer_char in _wild_boss_scene_chars(event_key):
+        if peer_conn is not conn:
+            send_rpc_push_safe(peer_conn, 511, dmg_board)
+    if killed:
+        _wild_boss_start_exit(event_key, boss_id, record,
+                              "The World Boss has been defeated. You will leave the scene after the countdown.")
+        # _wild_boss_finish sends the terminal notice/countdown. This second call
+        # is intentionally avoided by its terminal guard; only refresh the rank panel.
+    return True
+
+
 def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response, session):
     """Handle only the Gang/Guild UI protocols confirmed in the bundled APK."""
     global GUILD_ID_COUNTER
@@ -13393,21 +14001,39 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
             fields.insert(0, (0, _guild_info_bytes(found, None)))
         send_rpc_push(586, encode_sproto(fields))
 
+    elif msg == 200:  # request_wild_boss_info
+        send_rpc_push(605, _wild_boss_activity_response(char))
+
     elif msg == 195:  # request_guild_boss / Gang activity overview
         send_rpc_push(599, _guild_activity_response(guild, char))
 
-    elif msg == 231:  # request_battle_info; Gang Boss live battle/damage ranking
+    elif msg == 231:  # request_battle_info; Gang Boss or World Boss live ranking
+        wild_boss_id = _wild_boss_map_id(char.get('map_id', '')) if char else None
+        if wild_boss_id:
+            event_key = str(char.get("_wild_boss_event_key") or "")
+            record = WILD_BOSS_STATES.get("events", {}).get(event_key)
+            allow = bool(record and (
+                not record.get("expired") or record.get("finished")
+            ) and event_key)
+            if allow:
+                battle_info = encode_sproto([(0, _wild_boss_battle_info(char)), (1, 5)])
+            else:
+                battle_info = encode_sproto([
+                    (0, encode_sproto([(0, []), (1, -1), (2, 0), (3, 0), (4, ''), (5, 0)])),
+                    (1, 5)
+                ])
+            send_rpc_push(627, battle_info)
+            if session is not None:
+                send_rpc_response(session)
+            return
+
         boss_id = _guild_boss_map_id(char.get('map_id', '')) if char else None
-        # Allow battle info during and immediately after defeat (before auto-exit).
-        # _guild_boss_member rejects once the boss is finished, so check the
-        # record directly when the player is on the boss map.
         allow_battle_info = False
         if boss_id and _guild_boss_member(guild, char, boss_id):
             allow_battle_info = True
         if not allow_battle_info and boss_id and guild:
             record = _guild_boss_record(guild, boss_id)
             if record and record.get('finished'):
-                # Boss was just defeated; still show battle info until auto-exit.
                 member = _guild_member_id(guild, int(char.get('id', 0)))
                 if member and int(member.get('job', 4)) != 4:
                     allow_battle_info = True
@@ -13653,53 +14279,20 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
     elif msg == 319:  # request_guild_map_info; Gang city/capture data
         send_rpc_push(689, encode_sproto([(0, _guild_capture_activity_map(char=char))]))
 
-    elif msg == 233:  # open_guild_boss
+    elif msg == 233:  # open_guild_boss; availability check only, no attempt or map transition
         boss_id = get_val_str(body, 0, '')
         boss_cfg = GUILD_BOSS_DATA.get(boss_id)
-        state, remaining = _guild_boss_activity_state(boss_cfg) if boss_cfg else (0, 0)
-        can_open = False
-        record = None
-        if boss_cfg and guild and state == 1 and _guild_boss_member(guild, char, boss_id):
-            with GUILD_BOSS_LOCK:
-                record = _guild_boss_record(guild, boss_id, create=True)
-                max_attempts = max(1, int(boss_cfg.get('max_play_num', 1) or 1))
-                if record and not record.get('finished'):
-                    if int(record.get('attempts', 0) or 0) < max_attempts:
-                        record['attempts'] = int(record.get('attempts', 0) or 0) + 1
-                        # Clear reward claims from the previous attempt so each
-                        # new attempt distributes rewards fresh.
-                        record['reward_claims'] = {}
-                        record['rewards_pending'] = False
-                        # Reset HP for the new attempt
-                        npc_id = str(boss_cfg.get('boss_npc_id', ''))
-                        stats = get_npc_attr(npc_id)
-                        record['hp_max'] = int(stats.get('hp_max', 0))
-                        record['hp'] = int(stats.get('hp_max', 0))
-                        record['damage_players'] = {}
-                        record['participants'] = {}
-                        record['last_kill_id'] = 0
-                        record['last_kill_name'] = ''
-                        record['finished'] = False
-                        _save_guild_states()
-                    can_open = bool(
-                        record and not record.get('finished')
-                        and int(record.get('attempts', 0) or 0) > 0
-                    )
+        state, _remaining = _guild_boss_activity_state(boss_cfg) if boss_cfg else (0, 0)
+        can_open = bool(
+            boss_cfg and guild and state == 1
+            and _guild_boss_member(guild, char, boss_id)
+        )
+        if can_open:
+            existing = _guild_boss_record(guild, boss_id)
+            can_open = bool(not existing or not existing.get('finished') and not existing.get('expired'))
         if boss_cfg:
             boss_payload = _guild_boss_activity_item(boss_id, guild)
             send_rpc_push(628, encode_sproto([(0, can_open), (1, boss_payload)]))
-            # Teleport the player to the boss map when can_open is true
-            if can_open:
-                boss_map_id = str(boss_cfg.get('map_id', ''))
-                if boss_map_id:
-                    # Save pre-copy position for return after boss fight
-                    if char.get('pre_copy_pos') is None:
-                        char['pre_copy_pos'] = list(char.get('pos', [0, 100, 0, 0]))
-                        char['pre_copy_map'] = str(char.get('map_id', '11'))
-                    char['active_copy_id'] = boss_map_id
-                    save_chars(all_accounts_chars)
-                    start_map_transition(conn, char, boss_map_id, send_rpc_push)
-                    print(f"[GUILD BOSS] entered player={char.get('id')} boss={boss_id} map={boss_map_id}")
         else:
             send_rpc_push(628, encode_sproto([(0, False)]))
 
@@ -17388,6 +17981,12 @@ def client_handler(conn, addr):
                                 requested_effinfo_id, is_cri, client_cri_flag,
                                 client_hit_flag)
                             continue
+                        if _wild_boss_map_id(picked_char.get('map_id', '')):
+                            _wild_boss_apply_hit(
+                                conn, picked_char, target_id, client_dmg, skill_id,
+                                requested_effinfo_id, is_cri, client_cri_flag,
+                                client_hit_flag)
+                            continue
 
                         # --- Check if target is an online player (PvP) ---
                         target_cid, target_conn, target_char = find_player_connection(target_id)
@@ -17987,8 +18586,9 @@ def client_handler(conn, addr):
 
                 cur_map = str(picked_char.get('map_id', '11')) if picked_char else ''
                 report_valid = False
-                if picked_char and _guild_boss_map_id(cur_map):
-                    print(f"[GUILD BOSS] ignored client death report player={picked_char.get('id')} inst={inst_id}")
+                if picked_char and (_guild_boss_map_id(cur_map) or _wild_boss_map_id(cur_map)):
+                    boss_kind = "GUILD BOSS" if _guild_boss_map_id(cur_map) else "WORLD BOSS"
+                    print(f"[{boss_kind}] ignored client death report player={picked_char.get('id')} inst={inst_id}")
                     if session is not None:
                         ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                         conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -19158,6 +19758,8 @@ def client_handler(conn, addr):
                         reconcile_equipment_stage_login(picked_char)
                     current_map = str(picked_char.get('map_id', '11'))
                     boss_cfg = WILD_BOSS_CONFIG.get(mid, {}) if msg == 201 else {}
+                    wild_entry_event_key = None
+                    wild_entry_times = None
                     valid_guild_boss = True
                     if msg == 194:
                         configured_boss = GUILD_BOSS_DATA.get(mid)
@@ -19197,11 +19799,13 @@ def client_handler(conn, addr):
                             # enter_guild_city_scene sends GuildCaptureData.ID;
                             # resolve that capture ID to its actual MapInfoData ID.
                             mid = str(capture_map_id)
-                    valid_world_boss = (msg != 201 or (
-                            boss_cfg.get('type') == 5
-                            and str(boss_cfg.get('map_id')) == mid
-                            and int(boss_cfg.get('min_level', 1)) <= int(picked_char.get('level', 1)) <= int(boss_cfg.get('max_level', 80))
-                    ))
+                    valid_world_boss = True
+                    if msg == 201:
+                        world_entry_ok, world_notice, wild_entry_event_key, wild_entry_times = _wild_boss_entry_check(
+                            picked_char, mid)
+                        valid_world_boss = bool(world_entry_ok)
+                        if not world_entry_ok and world_notice:
+                            send_rpc_push(529, encode_sproto([(0, world_notice), (1, True)]))
                     if not is_current_character_connection(conn, picked_char):
                         print(f"[SCENE ENTRY] denied stale character socket player={picked_char.get('id')}")
                     elif not valid_world_boss:
@@ -19235,10 +19839,19 @@ def client_handler(conn, addr):
                                 picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
                                 picked_char['pre_copy_map'] = str(picked_char.get('map_id', '11'))
                             picked_char['active_copy_id'] = mid
-                        start_map_transition(conn, picked_char, mid, send_rpc_push)
-                        if msg == 201: # world_boss
-                            advance_missions(picked_char, send_rpc_push, 'world_boss')
-                            send_rpc_push(552, encode_sproto([(0, 1), (1, mid), (2, True)]))
+                        if msg == 201:
+                            if not _wild_boss_enter(picked_char, mid, wild_entry_event_key, wild_entry_times):
+                                send_rpc_push(529, encode_sproto([
+                                    (0, "This boss event has ended or your attempts are exhausted."),
+                                    (1, True)
+                                ]))
+                                valid_world_boss = False
+                            else:
+                                start_map_transition(conn, picked_char, mid, send_rpc_push)
+                                advance_missions(picked_char, send_rpc_push, 'world_boss')
+                                send_rpc_push(552, encode_sproto([(0, 1), (1, mid), (2, True)]))
+                        else:
+                            start_map_transition(conn, picked_char, mid, send_rpc_push)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -20426,17 +21039,21 @@ def client_handler(conn, addr):
                             conn.sendall(struct.pack(">H", len(pf)) + pf)
                         continue
 
-                    # Handle leaving Guild Boss scene early
+                    # Handle leaving either boss instance early.
                     in_guild_boss = bool(_guild_boss_map_id(picked_char.get('map_id', '')))
-                    if in_guild_boss and in_copy:
+                    in_wild_boss = bool(_wild_boss_map_id(picked_char.get('map_id', '')))
+                    if (in_guild_boss or in_wild_boss) and in_copy:
                         saved_pos = picked_char.get('pre_copy_pos')
                         saved_map = picked_char.get('pre_copy_map', '11')
                         picked_char['pre_copy_pos'] = None
                         picked_char['pre_copy_map'] = None
                         picked_char['active_copy_id'] = None
+                        picked_char.pop("_wild_boss_event_key", None)
+                        picked_char["_wild_boss_return_pending"] = False
                         start_map_transition(conn, picked_char, saved_map, send_rpc_push, override_pos=saved_pos)
                         save_chars(all_accounts_chars)
-                        print(f"[GUILD BOSS] player left early id={picked_char.get('id')} map={picked_char.get('map_id')}")
+                        boss_label = "GUILD BOSS" if in_guild_boss else "WORLD BOSS"
+                        print(f"[{boss_label}] player left early id={picked_char.get('id')} map={picked_char.get('map_id')}")
                         if session is not None:
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                             conn.sendall(struct.pack('>H', len(pf)) + pf)
@@ -21381,7 +21998,7 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif (msg in (146, 147, 148, 149, 150, 151, 152, 153, 154,
-                          169, 170, 173, 174, 175, 176, 195, 212, 231, 233, 247,
+                          169, 170, 173, 174, 175, 176, 195, 200, 212, 231, 233, 247,
                           285, 286, 287, 288, 289, 291, 293, 294, 295, 315, 318, 319, 320)
                   or (msg == 143 and get_val_int(body, 0, -1) == 3)
                   or (msg == 144 and get_val_int(body, 2, -1) == 3)):
