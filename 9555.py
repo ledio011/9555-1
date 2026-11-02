@@ -3859,6 +3859,25 @@ def send_push_to_char(char_id, tag, data):
     except Exception:
         return False
 
+
+def broadcast_global_tele_announcement(chat_info, intdata=None, stringdata=None):
+    """Send a client-formatted TAG 528 global ticker message (chattype=7)."""
+    chat_fields = [(4, str(chat_info)), (5, 7)]
+    if intdata is not None:
+        chat_fields.append((7, [int(value) for value in intdata]))
+    if stringdata is not None:
+        chat_fields.append((8, [str(value) for value in stringdata]))
+    payload = encode_sproto([(0, [encode_sproto(chat_fields)])])
+    sent = 0
+    for _char_id, (peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
+        if (not peer_conn or not peer_char
+                or not is_current_character_connection(peer_conn, peer_char)):
+            continue
+        if send_rpc_push_safe(peer_conn, 528, payload):
+            sent += 1
+    return sent
+
+
 def send_exp_result_to_char(char, result):
     """Deliver an EXP result or keep it for the character's next login."""
     if not char or not result:
@@ -10064,6 +10083,7 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None,
     honor_gained = 0
     currency_gains = {field: 0 for field in MONEY_FIELDS}
     inv_changed = False
+    announced_special_items = set()
 
     for entry in rewards_list:
         item_id = str(entry[0])
@@ -10082,6 +10102,15 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None,
             reward_quality = int(entry[1]) if len(entry) > 2 else None
             add_to_inventory(picked_char, item_id, amount, quality=reward_quality)
             inv_changed = True
+            item_type = int(ITEM_CONFIG.get(item_id, {}).get('type', -1))
+            if (picked_char and conn is not None and item_type in (6, 15, 18)
+                    and item_id not in announced_special_items
+                    and is_current_character_connection(conn, picked_char)):
+                broadcast_global_tele_announcement(
+                    "#{101910}", [2],
+                    [str(picked_char.get('name', '')), item_id]
+                )
+                announced_special_items.add(item_id)
 
     if exp_gained > 0:
         normalize_player_level(picked_char)
@@ -12475,6 +12504,8 @@ def _guild_boss_scheduler_tick(now=None):
         GUILD_BOSS_SCHED_LAST['open'] = current
         if previous is not None and previous != current and (current[1] or previous[1]):
             _guild_boss_broadcast_state(today_id, 1 if current[1] else 0)
+            if current[1]:
+                broadcast_global_tele_announcement("#{101912}", [19])
     for guild in list(GUILD_STATES.values()):
         for boss_id, record in list((guild.get('guild_boss_events') or {}).items()):
             if (isinstance(record, dict) and not record.get('finished')
@@ -12638,6 +12669,13 @@ def _guild_boss_apply_hit(conn, char, target_id, client_dmg, skill_id,
                 and int(_guild_member_id(guild, peer_id).get('job', 4)) != 4):
             send_rpc_push_safe(peer_conn, 511, dmg_board)
     if killed:
+        damage_rows = _guild_boss_rank_rows(record)
+        boss_npc_id = str(row.get('boss_npc_id', '') or '')
+        if damage_rows and boss_npc_id:
+            broadcast_global_tele_announcement(
+                "#{101902}", [1],
+                [str(damage_rows[0].get('name', '')), boss_npc_id]
+            )
         _guild_boss_start_exit_countdown(guild, boss_id, record)
         _guild_boss_send_result(guild, boss_id, record)
         _guild_boss_push_activity(guild)
@@ -13300,6 +13338,7 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         cfg = GUILD_DONATE_DATA.get(donation_id)
         member = _guild_member_id(guild, char_id) if guild else None
         success = False
+        previous_guild_level = _guild_level(guild) if guild else 0
         if cfg and guild and member and int(member.get('job', 4)) != 4:
             _guild_donate_records(char, guild)
             remaining = member.setdefault('donate_remaining', {})
@@ -13323,6 +13362,12 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
             if success:
                 sync_char_attrs_rpc(conn, char)
                 _guild_refresh_members(guild)
+                new_guild_level = _guild_level(guild)
+                if new_guild_level > previous_guild_level:
+                    broadcast_global_tele_announcement(
+                        "#{101909}", [8, new_guild_level],
+                        [str(guild.get('name', ''))]
+                    )
         member = _guild_member_id(guild, char_id) if guild else {}
         send_rpc_push(585, encode_sproto([
             (0, 0 if success else 1), (1, donation_id),
@@ -13786,6 +13831,10 @@ def client_handler(conn, addr):
         result = _rank_pvp_finalize_state(picked_char, bool(win), reason)
         if not result:
             return False
+        if int(result.get("new_rank", 0)) == 1 and int(result.get("old_rank", 0)) != 1:
+            broadcast_global_tele_announcement(
+                "#{101904}", [3], [str(picked_char.get("name", ""))]
+            )
         # 33001/33101 are client reward references but their drop definitions
         # are absent from the supplied APK data. Grant only a verified mapping.
         reward_id = "33001" if win else "33101"
@@ -15795,6 +15844,16 @@ def client_handler(conn, addr):
                                         get_character_stats(picked_char)['power']
                                     )
                                     sync_equipment_status_to_peers(picked_char)
+                                    if succeeded:
+                                        player_name = str(picked_char.get('name', ''))
+                                        broadcast_global_tele_announcement(
+                                            "#{101911}", [10, part, current_level],
+                                            [player_name]
+                                        )
+                                        if current_level >= 10:
+                                            broadcast_global_tele_announcement(
+                                                "#{101905}", [4, part], [player_name]
+                                            )
                                     print(f"[BACKPACK] refine part={part} level={current_level} "
                                           f"state={response_state} protected={use_safety}")
                 response_data = encode_sproto([
@@ -16337,6 +16396,18 @@ def client_handler(conn, addr):
                                                     push_backpack_item_update(send_rpc_push, 2, key_item)
                                         grant_item_rewards(picked_char, rewards, conn, send_rpc_push, save=False)
                                         save_chars(all_accounts_chars)
+                                        announced_package_items = set()
+                                        for reward_item_id, _reward_quality, reward_amount in rewards:
+                                            reward_item_id = str(reward_item_id)
+                                            reward_cfg = ITEM_CONFIG.get(reward_item_id, {})
+                                            if (reward_amount > 0 and reward_cfg
+                                                    and int(reward_cfg.get('type', -1)) not in (6, 15, 18)
+                                                    and reward_item_id not in announced_package_items):
+                                                broadcast_global_tele_announcement(
+                                                    "#{101903}", [2],
+                                                    [str(picked_char.get('name', '')), reward_item_id]
+                                                )
+                                                announced_package_items.add(reward_item_id)
                                         display_rewards = [encode_sproto([
                                             (0, item_id), (1, amount), (3, quality)
                                         ]) for (item_id, quality), amount in reward_totals.items()]
@@ -16373,6 +16444,11 @@ def client_handler(conn, addr):
                             picked_char['title_level'] = current_level + 1
                             save_chars(all_accounts_chars)
                             sync_char_attrs_rpc(conn, picked_char)
+                            if int(picked_char['title_level']) >= max(TITLE_CONFIG, default=10):
+                                broadcast_global_tele_announcement(
+                                    "#{101908}", [6],
+                                    [str(picked_char.get('name', ''))]
+                                )
                         send_rpc_push(569, encode_sproto([
                             (0, int(picked_char.get('title_level', 0))),
                             (1, int(picked_char.get('title_exp', 0)))
