@@ -4553,9 +4553,9 @@ def map_relife_type(map_id):
 def supports_normal_relife(map_id):
     """MapInfo enables ordinary revive offers on rule 1/2 maps only."""
     mid = str(map_id)
-    if _guild_boss_map_id(mid):
-        # MapInfoData RelifeType is 0 for the Gang Boss maps: without this the boss
-        # kills players but never offers a revive (618) and 132 is denied.
+    if _guild_boss_map_id(mid) or _wild_boss_map_id(mid):
+        # Boss maps use RelifeType=0 in MapInfoData; still allow the boss-scene
+        # revive flow so PvP boss deaths can receive the client's 618 offer.
         return True
     return (mid != '502'
             and not is_exp_map(mid)
@@ -13265,8 +13265,11 @@ def _wild_boss_entry_check(char, boss_id, now=None):
     record = _wild_boss_record(boss_id, slot_start)
     if record and (record.get("finished") or record.get("expired")):
         return False, "This boss event has ended.", None, None
-    in_scene = sum(1 for _cid, (_conn, peer) in list(ALL_CONNECTIONS.items())
-                   if peer and str(peer.get("_wild_boss_event_key", "")) == event_key)
+    in_scene = sum(
+        1 for peer_id, (_conn, peer) in list(ALL_CONNECTIONS.items())
+        if int(peer_id) != int(char.get("id", 0) or 0)
+        and peer and str(peer.get("_wild_boss_event_key", "")) == event_key
+    )
     if in_scene >= max(1, int(cfg.get("max_player", 50) or 50)):
         return False, "The boss scene is full.", None, None
     return True, "", event_key, (slot_start, slot_end)
