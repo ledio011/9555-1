@@ -11879,9 +11879,10 @@ def _guild_boss_record(guild, boss_id, create=False, now=None, char=None):
         )
         if int(record.get('event_start', 0) or 0) == legacy_start and legacy_start != event_start:
             record['event_start'] = event_start
-            record['end_time'] = event_start + 86400
-            if record.get('expired') and not record.get('finished'):
-                record['expired'] = False
+            if not record.get('finished'):
+                record['end_time'] = event_start + 86400
+                if record.get('expired'):
+                    record['expired'] = False
             _save_guild_states()
             print(f"[GUILD BOSS TEST] migrated existing record guild={guild.get('id')} boss={boss_id}")
     if (isinstance(record, dict)
