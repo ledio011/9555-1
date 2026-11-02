@@ -7895,9 +7895,11 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
             or int(record.get('hp', 0) or 0) <= 0
             or GUILD_BOSS_INSTANCES.get(runtime_key) != inst_id):
         return
-    # Schedule eligibility is checked per player by _guild_boss_scene_members.
-    # The runtime lasts only until the persisted event end_time; that is 24h
-    # for the scoped test gang and remains the configured duration elsewhere.
+    # The scoped test gang keeps its shared runtime open for 24h; other
+    # guilds retain the original configured activity-window check.
+    if (not _guild_boss_test_guild_enabled(guild)
+            and _guild_boss_activity_state(boss_cfg)[0] != 1):
+        return  # window closed; the scheduler expires the run
     members = _guild_boss_scene_members(guild, boss_cfg.get('map_id', ''))
     if not members:
         _schedule_guild_boss_tick(runtime_key, runtime)
