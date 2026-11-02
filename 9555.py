@@ -13198,7 +13198,7 @@ def _wild_boss_activity_info(boss_id, char=None, now=None):
     return encode_sproto([
         (0, str(boss_id)), (1, remaining), (2, 5), (3, state),
         (4, parm), (5, "#".join(rank_names)), (6, 0),
-        (7, day_start + int((cfg.get("start_times") or [0])[0]),), (8, int(slot)
+        (7, day_start + int((cfg.get("start_times") or [0])[0])), (8, int(slot)
     ])
 
 def _wild_boss_activity_response(char=None, now=None):
@@ -13608,11 +13608,6 @@ def _wild_boss_apply_hit(conn, char, target_id, client_dmg, skill_id,
     for _peer_id, peer_conn, _peer_char in _wild_boss_scene_chars(event_key):
         if peer_conn is not conn:
             send_rpc_push_safe(peer_conn, 511, dmg_board)
-    if killed:
-        _wild_boss_start_exit(event_key, boss_id, record,
-                              "The World Boss has been defeated. You will leave the scene after the countdown.")
-        # _wild_boss_finish sends the terminal notice/countdown. This second call
-        # is intentionally avoided by its terminal guard; only refresh the rank panel.
     return True
 
 
@@ -19772,9 +19767,13 @@ def client_handler(conn, addr):
                             boss_id = mid
                             with GUILD_BOSS_LOCK:
                                 boss_record = _guild_boss_record(guild, boss_id, create=True)
-                                if boss_record and not boss_record.get('finished'):
+                                if boss_record and not boss_record.get('finished') and not boss_record.get('expired'):
                                     mid = str(configured_boss.get('map_id', ''))
+                                    # MaxPlayNum is the guild's shared run count, not a
+                                    # per-member lock. Start the shared attempt once; let
+                                    # each eligible member enter that same live run.
                                     boss_record['attempts'] = max(1, int(boss_record.get('attempts', 0) or 0))
+                                    boss_record.setdefault('entered_players', {})[str(picked_char.get('id', 0))] = True
                                     boss_record.setdefault('participants', {})[str(picked_char.get('id', 0))] = True
                                     _save_guild_states()
                                 else:
@@ -19845,6 +19844,9 @@ def client_handler(conn, addr):
                                     (0, "This boss event has ended or your attempts are exhausted."),
                                     (1, True)
                                 ]))
+                                picked_char["active_copy_id"] = None
+                                picked_char["pre_copy_pos"] = None
+                                picked_char["pre_copy_map"] = None
                                 valid_world_boss = False
                             else:
                                 start_map_transition(conn, picked_char, mid, send_rpc_push)
