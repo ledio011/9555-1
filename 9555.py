@@ -17997,12 +17997,26 @@ def client_handler(conn, addr):
                                 requested_effinfo_id, is_cri, client_cri_flag,
                                 client_hit_flag)
                             continue
-                        if _wild_boss_map_id(picked_char.get('map_id', '')):
-                            _wild_boss_apply_hit(
-                                conn, picked_char, target_id, client_dmg, skill_id,
-                                requested_effinfo_id, is_cri, client_cri_flag,
-                                client_hit_flag)
-                            continue
+                        wild_boss_id = _wild_boss_map_id(picked_char.get('map_id', ''))
+                        if wild_boss_id:
+                            wild_cfg = WILD_BOSS_CONFIG.get(str(wild_boss_id), {})
+                            wild_event_key = str(picked_char.get("_wild_boss_event_key") or "")
+                            wild_boss_inst = WILD_BOSS_INSTANCES.get(wild_event_key)
+                            if wild_boss_inst is not None and int(target_id) == int(wild_boss_inst):
+                                _wild_boss_apply_hit(
+                                    conn, picked_char, target_id, client_dmg, skill_id,
+                                    requested_effinfo_id, is_cri, client_cri_flag,
+                                    client_hit_flag)
+                                continue
+                            # PVE rows accept damage only against their one server-owned boss.
+                            # PVP rows keep the ordinary player-vs-player combat path alive.
+                            if int(wild_cfg.get("pvp", 0) or 0) != 1:
+                                print(f"[WORLD BOSS SECURITY] rejected non-boss target={target_id} player={picked_char.get('id')}")
+                                continue
+                            _target_id, _target_conn, _target_char = find_player_connection(target_id)
+                            if _target_char is None:
+                                print(f"[WORLD BOSS SECURITY] rejected unknown PVP target={target_id} player={picked_char.get('id')}")
+                                continue
 
                         # --- Check if target is an online player (PvP) ---
                         target_cid, target_conn, target_char = find_player_connection(target_id)
