@@ -7962,23 +7962,14 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
     heading = int(math.degrees(math.atan2(dx, dz)) * 100)
     runtime['heading'] = heading
 
-    # GUILD_BOSS_COPY is a "multi" scene: the client runs NO AI for it, so the
-    # server must walk the boss (same 0.2s step / 507 / 513 scheme as the EXP AI).
-    stop_distance = min(attack_distance, max(skill_ranges.values()))
-    if distance > stop_distance:
-        move_speed = float(npc_cfg.get('move_speed', 50) or 50) / 10.0
-        if move_speed <= 0:
-            move_speed = 5.0
-        step = min(move_speed * 0.2, distance - stop_distance)
-        mx += (dx / distance) * step
-        mz += (dz / distance) * step
-        runtime['position'] = [mx, mz]
-        runtime['stopped'] = False
-        push_members(507, move_packet(mx, mz, heading))
-        _schedule_guild_boss_tick(runtime_key, runtime)
-        return
-    if not runtime.get('stopped'):
+    # Client Guild Boss AIData (AIID=1006) has AroundProb=0 and
+    # PatrolType=0. These bosses are stationary: never chase a player or emit
+    # TAG 507 movement. Attack selection below enforces each skill's authored
+    # trace/effect range from this fixed spawn position.
+    if (not runtime.get('stopped')
+            or runtime.get('last_heading_sent') != heading):
         runtime['stopped'] = True
+        runtime['last_heading_sent'] = heading
         push_members(513, move_packet(mx, mz, heading))
 
     now = time.time()
