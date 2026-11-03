@@ -119,10 +119,8 @@ GUILD_BOSS_SCENE_RANK_ROWS = 6
 GUILD_BOSS_RESULT_RANK_ROWS = 10
 GUILD_BOSS_SCHED_LAST = {}
 GUILD_BOSS_MISSING_REWARD_LOGGED = set()
-# The shipped ShowRewardData rows for these Guild Boss IDs have item IDs but
-# blank ItemCount fields. The APK defaults those counts to -1, so it does not
-# provide authoritative payout quantities. Fail closed instead of granting
-# proposed server-only test packages.
+# The APK's Guild Boss ShowRewardData preview has blank ItemCount fields and
+# does not confirm actual payout mappings or quantities; fail closed.
 GUILD_BOSS_TEST_REWARD_FALLBACK = False
 GUILD_BOSS_TEST_REWARD_LOGGED = set()
 GUILD_BOSS_TEST_REWARD_RANGES = ()
@@ -11870,8 +11868,8 @@ def _guild_boss_reward_rows(reward_key, guild):
         if row.get('show_reward_id')
     }
     is_preview_selector = reward_key in preview_keys or reward_key == '_show_ghb'
-    # Guild level 1 maps both _one_ghb and _show_ghb to 51001. With no
-    # separate authoritative drop row, that shared preview row cannot be paid.
+    # Guild level 1 maps _one_ghb and _show_ghb to the same preview ID.
+    # Other selectors sharing the preview ID must never grant its contents.
     is_preview_id_collision = bool(
         preview_reward_id and reward_id == preview_reward_id
     )
