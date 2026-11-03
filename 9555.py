@@ -7795,41 +7795,6 @@ def _guild_boss_skill_range(skill, attack_distance):
         effect_range = trace_distance
     return max(attack_distance, trace_distance, effect_range), area_type, param1, param2
 
-def _guild_boss_approach_target(runtime, members, target_x, target_z, attack_range,
-                                npc_cfg, now):
-    mx, mz = runtime['position']
-    dx, dz = target_x - mx, target_z - mz
-    distance = math.hypot(dx, dz)
-    if distance <= attack_range or distance <= 0.01:
-        return False
-
-    try:
-        move_speed = max(0, int(npc_cfg.get('move_speed', 50) or 0)) / 10.0
-    except (TypeError, ValueError):
-        move_speed = 0.0
-    if move_speed <= 0:
-        return False
-
-    stop_distance = max(0.1, attack_range - 0.1)
-    target_x = target_x - dx / distance * stop_distance
-    target_z = target_z - dz / distance * stop_distance
-    from_x_cm, from_z_cm = int(round(mx * 100.0)), int(round(mz * 100.0))
-    target_x_cm = int(round(target_x * 100.0))
-    target_z_cm = int(round(target_z * 100.0))
-    heading = int(round(math.degrees(math.atan2(dx, dz)) * 100)) % 36000
-
-    for _member_id, peer_conn, _peer_char in members:
-        _send_liberty_npc_patrol_move(
-            peer_conn, runtime['inst_id'], from_x_cm, from_z_cm,
-            target_x_cm, target_z_cm)
-
-    runtime['position'] = [target_x_cm / 100.0, target_z_cm / 100.0]
-    runtime['heading'] = heading
-    travel_seconds = math.hypot(
-        target_x_cm - from_x_cm, target_z_cm - from_z_cm) / 100.0 / move_speed
-    runtime['move_until'] = now + max(0.2, travel_seconds)
-    return True
-
 def _guild_boss_ai_tick_locked(runtime_key, runtime):
     guild = GUILD_STATES.get(str(runtime['guild_id']))
     boss_id = runtime['boss_id']
@@ -7899,18 +7864,6 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
     dx, dz = px - mx, pz - mz
 
     now = time.time()
-    if now < float(runtime.get('move_until', 0.0)):
-        _schedule_guild_boss_tick(runtime_key, runtime)
-        return
-    runtime.pop('move_until', None)
-    # LockDistance selects targets; the skill/effect data remains the hit limit.
-    # Walk into the shortest configured skill range instead of extending melee hits.
-    attack_range = min(skill_ranges.values())
-    if _guild_boss_approach_target(
-            runtime, members, px, pz, attack_range, npc_cfg, now):
-        _schedule_guild_boss_tick(runtime_key, runtime)
-        return
-
     if now >= float(runtime.get('next_attack_at', 0.0)):
         ready = [
             skill for skill in skills
@@ -11916,11 +11869,18 @@ def _guild_boss_reward_rows(reward_key, guild):
         for row in GUILD_BOSS_DATA.values()
         if row.get('show_reward_id')
     }
-    if reward_key in preview_keys or reward_key == '_show_ghb' or reward_id == preview_reward_id:
-        missing_key = ('preview', reward_key, guild_level, reward_id)
+    is_preview_selector = reward_key in preview_keys or reward_key == '_show_ghb'
+    # Guild level 1 maps both _one_ghb and _show_ghb to 51001. With no
+    # separate authoritative drop row, that shared preview row cannot be paid.
+    is_preview_id_collision = bool(
+        preview_reward_id and reward_id == preview_reward_id
+    )
+    if is_preview_selector or is_preview_id_collision:
+        reason = 'preview selector' if is_preview_selector else 'preview ID collision'
+        missing_key = ('preview', reason, reward_key, guild_level, reward_id)
         if missing_key not in GUILD_BOSS_MISSING_REWARD_LOGGED:
             GUILD_BOSS_MISSING_REWARD_LOGGED.add(missing_key)
-            print(f"[GUILD BOSS REWARD BLOCKED] preview-only selector "
+            print(f"[GUILD BOSS REWARD BLOCKED] {reason} "
                   f"key={reward_key} level={guild_level} reward={reward_id}; "
                   "grant skipped")
         return None
