@@ -7861,9 +7861,6 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
     px, pz = member_pos((target_id, target_conn, target_char))
     dx, dz = px - mx, pz - mz
 
-    # Guild Bosses remain at their authored spawn position. The server still
-    # selects nearby targets and runs their configured attacks from that point.
-
     now = time.time()
     if now >= float(runtime.get('next_attack_at', 0.0)):
         ready = [
