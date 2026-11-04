@@ -123,6 +123,7 @@ GUILD_BATTLE_DATA = {} # id -> configured Gang Battle schedule/selection data
 GUILD_STAR_DATA = {} # id -> configured Gang Star upgrade data
 SHOP_DATA = {} # shop type -> shop item ID -> ShopData row for player shops
 GUILD_SHOP_DATA = {} # shop item ID -> ShopData row for Guild shop
+DAILY_BUY_CONFIG = {} # daily purchase ID -> client DailyBuyData product metadata
 GUILD_BOSS_DATA = {} # guild boss/activity rows shown by the Gang activity panel
 GUILD_BOSS_POST_KILL_EXIT_SECONDS = 5  # fallback only; GuildBossData.WaitTime is used
 # The in-scene rank panel has no scroll/sort (client Bar-Fight variant caps at 6 rows).
@@ -608,6 +609,18 @@ try:
                         SHOP_DATA.setdefault(shop_type, {})[str(parts[1])] = shop_row
                 except (TypeError, ValueError):
                     continue
+    daily_buy_path = os.path.join(text_asset_root, "DailyBuyData")
+    if os.path.exists(daily_buy_path):
+        with open(daily_buy_path, "r", encoding="utf-8") as table_file:
+            for row in table_file:
+                parts = row.strip().split(",")
+                if len(parts) < 17 or parts[0] != "*" or not parts[1].isdigit():
+                    continue
+                DAILY_BUY_CONFIG[parts[1]] = {
+                    "id": parts[1], "product_id": parts[14].strip(),
+                    "dollar": parts[15].strip(),
+                    "value": int(parts[16]) if parts[16].isdigit() else 0
+                }
     guild_boss_path = os.path.join(text_asset_root, "GuildBossData")
     if os.path.exists(guild_boss_path):
         with open(guild_boss_path, "r", encoding="utf-8") as table_file:
@@ -12249,6 +12262,19 @@ def _shop_item_bytes(row, purchased=0):
     ]
     return encode_sproto(fields)
 
+def _send_tab_reply(send_rpc_push, send_rpc_response, session, push_tag, payload):
+    send_rpc_push(push_tag, payload)
+    if session is not None:
+        send_rpc_response(session)
+
+def daily_buy_state_payload():
+    """Return the client daily-buy state map for configured product IDs."""
+    daily_buys = {
+        product_id: encode_sproto([(0, product_id), (1, 0)])
+        for product_id in sorted(DAILY_BUY_CONFIG, key=lambda value: int(value))
+    }
+    return encode_sproto([(0, daily_buys)])
+
 def _shop_purchase_count(char, item_id, row):
     purchases = char.setdefault('shop_purchases', {})
     cycle = max(0, int(row.get('reset_cycle', 0) or 0))
@@ -20828,12 +20854,10 @@ def client_handler(conn, addr):
                             print(f"[REWARD SECURITY] duplicate 30-day sign rejected player={picked_char.get('id')}")
 
                 elif msg == 258 and picked_char: # request_daily_buy
-                    d_buys = {
-                        "1": encode_sproto([(0, "1"), (1, 0)]),
-                        "2": encode_sproto([(0, "2"), (1, 0)]),
-                        "3": encode_sproto([(0, "3"), (1, 0)]),
-                    }
-                    send_rpc_push(646, encode_sproto([(0, d_buys)]))
+                    _send_tab_reply(
+                        send_rpc_push, send_rpc_response, session,
+                        646, daily_buy_state_payload()
+                    )
 
                 elif msg == 278 and picked_char: # request_retrieve_info
                     if is_current_character_connection(conn, picked_char):
@@ -21028,7 +21052,10 @@ def client_handler(conn, addr):
                             (4, 0), (5, ""), (6, 0), (7, now_ts), (8, 0)
                         ])
                     }
-                    send_rpc_push(619, encode_sproto([(0, acts)]))
+                    _send_tab_reply(
+                        send_rpc_push, send_rpc_response, session,
+                        619, encode_sproto([(0, acts)])
+                    )
 
                 elif msg == 202 and picked_char: # request_tower_copy_info
                     t_info = encode_sproto([(0, 0), (1, 100), (2, 1), (3, 1), (4, 0), (5, 0)])
@@ -21043,7 +21070,10 @@ def client_handler(conn, addr):
                     send_rpc_push(633, encode_sproto([(0, slot_info_obj), (1, {}), (2, {})]))
 
                 elif msg == 257 and picked_char: # request_invest_pack
-                    send_rpc_push(645, encode_sproto([(0, {})]))
+                    _send_tab_reply(
+                        send_rpc_push, send_rpc_response, session,
+                        645, encode_sproto([(0, {})])
+                    )
 
                 elif msg == 256 and picked_char: # request_level_pack
                     send_rpc_push(644, level_package_state_payload(picked_char))
