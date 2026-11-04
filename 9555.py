@@ -8,6 +8,12 @@ except ImportError:
     fcntl = None
 
 PORT = int(os.environ.get("PORT", 15678))
+SERVER_DEBUG_LOGS = os.environ.get("GAME_SERVER_DEBUG", "").lower() in ("1", "true", "yes")
+
+def debug_log(*args, **kwargs):
+    if SERVER_DEBUG_LOGS:
+        print(*args, **kwargs)
+
 # Verified from the shipped APK: GameDefine.PLAYER_MAX_LEVEL = 80.
 PLAYER_MAX_LEVEL = 80
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -76,6 +82,8 @@ GUILD_DANCE_REWARD_MISSING_LOGGED = set()
 GUILD_DANCE_SPEAKER_LOCK = threading.RLock()
 GUILD_DANCE_SPEAKERS = {}  # guild ID -> active speaker instance records
 GUILD_DANCE_SPEAKER_TIMERS = {}  # NPC instance ID -> that speaker's expiry timer
+PERSONAL_DANCE_SPEAKER_TIMERS = {}  # NPC instance ID -> personal speaker expiry timer
+PERSONAL_DANCE_SPEAKER_TIMER_LOCK = threading.Lock()
 GUILD_BOSS_REWARD_LOCK = threading.RLock()
 DANCE_SERVER_EPOCH = str(time.time_ns())  # do not credit offline time across a restart
 
@@ -84,6 +92,48 @@ def next_global_inst_id():
     with GLOBAL_INST_COUNTER_LOCK:
         GLOBAL_INST_COUNTER += 1
         return GLOBAL_INST_COUNTER
+
+def spawn_personal_dance_speaker_model(activity, x, z, heading, conn, send_rpc_push):
+    npc_id = str(activity.get('NpcID', '80001') or '80001')
+    map_id = str(activity.get('MapId', '101') or '101')
+    name = NPC_CONFIG.get(npc_id, {}).get('name', 'Personal Stereo')
+    inst_id, attr = build_npc_attr_sproto(npc_id, name, x, z, heading)
+    NPC_INSTANCE_MAP[inst_id] = map_id
+    send_rpc_push(509, encode_sproto([(0, attr)]))
+    stats = get_npc_attr(npc_id)
+    sync_npc_attrs_rpc(
+        conn,
+        inst_id, stats, NPC_HP_MAP.get(inst_id, stats['hp_max'])
+    )
+    return inst_id
+
+def expire_personal_dance_speaker_model(char_id, map_id, inst_id):
+    current_timer = threading.current_thread()
+    with PERSONAL_DANCE_SPEAKER_TIMER_LOCK:
+        if PERSONAL_DANCE_SPEAKER_TIMERS.get(int(inst_id)) is not current_timer:
+            return
+        PERSONAL_DANCE_SPEAKER_TIMERS.pop(int(inst_id), None)
+    conn, char = ALL_CONNECTIONS.get(int(char_id), (None, None))
+    if conn and char and str(char.get('map_id', '')) == str(map_id):
+        send_rpc_push_safe(conn, 506, encode_sproto([(0, int(inst_id))]))
+    NPC_HP_MAP.pop(int(inst_id), None)
+    NPC_INST_MAP.pop(int(inst_id), None)
+    NPC_INSTANCE_MAP.pop(int(inst_id), None)
+    NPC_ATTR_MAP.pop(int(inst_id), None)
+    DEAD_NPC_SET.discard(int(inst_id))
+
+def schedule_personal_dance_speaker_expiry(char_id, map_id, inst_id, expires_at):
+    remaining = float(expires_at) - time.time()
+    if remaining <= 0:
+        return
+    timer = threading.Timer(
+        remaining, expire_personal_dance_speaker_model,
+        args=(int(char_id), str(map_id), int(inst_id))
+    )
+    timer.daemon = True
+    with PERSONAL_DANCE_SPEAKER_TIMER_LOCK:
+        PERSONAL_DANCE_SPEAKER_TIMERS[int(inst_id)] = timer
+    timer.start()
 
 def next_team_id():
     global TEAM_ID_COUNTER
@@ -273,7 +323,7 @@ try:
                         'min_level': int(parts[23]) if parts[23].isdigit() else 1,
                         'reward_ids': [parts[25] if len(parts)>25 else "", parts[27] if len(parts)>27 else "", parts[29] if len(parts)>29 else ""]
                     }
-        print(f"[MISSION DATA LOADED] count={len(missions_data)}")
+        debug_log(f"[MISSION DATA LOADED] count={len(missions_data)}")
 
     # Merge decompiled missions.json if present (supplementing missing missions/fields)
     json_md_paths = [
@@ -318,7 +368,7 @@ try:
             for _mk, _mv in missions_data.items():
                 if int(_mv.get('require_num') or 0) <= 0:
                     _mv['require_num'] = 1
-            print(f"[MISSION JSON MERGED] count={len(missions_data)}")
+            debug_log(f"[MISSION JSON MERGED] count={len(missions_data)}")
             break
 
     # Load decompiled mission_rewards.json if present
@@ -340,7 +390,7 @@ try:
                         'item_amounts': item_amts,
                         'amounts': item_amts
                     }
-            print(f"[MISSION REWARDS JSON LOADED] count={len(rewards_data)}")
+            debug_log(f"[MISSION REWARDS JSON LOADED] count={len(rewards_data)}")
             break
 
     rd_path = os.path.join(text_asset_root, "ShowRewardData")
@@ -364,7 +414,7 @@ try:
                                 items.append(iid)
                                 amounts.append(icount)
                     rewards_data[rid] = {'exp': exp, 'cash': cash, 'items': items, 'amounts': amounts, 'item_amounts': amounts}
-        print(f"[REWARDS DATA LOADED] count={len(rewards_data)}")
+        debug_log(f"[REWARDS DATA LOADED] count={len(rewards_data)}")
 
     def is_data(line): return line.startswith("*,") or ("," in line and line.split(",")[1].isdigit())
 
@@ -389,7 +439,7 @@ try:
                         'params': [int(parts[i]) if len(parts) > i and parts[i].isdigit() else 0 for i in range(17, 22)],
                         'adds': adds
                     }
-        print(f"[EFF CONFIG LOADED] count={len(EFF_CONFIG)}")
+        debug_log(f"[EFF CONFIG LOADED] count={len(EFF_CONFIG)}")
 
     # Load SkillData
     skill_path = os.path.join(text_asset_root, "SkillData")
@@ -417,7 +467,7 @@ try:
                         eff_id = SKILL_CONFIG[sid][eff_key]
                         if eff_id and eff_id not in EFF_TO_SKILL:
                             EFF_TO_SKILL[eff_id] = sid
-        print(f"[SKILL CONFIG LOADED] count={len(SKILL_CONFIG)}")
+        debug_log(f"[SKILL CONFIG LOADED] count={len(SKILL_CONFIG)}")
 
     # Load BaseLvData for EXP requirements and stats
     lv_path = os.path.join(text_asset_root, "BaseLvData")
@@ -446,7 +496,7 @@ try:
                             'defa': int(parts[31]), 'dgea': int(parts[32]), 'resa': int(parts[33]),
                             'hita': int(parts[34]), 'cria': int(parts[35])
                         }
-        print(f"[LEVEL TABLE LOADED] levels={len(LEVEL_DATA)}")
+        debug_log(f"[LEVEL TABLE LOADED] levels={len(LEVEL_DATA)}")
 
     # Load MapInfoData
     map_info_path = os.path.join(text_asset_root, "MapInfoData")
@@ -471,7 +521,7 @@ try:
                         'gather_area_id': parts[25] if len(parts) > 25 else '',
                         'open_lv': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 0
                     }
-        print(f"[MAP CONFIG LOADED] count={len(MAP_CONFIG)}")
+        debug_log(f"[MAP CONFIG LOADED] count={len(MAP_CONFIG)}")
 
     # Match SceneManager.IsInGatherArea for server-validated dance requests.
     map_area_path = os.path.join(text_asset_root, "MapAreaInfoData")
@@ -490,7 +540,7 @@ try:
                     }
                 except (TypeError, ValueError):
                     continue
-        print(f"[MAP AREA CONFIG LOADED] count={len(MAP_AREA_CONFIG)}")
+        debug_log(f"[MAP AREA CONFIG LOADED] count={len(MAP_AREA_CONFIG)}")
 
     # Load MapConnectInfoData
     conn_path = os.path.join(text_asset_root, "MapConnectInfoData")
@@ -507,7 +557,7 @@ try:
                         pz = float(parts[6])
                         MAP_CONNECT_DATA[(src, dst)] = (px, py, pz)
                     except: pass
-        print(f"[MAP CONNECT DATA LOADED] count={len(MAP_CONNECT_DATA)}")
+        debug_log(f"[MAP CONNECT DATA LOADED] count={len(MAP_CONNECT_DATA)}")
 
     # Load GuildCaptureData
     gc_path = os.path.join(text_asset_root, "GuildCaptureData")
@@ -538,7 +588,7 @@ try:
                         }
                     except (IndexError, TypeError, ValueError):
                         continue
-        print(f"[GUILD CAPTURE DATA LOADED] count={len(GUILD_CAPTURE_DATA)}")
+        debug_log(f"[GUILD CAPTURE DATA LOADED] count={len(GUILD_CAPTURE_DATA)}")
 
     # Guild UI tables are authoritative for capacity, donations, skill cost,
     # and guild-shop inventory. Keep these separate from unrelated shop logic.
@@ -594,8 +644,10 @@ try:
                         continue
                     shop_row = {
                         "id": str(parts[1]), "item_id": str(parts[3]),
-                        "quality": int(parts[4] or 0), "profession": int(parts[5] or -1),
+                        "quality": int(parts[4]) if parts[4].strip().isdigit() else None,
+                        "profession": int(parts[5] or -1),
                         "price_type": int(parts[6] or 0), "price": int(parts[7] or 0),
+                        "reset_cycle": int(parts[8] or 0),
                         "reset_cycle": int(parts[8] or 0), "limit": int(parts[9] or 0),
                         "single_limit": int(parts[10] or 0), "discount": int(parts[11] or 0),
                         "weight": int(parts[12] or 0), "min_level": int(parts[15] or 0),
@@ -776,7 +828,7 @@ try:
                         'hita_abs': int(parts[60]) if len(parts) > 60 and parts[60].isdigit() else 0,
                         'cria_abs': int(parts[61]) if len(parts) > 61 and parts[61].isdigit() else 0,
                     }
-        print(f"[NPC CONFIG LOADED] count={len(NPC_CONFIG)}")
+        debug_log(f"[NPC CONFIG LOADED] count={len(NPC_CONFIG)}")
 
     # MonsterData is authored with two IDs absent from this APK's NpcData.
     # Alias only their stat/template records; preserve the authored ID in the
@@ -815,7 +867,7 @@ try:
                         'patrol_distance': int(parts[18]) if parts[18].isdigit() else 400,
                         'wait_time': int(parts[19]) if len(parts) > 19 and parts[19].isdigit() else 300,
                     }
-        print(f"[AI DATA CONFIG LOADED] count={len(AI_DATA_CONFIG)}")
+        debug_log(f"[AI DATA CONFIG LOADED] count={len(AI_DATA_CONFIG)}")
 
     # Override ALL map 11 mission monsters with proper absolute stats
     # These are percentage-based in NpcData with level 9999, which causes incorrect stats
@@ -972,7 +1024,7 @@ try:
                     else:
                         if mid not in MONSTER_DATA: MONSTER_DATA[mid] = []
                         MONSTER_DATA[mid].append(entry)
-        print(f"[MONSTER DATA LOADED] monsters_map={len(MONSTER_DATA)} static_npcs_map={len(STATIC_NPC_DATA)}")
+        debug_log(f"[MONSTER DATA LOADED] monsters_map={len(MONSTER_DATA)} static_npcs_map={len(STATIC_NPC_DATA)}")
 
     # Load DailyExpData
     DAILY_EXP_CONFIG = {}
@@ -990,7 +1042,7 @@ try:
                         'group_time': int(parts[5]) if parts[5].isdigit() else 60,
                         'monsters': [x for x in parts[6].split("#") if x]
                     }
-        print(f"[DAILY EXP CONFIG LOADED] count={len(DAILY_EXP_CONFIG)}")
+        debug_log(f"[DAILY EXP CONFIG LOADED] count={len(DAILY_EXP_CONFIG)}")
 
     # Load KillTargetMissionData (Mission Spawns)
     # KillTargetMissionData rows are keyed by their own ID column.
@@ -1020,7 +1072,7 @@ try:
                         'num': flash_num,
                         'require': require_num
                     })
-        print(f"[KILL TARGET DATA LOADED] count={len(KILL_TARGET_SPAWNS)}")
+        debug_log(f"[KILL TARGET DATA LOADED] count={len(KILL_TARGET_SPAWNS)}")
 
     # Load TargetCarMissionData
     tc_path = os.path.join(text_asset_root, "TargetCarMissionData")
@@ -1040,7 +1092,7 @@ try:
                         'num': 1,
                         'require': require_num
                     })
-        print(f"[TARGET CAR DATA LOADED] count={len(TARGET_CAR_SPAWNS)}")
+        debug_log(f"[TARGET CAR DATA LOADED] count={len(TARGET_CAR_SPAWNS)}")
 
     # Load MissionRequireData (Counts and NPC targets for generic kill/collect missions)
     mr_path = os.path.join(text_asset_root, "MissionRequireData")
@@ -1057,7 +1109,7 @@ try:
                         'require_num': int(parts[5]) if parts[5].isdigit() else 1,
                         'item_id': parts[6] if len(parts) > 6 else ''
                     }
-        print(f"[MISSION REQUIRE DATA LOADED] count={len(MISSION_REQUIRE_DATA)}")
+        debug_log(f"[MISSION REQUIRE DATA LOADED] count={len(MISSION_REQUIRE_DATA)}")
 
     # Load MoveTargetMissionData (Arrive Target missions)
     mt_path = os.path.join(text_asset_root, "MoveTargetMissionData")
@@ -1071,7 +1123,7 @@ try:
                         'target_num': int(parts[3]) if parts[3].isdigit() else 1,
                         'target_point': parts[4] if len(parts) > 4 else ''
                     }
-        print(f"[MOVE TARGET DATA LOADED] count={len(MOVE_TARGET_DATA)}")
+        debug_log(f"[MOVE TARGET DATA LOADED] count={len(MOVE_TARGET_DATA)}")
 
     # Load SurveyMissionData (Survey missions)
     sv_path = os.path.join(text_asset_root, "SurveyMissionData")
@@ -1089,7 +1141,7 @@ try:
                         'auto_refresh_time': int(parts[11]) if len(parts) > 11 and parts[11].isdigit() else 0,
                         'need_num': int(parts[12]) if len(parts) > 12 and parts[12].isdigit() else 1
                     }
-        print(f"[SURVEY DATA LOADED] count={len(SURVEY_DATA)}")
+        debug_log(f"[SURVEY DATA LOADED] count={len(SURVEY_DATA)}")
 
     # Load ordered stops for MULTI_DELIVERY missions. Message 178 increments
     # one stop at a time, and message 182 may finish only after the final stop.
@@ -1106,7 +1158,7 @@ try:
                     })
         for stops in MULTI_DELIVERY_DATA.values():
             stops.sort(key=lambda stop: stop['index'])
-        print(f"[MULTI DELIVERY DATA LOADED] count={len(MULTI_DELIVERY_DATA)}")
+        debug_log(f"[MULTI DELIVERY DATA LOADED] count={len(MULTI_DELIVERY_DATA)}")
 
     # Universal Mission Requirements & Placements Enrichment
     for mid, m in missions_data.items():
@@ -1216,7 +1268,7 @@ try:
                     }
         garage_count = sum(1 for v in MOUNT_CONFIG.values() if v.get('need_show') == 1)
         motor_count = sum(1 for v in MOUNT_CONFIG.values() if v.get('is_motor') == 1)
-        print(f"[MOUNT CONFIG LOADED] total={len(MOUNT_CONFIG)} garage={garage_count} motorcycles={motor_count}")
+        debug_log(f"[MOUNT CONFIG LOADED] total={len(MOUNT_CONFIG)} garage={garage_count} motorcycles={motor_count}")
 
     # ColorData is the authority for garage paint prices. The client sends
     # only mountId/colorId in mount_use_color, so never trust a client price.
@@ -1231,7 +1283,7 @@ try:
                             'price_type': int(parts[3]),
                             'price': int(parts[4])
                         }
-        print(f"[COLOR CONFIG LOADED] colors={len(COLOR_CONFIG)}")
+        debug_log(f"[COLOR CONFIG LOADED] colors={len(COLOR_CONFIG)}")
 
     # Only configured PVE world-boss IDs may enter the corresponding scene.
     wild_boss_path = os.path.join(text_asset_root, "WildBossData")
@@ -1246,7 +1298,7 @@ try:
                         'min_level': int(parts[13]) if parts[13].isdigit() else 1,
                         'max_level': int(parts[14]) if parts[14].isdigit() else 80,
                     }
-        print(f"[WILD BOSS CONFIG LOADED] count={len(WILD_BOSS_CONFIG)}")
+        debug_log(f"[WILD BOSS CONFIG LOADED] count={len(WILD_BOSS_CONFIG)}")
 
     # Daily-copy UI receives its state from TAG 555.  Keep the IDs/types in
     # lockstep with CopySceneData so client tutorials can locate their target.
@@ -1287,7 +1339,7 @@ try:
                         # copy ID for DailyExpData, rewards, and progress.
                         'single_map_id': parts[31] if len(parts) > 31 and parts[31].isdigit() else ''
                     }
-        print(f"[COPY SCENE CONFIG LOADED] daily_copies={len(COPY_SCENE_CONFIG)}")
+        debug_log(f"[COPY SCENE CONFIG LOADED] daily_copies={len(COPY_SCENE_CONFIG)}")
 
     # The APK builds each race route from PointType=2 CarMissionBlockData rows.
     # BlockIndex 0 is the local car start; positive indexes are ordered checkpoints.
@@ -1340,7 +1392,7 @@ try:
                         'flags': int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else 0,
                         'level': int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
                     }
-        print(f"[ITEM CONFIG LOADED] items={len(ITEM_CONFIG)}")
+        debug_log(f"[ITEM CONFIG LOADED] items={len(ITEM_CONFIG)}")
 
     # TitleData is needed for the client's honor reward display and its
     # explicit title-promotion request (Honor is attribute_other.title_exp).
@@ -1360,7 +1412,7 @@ try:
                                and int(parts[index]) > 0
                         ]
                     }
-        print(f"[TITLE CONFIG LOADED] levels={len(TITLE_CONFIG)}")
+        debug_log(f"[TITLE CONFIG LOADED] levels={len(TITLE_CONFIG)}")
 
     # BadgeData is separate from ItemData.  The APK uses it to validate the
     # next badge tier, required stack count, currency type, and merge cost.
@@ -1380,7 +1432,7 @@ try:
                         'value2': _badge_int(8, -1), 'money_type': _badge_int(9, 0),
                         'upgrade_cost': _badge_int(10, 0), 'upgrade_count': max(1, _badge_int(11, 4))
                     }
-        print(f"[BADGE CONFIG LOADED] badges={len(BADGE_CONFIG)}")
+        debug_log(f"[BADGE CONFIG LOADED] badges={len(BADGE_CONFIG)}")
 
     # RefineData is the source of truth for star-refine levels, costs,
     # protection materials, chances, and the attributes awarded per part.
@@ -1407,7 +1459,7 @@ try:
                 }
                 REFINE_CONFIG[row['id']] = row
                 REFINE_BY_PART_LEVEL[(row['job'], row['part'], row['level'])] = row
-        print(f"[REFINE CONFIG LOADED] rows={len(REFINE_CONFIG)}")
+        debug_log(f"[REFINE CONFIG LOADED] rows={len(REFINE_CONFIG)}")
 
     # Street Race's actual reward preview is resolved by AdaptData's
     # _drop_bc key, then ShowRewardData.  Read those client tables rather
@@ -1472,7 +1524,7 @@ try:
                         'money1': _show_reward_base_value('Money1'),
                         'money2': _show_reward_base_value('Money2'),
                     }
-        print(f"[SHOW REWARD CONFIG LOADED] count={len(SHOW_REWARD_CONFIG)}")
+        debug_log(f"[SHOW REWARD CONFIG LOADED] count={len(SHOW_REWARD_CONFIG)}")
 
     adapt_path = os.path.join(text_asset_root, "AdaptData")
     if os.path.exists(adapt_path):
@@ -1513,7 +1565,7 @@ try:
                     'hita': int(parts[18]) if len(parts) > 18 and parts[18].isdigit() else 316,
                     'cria': int(parts[19]) if len(parts) > 19 and parts[19].isdigit() else 3158,
                 }
-        print(f"[ADAPT DATA LOADED] count={len(ADAPT_DATA)}")
+        debug_log(f"[ADAPT DATA LOADED] count={len(ADAPT_DATA)}")
         dance_drop_ids = {
             str(drop_id)
             for reward_key in ('_drop_jh', '_drop_jhdj')
@@ -1578,7 +1630,7 @@ try:
                 key.strip(): values[index].strip() if index < len(values) else ""
                 for index, key in enumerate(table_header)
             }
-        print(f"[{table_name.upper()} LOADED] count={len(target_table)}")
+        debug_log(f"[{table_name.upper()} LOADED] count={len(target_table)}")
 
     # Level rewards have two separate client flows: the milestone page
     # (LevelRewardData) and the level-up popup (LevelPackageData). Keep their
@@ -1602,7 +1654,7 @@ try:
                 key.strip(): values[index].strip() if index < len(values) else ""
                 for index, key in enumerate(table_header)
             }
-        print(f"[{table_name.upper()} LOADED] count={len(target_table)}")
+        debug_log(f"[{table_name.upper()} LOADED] count={len(target_table)}")
 
     # Daily activity and claim thresholds are also client-authored tables.
     # DailyActiveData has three legacy/unexported columns before Score, Count,
@@ -1625,7 +1677,7 @@ try:
                     "Title": row[8].strip(),
                     "Desc": row[9].strip(),
                 }
-        print(f"[DAILY ACTIVE CONFIG LOADED] count={len(DAILY_ACTIVE_CONFIG)}")
+        debug_log(f"[DAILY ACTIVE CONFIG LOADED] count={len(DAILY_ACTIVE_CONFIG)}")
 
     daily_active_reward_path = os.path.join(text_asset_root, "DailyActiveRewardData")
     if os.path.exists(daily_active_reward_path):
@@ -1641,7 +1693,7 @@ try:
                 key.strip(): values[index].strip() if index < len(values) else ""
                 for index, key in enumerate(table_header)
             }
-        print(f"[DAILY ACTIVE REWARD CONFIG LOADED] count={len(DAILY_ACTIVE_REWARD_CONFIG)}")
+        debug_log(f"[DAILY ACTIVE REWARD CONFIG LOADED] count={len(DAILY_ACTIVE_REWARD_CONFIG)}")
 
     # Load FunctionData (feature unlock gates by level)
     func_path = os.path.join(text_asset_root, "FunctionData")
@@ -1659,7 +1711,7 @@ try:
                         'unlock_type': int(parts[10]) if len(parts) > 10 and parts[10].isdigit() else 0,
                         'side_mission': parts[13] if len(parts) > 13 else ''
                     }
-        print(f"[FUNCTION DATA LOADED] count={len(FUNCTION_DATA)}")
+        debug_log(f"[FUNCTION DATA LOADED] count={len(FUNCTION_DATA)}")
 
     # Load EquipData (equipment definitions)
     equip_path = os.path.join(text_asset_root, "EquipData")
@@ -1693,7 +1745,7 @@ try:
                         'identify': parts[25].strip() if len(parts) > 25 else '',
                         'quality_id': parts[26].strip() if len(parts) > 26 else ''
                     }
-        print(f"[EQUIP CONFIG LOADED] count={len(EQUIP_CONFIG)}")
+        debug_log(f"[EQUIP CONFIG LOADED] count={len(EQUIP_CONFIG)}")
 
     # EquipData.DropId1..6 select the attribute roll pool for the item's
     # initial quality. EquipDrop stores the number of attributes and the
@@ -1730,7 +1782,7 @@ try:
                         ],
                         'attributes': attributes
                     }
-        print(f"[EQUIP DROP CONFIG LOADED] count={len(EQUIP_DROP_CONFIG)}")
+        debug_log(f"[EQUIP DROP CONFIG LOADED] count={len(EQUIP_DROP_CONFIG)}")
 
     # Weapons use skill affixes from WeaponDrop rather than stat affixes from
     # EquipDrop. The random_attri packet has skillId for this equipment slot.
@@ -1763,7 +1815,7 @@ try:
                         ],
                         'skills': skills
                     }
-        print(f"[WEAPON DROP CONFIG LOADED] count={len(WEAPON_DROP_CONFIG)}")
+        debug_log(f"[WEAPON DROP CONFIG LOADED] count={len(WEAPON_DROP_CONFIG)}")
 
     # These are the same tables EquipData/GameItem use to calculate displayed
     # quality and per-level equipment attributes in the APK.
@@ -1781,7 +1833,7 @@ try:
                         'equip_inherit': int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else 0,
                         'weapon_inherit': int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else 0
                     })
-        print(f"[QUALITY CONFIG LOADED] ids={len(QUALITY_CONFIG)}")
+        debug_log(f"[QUALITY CONFIG LOADED] ids={len(QUALITY_CONFIG)}")
 
     upgrade_path = os.path.join(text_asset_root, "EquipmentUpgradeData")
     if os.path.exists(upgrade_path):
@@ -1801,7 +1853,7 @@ try:
                         'money_k': int(parts[17]) if len(parts) > 17 and parts[17].lstrip('-').isdigit() else 0,
                         'money_b': int(parts[18]) if len(parts) > 18 and parts[18].lstrip('-').isdigit() else 0
                     }
-        print(f"[EQUIPMENT UPGRADE CONFIG LOADED] positions={len(EQUIPMENT_UPGRADE_CONFIG)}")
+        debug_log(f"[EQUIPMENT UPGRADE CONFIG LOADED] positions={len(EQUIPMENT_UPGRADE_CONFIG)}")
 
     # Load DownloadRewardData (expansion download rewards)
     dl_path = os.path.join(text_asset_root, "DownloadRewardData")
@@ -1819,7 +1871,7 @@ try:
                             DOWNLOAD_REWARD_DATA.append((item_id, count, quality))
                         elif item_id and count > 0 and item_id not in ITEM_CONFIG:
                             print(f"[WARN] Download reward item {item_id} not found in ItemData, skipping")
-        print(f"[DOWNLOAD REWARD LOADED] items={len(DOWNLOAD_REWARD_DATA)}")
+        debug_log(f"[DOWNLOAD REWARD LOADED] items={len(DOWNLOAD_REWARD_DATA)}")
 
     # Load SkillupgradeData (skill upgrade costs by level)
     sku_path = os.path.join(text_asset_root, "SkillupgradeData")
@@ -1833,7 +1885,7 @@ try:
                         'price_type': int(parts[2]) if parts[2].isdigit() else 0,
                         'price_value': int(parts[3]) if parts[3].isdigit() else 0
                     }
-        print(f"[SKILL UPGRADE DATA LOADED] levels={len(SKILL_UPGRADE_DATA)}")
+        debug_log(f"[SKILL UPGRADE DATA LOADED] levels={len(SKILL_UPGRADE_DATA)}")
 
     # Load RelifeData (respawn tier config)
     relife_path = os.path.join(text_asset_root, "RelifeData")
@@ -1849,7 +1901,7 @@ try:
                         'use_count': int(parts[4]) if parts[4].isdigit() else 1
                     })
         RELIFE_DATA.sort(key=lambda x: x['min_count'])
-        print(f"[RELIFE DATA LOADED] tiers={len(RELIFE_DATA)}")
+        debug_log(f"[RELIFE DATA LOADED] tiers={len(RELIFE_DATA)}")
 
     # Load ServerData (server list definitions)
     srv_path = os.path.join(text_asset_root, "ServerData")
@@ -1875,7 +1927,7 @@ try:
                         'new_server': int(parts[14]) if parts[14].isdigit() else 0,
                         'player_state': int(parts[15]) if parts[15].lstrip('-').isdigit() else -4,
                     })
-        print(f"[SERVER DATA LOADED] servers={len(SERVER_DATA_LIST)}")
+        debug_log(f"[SERVER DATA LOADED] servers={len(SERVER_DATA_LIST)}")
 
     # Load ConfigData (global game configuration)
     cfg_path = os.path.join(text_asset_root, "ConfigData")
@@ -1893,7 +1945,7 @@ try:
                     else:  # int
                         try: GAME_CONFIG[key] = int(raw_val)
                         except: GAME_CONFIG[key] = raw_val
-        print(f"[GAME CONFIG LOADED] keys={len(GAME_CONFIG)}")
+        debug_log(f"[GAME CONFIG LOADED] keys={len(GAME_CONFIG)}")
 
 except: traceback.print_exc()
 
@@ -6875,7 +6927,7 @@ def build_npc_attr_sproto(nid, name, x, z, o, existing_inst_id=None):
         hp_cur = hp_max
         NPC_HP_MAP[inst_id] = hp_max
         NPC_INST_MAP[inst_id] = str(nid)
-        print(f"[NPC SPAWN] inst_id={inst_id} npcid={nid} hp_max={hp_max} atk={atk} def={df}")
+        debug_log(f"[NPC SPAWN] inst_id={inst_id} npcid={nid} hp_max={hp_max} atk={atk} def={df}")
     else:
         # Reconnects must recreate the current NPC at its live position and
         # health without allocating a second server instance.
@@ -8821,7 +8873,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         # proximity-driven.
         # Sending TAG 509 duplicates those client-owned actors and leaves a
         # second server copy alive after the client reports the local death.
-        print(f"[NPC SPAWN] client-owned MonsterData simulation map={map_str}; suppress server duplicates")
+        debug_log(f"[NPC SPAWN] client-owned MonsterData simulation map={map_str}; suppress server duplicates")
         return
     if map_str != "11" and (map_str in STATIC_NPC_DATA or map_str in MONSTER_DATA):
         if map_str in STATIC_NPC_DATA:
@@ -11636,7 +11688,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
 
     save_chars(all_accounts_chars)
     # TAG 503: enter_map
-    print("[DEBUG] BEFORE MAP ENTER")
+    debug_log("[DEBUG] BEFORE MAP ENTER")
     try:
         # TAG 503 must use the same per-character send lock as TAG 504 and
         # timer-driven pushes. A raw conn.sendall here can interleave a
@@ -11645,7 +11697,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         # mapInfoId(0), line_index(1), line_count(2)
         data = encode_sproto([(0, target_map_id), (1, 0), (2, 1)])
         send_rpc_push(503, data)
-        print(f"[M1003 DEBUG] TX 503 map_id={target_map_id}")
+        debug_log(f"[M1003 DEBUG] TX 503 map_id={target_map_id}")
         print(f"[MAP ENTER SEND] map_id={target_map_id} scene={scene_name} pos={picked_char['pos']}")
 
         # TAG 504: main_player_create
@@ -11706,12 +11758,12 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
             # The APK cannot create the zombie player (or the VS panel) until
             # map_ready.  Remember it here; MSG 100 sends the actual tag 544.
             picked_char['boss_waiting_for_map_ready'] = True
-            print(f"[M1003 DEBUG] Prepared Boss did={did} inst={boss_inst_id} max_hp={boss_stats['hp_max']} (awaiting map_ready)")
+            debug_log(f"[M1003 DEBUG] Prepared Boss did={did} inst={boss_inst_id} max_hp={boss_stats['hp_max']} (awaiting map_ready)")
 
     except Exception:
         print("[!] FAILED TO SEND MAP ENTER TRANSITION")
         traceback.print_exc()
-    print("[DEBUG] AFTER MAP ENTER")
+    debug_log("[DEBUG] AFTER MAP ENTER")
 
 def is_skill_locked(sid, level, prof, owned_skill_ids=None):
     """Check starter and currently granted weapon skills; level is not ownership."""
@@ -12271,10 +12323,19 @@ def _guild_refresh_members(guild, send_rpc_push=None, include_info=True):
             send_rpc_push_safe(connection, 563, payload)
         send_rpc_push_safe(connection, 581, _guild_member_list_response(guild))
 
+def _shop_item_quality(row):
+    item_id = str(row.get('item_id', ''))
+    configured_quality = ITEM_CONFIG.get(item_id, {}).get('quality', 0)
+    quality = row.get('quality')
+    if quality is None:
+        quality = configured_quality
+    return int(quality or 0)
+
 def _shop_item_bytes(row, purchased=0):
+    item_id = str(row.get('item_id', ''))
     fields = [
-        (0, str(row.get('id', ''))), (1, str(row.get('item_id', ''))),
-        (2, int(row.get('quality', 0))), (3, int(row.get('price_type', 0))),
+        (0, str(row.get('id', ''))), (1, item_id),
+        (2, _shop_item_quality(row)), (3, int(row.get('price_type', 0))),
         (4, int(row.get('price', 0))), (5, int(row.get('limit', 0))),
         # The APK shop_item decoder reserves wire tag 6; these are 7, 8, 9.
         (7, max(0, int(purchased))), (8, int(row.get('discount', 0))),
@@ -14529,7 +14590,7 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         max_page = max(1, (len(rows) + per_page - 1) // per_page)
         page = min(page, max_page)
         shop_rows = [encode_sproto([
-            (0, str(row['id'])), (1, str(row['item_id'])), (2, int(row.get('quality', 0))),
+            (0, str(row['id'])), (1, str(row['item_id'])), (2, _shop_item_quality(row)),
             (3, int(row.get('price_type', 0))), (4, int(row.get('price', 0))),
             (5, int(row.get('limit', 0))),
             (7, _guild_shop_purchase_count(char, row['id'], row)),
@@ -14556,7 +14617,7 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
             is_box = item_type == 15  # GameDefine.ITEM_TYPE.BOX
             quantity_valid = (per_order <= 0 or not is_box or count <= per_order)
             limit_valid = available <= 0 or purchased + count <= available
-            quality = int(row.get('quality', ITEM_CONFIG.get(item_id, {}).get('quality', 0)) or 0)
+            quality = _shop_item_quality(row)
             # ShopTabRootLogic.UpdateBuyCost charges Price * count; Discount is
             # shown as a label and is not applied to the amount sent by the APK.
             cost = max(0, int(row.get('price', 0) or 0)) * count
@@ -14629,7 +14690,7 @@ def handle_shop_request(conn, char, msg, body, send_rpc_push, send_rpc_response,
                 price = int(row.get('price', 0))
                 money_type = int(row.get('price_type', -1))
                 item_id = str(row.get('item_id', ''))
-                quality = int(row.get('quality', ITEM_CONFIG.get(item_id, {}).get('quality', 0)) or 0)
+                quality = _shop_item_quality(row)
             except (TypeError, ValueError):
                 per_order = available = price = 0
                 money_type = -1
@@ -14699,7 +14760,7 @@ def client_handler(conn, addr):
             # Serialise writes because that delay runs in a timer thread.
             with send_lock:
                 conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
-            print(f"[TX] PUSH TAG={tag} SIZE={len(data)}")
+            debug_log(f"[TX] PUSH TAG={tag} SIZE={len(data)}")
         except Exception:
             print(f"[!] FAILED TO SEND PUSH TAG={tag}")
             traceback.print_exc()
@@ -14930,7 +14991,7 @@ def client_handler(conn, addr):
                     socket_current = is_current_character_connection(conn, picked_char)
                 except Exception:
                     socket_current = False
-                print(
+                debug_log(
                     f"[MAP101 WATCHDOG] player={watch_char_id} ready_for={now - watch_ready_at:.1f}s "
                     f"rx_after_ready={map101_post_ready_rx_count} "
                     f"msg101_after_ready={map101_post_ready_move_count} "
@@ -14959,7 +15020,9 @@ def client_handler(conn, addr):
             try:
                 required_level = int(activity.get('UnlockLevel', 8))
                 duration = int(activity.get('DurationTime', 0))
-                px, pz = int((picked_char.get('pos') or [])[0]), int((picked_char.get('pos') or [0, 0, 0])[2])
+                char_pos = picked_char.get('pos') or [0, 0, 0, 0]
+                px, pz = int(char_pos[0]), int(char_pos[2])
+                heading = int(char_pos[3]) if len(char_pos) > 3 else 0
                 requested_x, requested_z = int(x), int(z)
                 in_map = str(picked_char.get('map_id')) == str(activity.get('MapId', '101'))
                 in_range = math.hypot(requested_x - px, requested_z - pz) <= 500
@@ -14982,6 +15045,14 @@ def client_handler(conn, addr):
                     save_chars(all_accounts_chars)
                 success = True
         if success:
+            map_id = str(activity.get('MapId', '101') or '101')
+            speaker_inst_id = spawn_personal_dance_speaker_model(
+                activity, requested_x, requested_z, heading, conn, send_rpc_push
+            )
+            schedule_personal_dance_speaker_expiry(
+                picked_char.get('id', 0), map_id, speaker_inst_id,
+                runtime['speaker_end_time']
+            )
             send_rpc_push(686, dance_state_info_payload(picked_char, now))
         return success
 
@@ -15107,7 +15178,7 @@ def client_handler(conn, addr):
             # an elapsed end_time, before the map transition begins.
             send_rpc_push(629, encode_sproto([(0, int(time.time())), (1, 2)]))
             start_map_transition(conn, picked_char, return_map, send_rpc_push, override_pos=return_pos)
-            print('[M1003 DEBUG] Arena exit countdown finished; returned to saved city position')
+            debug_log('[M1003 DEBUG] Arena exit countdown finished; returned to saved city position')
 
         leave_after_notice(5)
 
@@ -15131,7 +15202,7 @@ def client_handler(conn, addr):
 
             raw = sproto_unpack(data); pkg = decode_sproto(raw, 0)
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
-            print(f"[RX] MSG={msg} SESSION={session}")
+            debug_log(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
             if (picked_char and str(picked_char.get('map_id', '')) == '101'
                     and map101_ready_at is not None):
@@ -15549,14 +15620,14 @@ def client_handler(conn, addr):
                                 picked_char['pos'] = [x_coord, y_coord, z_coord, o_coord]
                                 print(f"[LOGIN SPAWN FIX] map={mid} pos={picked_char['pos']}")
 
-                    print("[DEBUG] BEFORE MAP ENTER")
+                    debug_log("[DEBUG] BEFORE MAP ENTER")
                     try:
                         ph_p = encode_sproto([(0, 503)])
                         data = encode_sproto([(0, mid), (1, 0), (2, 1)])
                         pf_p = sproto_pack(ph_p + data)
                         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
-                        print(f"[M1003 DEBUG] TX 503 map_id={mid}")
-                        print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
+                        debug_log(f"[M1003 DEBUG] TX 503 map_id={mid}")
+                        debug_log(f"[TX] PUSH TAG=503 SIZE={len(data)}")
                         print(f"[MAP ENTER SEND] map_id={mid} scene={scene_name} pos={picked_char['pos']}")
 
                         # TAG 504: main_player_create
@@ -15613,7 +15684,7 @@ def client_handler(conn, addr):
                     except Exception:
                         print("[!] FAILED TO SEND INITIAL MAP ENTER")
                         traceback.print_exc()
-                    print("[DEBUG] AFTER MAP ENTER")
+                    debug_log("[DEBUG] AFTER MAP ENTER")
 
             elif msg == 100: # map_ready
                 if picked_char:
@@ -15765,7 +15836,7 @@ def client_handler(conn, addr):
                                 boss_id = picked_char.get('boss_inst_id')
                                 # Only timeout if boss is still alive (not already won/lost)
                                 if boss_id and NPC_HP_MAP.get(boss_id, 0) > 0:
-                                    print('[M1003 DEBUG] Arena 60s timeout reached; returning')
+                                    debug_log('[M1003 DEBUG] Arena 60s timeout reached; returning')
                                     schedule_domin_return(restore_hp=True)
 
                         t = threading.Timer(60.0, arena_timeout)
@@ -15781,7 +15852,7 @@ def client_handler(conn, addr):
                             # Tag 544 creates ObjZombiePlayer and opens the VS UI.
                             send_rpc_push(544, encode_sproto([(0, get_boss_char(boss_id, did, player_level))]))
                             sync_npc_attrs_rpc(conn, boss_id, boss_stats, NPC_HP_MAP.get(boss_id, boss_stats['hp_max']))
-                            print(f"[M1003 DEBUG] Spawned Boss did={did} inst={boss_id} after map_ready")
+                            debug_log(f"[M1003 DEBUG] Spawned Boss did={did} inst={boss_id} after map_ready")
 
                             # Tag 547 closes the VS UI and activates the APK's
                             # built-in zombie auto-fight.  Sending it immediately
@@ -15791,7 +15862,7 @@ def client_handler(conn, addr):
                                         and picked_char.get('boss_inst_id') == expected_boss_id
                                         and NPC_HP_MAP.get(expected_boss_id, 0) > 0):
                                     send_rpc_push(547, encode_sproto([]))
-                                    print(f"[M1003 DEBUG] Arena started boss={expected_boss_id}; APK zombie AI enabled")
+                                    debug_log(f"[M1003 DEBUG] Arena started boss={expected_boss_id}; APK zombie AI enabled")
                             arena_timer = threading.Timer(2.5, start_domin_battle)
                             arena_timer.daemon = True
                             arena_timer.start()
@@ -18149,7 +18220,7 @@ def client_handler(conn, addr):
                             print(f"[RANK PVP] player defeated player={picked_char.get('id')} "
                                   f"result=failure_ui relife_suppressed=1")
                         elif current_map == '502':
-                            print('[M1003 DEBUG] Player died in arena; scheduling loss return')
+                            debug_log('[M1003 DEBUG] Player died in arena; scheduling loss return')
                             schedule_domin_return(restore_hp=True)
                         elif supports_normal_relife(current_map):
                             death_count = int(picked_char.get('death_count', 0)) + 1
@@ -18518,7 +18589,7 @@ def client_handler(conn, addr):
                             if old_hp > 0 and new_hp == 0:
                                 current_map = str(picked_char.get('map_id', ''))
                                 if current_map == '502':
-                                    print('[M1003 DEBUG] Player died in arena; scheduling loss return')
+                                    debug_log('[M1003 DEBUG] Player died in arena; scheduling loss return')
                                     schedule_domin_return(restore_hp=True)
                                 elif supports_normal_relife(current_map):
                                     death_count = int(picked_char.get('death_count', 0)) + 1
@@ -18870,7 +18941,7 @@ def client_handler(conn, addr):
                                         send_rpc_push(510, encode_sproto([(0, aoi_attr)]))
 
                                     did = picked_char.get('active_domin_id', '1')
-                                    print(f"[M1003 DEBUG] Boss {target_id} killed by client dmg. Winning did={did}")
+                                    debug_log(f"[M1003 DEBUG] Boss {target_id} killed by client dmg. Winning did={did}")
                                     cap_target = did
                                     for act_m, act_mdata in list(picked_char.get('active_missions', {}).items()):
                                         cap_cfg = missions_data.get(act_m, {})
@@ -19322,7 +19393,7 @@ def client_handler(conn, addr):
 
             elif msg == 311: # enter_domin_pk_scene
                 did = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
-                print(f"[M1003 DEBUG] RX 311 domin_id={did}")
+                debug_log(f"[M1003 DEBUG] RX 311 domin_id={did}")
                 if picked_char:
                     # Validate Domin ID against active capture missions
                     # Only allow entering the Domin territory that matches the current mission
@@ -19340,7 +19411,7 @@ def client_handler(conn, addr):
                                 break
                     # Reject if no active capture mission matches the requested Domin ID
                     if not valid_domin:
-                        print(f"[M1003 DEBUG] RX 311 rejected: no active capture mission for domin_id={did}")
+                        debug_log(f"[M1003 DEBUG] RX 311 rejected: no active capture mission for domin_id={did}")
                         # Reject the request - send empty response
                         if session is not None:
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -19353,7 +19424,7 @@ def client_handler(conn, addr):
                     latest_pos = picked_char.get('pos', [34611, 100, -49480, 8632])
                     picked_char['pre_arena_pos'] = list(latest_pos)
                     picked_char['pre_arena_map'] = str(picked_char.get('map_id', '11'))
-                    print(f"[M1003 DEBUG] Saved pre-arena pos: {picked_char['pre_arena_pos']}, map: {picked_char['pre_arena_map']}")
+                    debug_log(f"[M1003 DEBUG] Saved pre-arena pos: {picked_char['pre_arena_pos']}, map: {picked_char['pre_arena_map']}")
                     picked_char['active_domin_id'] = valid_domin_id
                     start_map_transition(conn, picked_char, "502", send_rpc_push)
                 if session is not None:
@@ -20127,7 +20198,7 @@ def client_handler(conn, addr):
             elif msg in [106, 246, 273, 207, 201, 194, 322]:
                 # Scene/Dungeon Entry
                 mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
-                print(f"[RX] Scene Entry: {mid} (MSG={msg})")
+                debug_log(f"[RX] Scene Entry: {mid} (MSG={msg})")
                 if picked_char:
                     if is_current_character_connection(conn, picked_char):
                         reconcile_exp_stage_login(picked_char)
