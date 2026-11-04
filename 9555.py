@@ -147,11 +147,12 @@ GUILD_BOSS_RANDOM_BADGE_COUNTS = {
     '_three_ghb': 1,
     '_last_ghb': 1,
 }
-BADGE_CASE_LV1_ITEM_IDS = GUILD_BOSS_RANDOM_BADGE_ITEM_IDS
-ITEM_PACKAGE_RANDOM_REWARD_POOLS = {
-    # ItemData/Localization describe both cases as yielding one random Lv.1 badge.
-    '9403': BADGE_CASE_LV1_ITEM_IDS,
-    '9603': BADGE_CASE_LV1_ITEM_IDS,
+ITEM_PACKAGE_RANDOM_BADGE_LEVELS = {
+    '9403': 1, '9603': 1, '9604': 2, '9601': 3, '9602': 4, '9605': 6,
+}
+ITEM_PACKAGE_BADGE_TYPES = {
+    str(item_id): badge_type
+    for item_id, badge_type in zip(range(9700, 9709), range(1, 10))
 }
 # The shipped ShowRewardData rows for these Guild Boss IDs have item IDs but
 # blank ItemCount fields. The APK defaults those counts to -1, so it does not
@@ -9501,21 +9502,68 @@ def resolve_item_package_rewards(item_id, package_count=1):
         return []
     if package_count < 1:
         return []
-    random_pool = ITEM_PACKAGE_RANDOM_REWARD_POOLS.get(item_id)
-    if random_pool:
-        totals = {}
-        for _ in range(package_count):
-            reward_id = str(random.choice(random_pool))
-            totals[reward_id] = totals.get(reward_id, 0) + 1
-        return [(reward_id, 0, count) for reward_id, count in sorted(totals.items())]
 
     cfg = ITEM_CONFIG.get(item_id, {})
+    equipment_rewards = resolve_equipment_pack_rewards(item_id, package_count)
+    if equipment_rewards is not None:
+        return equipment_rewards
+
+    badge_level = ITEM_PACKAGE_RANDOM_BADGE_LEVELS.get(item_id)
+    badge_type = ITEM_PACKAGE_BADGE_TYPES.get(item_id)
+    if badge_level is not None or badge_type is not None:
+        expected_level = badge_level if badge_level is not None else 1
+        candidates = [
+            str(badge_id) for badge_id, badge_cfg in BADGE_CONFIG.items()
+            if int(badge_cfg.get('level', -1)) == expected_level
+            and (badge_type is None or int(badge_cfg.get('badge_type', -1)) == badge_type)
+            and str(badge_id) in ITEM_CONFIG
+        ]
+        if not candidates:
+            return []
+        totals = {}
+        for _ in range(package_count):
+            reward_id = str(random.choice(candidates))
+            quality = int(ITEM_CONFIG.get(reward_id, {}).get('quality', 0))
+            totals[(reward_id, quality)] = totals.get((reward_id, quality), 0) + 1
+        return [(reward_id, quality, count)
+                for (reward_id, quality), count in sorted(totals.items())]
+
     function_id = str(cfg.get('function', 0))
     rewards = ITEM_PACKAGE_FIXED_REWARDS.get(function_id)
     if rewards is None:
         rewards = SHOW_REWARD_CONFIG.get(function_id, [])
     return [(str(reward[0]), int(reward[1]), int(reward[2]) * package_count)
             for reward in rewards if len(reward) >= 3 and str(reward[0])]
+
+def resolve_equipment_pack_rewards(item_id, package_count=1):
+    """Roll profession/tier equipment packs using ItemData and EquipData."""
+    try:
+        function_id = int(ITEM_CONFIG.get(str(item_id), {}).get('function', 0) or 0)
+        package_count = int(package_count)
+    except (TypeError, ValueError):
+        return None
+
+    profession_group = function_id // 100 - 740
+    tier = function_id % 100
+    if profession_group not in (0, 1, 2) or tier > 8:
+        return None
+    profession = profession_group
+    allowed_classes = set(range(1, 9)) if tier == 0 else {tier}
+    candidates = []
+    for equip_id, equip_cfg in EQUIP_CONFIG.items():
+        try:
+            if (int(equip_cfg.get('position', -1)) not in range(1, 6)
+                    or int(equip_cfg.get('class', 0)) not in allowed_classes
+                    or int(equip_cfg.get('job', -1)) != profession
+                    or int(ITEM_CONFIG.get(str(equip_id), {}).get('type', -1)) != 2):
+                continue
+            quality = int(ITEM_CONFIG.get(str(equip_id), {}).get('quality', 0))
+            candidates.append((str(equip_id), quality, 1))
+        except (TypeError, ValueError):
+            continue
+    if not candidates or package_count < 1:
+        return []
+    return [random.choice(candidates) for _ in range(package_count)]
 
 def resolve_weapon_pack_rewards(item_id, character, package_count=1):
     """Roll the APK's 7300/7301-7308 weapon packs from EquipData + WeaponDrop."""
@@ -17211,7 +17259,7 @@ def client_handler(conn, addr):
                                         rewards = weapon_pack_rewards
                                     else:
                                         random_badge_package = (
-                                            package_id in ITEM_PACKAGE_RANDOM_REWARD_POOLS
+                                            package_id in ITEM_PACKAGE_RANDOM_BADGE_LEVELS
                                         )
                                         rewards = resolve_item_package_rewards(
                                             package_id, package_count)
