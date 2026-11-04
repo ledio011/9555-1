@@ -124,6 +124,7 @@ GUILD_STAR_DATA = {} # id -> configured Gang Star upgrade data
 SHOP_DATA = {} # shop type -> shop item ID -> ShopData row for player shops
 GUILD_SHOP_DATA = {} # shop item ID -> ShopData row for Guild shop
 DAILY_BUY_CONFIG = {} # daily purchase ID -> client DailyBuyData product metadata
+INVEST_CONFIG = {} # investment ID -> client InvestData offer/reward metadata
 GUILD_BOSS_DATA = {} # guild boss/activity rows shown by the Gang activity panel
 GUILD_BOSS_POST_KILL_EXIT_SECONDS = 5  # fallback only; GuildBossData.WaitTime is used
 # The in-scene rank panel has no scroll/sort (client Bar-Fight variant caps at 6 rows).
@@ -621,6 +622,25 @@ try:
                     "dollar": parts[15].strip(),
                     "value": int(parts[16]) if parts[16].isdigit() else 0
                 }
+    invest_path = os.path.join(text_asset_root, "InvestData")
+    if os.path.exists(invest_path):
+        with open(invest_path, "r", encoding="utf-8") as table_file:
+            for row in table_file:
+                parts = row.strip().split(",")
+                if len(parts) < 10 or parts[0] != "*" or not parts[1].isdigit():
+                    continue
+                try:
+                    INVEST_CONFIG[parts[1]] = {
+                        "id": parts[1], "item_id": parts[2].strip(),
+                        "item_count": int(parts[3] or 0),
+                        "quality": int(parts[4] or 0),
+                        "price_type": int(parts[5]) if parts[5].isdigit() else -1,
+                        "price": int(parts[6]) if parts[6].isdigit() else 0,
+                        "product_id": parts[7].strip(), "dollar": parts[8].strip(),
+                        "level_target": int(parts[9]) if parts[9].isdigit() else 0
+                    }
+                except (TypeError, ValueError):
+                    continue
     guild_boss_path = os.path.join(text_asset_root, "GuildBossData")
     if os.path.exists(guild_boss_path):
         with open(guild_boss_path, "r", encoding="utf-8") as table_file:
@@ -12275,6 +12295,14 @@ def daily_buy_state_payload():
     }
     return encode_sproto([(0, daily_buys)])
 
+def invest_pack_state_payload():
+    """Return configured investment offer and milestone state without payment grants."""
+    investments = {
+        invest_id: encode_sproto([(0, invest_id), (1, 0)])
+        for invest_id in sorted(INVEST_CONFIG, key=lambda value: int(value))
+    }
+    return encode_sproto([(0, investments)])
+
 def _shop_purchase_count(char, item_id, row):
     purchases = char.setdefault('shop_purchases', {})
     cycle = max(0, int(row.get('reset_cycle', 0) or 0))
@@ -21072,7 +21100,7 @@ def client_handler(conn, addr):
                 elif msg == 257 and picked_char: # request_invest_pack
                     _send_tab_reply(
                         send_rpc_push, send_rpc_response, session,
-                        645, encode_sproto([(0, {})])
+                        645, invest_pack_state_payload()
                     )
 
                 elif msg == 256 and picked_char: # request_level_pack
