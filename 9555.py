@@ -5237,7 +5237,8 @@ def personal_dance_reward_interval(activity=None):
     except (TypeError, ValueError):
         return 1
 
-def personal_dance_reward_list(char, dance_id, running_source='', interval_index=0):
+def personal_dance_reward_list(char, dance_id, running_source='', interval_index=0,
+                               reward_at=None):
     """Return one configured reward interval for the active dance.
 
     The APK maps every level's live free/paid dance to a distinct 303xx reward
@@ -5308,7 +5309,9 @@ def personal_dance_reward_list(char, dance_id, running_source='', interval_index
         interval_count = max(1, (duration + interval - 1) // interval)
         if interval_index >= interval_count:
             return []
-        speaker_count = _guild_dance_speaker_count_for_char(char)
+        reward_at = time.time() if reward_at is None else float(reward_at)
+        speaker_count = _guild_dance_speaker_count_for_char(
+            char, reward_at - 0.000001)
         if speaker_count <= 0:
             return []
         try:
@@ -5398,7 +5401,10 @@ def schedule_personal_dance_reward(char, run_id=None):
                 or str(runtime.get('server_epoch', '')) != DANCE_SERVER_EPOCH
                 or (run_id is not None and int(run_id) != current_run_id)):
             return False
-        interval = personal_dance_reward_interval()
+        source = str(runtime.get('running_source', ''))
+        activity = CITY_DANCE_CONFIG.get(
+            '104' if source == 'guild_speaker' else '101', {})
+        interval = personal_dance_reward_interval(activity)
         progress = int(runtime.get('reward_elapsed_seconds', 0)) % interval
         timer = threading.Timer(max(0.25, interval - progress),
                                 personal_dance_reward_timer_tick,
@@ -5470,9 +5476,10 @@ def settle_personal_dance_if_due(char, now=None):
     if not isinstance(runtime, dict) or not runtime.get('running'):
         return False
     try:
-        interval = personal_dance_reward_interval(
-            CITY_DANCE_CONFIG.get('101', {})
-        )
+        current_source = str(runtime.get('running_source', ''))
+        current_activity = CITY_DANCE_CONFIG.get(
+            '104' if current_source == 'guild_speaker' else '101', {})
+        interval = personal_dance_reward_interval(current_activity)
         started = int(runtime.get('running_since', now))
         pending = max(0, int(runtime.get('reward_elapsed_seconds', 0)))
         run_id = int(runtime.get('dance_run_id', 0))
@@ -5555,7 +5562,8 @@ def settle_personal_dance(char, now=None, stop=False, expected_run_id=None):
                         str(runtime.get('dance_id', '')), 0) or 0)
                     if paid_until > 0:
                         active_until = min(active_until, paid_until)
-            activity = CITY_DANCE_CONFIG.get('101', {})
+            activity = CITY_DANCE_CONFIG.get(
+                '104' if source == 'guild_speaker' else '101', {})
             area_valid = (str(char.get('map_id')) == str(activity.get('MapId', '101'))
                           and is_in_map_gather_area(activity.get('MapId', '101'), char.get('pos')))
             effective_elapsed = min(elapsed, max(0, active_until - started)) if active_until else elapsed
@@ -5567,14 +5575,17 @@ def settle_personal_dance(char, now=None, stop=False, expected_run_id=None):
 
             interval = personal_dance_reward_interval(activity)
             earned_dance_id = str(runtime.get('dance_id', ''))
-            runtime['reward_elapsed_seconds'] = max(0, int(runtime.get('reward_elapsed_seconds', 0))) + effective_elapsed
+            previous_elapsed = max(0, int(runtime.get('reward_elapsed_seconds', 0)))
+            runtime['reward_elapsed_seconds'] = previous_elapsed + effective_elapsed
             earned_intervals, remainder = divmod(runtime['reward_elapsed_seconds'], interval)
             if earned_intervals:
                 batches = []
-                for _ in range(earned_intervals):
+                first_reward_at = started + max(0, interval - previous_elapsed)
+                for interval_offset in range(earned_intervals):
                     rewards = personal_dance_reward_list(
                         char, runtime.get('dance_id', ''), runtime.get('running_source', ''),
-                        runtime.get('reward_interval_count', 0))
+                        runtime.get('reward_interval_count', 0),
+                        reward_at=first_reward_at + interval_offset * interval)
                     if not rewards:
                         break
                     batches.append(rewards)
@@ -5642,24 +5653,23 @@ def settle_personal_dance(char, now=None, stop=False, expected_run_id=None):
         cancel_personal_dance_reward_timer(char_id)
     return runtime
 
-def _guild_dance_speaker_expiries(guild_id, now=None):
-    if now is None:
-        now = time.time()
+def _guild_dance_speaker_records(guild_id):
     try:
         guild_key = str(int(guild_id))
     except (TypeError, ValueError):
         return []
     with GUILD_DANCE_SPEAKER_LOCK:
-        speakers = [
+        return [
             dict(speaker) for speaker in GUILD_DANCE_SPEAKERS.get(guild_key, [])
             if isinstance(speaker, dict)
-            and float(speaker.get('expires_at', 0) or 0) > float(now)
         ]
-        if speakers:
-            GUILD_DANCE_SPEAKERS[guild_key] = speakers
-        else:
-            GUILD_DANCE_SPEAKERS.pop(guild_key, None)
-    return speakers
+
+def _guild_dance_speaker_expiries(guild_id, now=None):
+    now = time.time() if now is None else float(now)
+    return [
+        speaker for speaker in _guild_dance_speaker_records(guild_id)
+        if float(speaker.get('expires_at', 0) or 0) > now
+    ]
 
 def _guild_dance_speaker_end_time(char, now=None):
     if not char:
@@ -5674,8 +5684,8 @@ def _guild_dance_speaker_end_time(char, now=None):
     if not member or int(member.get('job', 4)) == 4:
         return 0
     return max(
-        (int(speaker.get('expires_at', 0) or 0)
-         for speaker in _guild_dance_speaker_expiries(guild_id, now)),
+        (int(float(speaker.get('expires_at', 0) or 0))
+         for speaker in _guild_dance_speaker_records(guild_id)),
         default=0
     )
 
@@ -5884,6 +5894,12 @@ def _guild_dance_speaker_expiry_tick(guild_id, inst_id):
                 _schedule_guild_dance_speaker_expiry(guild_key, still_active)
             return
     if expired_speaker:
+        settle_at = int(math.floor(float(expired_speaker.get('expires_at', now))))
+        for _char_id, _conn, char in _guild_dance_scene_chars(guild_key):
+            runtime = char.get('dance_runtime', {})
+            if (isinstance(runtime, dict) and runtime.get('running')
+                    and runtime.get('running_source') == 'guild_speaker'):
+                settle_personal_dance(char, now=settle_at, stop=False)
         _remove_guild_dance_speaker_npc(expired_speaker)
         _sync_guild_dance_speaker_state(guild_key)
 
@@ -5943,7 +5959,7 @@ def dance_state_info_payload(char, now=None):
                 (0, guild_uuid), (1, '104'),
                 (2, int(speaker.get('started_at', now))),
                 (3, guild_speaker_end), (4, 1), (5, 0),
-                (6, guild_speaker_end - now), (7, guild_speaker_end),
+                (6, max(0, guild_speaker_end - int(now))), (7, guild_speaker_end),
                 (8, guild_id)
             ])
     return encode_sproto([(0, 1 if entries else 0), (1, 1 if entries else 0), (2, entries)])
@@ -14691,7 +14707,7 @@ def client_handler(conn, addr):
                     'started_at': now, 'expires_at': now + duration
                 }
                 with GUILD_DANCE_SPEAKER_LOCK:
-                    speakers = _guild_dance_speaker_expiries(guild_id, now)
+                    speakers = _guild_dance_speaker_records(guild_id)
                     speakers.append(speaker)
                     GUILD_DANCE_SPEAKERS[str(guild_id)] = speakers
                 success = True
