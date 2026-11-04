@@ -72,6 +72,10 @@ EXP_RUN_COUNTER_LOCK = threading.Lock()
 MAIL_ID_COUNTER_LOCK = threading.Lock()
 DANCE_REWARD_TIMER_LOCK = threading.Lock()
 DANCE_REWARD_TIMERS = {}  # character ID -> active personal-dance reward timer
+GUILD_DANCE_REWARD_PER_SPEAKER_INTERVAL = 10
+GUILD_DANCE_SPEAKER_LOCK = threading.RLock()
+GUILD_DANCE_SPEAKERS = {}  # guild ID -> active speaker expiry timestamps
+GUILD_DANCE_SPEAKER_TIMERS = {}  # guild ID -> next speaker expiry timer
 DANCE_SERVER_EPOCH = str(time.time_ns())  # do not credit offline time across a restart
 
 def next_global_inst_id():
@@ -5233,14 +5237,15 @@ def personal_dance_reward_interval(activity=None):
         return 1
 
 def personal_dance_reward_list(char, dance_id, running_source='', interval_index=0):
-    """Return one second of the level's active dance reward.
+    """Return one configured reward interval for the active dance.
 
     The APK maps every level's live free/paid dance to a distinct 303xx reward
     row, but those rows contain only the EXP item ID and omit its quantity.
     Use the active row to constrain the reward item, then use the matching
     level's configured dance-recovery quantity as the server fallback for the
-    missing live-session quantity. The fallback is level-specific; the APK
-    export does not prove its live total equals the recovery total.
+    missing live-session     quantity. The fallback is level-specific; the APK export does not prove its
+    live total equals the recovery total. Gang Stereo uses its Guild Dance
+    preview item set and the user-specified 10 rewards per active speaker.
     """
     try:
         level = max(1, min(80, int(char.get('level', 1))))
@@ -5250,7 +5255,10 @@ def personal_dance_reward_list(char, dance_id, running_source='', interval_index
     # Resolve the live activity row first: free dance uses _drop_jh, paid dance
     # uses _drop_jhdj, and sound-box dance uses CityDanceData 102's configured
     # drop. DanceData then applies the client's configured paid multiplier.
-    activity_id = '102' if str(running_source) == 'speaker' else '101'
+    if str(running_source) == 'guild_speaker':
+        activity_id = '104'
+    else:
+        activity_id = '102' if str(running_source) == 'speaker' else '101'
     activity = CITY_DANCE_CONFIG.get(activity_id, CITY_DANCE_CONFIG.get('101', {}))
     try:
         unlock_level = max(1, int(activity.get('UnlockLevel', 8) or 8))
@@ -5260,6 +5268,8 @@ def personal_dance_reward_list(char, dance_id, running_source='', interval_index
         return []
 
     if str(running_source) == 'speaker':
+        active_drop_key = str(activity.get('DropId', '') or '').strip()
+    elif str(running_source) == 'guild_speaker':
         active_drop_key = str(activity.get('DropId', '') or '').strip()
     elif str(running_source) == 'paid' or int(dance_cfg.get('Price', 0) or 0) > 0:
         active_drop_key = '_drop_jhdj'
@@ -5271,9 +5281,14 @@ def personal_dance_reward_list(char, dance_id, running_source='', interval_index
     # Some AdaptData levels point to 303xx IDs that are absent from this APK's
     # ShowRewardData export. CityDanceData's ShowRewardId is the client preview
     # row for the same active reward category and supplies the item identity.
-    active_reward_rows = (SHOW_REWARD_CONFIG.get(active_drop_id)
-                          or SHOW_REWARD_CONFIG.get(
-                str(activity.get('ShowRewardId', '') or '').strip(), []))
+    preview_reward_id = (
+        '30302' if str(running_source) == 'guild_speaker'
+        else str(activity.get('ShowRewardId', '') or '').strip()
+    )
+    active_reward_rows = (
+        SHOW_REWARD_CONFIG.get(active_drop_id)
+        or SHOW_REWARD_CONFIG.get(preview_reward_id, [])
+    )
     active_items = {
         (str(item_id), int(quality))
         for item_id, quality, _preview_count in active_reward_rows
@@ -5281,6 +5296,33 @@ def personal_dance_reward_list(char, dance_id, running_source='', interval_index
     }
     if not active_items:
         return []
+
+    if str(running_source) == 'guild_speaker':
+        interval = personal_dance_reward_interval(activity)
+        try:
+            duration = max(0, int(activity.get('DurationTime', 0) or 0))
+            interval_index = max(0, int(interval_index))
+        except (TypeError, ValueError):
+            return []
+        interval_count = max(1, (duration + interval - 1) // interval)
+        if interval_index >= interval_count:
+            return []
+        speaker_count = _guild_dance_speaker_count_for_char(char)
+        if speaker_count <= 0:
+            return []
+        try:
+            scale = max(0, int(dance_cfg.get('RewardScale', 100) or 100))
+        except (TypeError, ValueError):
+            scale = 100
+        amount = GUILD_DANCE_REWARD_PER_SPEAKER_INTERVAL * speaker_count * scale // 100
+        if amount <= 0:
+            return []
+        return [
+            (str(item_id), int(quality), amount)
+            for item_id, quality, _preview_count in active_reward_rows
+            if (str(item_id), int(quality)) in active_items
+            and str(item_id) in DIRECT_REWARD_RESOURCE_IDS
+        ]
 
     # The live dance row has no count. RetrieveData's _drop_gwzh row is the only
     # client-exported per-level quantity for this same activity; retain it as
@@ -5504,11 +5546,20 @@ def settle_personal_dance(char, now=None, stop=False, expected_run_id=None):
                                    or runtime.get('paid_end_time', 0) or 0)
             elif source == 'speaker':
                 active_until = int(runtime.get('speaker_end_time', 0))
+            elif source == 'guild_speaker':
+                active_until = _guild_dance_speaker_end_time(char, now)
+                dance_cfg = DANCE_CONFIG.get(str(runtime.get('dance_id', '')), {})
+                if int(dance_cfg.get('Price', 0) or 0) > 0:
+                    paid_until = int(runtime.get('paid_dances', {}).get(
+                        str(runtime.get('dance_id', '')), 0) or 0)
+                    if paid_until > 0:
+                        active_until = min(active_until, paid_until)
             activity = CITY_DANCE_CONFIG.get('101', {})
             area_valid = (str(char.get('map_id')) == str(activity.get('MapId', '101'))
                           and is_in_map_gather_area(activity.get('MapId', '101'), char.get('pos')))
             effective_elapsed = min(elapsed, max(0, active_until - started)) if active_until else elapsed
-            if not area_valid or (source in ('paid', 'speaker') and active_until <= 0):
+            if not area_valid or (source in ('paid', 'speaker', 'guild_speaker')
+                                  and active_until <= 0):
                 effective_elapsed = 0
             if source == 'free':
                 runtime['free_duration'] = max(0, int(runtime.get('free_duration', 0)) - effective_elapsed)
@@ -5539,7 +5590,8 @@ def settle_personal_dance(char, now=None, stop=False, expected_run_id=None):
                     earned_intervals = 0
             should_stop = (stop or not area_valid or effective_elapsed < elapsed
                            or (source == 'free' and runtime.get('free_duration', 0) <= 0)
-                           or (source in ('paid', 'speaker') and active_until > 0 and int(now) >= active_until))
+                           or (source in ('paid', 'speaker', 'guild_speaker')
+                               and active_until > 0 and int(now) >= active_until))
             if should_stop:
                 runtime['running'] = False
                 runtime['running_since'] = 0
@@ -5589,6 +5641,167 @@ def settle_personal_dance(char, now=None, stop=False, expected_run_id=None):
         cancel_personal_dance_reward_timer(char_id)
     return runtime
 
+def _guild_dance_speaker_expiries(guild_id, now=None):
+    if now is None:
+        now = int(time.time())
+    try:
+        guild_key = str(int(guild_id))
+    except (TypeError, ValueError):
+        return []
+    with GUILD_DANCE_SPEAKER_LOCK:
+        expiries = [
+            int(expiry) for expiry in GUILD_DANCE_SPEAKERS.get(guild_key, [])
+            if int(expiry) > int(now)
+        ]
+        if expiries:
+            GUILD_DANCE_SPEAKERS[guild_key] = expiries
+        else:
+            GUILD_DANCE_SPEAKERS.pop(guild_key, None)
+    return expiries
+
+def _guild_dance_speaker_end_time(char, now=None):
+    if not char:
+        return 0
+    try:
+        guild_id = int(_guild_id_for_character(char))
+        char_id = int(char.get('id', 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    guild = GUILD_STATES.get(str(guild_id))
+    member = _guild_member_id(guild, char_id) if guild else None
+    if not member or int(member.get('job', 4)) == 4:
+        return 0
+    return max(_guild_dance_speaker_expiries(guild_id, now), default=0)
+
+def _guild_dance_speaker_count_for_char(char, now=None):
+    if not char or str(char.get('map_id', '')) != str(
+            CITY_DANCE_CONFIG.get('104', {}).get('MapId', '101')):
+        return 0
+    if not is_in_map_gather_area(
+            CITY_DANCE_CONFIG.get('104', {}).get('MapId', '101'),
+            char.get('pos')):
+        return 0
+    try:
+        guild_id = int(_guild_id_for_character(char))
+        char_id = int(char.get('id', 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+    guild = GUILD_STATES.get(str(guild_id))
+    member = _guild_member_id(guild, char_id) if guild else None
+    if not member or int(member.get('job', 4)) == 4:
+        return 0
+    return len(_guild_dance_speaker_expiries(guild_id, now))
+
+def _sync_guild_dance_speaker_state(guild_id):
+    try:
+        guild_id = int(guild_id)
+    except (TypeError, ValueError):
+        return
+    guild = GUILD_STATES.get(str(guild_id))
+    if not guild:
+        return
+    for member_id, member in (guild.get('members') or {}).items():
+        if int((member or {}).get('job', 4)) == 4:
+            continue
+        try:
+            char_id = int(member_id)
+        except (TypeError, ValueError):
+            continue
+        conn, char = ALL_CONNECTIONS.get(char_id, (None, None))
+        if (conn and char and is_current_character_connection(conn, char)
+                and _guild_id_for_character(char) == guild_id):
+            send_rpc_push_safe(conn, 686, dance_state_info_payload(char))
+
+def _activate_guild_dance_for_online_dancers(guild_id, now=None):
+    now = int(time.time()) if now is None else int(now)
+    guild = GUILD_STATES.get(str(int(guild_id)))
+    if not guild:
+        return
+    map_id = str(CITY_DANCE_CONFIG.get('104', {}).get('MapId', '101'))
+    for member_id, member in (guild.get('members') or {}).items():
+        if int((member or {}).get('job', 4)) == 4:
+            continue
+        try:
+            char_id = int(member_id)
+        except (TypeError, ValueError):
+            continue
+        conn, char = ALL_CONNECTIONS.get(char_id, (None, None))
+        if (not conn or not char or not is_current_character_connection(conn, char)
+                or _guild_id_for_character(char) != int(guild_id)
+                or str(char.get('map_id', '')) != map_id
+                or not is_in_map_gather_area(map_id, char.get('pos'))):
+            continue
+        current_runtime = char.get('dance_runtime')
+        if not isinstance(current_runtime, dict) or not current_runtime.get('running'):
+            continue
+        if current_runtime.get('running_source') == 'guild_speaker':
+            continue
+        settled = settle_personal_dance(char, now=now, stop=False)
+        if not settled.get('running'):
+            continue
+        with get_character_transaction_lock(char):
+            runtime = ensure_dance_runtime(char, now)
+            if not runtime.get('running'):
+                continue
+            dance_id = str(runtime.get('dance_id', ''))
+            runtime['running_source'] = 'guild_speaker'
+            runtime['running_since'] = now
+            runtime['reward_elapsed_seconds'] = 0
+            runtime['reward_interval_count'] = 0
+            runtime['reward_source_key'] = f'guild_speaker:{dance_id}'
+            runtime['reward_dance_id'] = dance_id
+            runtime['reward_level'] = max(1, min(80, int(char.get('level', 1))))
+            run_id = int(runtime.get('dance_run_id', 0))
+            save_chars(all_accounts_chars)
+        schedule_personal_dance_reward(char, run_id)
+
+def _schedule_guild_dance_speaker_expiry(guild_id, now=None):
+    now = int(time.time()) if now is None else int(now)
+    try:
+        guild_key = str(int(guild_id))
+    except (TypeError, ValueError):
+        return
+    with GUILD_DANCE_SPEAKER_LOCK:
+        old_timer = GUILD_DANCE_SPEAKER_TIMERS.pop(guild_key, None)
+        if old_timer:
+            old_timer.cancel()
+        expiries = [
+            int(expiry) for expiry in GUILD_DANCE_SPEAKERS.get(guild_key, [])
+            if int(expiry) > now
+        ]
+        if not expiries:
+            GUILD_DANCE_SPEAKERS.pop(guild_key, None)
+            return
+        GUILD_DANCE_SPEAKERS[guild_key] = expiries
+        timer = threading.Timer(
+            max(0.1, min(expiries) - now),
+            _guild_dance_speaker_expiry_tick, args=(guild_key,)
+        )
+        timer.daemon = True
+        GUILD_DANCE_SPEAKER_TIMERS[guild_key] = timer
+        timer.start()
+
+def _guild_dance_speaker_expiry_tick(guild_id):
+    guild_key = str(guild_id)
+    current_timer = threading.current_thread()
+    now = int(time.time())
+    with GUILD_DANCE_SPEAKER_LOCK:
+        if GUILD_DANCE_SPEAKER_TIMERS.get(guild_key) is not current_timer:
+            return
+        GUILD_DANCE_SPEAKER_TIMERS.pop(guild_key, None)
+        expiries = [
+            int(expiry) for expiry in GUILD_DANCE_SPEAKERS.get(guild_key, [])
+            if int(expiry) > now
+        ]
+        if expiries:
+            GUILD_DANCE_SPEAKERS[guild_key] = expiries
+        else:
+            GUILD_DANCE_SPEAKERS.pop(guild_key, None)
+    if expiries:
+        _schedule_guild_dance_speaker_expiry(guild_key, now)
+    else:
+        _sync_guild_dance_speaker_state(guild_key)
+
 def dance_state_info_payload(char, now=None):
     """Build sync_dance_state_info (686) exactly as the client schema expects."""
     if now is None:
@@ -5633,6 +5846,16 @@ def dance_state_info_payload(char, now=None):
                 (0, speaker_uuid), (1, '102'), (2, int(runtime.get('speaker_start_time', 0))),
                 (3, speaker_end), (4, 1), (5, 0), (6, speaker_end - now),
                 (7, speaker_end), (8, 0)
+            ])
+        guild_id = int(_guild_id_for_character(char) or 0)
+        guild_speaker_end = _guild_dance_speaker_end_time(char, now)
+        if guild_id and guild_speaker_end > now:
+            guild_uuid = int(char.get('id', 0)) * 100 + 104
+            entries[str(guild_uuid)] = encode_sproto([
+                (0, guild_uuid), (1, '104'), (2, now),
+                (3, guild_speaker_end), (4, 1), (5, 0),
+                (6, guild_speaker_end - now), (7, guild_speaker_end),
+                (8, guild_id)
             ])
     return encode_sproto([(0, 1 if entries else 0), (1, 1 if entries else 0), (2, entries)])
 
@@ -12442,7 +12665,6 @@ def _guild_boss_start_exit_countdown(guild, boss_id, record):
     timer.start()
 
 def _guild_boss_send_result(guild, boss_id, record):
-    map_id = str(GUILD_BOSS_DATA.get(str(boss_id), {}).get('map_id', ''))
     rows = _guild_boss_rank_rows(record)
     boss = GUILD_BOSS_DATA.get(str(boss_id), {})
     # Pre-compute the reward sets for each player so the result screen always
@@ -12481,23 +12703,9 @@ def _guild_boss_send_result(guild, boss_id, record):
             drops.append(('last-kill', boss.get('last_kill_drop_id', '')))
         if drops:
             add_awards(entry.get('id', 0), drops)
-    # Send result to each online rank-row participant
-    for entry in rows:
-        try:
-            char_id = int(entry.get('id', 0) or 0)
-        except (TypeError, ValueError):
-            continue
-        conn, char = ALL_CONNECTIONS.get(char_id, (None, None))
-        # After defeat, _guild_boss_member rejects because activity state is no
-        # longer 1. Use a relaxed check: only verify the player is online, on the
-        # boss map, and belongs to the guild (skip the activity-state gate).
-        if (not conn or not char or not is_current_character_connection(conn, char)
-                or str(char.get('map_id', '')) != map_id):
-            continue
-        # Verify guild membership without the activity-state gate
-        guild_id = _guild_id_for_character(char)
-        if guild_id != int(guild.get('id', 0)):
-            continue
+    # Show the result to every eligible guild member still in the scene, not
+    # only damage dealers; the client opens the rank page from this push.
+    for char_id, conn, char in _guild_boss_scene_chars(guild, boss_id):
         member = _guild_member_id(guild, char_id)
         if not member or int(member.get('job', 4)) == 4:
             continue
@@ -12522,7 +12730,10 @@ def _guild_boss_send_result(guild, boss_id, record):
             (4, _guild_boss_battle_info(char, include_state=False)),
             (5, str(boss_id))
         ]
-        send_rpc_push_safe(conn, 620, encode_sproto(result_fields))
+        sent = send_rpc_push_safe(conn, 620, encode_sproto(result_fields))
+        print(f"[GUILD BOSS RESULT] boss={boss_id} player={char_id} "
+              f"damage_rows={min(len(rows), GUILD_BOSS_RESULT_RANK_ROWS)} "
+              f"reward_items={len(item_list)} sent={sent}")
 
 def _guild_boss_finish(guild, boss_id, record, killer_id):
     if record.get('finished'):
@@ -12888,6 +13099,11 @@ def _guild_boss_apply_hit(conn, char, target_id, client_dmg, skill_id,
             DEAD_NPC_SET.add(int(target_id))
             killed = _guild_boss_finish(guild, boss_id, record, int(char.get('id', 0)))
         _save_guild_states()
+    if killed:
+        # Open the result UI before the client processes the boss's zero-HP
+        # damage update, which can otherwise complete the scene first.
+        _guild_boss_start_exit_countdown(guild, boss_id, record)
+        _guild_boss_send_result(guild, boss_id, record)
     _guild_boss_sync_npc(guild, row.get('map_id', ''), target_id, defender_stats, hp_after)
     hit_entry = encode_sproto([
         (0, int(target_id)), (1, actual_damage), (2, skill_id),
@@ -12905,8 +13121,6 @@ def _guild_boss_apply_hit(conn, char, target_id, client_dmg, skill_id,
                 and int(_guild_member_id(guild, peer_id).get('job', 4)) != 4):
             send_rpc_push_safe(peer_conn, 511, dmg_board)
     if killed:
-        _guild_boss_start_exit_countdown(guild, boss_id, record)
-        _guild_boss_send_result(guild, boss_id, record)
         _guild_boss_push_activity(guild)
     return True
 
@@ -14328,6 +14542,68 @@ def client_handler(conn, addr):
         if success:
             send_rpc_push(686, dance_state_info_payload(picked_char, now))
         return success
+
+    def use_guild_dance_speaker(index_id, x, z, consume_item=False):
+        if not picked_char or not is_current_character_connection(conn, picked_char):
+            return False
+        now = int(time.time())
+        success = False
+        with get_character_transaction_lock(picked_char):
+            found = find_backpack_item(picked_char, index_id, 2)
+            if not found:
+                return False
+            item = found['item']
+            item_id = str(item.get('id', ''))
+            item_cfg = ITEM_CONFIG.get(item_id, {})
+            activity = CITY_DANCE_CONFIG.get('104', {})
+            try:
+                guild_id = int(_guild_id_for_character(picked_char))
+                member = _guild_member_id(GUILD_STATES.get(str(guild_id)), int(picked_char.get('id', 0)))
+                required_level = int(activity.get('UnlockLevel', 8))
+                duration = int(activity.get('DurationTime', 0))
+                px = int((picked_char.get('pos') or [])[0])
+                pz = int((picked_char.get('pos') or [0, 0, 0])[2])
+                requested_x, requested_z = int(x), int(z)
+                map_id = str(activity.get('MapId', '101'))
+                in_map = str(picked_char.get('map_id')) == map_id
+                in_range = math.hypot(requested_x - px, requested_z - pz) <= 500
+                in_gather_area = (
+                    is_in_map_gather_area(map_id, picked_char.get('pos'))
+                    and is_in_map_gather_area(map_id, [requested_x, requested_z])
+                )
+                valid_member = bool(member and int(member.get('job', 4)) != 4)
+                valid_item = item_id == '6002' and int(item_cfg.get('type', -1)) == 28
+            except (TypeError, ValueError, IndexError):
+                return False
+            if (valid_item and valid_member and in_map and in_range and in_gather_area
+                    and int(picked_char.get('level', 1)) >= required_level and duration > 0):
+                with GUILD_DANCE_SPEAKER_LOCK:
+                    expiries = _guild_dance_speaker_expiries(guild_id, now)
+                    expiries.append(now + duration)
+                    GUILD_DANCE_SPEAKERS[str(guild_id)] = expiries
+                success = True
+                if consume_item:
+                    item['amount'] = int(item.get('amount', 1)) - 1
+                    if item['amount'] <= 0:
+                        picked_char['inventory'].remove(item)
+                    send_rpc_push(526, encode_sproto([(0, 1), (1, int(index_id))]))
+                    save_chars(all_accounts_chars)
+        if success:
+            _schedule_guild_dance_speaker_expiry(guild_id, now)
+            _activate_guild_dance_for_online_dancers(guild_id, now)
+            _sync_guild_dance_speaker_state(guild_id)
+            print(f"[GUILD DANCE STEREO] player={picked_char.get('id')} "
+                  f"guild={guild_id} active={_guild_dance_speaker_count_for_char(picked_char, now)} "
+                  f"ends={_guild_dance_speaker_end_time(picked_char, now)}")
+        return success
+
+    def use_dance_speaker_item(index_id, x, z, consume_item=False):
+        found = find_backpack_item(picked_char, index_id, 2) if picked_char else None
+        if not found:
+            return False
+        if str(found['item'].get('id', '')) == '6002':
+            return use_guild_dance_speaker(index_id, x, z, consume_item)
+        return use_personal_dance_speaker(index_id, x, z, consume_item)
 
     def schedule_domin_return(restore_hp=False):
         """Return after the Capture mission's APK-localized five-second exit notice."""
@@ -16919,6 +17195,7 @@ def client_handler(conn, addr):
                                           and is_in_map_gather_area(activity.get('MapId', '101'), picked_char.get('pos')))
                     except (TypeError, ValueError):
                         in_dance_scene = False
+                    guild_speaker_end = _guild_dance_speaker_end_time(picked_char, now)
                     with get_character_transaction_lock(picked_char):
                         runtime = ensure_dance_runtime(picked_char, now)
                         try:
@@ -16929,6 +17206,7 @@ def client_handler(conn, addr):
                                 existing_paid_end = max(existing_paid_end, int(runtime.get('paid_end_time', 0)))
                             dance_has_time = (int(runtime.get('free_duration', 0)) > 0
                                               or int(runtime.get('speaker_end_time', 0)) > now
+                                              or guild_speaker_end > now
                                               or (requested_price > 0 and 0 <= requested_price_type < len(MONEY_FIELDS)
                                                   and (existing_paid_end > now
                                                        or get_currency_balance(picked_char, requested_price_type) >= requested_price)))
@@ -16972,7 +17250,9 @@ def client_handler(conn, addr):
                                     runtime['free_started_at'] = now
                                     runtime['dance_run_id'] = int(runtime.get('dance_run_id', 0)) + 1
                                     runtime['server_epoch'] = DANCE_SERVER_EPOCH
-                                    if int(dance_cfg.get('Price', 0)) > 0:
+                                    if guild_speaker_end > now:
+                                        runtime['running_source'] = 'guild_speaker'
+                                    elif int(dance_cfg.get('Price', 0)) > 0:
                                         # Paid choreography has its own absolute expiry. Do not
                                         # burn the player's separate free-dance allowance while
                                         # they are using a paid selection.
@@ -17053,10 +17333,10 @@ def client_handler(conn, addr):
 
             elif msg == 314: # use_dance_sound_box (alternate client protocol)
                 index_id = get_val_int(body, 0, -1)
-                success = use_personal_dance_speaker(index_id,
-                                                     get_val_int(body, 1, None),
-                                                     get_val_int(body, 2, None),
-                                                     consume_item=True)
+                success = use_dance_speaker_item(index_id,
+                                                 get_val_int(body, 1, None),
+                                                 get_val_int(body, 2, None),
+                                                 consume_item=True)
                 if not success:
                     send_rpc_push(526, encode_sproto([(0, 0), (1, index_id)]))
                 send_rpc_response(session)
@@ -17158,11 +17438,14 @@ def client_handler(conn, addr):
                                         and int(cfg.get('level', 0)) <= int(picked_char.get('level', 1))):
                                     success = 1
                             elif item_type == 28:
-                                # Item 6001 starts the configured personal
-                                # activity, and only consumes after all map,
-                                # level, cooldown and coordinate checks pass.
-                                if item_id == '6001':
-                                    success = int(use_personal_dance_speaker(
+                                # Dance speakers consume only after the
+                                # configured map, guild, level, and position checks pass.
+                                if item_id in ('6001', '6002'):
+                                    use_speaker = (
+                                        use_guild_dance_speaker if item_id == '6002'
+                                        else use_personal_dance_speaker
+                                    )
+                                    success = int(use_speaker(
                                         index_id,
                                         get_val_int(body, 1, None),
                                         get_val_int(body, 2, None),
