@@ -648,10 +648,14 @@ try:
                         "profession": int(parts[5] or -1),
                         "price_type": int(parts[6] or 0), "price": int(parts[7] or 0),
                         "reset_cycle": int(parts[8] or 0),
-                        "reset_cycle": int(parts[8] or 0), "limit": int(parts[9] or 0),
+                        "limit": int(parts[9] or 0),
                         "single_limit": int(parts[10] or 0), "discount": int(parts[11] or 0),
                         "weight": int(parts[12] or 0), "min_level": int(parts[15] or 0),
                         "max_level": int(parts[16] or 80),
+                        "display_order": (
+                            int(parts[19]) if len(parts) > 19 and parts[19].strip().isdigit()
+                            else int(parts[12] or 0)
+                        ),
                         "start_time": parts[13].strip() if len(parts) > 13 else "",
                         "end_time": parts[14].strip() if len(parts) > 14 else "",
                         "class": int(parts[21] or 0) if len(parts) > 21 and parts[21] else 0
@@ -14585,7 +14589,10 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
                 if int(char.get('level', 1)) >= int(row.get('min_level', 0))
                 and int(char.get('level', 1)) <= int(row.get('max_level', 80))
                 and int(row.get('profession', -1)) in (-1, int(char.get('prof', 0)))]
-        rows.sort(key=lambda row: (int(row.get('weight', 0)), str(row.get('id', ''))))
+        rows.sort(key=lambda row: (
+            int(row.get('display_order', row.get('weight', 0))),
+            str(row.get('id', ''))
+        ))
         per_page = 30
         max_page = max(1, (len(rows) + per_page - 1) // per_page)
         page = min(page, max_page)
@@ -14666,7 +14673,10 @@ def handle_shop_request(conn, char, msg, body, send_rpc_push, send_rpc_response,
         page = max(1, get_val_int(body, 1, 1))
         rows = [row for row in SHOP_DATA.get(shop_type, {}).values()
                 if _shop_row_available_for_character(char, row)]
-        rows.sort(key=lambda row: (int(row.get('weight', 0)), str(row.get('id', ''))))
+        rows.sort(key=lambda row: (
+            int(row.get('display_order', row.get('weight', 0))),
+            str(row.get('id', ''))
+        ))
         per_page = 30
         max_page = max(1, (len(rows) + per_page - 1) // per_page)
         page = min(page, max_page)
