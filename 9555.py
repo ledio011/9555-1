@@ -8986,6 +8986,23 @@ def can_add_reward_list_to_inventory(picked_char, rewards):
             return False
     return True
 
+def snapshot_character_reward_state(picked_char, include_mails=False):
+    """Snapshot only persistent fields mutated by reward grants, not live runtime state."""
+    keys = {bucket for bucket, _tag in BACKPACKS.values()}
+    keys.update(MONEY_FIELDS)
+    keys.update(('next_item_index', 'exp', 'level', 'hp', 'title_exp', 'active_missions'))
+    if include_mails:
+        keys.add('mails')
+    present = {key for key in keys if key in picked_char}
+    return {key: copy.deepcopy(picked_char[key]) for key in present}, present, keys
+
+def restore_character_reward_state(picked_char, snapshot):
+    values, present, keys = snapshot
+    for key in keys - present:
+        picked_char.pop(key, None)
+    for key, value in values.items():
+        picked_char[key] = value
+
 def download_reward_catalog():
     """Return the four rewards shown by the APK's DownloadRewardData table."""
     if len(DOWNLOAD_REWARD_DATA) >= len(DOWNLOAD_REWARD_FALLBACK):
@@ -10913,7 +10930,7 @@ def claim_mail_reward_entries(picked_char, mail_entries, all_chars, conn, send_r
             try:
                 item_id = str(item.get('itemId', 0))
                 quality = int(item.get('quality', 0) or 0)
-                count = int(item.get('count', 1) or 1)
+                count = int(item.get('count', 1))
             except (TypeError, ValueError):
                 return False
             if count <= 0 or (
@@ -10925,7 +10942,7 @@ def claim_mail_reward_entries(picked_char, mail_entries, all_chars, conn, send_r
     if not rewards or not can_add_reward_list_to_inventory(picked_char, rewards):
         return False
     try:
-        snapshot = copy.deepcopy(picked_char)
+        snapshot = snapshot_character_reward_state(picked_char, include_mails=True)
     except Exception as snapshot_error:
         print(f"[MAIL] claim snapshot failed char={picked_char.get('id')}: {snapshot_error}")
         return False
@@ -10938,8 +10955,7 @@ def claim_mail_reward_entries(picked_char, mail_entries, all_chars, conn, send_r
         advance_missions(picked_char, None, 'level')
 
     if not save_chars(all_chars):
-        picked_char.clear()
-        picked_char.update(snapshot)
+        restore_character_reward_state(picked_char, snapshot)
         print(f"[MAIL] claim persistence failed char={picked_char.get('id')}")
         return False
 
@@ -16575,7 +16591,8 @@ def client_handler(conn, addr):
                                     if valid_rewards and has_capacity:
                                         if random_badge_package:
                                             try:
-                                                package_snapshot = copy.deepcopy(picked_char)
+                                                package_snapshot = snapshot_character_reward_state(
+                                                    picked_char)
                                             except Exception as snapshot_error:
                                                 failure_reason = (
                                                     f'could not safely open badge case: {snapshot_error}'
@@ -16621,8 +16638,8 @@ def client_handler(conn, addr):
                                                 save=False)
                                             saved = save_chars(all_accounts_chars)
                                             if random_badge_package and not saved:
-                                                picked_char.clear()
-                                                picked_char.update(package_snapshot)
+                                                restore_character_reward_state(
+                                                    picked_char, package_snapshot)
                                                 failure_reason = 'badge case reward could not be saved'
                                             else:
                                                 if random_badge_package:
