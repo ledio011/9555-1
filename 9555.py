@@ -12822,31 +12822,52 @@ def _guild_boss_scene_chars(guild, boss_id):
             found.append((char_id, conn, char))
     return found
 
-def _guild_boss_auto_exit(guild_id, boss_id, event_start):
-    guild = GUILD_STATES.get(str(guild_id))
-    row = GUILD_BOSS_DATA.get(str(boss_id), {})
-    map_id = str(row.get('map_id', ''))
-    record = (guild or {}).get('guild_boss_events', {}).get(str(boss_id), {})
-    if (not record or int(record.get('event_start', 0) or 0) != int(event_start)
-            or not (record.get('finished') or record.get('expired'))):
-        return
-    for char_id, conn, char in _guild_boss_scene_chars(guild, boss_id):
+def _guild_boss_exit_key(guild, boss_id, event_start):
+    return f"{int((guild or {}).get('id', 0) or 0)}:{boss_id}:{int(event_start or 0)}"
+
+def _guild_boss_return_char(conn, char, guild, boss_id, event_start, reason):
+    """Claim one boss exit so the button and timeout cannot transition twice."""
+    if not conn or not char or not is_current_character_connection(conn, char):
+        return False
+    boss_row = GUILD_BOSS_DATA.get(str(boss_id), {})
+    if str(char.get('map_id', '')) != str(boss_row.get('map_id', '')):
+        return False
+    exit_key = _guild_boss_exit_key(guild, boss_id, event_start)
+    with GUILD_BOSS_LOCK:
+        if char.get('_guild_boss_exit_key') == exit_key:
+            return False
+        char['_guild_boss_exit_key'] = exit_key
         return_map = str(char.get('pre_copy_map') or '11')
         return_pos = char.get('pre_copy_pos')
-        if return_map == map_id or _guild_boss_map_id(return_map):
+        if return_map == str(boss_row.get('map_id', '')) or _guild_boss_map_id(return_map):
             return_map = '11'
             return_pos = None
         char['pre_copy_pos'] = None
         char['pre_copy_map'] = None
         char['active_copy_id'] = None
         if int(char.get('hp', 0) or 0) <= 0:
-            # never leave as a corpse: the revive offer is bound to the boss map
             char['hp'] = get_character_stats(char)['hp_max']
             char.pop('_pending_relife', None)
             sync_char_attrs_rpc(conn, char)
-        send_rpc_push_safe(conn, 629, encode_sproto([(0, int(time.time())), (1, 2)]))
-        push = lambda tag, data, cid=char_id: send_push_to_char(cid, tag, data)
-        start_map_transition(conn, char, return_map, push, override_pos=return_pos)
+        start_map_transition(
+            conn, char, return_map,
+            lambda tag, data, cid=int(char.get('id', 0)):
+                send_push_to_char(cid, tag, data),
+            override_pos=return_pos
+        )
+    print(f"[GUILD BOSS] player returned id={char.get('id')} "
+          f"boss={boss_id} reason={reason} map={char.get('map_id')}")
+    return True
+
+def _guild_boss_auto_exit(guild_id, boss_id, event_start):
+    guild = GUILD_STATES.get(str(guild_id))
+    record = (guild or {}).get('guild_boss_events', {}).get(str(boss_id), {})
+    if (not record or int(record.get('event_start', 0) or 0) != int(event_start)
+            or not (record.get('finished') or record.get('expired'))):
+        return
+    for char_id, conn, char in _guild_boss_scene_chars(guild, boss_id):
+        _guild_boss_return_char(
+            conn, char, guild, boss_id, event_start, 'auto-timeout')
     save_chars(all_accounts_chars)
 
 def _guild_boss_start_exit_countdown(guild, boss_id, record):
@@ -14353,6 +14374,7 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
                         char['pre_copy_pos'] = list(char.get('pos', [0, 100, 0, 0]))
                         char['pre_copy_map'] = str(char.get('map_id', '11'))
                     char['active_copy_id'] = boss_map_id
+                    char.pop('_guild_boss_exit_key', None)
                     save_chars(all_accounts_chars)
                     start_map_transition(conn, char, boss_map_id, send_rpc_push)
                     print(f"[GUILD BOSS] entered player={char.get('id')} boss={boss_id} map={boss_map_id}")
@@ -21176,17 +21198,22 @@ def client_handler(conn, addr):
                     # The result UI sends the same leave request even when the
                     # boss scene no longer has an active_copy_id.
                     if in_guild_boss:
-                        saved_pos = picked_char.get('pre_copy_pos')
-                        saved_map = picked_char.get('pre_copy_map', '11')
-                        picked_char['pre_copy_pos'] = None
-                        picked_char['pre_copy_map'] = None
-                        picked_char['active_copy_id'] = None
-                        start_map_transition(conn, picked_char, saved_map, send_rpc_push, override_pos=saved_pos)
-                        save_chars(all_accounts_chars)
-                        print(f"[GUILD BOSS] player left early id={picked_char.get('id')} map={picked_char.get('map_id')}")
                         if session is not None:
-                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
-                            conn.sendall(struct.pack('>H', len(pf)) + pf)
+                            send_rpc_response(session)
+                        boss_id = _guild_boss_map_id(picked_char.get('map_id', ''))
+                        guild_id = _guild_id_for_character(picked_char)
+                        boss_guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
+                        boss_record = (
+                            (boss_guild or {}).get('guild_boss_events', {}).get(str(boss_id), {})
+                        )
+                        event_start = int((boss_record or {}).get('event_start', 0) or 0)
+                        if _guild_boss_return_char(
+                                conn, picked_char, boss_guild, boss_id, event_start,
+                                'manual-button'):
+                            save_chars(all_accounts_chars)
+                        else:
+                            print(f"[GUILD BOSS] ignored duplicate/stale exit "
+                                  f"player={picked_char.get('id')} boss={boss_id}")
                         continue
 
                     if has_leave_timer:
