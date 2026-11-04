@@ -173,6 +173,9 @@ GUILD_BATTLE_DATA = {} # id -> configured Gang Battle schedule/selection data
 GUILD_STAR_DATA = {} # id -> configured Gang Star upgrade data
 SHOP_DATA = {} # shop type -> shop item ID -> ShopData row for player shops
 GUILD_SHOP_DATA = {} # shop item ID -> ShopData row for Guild shop
+PURCHASE_DATA = {} # product ID -> client recharge product metadata
+BIG_PACKAGE_DATA = {} # package ID -> client BigPackageData offer metadata
+MONTHLY_CARD_DATA = {} # monthly card ID -> client monthly card metadata
 DAILY_BUY_CONFIG = {} # daily purchase ID -> client DailyBuyData product metadata
 INVEST_CONFIG = {} # investment ID -> client InvestData offer/reward metadata
 GUILD_BOSS_DATA = {} # guild boss/activity rows shown by the Gang activity panel
@@ -666,6 +669,56 @@ try:
                         SHOP_DATA.setdefault(shop_type, {})[str(parts[1])] = shop_row
                 except (TypeError, ValueError):
                     continue
+    purchase_path = os.path.join(text_asset_root, "PurchaseData")
+    if os.path.exists(purchase_path):
+        with open(purchase_path, "r", encoding="utf-8") as table_file:
+            for row in table_file:
+                parts = row.strip().split(",")
+                if len(parts) < 9 or parts[0] != "*" or not parts[1].strip():
+                    continue
+                try:
+                    product_type = int(parts[5])
+                    PURCHASE_DATA[parts[1].strip()] = {
+                        "product_id": parts[1].strip(),
+                        "type": product_type,
+                        "key": parts[6].strip() if len(parts) > 6 else "",
+                        "price_type": int(parts[4]) if parts[4].strip().isdigit() else -1,
+                        "price": int(parts[2]) if parts[2].strip().isdigit() else 0,
+                    }
+                except (IndexError, TypeError, ValueError):
+                    continue
+    big_package_path = os.path.join(text_asset_root, "BigPackageData")
+    if os.path.exists(big_package_path):
+        with open(big_package_path, "r", encoding="utf-8") as table_file:
+            for row in table_file:
+                parts = row.strip().split(",")
+                if len(parts) < 53 or parts[0] != "*" or not parts[1].strip().isdigit():
+                    continue
+                try:
+                    BIG_PACKAGE_DATA[parts[1].strip()] = {
+                        "id": parts[1].strip(),
+                        "max_count": int(parts[2]) if parts[2].strip().isdigit() else 0,
+                        "sell_type": int(parts[3]) if parts[3].strip().isdigit() else 0,
+                        "sort_id": int(parts[4]) if parts[4].strip().isdigit() else 0,
+                        "price_type": int(parts[45]) if parts[45].strip().isdigit() else -1,
+                        "price": int(parts[46]) if parts[46].strip().isdigit() else 0,
+                        "product_id": parts[47].strip(),
+                        "level_min": int(parts[51]) if parts[51].strip().isdigit() else 0,
+                        "level_max": int(parts[52]) if parts[52].strip().isdigit() else 80,
+                    }
+                except (IndexError, TypeError, ValueError):
+                    continue
+    monthly_card_path = os.path.join(text_asset_root, "MonthlyCardData")
+    if os.path.exists(monthly_card_path):
+        with open(monthly_card_path, "r", encoding="utf-8") as table_file:
+            for row in table_file:
+                parts = row.strip().split(",")
+                if len(parts) < 19 or parts[0] != "*" or not parts[1].strip().isdigit():
+                    continue
+                MONTHLY_CARD_DATA[parts[1].strip()] = {
+                    "id": parts[1].strip(),
+                    "product_id": parts[17].strip(),
+                }
     daily_buy_path = os.path.join(text_asset_root, "DailyBuyData")
     if os.path.exists(daily_buy_path):
         with open(daily_buy_path, "r", encoding="utf-8") as table_file:
@@ -14664,29 +14717,48 @@ def handle_shop_request(conn, char, msg, body, send_rpc_push, send_rpc_response,
         return
 
     shop_type = get_val_int(body, 0 if msg == 143 else 2, -1)
-    if shop_type not in (0, 1, 2, 4):
+    if shop_type not in (0, 1, 2, 4, 5, 6, 7):
         if session is not None:
             send_rpc_response(session)
         return
 
     if msg == 143:
         page = max(1, get_val_int(body, 1, 1))
-        # Types 2/4 are still answered so the client exits its loading state;
-        # this APK export has no ShopData rows for them, so do not fabricate
-        # paid-product rows from the separate purchase/offer catalogs.
-        rows = [row for row in SHOP_DATA.get(shop_type, {}).values()
-                if _shop_row_available_for_character(char, row)]
-        rows.sort(key=lambda row: (
-            int(row.get('display_order', row.get('weight', 0))),
-            str(row.get('id', ''))
-        ))
+        # Type 2 has no exported catalog. Type 4 is populated from PurchaseData
+        # below because the client resolves those shop_item IDs as product IDs.
+        if shop_type == 4:
+            rows = [row for row in PURCHASE_DATA.values() if row.get('type') == 4]
+            rows.sort(key=lambda row: (
+                len(row.get('key', '')), row.get('key', ''), row['product_id']
+            ))
+        elif shop_type in (0, 1):
+            rows = [row for row in SHOP_DATA.get(shop_type, {}).values()
+                    if _shop_row_available_for_character(char, row)]
+            rows.sort(key=lambda row: (
+                int(row.get('display_order', row.get('weight', 0))),
+                str(row.get('id', ''))
+            ))
+        else:
+            rows = []
         per_page = 30
         max_page = max(1, (len(rows) + per_page - 1) // per_page)
+        requested_item_id = get_val_str(body, 2, '').strip()
+        if requested_item_id and shop_type in (0, 1):
+            requested_index = next((
+                index for index, row in enumerate(rows)
+                if row.get('item_id') == requested_item_id
+            ), None)
+            if requested_index is not None:
+                page = requested_index // per_page + 1
         page = min(page, max_page)
-        shop_rows = [_shop_item_bytes(
-            row, _shop_purchase_count(char, row['id'], row))
-            for row in rows[(page - 1) * per_page:page * per_page]
-        ]
+        if shop_type == 4:
+            shop_rows = [encode_sproto([(0, row['product_id'])])
+                         for row in rows[(page - 1) * per_page:page * per_page]]
+        else:
+            shop_rows = [_shop_item_bytes(
+                row, _shop_purchase_count(char, row['id'], row))
+                for row in rows[(page - 1) * per_page:page * per_page]
+            ]
         send_rpc_push(554, encode_sproto([
             (0, shop_type), (1, page), (2, max_page), (3, shop_rows),
             (4, get_val_int(body, 3, 0))
@@ -14740,6 +14812,54 @@ def handle_shop_request(conn, char, msg, body, send_rpc_push, send_rpc_response,
 
     if session is not None:
         send_rpc_response(session)
+
+def big_sale_state_payload(char):
+    """Build the client ret_special_big_pack map from eligible BigPackageData rows."""
+    try:
+        level = int((char or {}).get('level', 1) or 1)
+    except (TypeError, ValueError):
+        level = 1
+    packs = {}
+    for package_id, row in sorted(
+            BIG_PACKAGE_DATA.items(),
+            key=lambda entry: (entry[1].get('sort_id', 0), entry[0])):
+        if (row.get('sell_type') != 2
+                or level < row.get('level_min', 0)
+                or level > row.get('level_max', 80)):
+            continue
+        packs[package_id] = encode_sproto([
+            (0, package_id), (1, 0), (2, 0), (3, 0)
+        ])
+    return encode_sproto([(0, packs)])
+
+def monthly_card_state_payload():
+    """Return the configured card as not purchased; payment fulfillment is separate."""
+    if not MONTHLY_CARD_DATA:
+        return encode_sproto([])
+    card_id = sorted(MONTHLY_CARD_DATA)[0]
+    return encode_sproto([
+        (0, encode_sproto([(0, card_id), (1, 0), (2, -1)]))
+    ])
+
+def handle_shop_offer_request(conn, char, msg, send_rpc_push, send_rpc_response, session):
+    if not char or not is_current_character_connection(conn, char):
+        if session is not None:
+            send_rpc_response(session)
+        return
+    if msg == 274:
+        push_tag = 656
+        payload = big_sale_state_payload(char)
+    elif msg == 299:
+        push_tag = 678
+        payload = monthly_card_state_payload()
+    elif msg == 300:
+        push_tag = 679
+        payload = monthly_card_state_payload()
+    else:
+        if session is not None:
+            send_rpc_response(session)
+        return
+    _send_tab_reply(send_rpc_push, send_rpc_response, session, push_tag, payload)
 
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
@@ -20835,7 +20955,7 @@ def client_handler(conn, addr):
                 if session is not None:
                     ph=encode_sproto([(1,session)]);pf=sproto_pack(ph+encode_sproto([]));conn.sendall(struct.pack('>H',len(pf))+pf)
 
-            elif msg in [118, 218, 145, 202, 210, 225, 242, 252, 253, 254, 255, 256, 257, 258, 261, 262, 265, 266, 278, 296, 297, 299, 313, 319]:
+            elif msg in [118, 218, 145, 202, 210, 225, 242, 252, 253, 254, 255, 256, 257, 258, 261, 262, 265, 266, 278, 296, 297, 313, 319]:
                 resp_data = encode_sproto([])
                 if msg == 118:
                     # Check if this is a random name request (body has field 0 = type)
@@ -22446,6 +22566,12 @@ def client_handler(conn, addr):
                   or (msg == 144 and get_val_int(body, 2, -1) in (0, 1, 2, 4))):
                 handle_shop_request(
                     conn, picked_char, msg, body, send_rpc_push,
+                    send_rpc_response, session
+                )
+
+            elif msg in (274, 299, 300):
+                handle_shop_offer_request(
+                    conn, picked_char, msg, send_rpc_push,
                     send_rpc_response, session
                 )
 
