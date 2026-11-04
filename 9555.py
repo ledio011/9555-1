@@ -2,6 +2,11 @@ import socket, struct, copy, threading, random, json, os, time, traceback, math,
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Tuple
 
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
 PORT = int(os.environ.get("PORT", 15678))
 # Verified from the shipped APK: GameDefine.PLAYER_MAX_LEVEL = 80.
 PLAYER_MAX_LEVEL = 80
@@ -135,6 +140,12 @@ GUILD_BOSS_RANDOM_BADGE_COUNTS = {
     '_two_ghb': 1,
     '_three_ghb': 1,
     '_last_ghb': 1,
+}
+BADGE_CASE_LV1_ITEM_IDS = GUILD_BOSS_RANDOM_BADGE_ITEM_IDS
+ITEM_PACKAGE_RANDOM_REWARD_POOLS = {
+    # ItemData/Localization describe both cases as yielding one random Lv.1 badge.
+    '9403': BADGE_CASE_LV1_ITEM_IDS,
+    '9603': BADGE_CASE_LV1_ITEM_IDS,
 }
 # The shipped ShowRewardData rows for these Guild Boss IDs have item IDs but
 # blank ItemCount fields. The APK defaults those counts to -1, so it does not
@@ -2531,9 +2542,14 @@ def _save_chars_atomic(data):
         if os.path.exists(CHAR_DB) and os.path.getsize(CHAR_DB) > 10:
             print("[SAVE GUARD] Refusing to overwrite non-empty CHAR_DB with empty dictionary!")
             return False
+    process_lock = None
+    temp_path = f"{TMP_DB}.{os.getpid()}.{threading.get_ident()}"
     try:
+        if fcntl is not None:
+            process_lock = open(CHAR_DB + ".lock", "a+b")
+            fcntl.flock(process_lock.fileno(), fcntl.LOCK_EX)
         # 1. Write new state to temporary file
-        with open(TMP_DB, "w", encoding="utf-8") as f:
+        with open(temp_path, "w", encoding="utf-8") as f:
             json.dump(_serializable_character_data(data), f, indent=4, default=_json_default_handler)
             f.flush()
             os.fsync(f.fileno())
@@ -2548,11 +2564,22 @@ def _save_chars_atomic(data):
             except: pass
 
         # 3. Atomic rename guarantees either old file or new file exists intact
-        os.replace(TMP_DB, CHAR_DB)
+        os.replace(temp_path, CHAR_DB)
         return True
     except Exception as e:
         print(f"[ERROR] Failed atomic save_chars: {e}")
         return False
+    finally:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError as cleanup_error:
+                print(f"[WARN] Failed to remove character save temp {temp_path}: {cleanup_error}")
+        if process_lock is not None:
+            try:
+                fcntl.flock(process_lock.fileno(), fcntl.LOCK_UN)
+            finally:
+                process_lock.close()
 
 all_accounts_chars = load_chars()
 
@@ -9019,14 +9046,29 @@ def ensure_download_rewards_granted(picked_char):
           f"items={[(item_id, count) for item_id, _quality, count in pending]}")
     return True
 
-def resolve_item_package_rewards(item_id):
+def resolve_item_package_rewards(item_id, package_count=1):
     """Return exact client package rewards when their source data exists."""
-    cfg = ITEM_CONFIG.get(str(item_id), {})
+    item_id = str(item_id)
+    try:
+        package_count = int(package_count)
+    except (TypeError, ValueError):
+        return []
+    if package_count < 1:
+        return []
+    random_pool = ITEM_PACKAGE_RANDOM_REWARD_POOLS.get(item_id)
+    if random_pool:
+        totals = {}
+        for _ in range(package_count):
+            reward_id = str(random.choice(random_pool))
+            totals[reward_id] = totals.get(reward_id, 0) + 1
+        return [(reward_id, 0, count) for reward_id, count in sorted(totals.items())]
+
+    cfg = ITEM_CONFIG.get(item_id, {})
     function_id = str(cfg.get('function', 0))
     rewards = ITEM_PACKAGE_FIXED_REWARDS.get(function_id)
     if rewards is None:
         rewards = SHOW_REWARD_CONFIG.get(function_id, [])
-    return [(str(reward[0]), int(reward[1]), int(reward[2]))
+    return [(str(reward[0]), int(reward[1]), int(reward[2]) * package_count)
             for reward in rewards if len(reward) >= 3 and str(reward[0])]
 
 def resolve_weapon_pack_rewards(item_id, character, package_count=1):
@@ -10862,6 +10904,59 @@ def build_mail_update(mi):
         (10, items_dict if items_dict else None),
         (11, mi.get('expireday', 7))
     ])
+
+def claim_mail_reward_entries(picked_char, mail_entries, all_chars, conn, send_rpc_push):
+    """Persist mail state and attachments before acknowledging a claim to the client."""
+    rewards = []
+    for mail in mail_entries:
+        for item in mail.get('items', []):
+            try:
+                item_id = str(item.get('itemId', 0))
+                quality = int(item.get('quality', 0) or 0)
+                count = int(item.get('count', 1) or 1)
+            except (TypeError, ValueError):
+                return False
+            if count <= 0 or (
+                    item_id not in DIRECT_REWARD_RESOURCE_IDS
+                    and item_id not in ITEM_CONFIG):
+                return False
+            rewards.append((item_id, quality, count))
+
+    if not rewards or not can_add_reward_list_to_inventory(picked_char, rewards):
+        return False
+    try:
+        snapshot = copy.deepcopy(picked_char)
+    except Exception as snapshot_error:
+        print(f"[MAIL] claim snapshot failed char={picked_char.get('id')}: {snapshot_error}")
+        return False
+
+    old_level = int(picked_char.get('level', 1))
+    for mail in mail_entries:
+        mail['mailState'] = 3  # GETITEM - client IsGetItem() checks mailstate==3
+    grant_item_rewards(picked_char, rewards, save=False)
+    if int(picked_char.get('level', 1)) > old_level:
+        advance_missions(picked_char, None, 'level')
+
+    if not save_chars(all_chars):
+        picked_char.clear()
+        picked_char.update(snapshot)
+        print(f"[MAIL] claim persistence failed char={picked_char.get('id')}")
+        return False
+
+    if int(picked_char.get('level', 1)) > old_level:
+        new_level = picked_char.get('level', 1)
+        skill_map = build_skills_map(
+            picked_char.get('prof', 0), new_level,
+            picked_char.get('skill_levels', {}), picked_char.get('equipped_equip', []),
+            picked_char.get('skill_positions', {})
+        )
+        send_rpc_push(540, encode_sproto([(0, skill_map), (1, False)]))
+        send_rpc_push(644, level_package_state_payload(picked_char))
+    sync_char_attrs_rpc(conn, picked_char)
+    sync_all_backpacks(picked_char, send_rpc_push)
+    for mail in mail_entries:
+        send_rpc_push(531, build_mail_update(mail))
+    return True
 
 def broadcast_aoi_add(target_conn, target_char, sender_conn=None, sender_char=None):
     """Broadcast aoi_add (msg 505) for a player to all other players on the same map.
@@ -16412,6 +16507,8 @@ def client_handler(conn, addr):
                             partner_item = None
                             partner_items = []
                             package_count = open_count
+                            random_badge_package = False
+                            package_snapshot = None
                             if first_type == 15 and second_index < 0:
                                 package_item = first_item
                                 if package_count > int(package_item.get('amount', 0)):
@@ -16461,10 +16558,11 @@ def client_handler(conn, addr):
                                     if weapon_pack_rewards is not None:
                                         rewards = weapon_pack_rewards
                                     else:
-                                        base_rewards = resolve_item_package_rewards(package_id)
-                                        rewards = [(str(item_id), int(quality), int(amount) * package_count)
-                                                   for item_id, quality, amount in base_rewards
-                                                   if int(amount) > 0]
+                                        random_badge_package = (
+                                            package_id in ITEM_PACKAGE_RANDOM_REWARD_POOLS
+                                        )
+                                        rewards = resolve_item_package_rewards(
+                                            package_id, package_count)
                                     valid_rewards = bool(rewards) and all(
                                         item_id in ITEM_CONFIG and amount > 0
                                         for item_id, _quality, amount in rewards
@@ -16475,42 +16573,65 @@ def client_handler(conn, addr):
                                     has_capacity = (valid_rewards
                                                     and can_add_reward_list_to_inventory(picked_char, rewards))
                                     if valid_rewards and has_capacity:
+                                        if random_badge_package:
+                                            try:
+                                                package_snapshot = copy.deepcopy(picked_char)
+                                            except Exception as snapshot_error:
+                                                failure_reason = (
+                                                    f'could not safely open badge case: {snapshot_error}'
+                                                )
+                                        if random_badge_package and package_snapshot is None:
+                                            pass
+                                        else:
                                         # Consume only after every reward is known and its bag capacity
                                         # has been checked. TAG 525 removes the consumed item/keys.
-                                        consumed = [
-                                            (package_item, package_count, item_backpack_type(package_id))
-                                        ]
-                                        for consumed_item, amount, container_type in consumed:
-                                            consumed_index = int(consumed_item['index_id'])
-                                            consumed_item['amount'] = int(consumed_item.get('amount', 1)) - amount
-                                            if consumed_item['amount'] <= 0:
-                                                picked_char[BACKPACKS[container_type][0]].remove(consumed_item)
-                                                push_backpack_item_update(send_rpc_push, container_type, None, consumed_index)
+                                            consumed = [
+                                                (package_item, package_count, item_backpack_type(package_id))
+                                            ]
+                                            for consumed_item, amount, container_type in consumed:
+                                                consumed_index = int(consumed_item['index_id'])
+                                                consumed_item['amount'] = int(consumed_item.get('amount', 1)) - amount
+                                                if consumed_item['amount'] <= 0:
+                                                    picked_char[BACKPACKS[container_type][0]].remove(consumed_item)
+                                                    if not random_badge_package:
+                                                        push_backpack_item_update(send_rpc_push, container_type, None, consumed_index)
+                                                elif not random_badge_package:
+                                                    push_backpack_item_update(send_rpc_push, container_type, consumed_item)
+                                            if partner_item:
+                                                remaining_keys = package_count
+                                                for key_item in partner_items:
+                                                    if remaining_keys <= 0:
+                                                        break
+                                                    consumed_amount = min(remaining_keys, int(key_item.get('amount', 0)))
+                                                    if consumed_amount <= 0:
+                                                        continue
+                                                    key_index = int(key_item['index_id'])
+                                                    key_item['amount'] = int(key_item.get('amount', 1)) - consumed_amount
+                                                    remaining_keys -= consumed_amount
+                                                    if key_item['amount'] <= 0:
+                                                        picked_char['inventory'].remove(key_item)
+                                                        if not random_badge_package:
+                                                            push_backpack_item_update(send_rpc_push, 2, None, key_index)
+                                                    elif not random_badge_package:
+                                                        push_backpack_item_update(send_rpc_push, 2, key_item)
+                                            grant_item_rewards(
+                                                picked_char, rewards,
+                                                None if random_badge_package else conn,
+                                                None if random_badge_package else send_rpc_push,
+                                                save=False)
+                                            saved = save_chars(all_accounts_chars)
+                                            if random_badge_package and not saved:
+                                                picked_char.clear()
+                                                picked_char.update(package_snapshot)
+                                                failure_reason = 'badge case reward could not be saved'
                                             else:
-                                                push_backpack_item_update(send_rpc_push, container_type, consumed_item)
-                                        if partner_item:
-                                            remaining_keys = package_count
-                                            for key_item in partner_items:
-                                                if remaining_keys <= 0:
-                                                    break
-                                                consumed_amount = min(remaining_keys, int(key_item.get('amount', 0)))
-                                                if consumed_amount <= 0:
-                                                    continue
-                                                key_index = int(key_item['index_id'])
-                                                key_item['amount'] = int(key_item.get('amount', 1)) - consumed_amount
-                                                remaining_keys -= consumed_amount
-                                                if key_item['amount'] <= 0:
-                                                    picked_char['inventory'].remove(key_item)
-                                                    push_backpack_item_update(send_rpc_push, 2, None, key_index)
-                                                else:
-                                                    push_backpack_item_update(send_rpc_push, 2, key_item)
-                                        grant_item_rewards(picked_char, rewards, conn, send_rpc_push, save=False)
-                                        save_chars(all_accounts_chars)
-                                        display_rewards = [encode_sproto([
-                                            (0, item_id), (1, amount), (3, quality)
-                                        ]) for (item_id, quality), amount in reward_totals.items()]
-                                        opened = True
-                                        print(f"[BACKPACK] opened package={package_id} count={package_count} rewards={len(display_rewards)}")
+                                                if random_badge_package:
+                                                    sync_all_backpacks(picked_char, send_rpc_push)
+                                                display_rewards = [encode_sproto([
+                                                    (0, item_id), (1, amount), (3, quality)
+                                                ]) for (item_id, quality), amount in reward_totals.items()]
+                                                opened = True
+                                                print(f"[BACKPACK] opened package={package_id} count={package_count} rewards={len(display_rewards)}")
                                     elif valid_rewards:
                                         failure_reason = 'reward would exceed backpack capacity'
                                     else:
@@ -20717,42 +20838,30 @@ def client_handler(conn, addr):
                         send_rpc_push(532, encode_sproto([(0, mail_id)]))
                     elif operation == 2: # get items
                         with get_character_transaction_lock(picked_char):
-                            for mi in picked_char.get('mails', []):
-                                if (numeric_id_matches(mi.get('mailId'), mail_id)
-                                        and mi.get('mailState', 0) != 3
-                                        and mi.get('items')):
-                                    mi['mailState'] = 3  # GETITEM - client IsGetItem() checks mailstate==3
-                                    mail_rewards = [
-                                        (str(it.get('itemId', 0)),
-                                         int(it.get('quality', 0) or 0),
-                                         int(it.get('count', 1) or 1))
-                                        for it in mi.get('items', [])
-                                    ]
-                                    grant_item_rewards(
-                                        picked_char, mail_rewards, conn, send_rpc_push, save=False)
-                                    # Send updated mail_update (531) so client knows the mail state changed
-                                    mi_bytes = build_mail_update(mi)
-                                    send_rpc_push(531, mi_bytes)
-                                    break
-                            save_chars(all_accounts_chars)
+                            target_mail = next((
+                                mi for mi in picked_char.get('mails', [])
+                                if numeric_id_matches(mi.get('mailId'), mail_id)
+                                and mi.get('mailState', 0) != 3
+                                and mi.get('items')
+                            ), None)
+                            if target_mail and not claim_mail_reward_entries(
+                                    picked_char, [target_mail], all_accounts_chars, conn, send_rpc_push):
+                                send_rpc_push(529, encode_sproto([
+                                    (0, 'Mail rewards could not be claimed or saved.'),
+                                    (1, True)
+                                ]))
                     elif operation == 3: # get all items
                         with get_character_transaction_lock(picked_char):
-                            all_mail_rewards = []
-                            for mi in picked_char.get('mails', []):
-                                if mi.get('mailState', 0) != 3 and mi.get('items'):
-                                    mi['mailState'] = 3  # GETITEM - client IsGetItem() checks mailstate==3
-                                    all_mail_rewards.extend(
-                                        (str(it.get('itemId', 0)),
-                                         int(it.get('quality', 0) or 0),
-                                         int(it.get('count', 1) or 1))
-                                        for it in mi.get('items', [])
-                                    )
-                                    # Send updated mail_update (531) for each claimed mail
-                                    mi_bytes = build_mail_update(mi)
-                                    send_rpc_push(531, mi_bytes)
-                            grant_item_rewards(
-                                picked_char, all_mail_rewards, conn, send_rpc_push, save=False)
-                            save_chars(all_accounts_chars)
+                            claimable_mails = [
+                                mi for mi in picked_char.get('mails', [])
+                                if mi.get('mailState', 0) != 3 and mi.get('items')
+                            ]
+                            if claimable_mails and not claim_mail_reward_entries(
+                                    picked_char, claimable_mails, all_accounts_chars, conn, send_rpc_push):
+                                send_rpc_push(529, encode_sproto([
+                                    (0, 'Mail rewards could not be claimed or saved.'),
+                                    (1, True)
+                                ]))
                     elif operation == 4: # delete all
                         picked_char['mails'] = []
                         save_chars(all_accounts_chars)
