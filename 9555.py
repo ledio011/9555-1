@@ -14664,13 +14664,16 @@ def handle_shop_request(conn, char, msg, body, send_rpc_push, send_rpc_response,
         return
 
     shop_type = get_val_int(body, 0 if msg == 143 else 2, -1)
-    if shop_type not in (0, 1):
+    if shop_type not in (0, 1, 2, 4):
         if session is not None:
             send_rpc_response(session)
         return
 
     if msg == 143:
         page = max(1, get_val_int(body, 1, 1))
+        # Types 2/4 are still answered so the client exits its loading state;
+        # this APK export has no ShopData rows for them, so do not fabricate
+        # paid-product rows from the separate purchase/offer catalogs.
         rows = [row for row in SHOP_DATA.get(shop_type, {}).values()
                 if _shop_row_available_for_character(char, row)]
         rows.sort(key=lambda row: (
@@ -22439,8 +22442,8 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif ((msg == 143 and get_val_int(body, 0, -1) in (0, 1))
-                  or (msg == 144 and get_val_int(body, 2, -1) in (0, 1))):
+            elif ((msg == 143 and get_val_int(body, 0, -1) in (0, 1, 2, 4))
+                  or (msg == 144 and get_val_int(body, 2, -1) in (0, 1, 2, 4))):
                 handle_shop_request(
                     conn, picked_char, msg, body, send_rpc_push,
                     send_rpc_response, session
