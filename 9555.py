@@ -119,8 +119,27 @@ GUILD_BOSS_SCENE_RANK_ROWS = 6
 GUILD_BOSS_RESULT_RANK_ROWS = 10
 GUILD_BOSS_SCHED_LAST = {}
 GUILD_BOSS_MISSING_REWARD_LOGGED = set()
-# The APK's Guild Boss ShowRewardData preview has blank ItemCount fields and
-# does not confirm actual payout mappings or quantities; fail closed.
+# User-confirmed Gang Boss payouts. Badge counts are random draws from the
+# available Lv.1 badge IDs; repeated draws may award the same badge.
+GUILD_BOSS_CONFIRMED_REWARD_ROWS = {
+    '_one_ghb': [('1001', 0, 840000), ('1004', 0, 300), ('6002', 0, 1)],
+    '_two_ghb': [('1001', 0, 630000), ('1004', 0, 200)],
+    '_three_ghb': [('1001', 0, 420000), ('1004', 0, 150)],
+    '_join_ghb': [('1001', 0, 210000), ('1004', 0, 50)],
+    '_last_ghb': [('1001', 0, 420000), ('1004', 0, 100)],
+    '_every_ghb': [('1001', 0, 100000), ('1004', 0, 20)],
+}
+GUILD_BOSS_RANDOM_BADGE_ITEM_IDS = tuple(str(item_id) for item_id in range(9700, 9709))
+GUILD_BOSS_RANDOM_BADGE_COUNTS = {
+    '_one_ghb': 2,
+    '_two_ghb': 1,
+    '_three_ghb': 1,
+    '_last_ghb': 1,
+}
+# The shipped ShowRewardData rows for these Guild Boss IDs have item IDs but
+# blank ItemCount fields. The APK defaults those counts to -1, so it does not
+# provide authoritative payout quantities. Fail closed instead of granting
+# proposed server-only test packages.
 GUILD_BOSS_TEST_REWARD_FALLBACK = False
 GUILD_BOSS_TEST_REWARD_LOGGED = set()
 GUILD_BOSS_TEST_REWARD_RANGES = ()
@@ -7861,6 +7880,9 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
     px, pz = member_pos((target_id, target_conn, target_char))
     dx, dz = px - mx, pz - mz
 
+    # Guild Bosses remain at their authored spawn position. The server still
+    # selects nearby targets and runs their configured attacks from that point.
+
     now = time.time()
     if now >= float(runtime.get('next_attack_at', 0.0)):
         ready = [
@@ -11851,7 +11873,7 @@ def _guild_boss_battle_info(char, include_state=True):
         return battle_info
     return encode_sproto([(0, battle_info), (1, 1 if record else 0)])
 
-def _guild_boss_reward_rows(reward_key, guild):
+def _guild_boss_reward_rows(reward_key, guild, record=None, char_id=None):
     reward_key = str(reward_key or '')
     guild_level = _guild_level(guild)
     reward_id = str(
@@ -11886,6 +11908,32 @@ def _guild_boss_reward_rows(reward_key, guild):
     if rewards:
         # Authoritative, fully populated ShowRewardData always wins.
         return list(rewards)
+    confirmed_rewards = GUILD_BOSS_CONFIRMED_REWARD_ROWS.get(reward_key)
+    if confirmed_rewards:
+        rewards = list(confirmed_rewards)
+        badge_count = GUILD_BOSS_RANDOM_BADGE_COUNTS.get(reward_key, 0)
+        if badge_count:
+            cached_badges = None
+            if isinstance(record, dict) and char_id is not None:
+                rolls_by_player = record.setdefault('reward_rolls', {})
+                if not isinstance(rolls_by_player, dict):
+                    rolls_by_player = record['reward_rolls'] = {}
+                player_rolls = rolls_by_player.setdefault(str(int(char_id)), {})
+                if not isinstance(player_rolls, dict):
+                    player_rolls = rolls_by_player[str(int(char_id))] = {}
+                cached_badges = player_rolls.get(reward_key)
+            if (not isinstance(cached_badges, list)
+                    or len(cached_badges) != badge_count
+                    or any(str(item_id) not in GUILD_BOSS_RANDOM_BADGE_ITEM_IDS
+                           for item_id in cached_badges)):
+                cached_badges = [
+                    random.choice(GUILD_BOSS_RANDOM_BADGE_ITEM_IDS)
+                    for _ in range(badge_count)
+                ]
+                if isinstance(record, dict) and char_id is not None:
+                    player_rolls[reward_key] = cached_badges
+            rewards.extend((str(item_id), 0, 1) for item_id in cached_badges)
+        return rewards
     # The available client export has IDs for all six reward categories but
     # lacks explicit item counts for those rows. This opt-in test fallback
     # applies the proposed test packages to the level-specific ID ranges.
@@ -11937,7 +11985,7 @@ def _guild_boss_award(record, guild, char_id, reward_sets, notify=True,
         if reward_key in claimed:
             print(f"[GUILD BOSS AWARD SKIP] player={char_id_int} {reward_key} already claimed")
             continue
-        rewards = _guild_boss_reward_rows(selector, guild)
+        rewards = _guild_boss_reward_rows(selector, guild, record, char_id_int)
         if rewards is None:
             unresolved = True
             audit_packages.append(
@@ -12125,7 +12173,8 @@ def _guild_boss_distribute_rewards(guild, boss_id, record, notify=True, force_ma
             rank1_selector = drop_id
             break
     rank1_rewards = (
-        _guild_boss_reward_rows(rank1_selector, guild) if rank1_selector else None
+        _guild_boss_reward_rows(rank1_selector, guild, record, rank1_id)
+        if rank1_selector else None
     )
     rank1_has_stereo = bool(rank1_rewards and any(
         str(item_id) == '6002' and int(amount) > 0
@@ -12346,7 +12395,7 @@ def _guild_boss_send_result(guild, boss_id, record):
         item_list = []
         reward_sets = awards_by_player.get(str(char_id), [])
         for reward_key, selector in reward_sets:
-            rewards = _guild_boss_reward_rows(selector, guild)
+            rewards = _guild_boss_reward_rows(selector, guild, record, char_id)
             if rewards is None:
                 continue
             for item_id, quality, amount in rewards:
