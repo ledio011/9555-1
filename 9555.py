@@ -173,6 +173,7 @@ GUILD_BATTLE_DATA = {} # id -> configured Gang Battle schedule/selection data
 GUILD_STAR_DATA = {} # id -> configured Gang Star upgrade data
 SHOP_DATA = {} # shop type -> shop item ID -> ShopData row for player shops
 GUILD_SHOP_DATA = {} # shop item ID -> ShopData row for Guild shop
+SHOP_ITEMS_PER_PAGE = 9
 PURCHASE_DATA = {} # product ID -> client recharge product metadata
 BIG_PACKAGE_DATA = {} # package ID -> client BigPackageData offer metadata
 MONTHLY_CARD_DATA = {} # monthly card ID -> client monthly card metadata
@@ -14740,7 +14741,7 @@ def handle_shop_request(conn, char, msg, body, send_rpc_push, send_rpc_response,
             ))
         else:
             rows = []
-        per_page = 30
+        per_page = SHOP_ITEMS_PER_PAGE
         max_page = max(1, (len(rows) + per_page - 1) // per_page)
         requested_item_id = get_val_str(body, 2, '').strip()
         if requested_item_id and shop_type in (0, 1):
@@ -22562,8 +22563,8 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif ((msg == 143 and get_val_int(body, 0, -1) in (0, 1, 2, 4))
-                  or (msg == 144 and get_val_int(body, 2, -1) in (0, 1, 2, 4))):
+            elif ((msg == 143 and get_val_int(body, 0, -1) in (0, 1, 2, 4, 5, 6, 7))
+                  or (msg == 144 and get_val_int(body, 2, -1) in (0, 1, 2, 4, 5, 6, 7))):
                 handle_shop_request(
                     conn, picked_char, msg, body, send_rpc_push,
                     send_rpc_response, session
