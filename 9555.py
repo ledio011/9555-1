@@ -72,7 +72,7 @@ EXP_RUN_COUNTER_LOCK = threading.Lock()
 MAIL_ID_COUNTER_LOCK = threading.Lock()
 DANCE_REWARD_TIMER_LOCK = threading.Lock()
 DANCE_REWARD_TIMERS = {}  # character ID -> active personal-dance reward timer
-GUILD_DANCE_REWARD_PER_SPEAKER_INTERVAL = 10
+GUILD_DANCE_REWARD_MISSING_LOGGED = set()
 GUILD_DANCE_SPEAKER_LOCK = threading.RLock()
 GUILD_DANCE_SPEAKERS = {}  # guild ID -> active speaker instance records
 GUILD_DANCE_SPEAKER_TIMERS = {}  # NPC instance ID -> that speaker's expiry timer
@@ -5241,13 +5241,8 @@ def personal_dance_reward_list(char, dance_id, running_source='', interval_index
                                reward_at=None):
     """Return one configured reward interval for the active dance.
 
-    The APK maps every level's live free/paid dance to a distinct 303xx reward
-    row, but those rows contain only the EXP item ID and omit its quantity.
-    Use the active row to constrain the reward item, then use the matching
-    level's configured dance-recovery quantity as the server fallback for the
-    missing live-session     quantity. The fallback is level-specific; the APK export does not prove its
-    live total equals the recovery total. Gang Stereo uses its Guild Dance
-    preview item set and the user-specified 10 rewards per active speaker.
+    Preview rows do not authorize payout quantities. Gang Stereo rewards are
+    granted only when its live drop row contains explicit item counts.
     """
     try:
         level = max(1, min(80, int(char.get('level', 1))))
@@ -5277,27 +5272,12 @@ def personal_dance_reward_list(char, dance_id, running_source='', interval_index
         active_drop_key = '_drop_jhdj'
     else:
         active_drop_key = '_drop_jh'
-    active_drop_id = str(
-        DANCE_REWARD_DROP_BY_KEY_LEVEL.get(active_drop_key, {}).get(level, '') or ''
+    drop_tables = (
+        STREET_RACE_REWARD_BY_KEY_LEVEL
+        if str(running_source) == 'guild_speaker'
+        else DANCE_REWARD_DROP_BY_KEY_LEVEL
     )
-    # Some AdaptData levels point to 303xx IDs that are absent from this APK's
-    # ShowRewardData export. CityDanceData's ShowRewardId is the client preview
-    # row for the same active reward category and supplies the item identity.
-    preview_reward_id = (
-        '30302' if str(running_source) == 'guild_speaker'
-        else str(activity.get('ShowRewardId', '') or '').strip()
-    )
-    active_reward_rows = (
-        SHOW_REWARD_CONFIG.get(active_drop_id)
-        or SHOW_REWARD_CONFIG.get(preview_reward_id, [])
-    )
-    active_items = {
-        (str(item_id), int(quality))
-        for item_id, quality, _preview_count in active_reward_rows
-        if str(item_id)
-    }
-    if not active_items:
-        return []
+    active_drop_id = str(drop_tables.get(active_drop_key, {}).get(level, '') or '')
 
     if str(running_source) == 'guild_speaker':
         interval = personal_dance_reward_interval(activity)
@@ -5314,23 +5294,60 @@ def personal_dance_reward_list(char, dance_id, running_source='', interval_index
             char, reward_at - 0.000001)
         if speaker_count <= 0:
             return []
+
+        recovery_drop_id = str(
+            STREET_RACE_REWARD_BY_KEY_LEVEL.get('_drop_gwzh', {}).get(level, '') or ''
+        )
+        exp_amount = next(
+            (int(count) for item_id, _quality, count
+             in SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(recovery_drop_id, [])
+             if str(item_id) == '2001' and int(count) > 0),
+            0
+        )
+        if not exp_amount:
+            missing_key = (level, recovery_drop_id)
+            if missing_key not in GUILD_DANCE_REWARD_MISSING_LOGGED:
+                GUILD_DANCE_REWARD_MISSING_LOGGED.add(missing_key)
+                print("[GUILD DANCE REWARD] EXP payout unavailable: "
+                      f"no explicit item 2001 count for level {level} "
+                      f"drop row {recovery_drop_id or '(missing)'}")
         try:
             scale = max(0, int(dance_cfg.get('RewardScale', 100) or 100))
         except (TypeError, ValueError):
             scale = 100
-        amount = GUILD_DANCE_REWARD_PER_SPEAKER_INTERVAL * speaker_count * scale // 100
-        if amount <= 0:
-            return []
-        return [
-            (str(item_id), int(quality), amount)
-            for item_id, quality, _preview_count in active_reward_rows
-            if (str(item_id), int(quality)) in active_items
-            and str(item_id) in DIRECT_REWARD_RESOURCE_IDS
-        ]
+        # _drop_gwzh is the full 30-minute per-level EXP amount; pay its
+        # scaled total evenly across CityDanceData's one-second intervals.
+        scaled_exp_total = exp_amount * scale // 100
+        exp_per_interval = (
+            scaled_exp_total * (interval_index + 1) // interval_count
+            - scaled_exp_total * interval_index // interval_count
+        )
+        contribution_per_interval = scale // 100
+        rewards = []
+        for _speaker_index in range(speaker_count):
+            if contribution_per_interval > 0:
+                rewards.append(('1004', 0, contribution_per_interval))
+            if exp_per_interval > 0:
+                rewards.append(('2001', 0, exp_per_interval))
+        return rewards
 
-    # The live dance row has no count. RetrieveData's _drop_gwzh row is the only
-    # client-exported per-level quantity for this same activity; retain it as
-    # the quantity fallback, while requiring the live row to authorize the item.
+    # Some AdaptData levels point to 303xx IDs that are absent from this APK's
+    # ShowRewardData export. CityDanceData's ShowRewardId is the client preview
+    # row for the same active reward category and supplies the item identity.
+    preview_reward_id = str(activity.get('ShowRewardId', '') or '').strip()
+    active_reward_rows = SHOW_REWARD_CONFIG.get(active_drop_id, [])
+    if not active_reward_rows:
+        active_reward_rows = SHOW_REWARD_CONFIG.get(preview_reward_id, [])
+    active_items = {
+        (str(item_id), int(quality))
+        for item_id, quality, _preview_count in active_reward_rows
+        if str(item_id)
+    }
+    if not active_items:
+        return []
+
+    # The live dance row omits its count. The per-level _drop_gwzh row supplies
+    # the EXP total, while the activity preview still constrains the item ID.
     drop_key = '_drop_gwzh'
     level_drops = STREET_RACE_REWARD_BY_KEY_LEVEL.get(drop_key, {})
     drop_id = str(level_drops.get(level, '') or '')
@@ -5509,6 +5526,7 @@ def settle_personal_dance(char, now=None, stop=False, expected_run_id=None):
     earned_intervals = 0
     earned_rewards = []
     earned_dance_id = ''
+    earned_source = ''
     accrued = False
     with get_character_transaction_lock(char):
         runtime = ensure_dance_runtime(char, now)
@@ -5575,6 +5593,7 @@ def settle_personal_dance(char, now=None, stop=False, expected_run_id=None):
 
             interval = personal_dance_reward_interval(activity)
             earned_dance_id = str(runtime.get('dance_id', ''))
+            earned_source = source
             previous_elapsed = max(0, int(runtime.get('reward_elapsed_seconds', 0)))
             runtime['reward_elapsed_seconds'] = previous_elapsed + effective_elapsed
             earned_intervals, remainder = divmod(runtime['reward_elapsed_seconds'], interval)
@@ -5603,7 +5622,7 @@ def settle_personal_dance(char, now=None, stop=False, expected_run_id=None):
             should_stop = (stop or not area_valid or effective_elapsed < elapsed
                            or (source == 'free' and runtime.get('free_duration', 0) <= 0)
                            or (source in ('paid', 'speaker', 'guild_speaker')
-                               and active_until > 0 and int(now) >= active_until))
+                               and (active_until <= 0 or int(now) >= active_until)))
             if should_stop:
                 runtime['running'] = False
                 runtime['running_since'] = 0
@@ -5634,15 +5653,21 @@ def settle_personal_dance(char, now=None, stop=False, expected_run_id=None):
                 # The client displays periodic activity payouts through
                 # show_reward_items_tips (638). Attribute/inventory sync above
                 # applies the reward but does not show it to the player.
-                popup_totals = {}
-                for item_id, quality, amount in reward_entries:
-                    key = (str(item_id), int(quality))
-                    popup_totals[key] = popup_totals.get(key, 0) + int(amount)
-                popup_items = [
-                    encode_sproto([(0, item_id), (1, amount), (3, quality)])
-                    for (item_id, quality), amount in popup_totals.items()
-                    if amount > 0
-                ]
+                if earned_source == 'guild_speaker':
+                    popup_items = [
+                        encode_sproto([(0, str(item_id)), (1, int(amount)), (3, int(quality))])
+                        for item_id, quality, amount in reward_entries if int(amount) > 0
+                    ]
+                else:
+                    popup_totals = {}
+                    for item_id, quality, amount in reward_entries:
+                        key = (str(item_id), int(quality))
+                        popup_totals[key] = popup_totals.get(key, 0) + int(amount)
+                    popup_items = [
+                        encode_sproto([(0, item_id), (1, amount), (3, quality)])
+                        for (item_id, quality), amount in popup_totals.items()
+                        if amount > 0
+                    ]
                 if popup_items:
                     if not reward_push(638, encode_sproto([(0, popup_items)])):
                         print(f"[DANCE REWARD] popup delivery failed char={char_id} dance={earned_dance_id}")
@@ -5659,10 +5684,79 @@ def _guild_dance_speaker_records(guild_id):
     except (TypeError, ValueError):
         return []
     with GUILD_DANCE_SPEAKER_LOCK:
+        if guild_key not in GUILD_DANCE_SPEAKERS:
+            guild = GUILD_STATES.get(guild_key, {})
+            persisted = guild.get('dance_speakers', [])
+            GUILD_DANCE_SPEAKERS[guild_key] = [
+                dict(speaker) for speaker in persisted
+                if isinstance(speaker, dict)
+            ]
         return [
             dict(speaker) for speaker in GUILD_DANCE_SPEAKERS.get(guild_key, [])
             if isinstance(speaker, dict)
         ]
+
+def _persist_guild_dance_speakers(guild_id, speakers):
+    guild_key = str(int(guild_id))
+    records = [dict(speaker) for speaker in speakers if isinstance(speaker, dict)]
+    with GUILD_DANCE_SPEAKER_LOCK:
+        GUILD_DANCE_SPEAKERS[guild_key] = records
+        guild = GUILD_STATES.get(guild_key)
+        if guild is not None:
+            guild['dance_speakers'] = records
+    _save_guild_states()
+
+def _restore_guild_dance_speaker_timers():
+    now = time.time()
+    max_inst_id = 0
+    changed = False
+    restored = []
+    for guild_key, guild in GUILD_STATES.items():
+        if not isinstance(guild, dict):
+            continue
+        active = []
+        for speaker in guild.get('dance_speakers', []):
+            if not isinstance(speaker, dict):
+                changed = True
+                continue
+            try:
+                inst_id = int(speaker.get('inst_id', 0) or 0)
+                started_at = float(speaker.get('started_at', 0) or 0)
+                expires_at = float(speaker.get('expires_at', 0) or 0)
+                x, z = int(speaker.get('x', 0)), int(speaker.get('z', 0))
+                orientation = int(speaker.get('o', 0))
+                guild_id = int(guild_key)
+            except (TypeError, ValueError):
+                changed = True
+                continue
+            if inst_id <= 0 or expires_at <= now:
+                changed = True
+                continue
+            record = {
+                'inst_id': inst_id, 'guild_id': guild_id,
+                'x': x, 'z': z, 'o': orientation,
+                'started_at': started_at, 'expires_at': expires_at
+            }
+            active.append(record)
+            max_inst_id = max(max_inst_id, inst_id)
+        if active != guild.get('dance_speakers', []):
+            guild['dance_speakers'] = active
+            changed = True
+        if active:
+            GUILD_DANCE_SPEAKERS[str(guild_key)] = active
+            restored.extend((guild_key, speaker) for speaker in active)
+        else:
+            GUILD_DANCE_SPEAKERS.pop(str(guild_key), None)
+    if max_inst_id:
+        with GLOBAL_INST_COUNTER_LOCK:
+            global GLOBAL_INST_COUNTER
+            GLOBAL_INST_COUNTER = max(GLOBAL_INST_COUNTER, max_inst_id)
+    if changed:
+        _save_guild_states()
+    for guild_key, speaker in restored:
+        _schedule_guild_dance_speaker_expiry(guild_key, speaker)
+    if restored:
+        print(f"[GUILD DANCE STEREO] restored active speakers={len(restored)}")
 
 def _guild_dance_speaker_expiries(guild_id, now=None):
     now = time.time() if now is None else float(now)
@@ -5875,16 +5969,7 @@ def _guild_dance_speaker_expiry_tick(guild_id, inst_id):
              and float(speaker.get('expires_at', 0) or 0) <= now),
             None
         )
-        if expired_speaker:
-            speakers = [
-                speaker for speaker in speakers
-                if int(speaker.get('inst_id', 0) or 0) != int(inst_id)
-            ]
-            if speakers:
-                GUILD_DANCE_SPEAKERS[guild_key] = speakers
-            else:
-                GUILD_DANCE_SPEAKERS.pop(guild_key, None)
-        else:
+        if not expired_speaker:
             still_active = next(
                 (speaker for speaker in speakers
                  if int(speaker.get('inst_id', 0) or 0) == int(inst_id)),
@@ -5900,6 +5985,13 @@ def _guild_dance_speaker_expiry_tick(guild_id, inst_id):
             if (isinstance(runtime, dict) and runtime.get('running')
                     and runtime.get('running_source') == 'guild_speaker'):
                 settle_personal_dance(char, now=settle_at, stop=False)
+        with GUILD_DANCE_SPEAKER_LOCK:
+            speakers = [
+                speaker for speaker in GUILD_DANCE_SPEAKERS.get(guild_key, [])
+                if int(speaker.get('inst_id', 0) or 0) != int(inst_id)
+            ]
+            GUILD_DANCE_SPEAKERS[guild_key] = speakers
+        _persist_guild_dance_speakers(guild_key, speakers)
         _remove_guild_dance_speaker_npc(expired_speaker)
         _sync_guild_dance_speaker_state(guild_key)
 
@@ -14710,6 +14802,12 @@ def client_handler(conn, addr):
                     speakers = _guild_dance_speaker_records(guild_id)
                     speakers.append(speaker)
                     GUILD_DANCE_SPEAKERS[str(guild_id)] = speakers
+                    guild_state = GUILD_STATES.get(str(guild_id))
+                    if guild_state is not None:
+                        guild_state['dance_speakers'] = [
+                            dict(active_speaker) for active_speaker in speakers
+                        ]
+                _save_guild_states()
                 success = True
                 if consume_item:
                     item['amount'] = int(item.get('amount', 1)) - 1
@@ -21010,6 +21108,7 @@ def client_handler(conn, addr):
                 if picked_char:
                     # Security: Validate player is actually in a copy scene before processing leave
                     in_copy = picked_char.get('active_copy_id') is not None
+                    in_guild_boss = bool(_guild_boss_map_id(picked_char.get('map_id', '')))
                     in_exp_stage = picked_char.get('exp_stage_state') is not None
                     in_equipment_stage = picked_char.get('equipment_stage_state') is not None
                     active_copy_cfg = COPY_SCENE_CONFIG.get(str(picked_char.get('active_copy_id') or ''))
@@ -21017,7 +21116,8 @@ def client_handler(conn, addr):
                     in_rank_pvp = (str(picked_char.get('map_id', '')) == RANK_PVP_MAP_ID
                                    and isinstance(picked_char.get('_rank_pvp_match'), dict))
                     has_leave_timer = '_exp_leave_timer' in picked_char
-                    if (in_exp_stage or in_equipment_stage or in_street_race or in_rank_pvp or has_leave_timer) and not is_current_character_connection(conn, picked_char):
+                    if (in_exp_stage or in_equipment_stage or in_street_race or in_rank_pvp
+                            or has_leave_timer or in_guild_boss) and not is_current_character_connection(conn, picked_char):
                         print(f"[LEAVE COPY] denied stale character socket player={picked_char.get('id')}")
                         if session is not None:
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -21025,7 +21125,8 @@ def client_handler(conn, addr):
                         continue
                     # Fix: After exp stage win, state is already cleaned up but client still sends leave_copy_scene
                     # from the StarRewardPageRoot. Accept it gracefully — just send an ACK.
-                    if not in_copy and not in_exp_stage and not in_equipment_stage and not in_rank_pvp and not has_leave_timer:
+                    if (not in_copy and not in_exp_stage and not in_equipment_stage
+                            and not in_rank_pvp and not has_leave_timer and not in_guild_boss):
                         print(f"[LEAVE COPY] denied for player {picked_char['id']}; not in a copy scene")
                         if session is not None:
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -21072,9 +21173,9 @@ def client_handler(conn, addr):
                             conn.sendall(struct.pack(">H", len(pf)) + pf)
                         continue
 
-                    # Handle leaving Guild Boss scene early
-                    in_guild_boss = bool(_guild_boss_map_id(picked_char.get('map_id', '')))
-                    if in_guild_boss and in_copy:
+                    # The result UI sends the same leave request even when the
+                    # boss scene no longer has an active_copy_id.
+                    if in_guild_boss:
                         saved_pos = picked_char.get('pre_copy_pos')
                         saved_map = picked_char.get('pre_copy_map', '11')
                         picked_char['pre_copy_pos'] = None
@@ -22552,6 +22653,7 @@ def start_server():
     server.bind(("0.0.0.0", PORT))
     server.listen(20)
     print(f"GAME SERVER 9555 READY ON PORT {PORT}")
+    _restore_guild_dance_speaker_timers()
     threading.Thread(target=_guild_boss_scheduler_loop, daemon=True).start()
     while True:
         try:
