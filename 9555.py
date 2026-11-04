@@ -121,6 +121,7 @@ GUILD_DONATE_DATA = {} # donation id -> authoritative cost and reward
 GUILD_SKILL_DATA = {} # skill type -> ordered level rows
 GUILD_BATTLE_DATA = {} # id -> configured Gang Battle schedule/selection data
 GUILD_STAR_DATA = {} # id -> configured Gang Star upgrade data
+SHOP_DATA = {} # shop type -> shop item ID -> ShopData row for player shops
 GUILD_SHOP_DATA = {} # shop item ID -> ShopData row for Guild shop
 GUILD_BOSS_DATA = {} # guild boss/activity rows shown by the Gang activity panel
 GUILD_BOSS_POST_KILL_EXIT_SECONDS = 5  # fallback only; GuildBossData.WaitTime is used
@@ -585,9 +586,10 @@ try:
                 if len(parts) < 17 or parts[0] != "*":
                     continue
                 try:
-                    if int(parts[2]) != 3:
+                    shop_type = int(parts[2])
+                    if shop_type not in (0, 1, 3):
                         continue
-                    GUILD_SHOP_DATA[str(parts[1])] = {
+                    shop_row = {
                         "id": str(parts[1]), "item_id": str(parts[3]),
                         "quality": int(parts[4] or 0), "profession": int(parts[5] or -1),
                         "price_type": int(parts[6] or 0), "price": int(parts[7] or 0),
@@ -595,8 +597,14 @@ try:
                         "single_limit": int(parts[10] or 0), "discount": int(parts[11] or 0),
                         "weight": int(parts[12] or 0), "min_level": int(parts[15] or 0),
                         "max_level": int(parts[16] or 80),
+                        "start_time": parts[13].strip() if len(parts) > 13 else "",
+                        "end_time": parts[14].strip() if len(parts) > 14 else "",
                         "class": int(parts[21] or 0) if len(parts) > 21 and parts[21] else 0
                     }
+                    if shop_type == 3:
+                        GUILD_SHOP_DATA[str(parts[1])] = shop_row
+                    else:
+                        SHOP_DATA.setdefault(shop_type, {})[str(parts[1])] = shop_row
                 except (TypeError, ValueError):
                     continue
     guild_boss_path = os.path.join(text_asset_root, "GuildBossData")
@@ -12182,7 +12190,7 @@ def _guild_refresh_members(guild, send_rpc_push=None, include_info=True):
             send_rpc_push_safe(connection, 563, payload)
         send_rpc_push_safe(connection, 581, _guild_member_list_response(guild))
 
-def _guild_shop_item_bytes(row, purchased=0):
+def _shop_item_bytes(row, purchased=0):
     fields = [
         (0, str(row.get('id', ''))), (1, str(row.get('item_id', ''))),
         (2, int(row.get('quality', 0))), (3, int(row.get('price_type', 0))),
@@ -12193,6 +12201,20 @@ def _guild_shop_item_bytes(row, purchased=0):
     ]
     return encode_sproto(fields)
 
+def _shop_purchase_count(char, item_id, row):
+    purchases = char.setdefault('shop_purchases', {})
+    cycle = max(0, int(row.get('reset_cycle', 0) or 0))
+    stamp = str(current_daily_stamp()) if cycle > 0 else 'never'
+    record = purchases.get(str(item_id), {})
+    if not isinstance(record, dict) or str(record.get('stamp', '')) != stamp:
+        record = {'stamp': stamp, 'count': 0}
+        purchases[str(item_id)] = record
+    try:
+        return max(0, int(record.get('count', 0) or 0))
+    except (TypeError, ValueError):
+        record['count'] = 0
+        return 0
+
 def _guild_shop_purchase_count(char, item_id, row):
     purchases = char.setdefault('guild_shop_purchases', {})
     cycle = max(0, int(row.get('reset_cycle', 0) or 0))
@@ -12202,6 +12224,15 @@ def _guild_shop_purchase_count(char, item_id, row):
         record = {'stamp': stamp, 'count': 0}
         purchases[str(item_id)] = record
     return max(0, int(record.get('count', 0) or 0))
+
+def _shop_row_available_for_character(char, row):
+    try:
+        level = int(char.get('level', 1) or 1)
+        profession = int(char.get('prof', 0) or 0)
+        return (int(row.get('min_level', 0)) <= level <= int(row.get('max_level', 80))
+                and int(row.get('profession', -1)) in (-1, profession))
+    except (TypeError, ValueError):
+        return False
 
 def _guild_boss_daily_id(now=None):
     """Return the one Gang Boss assigned to the current UTC weekday.
@@ -14448,8 +14479,87 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         purchased = _guild_shop_purchase_count(char, item_shop_id, row) if row else 0
         send_rpc_push(652, encode_sproto([
             (0, 0 if success else 1),
-            (1, _guild_shop_item_bytes(row, purchased) if row else encode_sproto([])),
+            (1, _shop_item_bytes(row, purchased) if row else encode_sproto([])),
             (2, 3), (3, count if success else 0)
+        ]))
+
+    if session is not None:
+        send_rpc_response(session)
+
+def handle_shop_request(conn, char, msg, body, send_rpc_push, send_rpc_response, session):
+    """Handle the configured player shops; the Guild shop stays in its own handler."""
+    if not char or not is_current_character_connection(conn, char):
+        if session is not None:
+            send_rpc_response(session)
+        return
+
+    shop_type = get_val_int(body, 0 if msg == 143 else 2, -1)
+    if shop_type not in (0, 1):
+        if session is not None:
+            send_rpc_response(session)
+        return
+
+    if msg == 143:
+        page = max(1, get_val_int(body, 1, 1))
+        rows = [row for row in SHOP_DATA.get(shop_type, {}).values()
+                if _shop_row_available_for_character(char, row)]
+        rows.sort(key=lambda row: (int(row.get('weight', 0)), str(row.get('id', ''))))
+        per_page = 30
+        max_page = max(1, (len(rows) + per_page - 1) // per_page)
+        page = min(page, max_page)
+        shop_rows = [_shop_item_bytes(
+            row, _shop_purchase_count(char, row['id'], row))
+            for row in rows[(page - 1) * per_page:page * per_page]
+        ]
+        send_rpc_push(554, encode_sproto([
+            (0, shop_type), (1, page), (2, max_page), (3, shop_rows),
+            (4, get_val_int(body, 3, 0))
+        ]))
+    elif msg == 144:
+        item_shop_id = get_val_str(body, 0, '')
+        count = get_val_int(body, 1, 0)
+        row = SHOP_DATA.get(shop_type, {}).get(item_shop_id)
+        success = False
+        if (row and count > 0 and _shop_row_available_for_character(char, row)):
+            try:
+                per_order = max(0, int(row.get('single_limit', 0) or 0))
+                available = max(0, int(row.get('limit', 0) or 0))
+                price = int(row.get('price', 0))
+                money_type = int(row.get('price_type', -1))
+                item_id = str(row.get('item_id', ''))
+                quality = int(row.get('quality', ITEM_CONFIG.get(item_id, {}).get('quality', 0)) or 0)
+            except (TypeError, ValueError):
+                per_order = available = price = 0
+                money_type = -1
+                item_id = ''
+                quality = 0
+
+            with get_character_transaction_lock(char):
+                purchased = _shop_purchase_count(char, item_shop_id, row)
+                quantity_valid = per_order <= 0 or count <= per_order
+                limit_valid = available <= 0 or purchased + count <= available
+                cost = price * count
+                if (item_id in ITEM_CONFIG and quantity_valid and limit_valid and price >= 0
+                        and 0 <= money_type < len(MONEY_FIELDS)
+                        and get_currency_balance(char, money_type) >= cost
+                        and can_add_to_inventory(char, item_id, count, quality)):
+                    set_currency_balance(char, money_type, get_currency_balance(char, money_type) - cost)
+                    if add_to_inventory(char, item_id, count, quality):
+                        purchases = char.setdefault('shop_purchases', {})
+                        record = purchases[item_shop_id]
+                        record['count'] = purchased + count
+                        save_chars(all_accounts_chars)
+                        sync_all_backpacks(char, send_rpc_push)
+                        sync_char_attrs_rpc(conn, char)
+                        success = True
+                    else:
+                        set_currency_balance(char, money_type, get_currency_balance(char, money_type) + cost)
+
+        purchased = _shop_purchase_count(char, item_shop_id, row) if row else 0
+        send_rpc_push(652, encode_sproto([
+            (0, 0 if success else 1),
+            (1, _shop_item_bytes(row, purchased) if row else encode_sproto([])),
+            (2, shop_type), (3, count if success else 0)
         ]))
 
     if session is not None:
@@ -22141,6 +22251,13 @@ def client_handler(conn, addr):
                 elif session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif ((msg == 143 and get_val_int(body, 0, -1) in (0, 1))
+                  or (msg == 144 and get_val_int(body, 2, -1) in (0, 1))):
+                handle_shop_request(
+                    conn, picked_char, msg, body, send_rpc_push,
+                    send_rpc_response, session
+                )
 
             elif (msg in (146, 147, 148, 149, 150, 151, 152, 153, 154,
                           169, 170, 173, 174, 175, 176, 195, 212, 231, 233, 247,
