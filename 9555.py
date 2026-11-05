@@ -1,4 +1,4 @@
-import socket, struct, copy, threading, random, json, os, time, traceback, math, re
+import socket, struct, copy, threading, random, json, os, time, traceback, math, re, uuid
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Tuple
 
@@ -235,6 +235,9 @@ SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
 SHOW_REWARD_EXPLICIT_COUNT_CONFIG = {} # ShowRewardData id -> rewards with an explicit positive item count
 SHOW_REWARD_ITEM_SLOT_CONFIG = {} # ShowRewardData id -> authored Item1..Item8 slots (not Exp/Money columns)
 SHOW_REWARD_BASE_CONFIG = {} # ShowRewardData id -> authored Exp/Money1/Money2 values
+SLOT_DATA_CONFIG = {} # SlotData ID -> client prize metadata and paid/free weights
+SLOT_AUTO_CONFIG = {} # SlotAutoData ID -> spin count and authoritative price
+SLOT_SUM_REWARD_THRESHOLD = 10 # SlotUIRootLogic.SumMaxLimit in the client APK
 STREET_RACE_REWARD_BY_LEVEL = {} # level -> AdaptData _drop_bc ShowRewardData id
 STREET_RACE_REWARD_BY_KEY_LEVEL = {} # AdaptData reward key -> level -> ShowRewardData id
 DANCE_REWARD_DROP_BY_KEY_LEVEL = {} # AdaptData dance drop key -> level -> drop id
@@ -1601,6 +1604,81 @@ try:
                         'money2': _show_reward_base_value('Money2'),
                     }
         debug_log(f"[SHOW REWARD CONFIG LOADED] count={len(SHOW_REWARD_CONFIG)}")
+
+    slot_path = os.path.join(text_asset_root, "SlotData")
+    if os.path.exists(slot_path):
+        slot_columns = {}
+        with open(slot_path, "r", encoding="utf-8") as slot_file:
+            for line in slot_file:
+                parts = line.strip().split(",")
+                if len(parts) > 2 and parts[0] == "*" and parts[1] == "ID":
+                    slot_columns = {name.strip(): index for index, name in enumerate(parts)
+                                    if name.strip()}
+                    continue
+                if len(parts) < 3 or parts[0] != "*" or not parts[1].isdigit():
+                    continue
+                def _slot_value(name, default=""):
+                    index = slot_columns.get(name)
+                    return parts[index].strip() if index is not None and index < len(parts) else default
+                def _slot_int(name, default=0):
+                    try:
+                        return int(_slot_value(name, str(default)))
+                    except (TypeError, ValueError):
+                        return default
+                slot_id = _slot_value("ID")
+                SLOT_DATA_CONFIG[slot_id] = {
+                    "id": slot_id,
+                    "prob": _slot_int("Prob"),
+                    "prob_free": _slot_int("Prob_Free"),
+                    "drop_id": _slot_value("DropID"),
+                    "show_reward_id": _slot_value("ShowRewardID"),
+                    "reward_map": _slot_value("RewardMap"),
+                    "reward_effect": _slot_value("RewardEffect"),
+                    "desc": _slot_value("Desc"),
+                    "rank": _slot_int("Rank"),
+                    "max_play_num": _slot_int("MaxPlayNum"),
+                    "price_type": _slot_int("PriceType"),
+                    "price_cost": _slot_int("PriceCost"),
+                    "cast_type": _slot_value("CastType"),
+                }
+
+    slot_auto_path = os.path.join(text_asset_root, "SlotAutoData")
+    if os.path.exists(slot_auto_path):
+        auto_columns = {}
+        with open(slot_auto_path, "r", encoding="utf-8") as auto_file:
+            for line in auto_file:
+                parts = line.strip().split(",")
+                if len(parts) > 2 and parts[0] == "*" and parts[1] == "ID":
+                    auto_columns = {name.strip(): index for index, name in enumerate(parts)
+                                    if name.strip()}
+                    continue
+                if len(parts) < 3 or parts[0] != "*" or not parts[1].isdigit():
+                    continue
+                def _auto_value(name, default=""):
+                    index = auto_columns.get(name)
+                    return parts[index].strip() if index is not None and index < len(parts) else default
+                def _auto_int(name, default=0):
+                    try:
+                        return int(_auto_value(name, str(default)))
+                    except (TypeError, ValueError):
+                        return default
+                auto_id = _auto_value("ID")
+                SLOT_AUTO_CONFIG[auto_id] = {
+                    "id": auto_id,
+                    "roll_num": _auto_int("RollNum"),
+                    "max_play_num": _auto_int("MaxPlayNum"),
+                    "price_type": _auto_int("PriceType", -1),
+                    "price_cost": _auto_int("PriceCost"),
+                }
+
+    missing_slot_rewards = sorted(
+        slot_id for slot_id, slot_cfg in SLOT_DATA_CONFIG.items()
+        if (slot_cfg["prob"] > 0 or slot_cfg["prob_free"] > 0)
+        and not SHOW_REWARD_ITEM_SLOT_CONFIG.get(slot_cfg["show_reward_id"])
+    )
+    if missing_slot_rewards:
+        print(f"[SLOT CONFIG] missing authored rewards for slot IDs={missing_slot_rewards}")
+    debug_log(f"[SLOT CONFIG LOADED] prizes={len(SLOT_DATA_CONFIG)} spin_options={len(SLOT_AUTO_CONFIG)}")
 
     adapt_path = os.path.join(text_asset_root, "AdaptData")
     if os.path.exists(adapt_path):
@@ -9596,6 +9674,248 @@ def restore_character_reward_state(picked_char, snapshot):
         picked_char.pop(key, None)
     for key, value in values.items():
         picked_char[key] = value
+
+def ensure_slot_state(picked_char):
+    state = picked_char.get('slot_state')
+    if not isinstance(state, dict):
+        state = {}
+    try:
+        free_spins = max(0, int(state.get('free_spins', picked_char.get('slot_free_spins', 0))))
+    except (TypeError, ValueError):
+        free_spins = 0
+    try:
+        sum_num = max(0, int(state.get('sum_num', 0)))
+    except (TypeError, ValueError):
+        sum_num = 0
+    pending = state.get('pending')
+    if not isinstance(pending, dict):
+        pending = {}
+    state['free_spins'] = free_spins
+    state['sum_num'] = sum_num
+    state['pending'] = pending
+    picked_char['slot_state'] = state
+    return state
+
+def slot_reward_list(slot_id):
+    slot_cfg = SLOT_DATA_CONFIG.get(str(slot_id), {})
+    reward_id = str(slot_cfg.get('show_reward_id', '') or '')
+    authored_rewards = SHOW_REWARD_ITEM_SLOT_CONFIG.get(reward_id, [])
+    if not authored_rewards:
+        return []
+    rewards = []
+    for item_id, quality, amount in authored_rewards:
+        item_id = str(item_id)
+        try:
+            quality, amount = int(quality), int(amount)
+        except (TypeError, ValueError):
+            return []
+        if amount <= 0 or (item_id not in DIRECT_REWARD_RESOURCE_IDS
+                           and item_id not in ITEM_CONFIG):
+            return []
+        rewards.append((item_id, quality, amount))
+    return rewards
+
+def slot_item_payload(slot_uuid, slot_id):
+    rewards = slot_reward_list(slot_id)
+    if not rewards:
+        return None
+    reward_items = [
+        encode_sproto([(0, item_id), (1, amount), (3, quality)])
+        for item_id, quality, amount in rewards
+    ]
+    return encode_sproto([
+        (0, str(slot_uuid)), (1, str(slot_id)), (2, reward_items)
+    ])
+
+def slot_state_payload(picked_char, include_rules=False):
+    state = ensure_slot_state(picked_char)
+    info = encode_sproto([
+        (1, int(state['free_spins'])),
+        (2, int(state['sum_num']))
+    ])
+    pending = {}
+    for slot_uuid, entry in state['pending'].items():
+        if not isinstance(entry, dict):
+            continue
+        slot_id = str(entry.get('id', '') or '')
+        payload = slot_item_payload(slot_uuid, slot_id)
+        if payload is not None:
+            pending[str(slot_uuid)] = payload
+    fields = [(0, info)]
+    if include_rules:
+        rules = {}
+        for slot_id, slot_cfg in SLOT_DATA_CONFIG.items():
+            rules[slot_id] = encode_sproto([
+                (0, slot_id), (1, str(slot_cfg['reward_map'])),
+                (2, str(slot_cfg['reward_effect'])), (3, str(slot_cfg['desc'])),
+                (4, int(slot_cfg['rank'])), (5, str(slot_cfg['show_reward_id'])),
+                (6, int(slot_cfg['price_type'])), (7, int(slot_cfg['price_cost']))
+            ])
+        fields.extend([(1, rules), (2, pending)])
+    else:
+        fields.append((1, pending))
+    return encode_sproto(fields)
+
+def slot_spin_result(picked_char, conn, request_body):
+    if not is_current_character_connection(conn, picked_char):
+        print(f"[SLOT] rejected stale spin request player={picked_char.get('id')}")
+        return None, False
+    auto_id = get_val_str(request_body, 0, '')
+    auto_cfg = SLOT_AUTO_CONFIG.get(auto_id)
+    if not auto_cfg:
+        print(f"[SLOT] rejected unknown spin option player={picked_char.get('id')} id={auto_id!r}")
+        return None, False
+    try:
+        roll_count = int(auto_cfg.get('roll_num', 0))
+        price_type = int(auto_cfg.get('price_type', -1))
+        price_cost = int(auto_cfg.get('price_cost', 0))
+    except (TypeError, ValueError):
+        print(f"[SLOT] rejected malformed spin option id={auto_id}")
+        return None, False
+    if roll_count <= 0 or roll_count > 100 or price_cost < 0:
+        print(f"[SLOT] rejected invalid spin option id={auto_id} rolls={roll_count} cost={price_cost}")
+        return None, False
+    if not 0 <= price_type < len(MONEY_FIELDS):
+        print(f"[SLOT] rejected invalid price type id={auto_id} type={price_type}")
+        return None, False
+
+    with get_character_transaction_lock(picked_char):
+        state_was_present = 'slot_state' in picked_char
+        old_state = copy.deepcopy(picked_char.get('slot_state'))
+        state = ensure_slot_state(picked_char)
+        use_free_spin = auto_id == '1' and state['free_spins'] > 0
+        charged = not use_free_spin
+        if charged and get_currency_balance(picked_char, price_type) < price_cost:
+            print(f"[SLOT] insufficient currency player={picked_char.get('id')} "
+                  f"type={price_type} cost={price_cost}")
+            return None, False
+
+        probability_field = 'prob_free' if use_free_spin else 'prob'
+        outcomes = []
+        for slot_id, slot_cfg in SLOT_DATA_CONFIG.items():
+            try:
+                weight = max(0, int(slot_cfg.get(probability_field, 0)))
+            except (TypeError, ValueError):
+                continue
+            reward_list = slot_reward_list(slot_id)
+            if weight > 0 and reward_list:
+                outcomes.append((slot_id, weight, reward_list))
+        total_weight = sum(weight for _slot_id, weight, _rewards in outcomes)
+        if total_weight <= 0:
+            print(f"[SLOT] no valid outcomes player={picked_char.get('id')} free={use_free_spin}")
+            return None, False
+
+        selected = []
+        for _ in range(roll_count):
+            draw = random.randint(1, total_weight)
+            for slot_id, weight, reward_list in outcomes:
+                draw -= weight
+                if draw <= 0:
+                    selected.append((slot_id, reward_list))
+                    break
+
+        old_money_present = MONEY_FIELDS[price_type] in picked_char
+        old_money = picked_char.get(MONEY_FIELDS[price_type])
+        if use_free_spin:
+            state['free_spins'] -= 1
+        else:
+            set_currency_balance(
+                picked_char, price_type,
+                get_currency_balance(picked_char, price_type) - price_cost
+            )
+        for slot_id, _reward_list in selected:
+            slot_uuid = uuid.uuid4().hex
+            state['pending'][slot_uuid] = {'id': slot_id}
+        state['sum_num'] += roll_count
+        if not save_chars(all_accounts_chars):
+            if state_was_present:
+                picked_char['slot_state'] = old_state
+            else:
+                picked_char.pop('slot_state', None)
+            if old_money_present:
+                picked_char[MONEY_FIELDS[price_type]] = old_money
+            else:
+                picked_char.pop(MONEY_FIELDS[price_type], None)
+            print(f"[SLOT] persistence failed player={picked_char.get('id')} option={auto_id}")
+            return None, False
+
+        print(f"[SLOT] spun player={picked_char.get('id')} option={auto_id} rolls={roll_count} "
+              f"free={use_free_spin} cost={price_cost if charged else 0} outcomes="
+              f"{[slot_id for slot_id, _rewards in selected]}")
+        return slot_state_payload(picked_char), charged
+
+def claim_slot_reward(picked_char, conn, send_rpc_push, slot_uuid):
+    if not is_current_character_connection(conn, picked_char):
+        print(f"[SLOT] rejected stale reward claim player={picked_char.get('id')}")
+        return
+    with get_character_transaction_lock(picked_char):
+        state = ensure_slot_state(picked_char)
+        entry = state['pending'].get(str(slot_uuid))
+        if not isinstance(entry, dict):
+            print(f"[SLOT] ignored missing or duplicate reward claim player={picked_char.get('id')} "
+                  f"uuid={slot_uuid!r}")
+            return
+        rewards = slot_reward_list(entry.get('id', ''))
+        if not rewards:
+            print(f"[SLOT] reward claim has invalid table row player={picked_char.get('id')} "
+                  f"id={entry.get('id')}")
+            return
+        if not can_add_reward_list_to_inventory(picked_char, rewards):
+            print(f"[SLOT] reward claim deferred for backpack capacity player={picked_char.get('id')} "
+                  f"uuid={slot_uuid}")
+            return
+        slot_state_snapshot = copy.deepcopy(state)
+        reward_snapshot = snapshot_character_reward_state(picked_char)
+        grant_item_rewards(picked_char, rewards, save=False)
+        state['pending'].pop(str(slot_uuid), None)
+        if not save_chars(all_accounts_chars):
+            restore_character_reward_state(picked_char, reward_snapshot)
+            picked_char['slot_state'] = slot_state_snapshot
+            print(f"[SLOT] reward persistence failed player={picked_char.get('id')} uuid={slot_uuid}")
+            return
+        sync_char_attrs_rpc(conn, picked_char)
+        if any(item_id not in DIRECT_REWARD_RESOURCE_IDS for item_id, _quality, _amount in rewards):
+            sync_all_backpacks(picked_char, send_rpc_push)
+        print(f"[SLOT] claimed player={picked_char.get('id')} id={entry.get('id')} uuid={slot_uuid}")
+
+def claim_slot_sum_reward(picked_char, conn, send_rpc_push):
+    rewards_to_show = []
+    if not is_current_character_connection(conn, picked_char):
+        print(f"[SLOT] rejected stale milestone claim player={picked_char.get('id')}")
+        return encode_sproto([(0, []), (1, 0)])
+
+    with get_character_transaction_lock(picked_char):
+        state = ensure_slot_state(picked_char)
+        if state['sum_num'] >= SLOT_SUM_REWARD_THRESHOLD:
+            rewards = slot_reward_list('9999')
+            if not rewards:
+                print(f"[SLOT] milestone reward table is missing player={picked_char.get('id')}")
+            elif not can_add_reward_list_to_inventory(picked_char, rewards):
+                print(f"[SLOT] milestone claim deferred for backpack capacity "
+                      f"player={picked_char.get('id')}")
+            else:
+                slot_state_snapshot = copy.deepcopy(state)
+                reward_snapshot = snapshot_character_reward_state(picked_char)
+                grant_item_rewards(picked_char, rewards, save=False)
+                state['sum_num'] -= SLOT_SUM_REWARD_THRESHOLD
+                if save_chars(all_accounts_chars):
+                    rewards_to_show = [
+                        encode_sproto([(0, item_id), (1, amount), (3, quality)])
+                        for item_id, quality, amount in rewards
+                    ]
+                    sync_char_attrs_rpc(conn, picked_char)
+                    if any(item_id not in DIRECT_REWARD_RESOURCE_IDS
+                           for item_id, _quality, _amount in rewards):
+                        sync_all_backpacks(picked_char, send_rpc_push)
+                    print(f"[SLOT] milestone claimed player={picked_char.get('id')} "
+                          f"remaining={state['sum_num']}")
+                else:
+                    restore_character_reward_state(picked_char, reward_snapshot)
+                    picked_char['slot_state'] = slot_state_snapshot
+                    print(f"[SLOT] milestone persistence failed player={picked_char.get('id')}")
+        return encode_sproto([
+            (0, rewards_to_show), (1, int(state['sum_num']))
+        ])
 
 def download_reward_catalog():
     """Return the four rewards shown by the APK's DownloadRewardData table."""
@@ -21186,7 +21506,7 @@ def client_handler(conn, addr):
                 if session is not None:
                     ph=encode_sproto([(1,session)]);pf=sproto_pack(ph+encode_sproto([]));conn.sendall(struct.pack('>H',len(pf))+pf)
 
-            elif msg in [118, 218, 145, 202, 210, 225, 242, 252, 253, 254, 255, 256, 257, 258, 261, 262, 265, 266, 278, 296, 297, 313, 319, 452]:
+            elif msg in [118, 218, 145, 202, 210, 225, 242, 243, 244, 249, 252, 253, 254, 255, 256, 257, 258, 261, 262, 265, 266, 278, 296, 297, 313, 319, 452]:
                 resp_data = encode_sproto([])
                 if msg == 118:
                     # Check if this is a random name request (body has field 0 = type)
@@ -21582,12 +21902,26 @@ def client_handler(conn, addr):
                     send_rpc_push(606, encode_sproto([(0, t_info), (1, [])]))
 
                 elif msg == 242 and picked_char: # request_slot_info
-                    # ret_slot_info expects:
-                    # tag 0: slot_info object with curNum(long) at tag 1, sumNum(long) at tag 2
-                    # tag 1: Dictionary<string, slot_data>
-                    # tag 2: Dictionary<string, slot_item>
-                    slot_info_obj = encode_sproto([(1, 0), (2, 0)])
-                    send_rpc_push(633, encode_sproto([(0, slot_info_obj), (1, {}), (2, {})]))
+                    if is_current_character_connection(conn, picked_char):
+                        with get_character_transaction_lock(picked_char):
+                            send_rpc_push(633, slot_state_payload(picked_char, include_rules=True))
+
+                elif msg == 243 and picked_char: # spin_slot
+                    slot_result, charged = slot_spin_result(picked_char, conn, body)
+                    if slot_result is not None:
+                        if charged:
+                            sync_char_attrs_rpc(conn, picked_char)
+                        send_rpc_push(634, slot_result)
+
+                elif msg == 249 and picked_char: # request_slot_reward
+                    claim_slot_reward(
+                        picked_char, conn, send_rpc_push, get_val_str(body, 0, '')
+                    )
+
+                elif msg == 244 and picked_char: # request_slot_sum_reward
+                    send_rpc_push(
+                        635, claim_slot_sum_reward(picked_char, conn, send_rpc_push)
+                    )
 
                 elif msg == 257 and picked_char: # request_invest_pack
                     _send_tab_reply(
