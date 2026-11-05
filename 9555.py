@@ -98,6 +98,7 @@ MAIL_ID_COUNTER = 1000000  # Will be initialized from max existing mailId on sta
 CHAR_DB_SAVE_LOCK = threading.Lock() # serialize atomic snapshots to the shared temp/backup files
 TEAM_ID_COUNTER_LOCK = threading.Lock()
 EXP_RUN_COUNTER_LOCK = threading.Lock()
+CASH_STAGE_LOCK = threading.RLock()
 MAIL_ID_COUNTER_LOCK = threading.Lock()
 DANCE_REWARD_TIMER_LOCK = threading.Lock()
 DANCE_REWARD_TIMERS = {}  # character ID -> active personal-dance reward timer
@@ -1425,6 +1426,7 @@ try:
                         'daily_slot': int(parts[16]) if len(parts) > 16 and parts[16].isdigit() else -1,
                         'time_inc': parts[8] if len(parts) > 8 else '',
                         'end_time': int(parts[10]) if parts[10].isdigit() else 0,
+                        'parm1': int(parts[14]) if len(parts) > 14 and parts[14].lstrip('-').isdigit() else 0,
                         'max_plays': int(parts[18]) if parts[18].isdigit() else 0,
                         'min_level': int(parts[19]) if parts[19].isdigit() else 1,
                         'max_level': int(parts[20]) if len(parts) > 20 and parts[20].isdigit() else 80,
@@ -4465,7 +4467,8 @@ def is_active_daily_copy_current(char):
     # Copy entry uses the copy ID as its map, except Street Race, whose
     # configured map ID is the actual scene. Do not infer an active daily
     # run merely because a shared world map appears as another copy's MapId.
-    expected_map = str(cfg.get('map_id') or active_copy_id) if cfg.get('subtype') == 7 else active_copy_id
+    expected_map = (str(cfg.get('map_id') or active_copy_id)
+                    if cfg.get('subtype') in (7, 11) else active_copy_id)
     if active_copy_id in DAILY_EXP_CONFIG and cfg.get('single_map_id'):
         expected_map = str(cfg['single_map_id'])
     return current_map == expected_map
@@ -8213,16 +8216,20 @@ def _finish_exp_stage_impl(conn, send_rpc_push, picked_char, exp_state, win=True
 
     print(f"[EXP STAGE] Finished copy={copy_id} win={win} total_kills={exp_state['total_kills']} exp={exp_reward} cash={cash_reward}")
 
-def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid):
+def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid, grant_rewards=True):
     state = picked_char.get('exp_stage_state') if picked_char else None
     if state and inst_id:
         run_lock = state.setdefault('_kill_lock', threading.RLock())
         with run_lock:
-            return _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid)
-    return _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid)
+            return _on_npc_killed_locked(
+                conn, send_rpc_push, picked_char, inst_id, npcid, grant_rewards
+            )
+    return _on_npc_killed_locked(
+        conn, send_rpc_push, picked_char, inst_id, npcid, grant_rewards
+    )
 
 
-def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid):
+def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, grant_rewards=True):
     if not picked_char: return
 
     exp_state = picked_char.get('exp_stage_state')
@@ -8277,7 +8284,7 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid):
         # cannot be resolved for mission credit.
         if exp_kill_counted:
             print(f"[EXP KILL] COUNTED wave_kills={exp_state['wave_kills']} total_kills={exp_state['total_kills']} wave={exp_state['cur_wave']} group={exp_state['cur_group']}")
-        if valid_kill:
+        if valid_kill and grant_rewards:
             kt = exp_state.get('kill_tracker', [])
             # Mission progress is per defeated instance.  A wave can contain
             # many copies of the same NPC ID, so keep duplicates here and
@@ -8313,7 +8320,7 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid):
         exp_state.get('monster_heading', {}).pop(inst_id, None) if exp_state else None
         exp_state.get('attack_cd', {}).pop(inst_id, None) if exp_state else None
 
-    if valid_kill:
+    if valid_kill and grant_rewards:
         npc_stats = get_npc_attr(npcid)
         npc_lv = npc_stats.get('lv', 1)
         char_lv = picked_char.get('level', 1)
@@ -10420,6 +10427,262 @@ def copy_attempts_remaining(picked_char, copy_id, cfg):
     if copy_id not in remaining:
         remaining[copy_id] = int(cfg.get('max_plays', 3))
     return max(0, int(remaining[copy_id]))
+
+
+def is_cash_stage_copy(copy_id):
+    cfg = COPY_SCENE_CONFIG.get(str(copy_id or ''), {})
+    return int(cfg.get('type', 0)) == 1 and int(cfg.get('subtype', -1)) == 11
+
+
+def cash_stage_copy_ids():
+    return [
+        str(copy_id) for copy_id, cfg in COPY_SCENE_CONFIG.items()
+        if int(cfg.get('type', 0)) == 1 and int(cfg.get('subtype', -1)) == 11
+    ]
+
+
+def cash_stage_attempts_remaining(char):
+    copy_ids = cash_stage_copy_ids()
+    if not copy_ids:
+        return 0
+    return min(
+        copy_attempts_remaining(char, copy_id, COPY_SCENE_CONFIG[copy_id])
+        for copy_id in copy_ids
+    )
+
+
+def cash_stage_reward_budget(char):
+    """Return the authored Cash Stage payout for the character's AdaptData level."""
+    try:
+        level = max(1, min(int(char.get('level', 1)), PLAYER_MAX_LEVEL))
+    except (TypeError, ValueError):
+        level = 1
+    reward_id = STREET_RACE_REWARD_BY_KEY_LEVEL.get('_drop_jbfb', {}).get(level)
+    if not reward_id:
+        print(f"[CASH STAGE] missing AdaptData _drop_jbfb reward for level={level}")
+        return 0
+    cash_amount = sum(
+        max(0, int(amount))
+        for item_id, _quality, amount in SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(str(reward_id), [])
+        if str(item_id) == '1001'
+    )
+    if cash_amount <= 0:
+        print(f"[CASH STAGE] missing cash payout ShowRewardData id={reward_id} level={level}")
+    return cash_amount
+
+
+def send_cash_stage_result_to_char(char, result):
+    """Deliver a Cash Stage result or preserve it for the next login."""
+    if not char or not result:
+        return False
+    char['pending_cash_stage_result'] = result.hex()
+    delivered = send_push_to_char(char.get('id', 0), 552, result)
+    if delivered:
+        char.pop('pending_cash_stage_result', None)
+        save_chars(all_accounts_chars)
+    return delivered
+
+
+def replay_pending_cash_stage_result(char):
+    pending = char.get('pending_cash_stage_result') if char else None
+    if not pending:
+        return False
+    try:
+        result = bytes.fromhex(str(pending))
+    except (TypeError, ValueError):
+        print(f"[CASH STAGE] discarded invalid pending result player={char.get('id')}")
+        char.pop('pending_cash_stage_result', None)
+        save_chars(all_accounts_chars)
+        return False
+    if send_push_to_char(char.get('id', 0), 552, result):
+        char.pop('pending_cash_stage_result', None)
+        save_chars(all_accounts_chars)
+        return True
+    return False
+
+
+def finish_cash_stage(char, win, notify=True):
+    if not char:
+        return False
+    with CASH_STAGE_LOCK:
+        state = char.get('cash_stage_state')
+        if not isinstance(state, dict) or state.get('result_recorded'):
+            return False
+        state['result_recorded'] = True
+        state['win'] = bool(win)
+        timer = char.pop('_cash_stage_timer', None)
+        if timer is not None:
+            timer.cancel()
+        result = None
+        if notify:
+            result_items = []
+            cash_earned = max(0, int(state.get('cash_earned', 0)))
+            if cash_earned:
+                result_items.append(encode_sproto([
+                    (0, '1001'), (1, cash_earned), (3, 0)
+                ]))
+            result = encode_sproto([
+                (0, 11), (1, str(state.get('copy_id', '201'))),
+                (2, bool(win)), (3, 1 if win else 0), (4, 1 if win else 0),
+                (5, result_items)
+            ])
+            char['pending_cash_stage_result'] = result.hex()
+        save_chars(all_accounts_chars)
+    if result is not None:
+        if not send_cash_stage_result_to_char(char, result):
+            save_chars(all_accounts_chars)
+    return True
+
+
+def cash_stage_timeout(char, copy_id, run_id):
+    state = char.get('cash_stage_state') if char else None
+    if (isinstance(state, dict)
+            and str(state.get('copy_id')) == str(copy_id)
+            and str(state.get('run_id')) == str(run_id)
+            and not state.get('result_recorded')):
+        finish_cash_stage(char, False)
+
+
+def schedule_cash_stage_timeout(char):
+    state = char.get('cash_stage_state') if char else None
+    if not isinstance(state, dict) or state.get('result_recorded'):
+        return
+    previous_timer = char.pop('_cash_stage_timer', None)
+    if previous_timer is not None:
+        previous_timer.cancel()
+    delay = max(0.01, float(state.get('end_time', time.time())) - time.time())
+    timer = threading.Timer(
+        delay, cash_stage_timeout,
+        args=(char, str(state.get('copy_id', '')), str(state.get('run_id', '')))
+    )
+    timer.daemon = True
+    char['_cash_stage_timer'] = timer
+    timer.start()
+
+
+def start_cash_stage_run(conn, char, copy_id, cfg, use_time_item, send_rpc_push):
+    copy_id = str(copy_id)
+    map_id = str(cfg.get('map_id') or copy_id)
+    char_id = int(char.get('id', 0))
+    if (not is_current_character_connection(conn, char)
+            or map_id not in MAP_CONFIG
+            or int(char.get('level', 1)) < int(cfg.get('min_level', 1))
+            or int(char.get('level', 1)) > int(cfg.get('max_level', PLAYER_MAX_LEVEL))):
+        print(f"[CASH STAGE] denied entry id={copy_id}; invalid session/map/level")
+        send_rpc_push(555, sync_copy_scenes(char))
+        return False
+
+    existing = char.get('cash_stage_state')
+    if (isinstance(existing, dict) and not existing.get('result_recorded')
+            and str(existing.get('copy_id')) == copy_id
+            and str(char.get('map_id')) == map_id):
+        return True
+    if (is_active_copy_current(char) or char.get('exp_stage_state')
+            or char.get('equipment_stage_state')):
+        print(f"[CASH STAGE] denied entry id={copy_id}; player already in a copy")
+        send_rpc_push(555, sync_copy_scenes(char))
+        return False
+
+    team = get_team_for_char(char_id)
+    if team and (team.get('active_run') or team.get('pending_run') or team.get('matching')):
+        print(f"[CASH STAGE] denied entry id={copy_id}; team has an active/matching run")
+        send_rpc_push(555, sync_copy_scenes(char))
+        return False
+
+    ticket_used = False
+    with CASH_STAGE_LOCK:
+        remaining = cash_stage_attempts_remaining(char)
+        if remaining <= 0 and use_time_item:
+            ticket_id = str(cfg.get('time_inc') or '')
+            inventory = char.get('inventory', [])
+            ticket = next((item for item in inventory
+                           if str(item.get('id')) == ticket_id
+                           and int(item.get('amount', 1)) > 0), None) if ticket_id else None
+            if ticket is not None:
+                ticket['amount'] = int(ticket.get('amount', 1)) - 1
+                if ticket['amount'] <= 0:
+                    inventory.remove(ticket)
+                char['inventory'] = inventory
+                for configured_id in cash_stage_copy_ids():
+                    configured_cfg = COPY_SCENE_CONFIG[configured_id]
+                    state = ensure_daily_copy_state(char)
+                    state.setdefault('remaining', {})[configured_id] = (
+                        copy_attempts_remaining(char, configured_id, configured_cfg) + 1
+                    )
+                remaining = cash_stage_attempts_remaining(char)
+                ticket_used = True
+        if remaining <= 0:
+            print(f"[CASH STAGE] denied entry id={copy_id}; daily attempts exhausted")
+            send_rpc_push(555, sync_copy_scenes(char))
+            return False
+
+        daily_state = ensure_daily_copy_state(char)
+        for configured_id in cash_stage_copy_ids():
+            configured_cfg = COPY_SCENE_CONFIG[configured_id]
+            daily_state.setdefault('remaining', {})[configured_id] = max(
+                0, copy_attempts_remaining(char, configured_id, configured_cfg) - 1
+            )
+        duration = max(1, int(cfg.get('exist_time') or 300))
+        if char.get('pre_copy_pos') is None:
+            char['pre_copy_pos'] = list(char.get('pos', [29860, 100, -17005, 0]))
+            char['pre_copy_map'] = str(char.get('map_id', '11'))
+        char['active_copy_id'] = copy_id
+        char['cash_stage_state'] = {
+            'copy_id': copy_id,
+            'map_id': map_id,
+            'phase': 'sneaking',
+            'duration': duration,
+            'started_at': 0,
+            'run_id': uuid.uuid4().hex,
+            'end_time': 0,
+            'damage_dealt': 0,
+            'cash_earned': 0,
+            'result_recorded': False,
+        }
+        save_chars(all_accounts_chars)
+
+    if ticket_used:
+        sync_all_backpacks(char, send_rpc_push)
+    send_rpc_push(555, sync_copy_scenes(char))
+    advance_missions(char, send_rpc_push, 'dungeon', target_id=copy_id)
+    start_map_transition(conn, char, map_id, send_rpc_push)
+    print(f"[CASH STAGE] entered id={copy_id} map={map_id} "
+          f"remaining={cash_stage_attempts_remaining(char)} ticket={ticket_used}")
+    return True
+
+
+def credit_cash_stage_damage(char, conn, send_rpc_push, npc_id, hp_max, damage):
+    """Credit validated boss damage proportionally to the authored level payout."""
+    if (str(npc_id) != '22101' or int(damage) <= 0
+            or not is_current_character_connection(conn, char)):
+        return 0
+    with CASH_STAGE_LOCK:
+        state = char.get('cash_stage_state') if char else None
+        if (not isinstance(state, dict) or state.get('result_recorded')
+                or state.get('phase') != 'boss'
+                or not is_cash_stage_copy(state.get('copy_id'))
+                or str(state.get('map_id')) != str(char.get('map_id'))):
+            return 0
+        if int(state.get('end_time', 0)) <= int(time.time()):
+            finish_cash_stage(char, False)
+            return 0
+        hp_max = max(1, int(hp_max))
+        previous_damage = max(0, int(state.get('damage_dealt', 0)))
+        previous_cash = max(0, int(state.get('cash_earned', 0)))
+        state['damage_dealt'] = min(hp_max, previous_damage + int(damage))
+        total_cash = cash_stage_reward_budget(char) * state['damage_dealt'] // hp_max
+        added_cash = max(0, total_cash - previous_cash)
+        state['cash_earned'] = total_cash
+        if added_cash:
+            grant_item_rewards(
+                char, [('1001', 0, added_cash)], conn, send_rpc_push, save=False
+            )
+            reward_item = encode_sproto([
+                (0, '1001'), (1, total_cash), (3, 0)
+            ])
+            send_rpc_push(615, encode_sproto([(0, [reward_item])]))
+            save_chars(all_accounts_chars)
+        return added_cash
 
 def single_dance_time_remaining(picked_char, now=None):
     """Return the remaining free-dance seconds shown in Minimap > Daily."""
@@ -16533,6 +16796,7 @@ def client_handler(conn, addr):
                                     picked_char.pop('pending_exp_result', None)
                                     save_chars(all_accounts_chars)
                             except Exception: pass
+                        replay_pending_cash_stage_result(picked_char)
 
                         # MULTIPLAYER AOI SYNC - Broadcast this new player to existing players
                         # Skip player-to-player AOI on single-player maps (e.g., Map 11)
@@ -16654,6 +16918,20 @@ def client_handler(conn, addr):
                                 and supports_normal_relife(mid)):
                             send_rpc_push(618, encode_pending_relife_offer(pending_relife))
                             print(f"[RELIFE] replayed pending offer after reconnect player={picked_char.get('id')} map={mid}")
+                    cash_state = picked_char.get('cash_stage_state')
+                    if (isinstance(cash_state, dict)
+                            and str(cash_state.get('map_id')) == str(mid)
+                            and cash_state.get('phase') == 'boss'
+                            and not cash_state.get('result_recorded')):
+                        if int(cash_state.get('end_time', 0)) <= int(time.time()):
+                            finish_cash_stage(picked_char, False)
+                        else:
+                            cash_timer = picked_char.get('_cash_stage_timer')
+                            if cash_timer is None or not cash_timer.is_alive():
+                                schedule_cash_stage_timeout(picked_char)
+                            send_rpc_push(629, encode_sproto([
+                                (0, int(cash_state['end_time'])), (1, 2)
+                            ]))
                     if mid == "501":
                         rank_match = picked_char.get("_rank_pvp_match")
                         pending_result = picked_char.get("rank_pvp_pending_result")
@@ -16734,6 +17012,7 @@ def client_handler(conn, addr):
                             arena_timer.daemon = True
                             arena_timer.start()
                     send_rpc_push(519, sync_mission_data(picked_char))
+                    replay_pending_cash_stage_result(picked_char)
                     if street_race_result_restore_pending:
                         pending_race_result = picked_char.get('street_race_pending_result')
                         try:
@@ -16759,6 +17038,12 @@ def client_handler(conn, addr):
                     char_map = str(reconnect_char.get('map_id') or '11')
                     active_copy_id = str(reconnect_char.get('active_copy_id') or '')
                     active_cfg = COPY_SCENE_CONFIG.get(active_copy_id, {})
+                    cash_stage_state = reconnect_char.get('cash_stage_state')
+                    cash_stage_reconnect = bool(
+                        active_cfg.get('subtype') == 11
+                        and isinstance(cash_stage_state, dict)
+                        and str(cash_stage_state.get('map_id')) == char_map
+                    )
                     equipment_run = reconnect_char.get('equipment_stage_state')
                     equipment_reconnect = bool(
                         equipment_run and equipment_run.get('stage_kind') == 'equipment'
@@ -16821,6 +17106,31 @@ def client_handler(conn, addr):
                         if stage_team:
                             send_team_update(stage_team['id'])
                         print(f"[EQUIP STAGE] reconnect restored copy={active_copy_id} "
+                              f"player={reconnect_char_id} type={reconnect_type} map={char_map}")
+                    elif cash_stage_reconnect:
+                        cash_stage_reloading = reconnect_type == 1 or requested_map != char_map
+                        if cash_stage_reloading:
+                            start_map_transition(
+                                conn, picked_char, char_map, send_rpc_push,
+                                override_pos=list(picked_char.get('pos') or [0, 100, 0, 0])
+                            )
+                        elif (not cash_stage_state.get('result_recorded')
+                              and cash_stage_state.get('phase') == 'boss'):
+                            if int(cash_stage_state.get('end_time', 0)) <= int(time.time()):
+                                finish_cash_stage(picked_char, False)
+                            else:
+                                cash_timer = picked_char.get('_cash_stage_timer')
+                                if cash_timer is None or not cash_timer.is_alive():
+                                    schedule_cash_stage_timeout(picked_char)
+                                send_rpc_push(629, encode_sproto([
+                                    (0, int(cash_stage_state['end_time'])), (1, 2)
+                                ]))
+                        send_rpc_push(555, sync_copy_scenes(picked_char))
+                        send_rpc_push(519, sync_mission_data(picked_char))
+                        if not cash_stage_reloading:
+                            replay_pending_cash_stage_result(picked_char)
+                        save_chars(all_accounts_chars)
+                        print(f"[CASH STAGE] reconnect restored id={active_copy_id} "
                               f"player={reconnect_char_id} type={reconnect_type} map={char_map}")
                     elif is_street_race_reconnect:
                         # Rebind the authenticated character before route recovery;
@@ -19094,6 +19404,9 @@ def client_handler(conn, addr):
                     picked_char['hp'] = new_hp
                     sync_char_attrs_rpc(conn, picked_char)
                     if old_hp > 0 and new_hp == 0:
+                        if (isinstance(picked_char.get('cash_stage_state'), dict)
+                                and str(picked_char['cash_stage_state'].get('map_id')) == current_map):
+                            finish_cash_stage(picked_char, False)
                         if current_map == RANK_PVP_MAP_ID:
                             # RankPVP's client expects TAG 551 (tiantti_result, win=false),
                             # whose handler opens CopyFailShowRoot and completes the scene.
@@ -19471,6 +19784,9 @@ def client_handler(conn, addr):
                             sync_char_attrs_rpc(conn, picked_char)
                             if old_hp > 0 and new_hp == 0:
                                 current_map = str(picked_char.get('map_id', ''))
+                                if (isinstance(picked_char.get('cash_stage_state'), dict)
+                                        and str(picked_char['cash_stage_state'].get('map_id')) == current_map):
+                                    finish_cash_stage(picked_char, False)
                                 if current_map == '502':
                                     debug_log('[M1003 DEBUG] Player died in arena; scheduling loss return')
                                     schedule_domin_return(restore_hp=True)
@@ -19536,6 +19852,19 @@ def client_handler(conn, addr):
                             target_nid = NPC_INST_MAP.get(target_id, str(target_id))
                             if not is_exp:
                                 NPC_INST_MAP[target_id] = target_nid
+                            if str(target_nid) == '22101':
+                                cash_state = picked_char.get('cash_stage_state')
+                                if (not isinstance(cash_state, dict)
+                                        or cash_state.get('result_recorded')
+                                        or cash_state.get('phase') != 'boss'
+                                        or str(cash_state.get('map_id')) != cur_map
+                                        or str(cash_state.get('copy_id'))
+                                        != str(picked_char.get('active_copy_id') or '')
+                                        or not is_current_character_connection(conn, picked_char)):
+                                    phase = cash_state.get('phase', '-') if isinstance(cash_state, dict) else '-'
+                                    print(f"[CASH STAGE] rejected boss hit player={picked_char.get('id')} "
+                                          f"target={target_id} phase={phase}")
+                                    continue
                             city_capture_id, city_capture_cfg = _guild_capture_for_map(cur_map)
                             if (city_capture_cfg and str(city_capture_cfg.get('npc_id', '')) == str(target_nid)):
                                 city_event, city_event_active = _guild_city_event(city_capture_id)
@@ -19685,6 +20014,7 @@ def client_handler(conn, addr):
                             exp_npc_died = False
                             exp_dead_target = False
                             world_npc_died = False
+                            applied_damage = 0
                             if is_stage_combat:
                                 # EXP and equipment squads can submit hits from
                                 # different client threads at nearly the same
@@ -19728,7 +20058,9 @@ def client_handler(conn, addr):
                                             or int(hp_now) <= 0):
                                         exp_dead_target = True
                                     else:
-                                        hp_after = max(0, int(hp_now) - max(0, int(actual_dmg)))
+                                        hp_before = max(0, int(hp_now))
+                                        applied_damage = min(hp_before, max(0, int(actual_dmg)))
+                                        hp_after = hp_before - applied_damage
                                         NPC_HP_MAP[target_id] = hp_after
                                         world_npc_died = hp_after == 0
                                         if world_npc_died:
@@ -19738,6 +20070,16 @@ def client_handler(conn, addr):
                                 stage_label = 'EQUIP' if is_equipment else 'EXP'
                                 print(f"[{stage_label} HIT] rejected target already dead/inactive target={target_id}")
                                 continue
+
+                            cash_stage_state = picked_char.get('cash_stage_state') if picked_char else None
+                            if (not is_stage_combat and isinstance(cash_stage_state, dict)
+                                    and str(cash_stage_state.get('copy_id'))
+                                    == str(picked_char.get('active_copy_id') or '')
+                                    and target_nid == '22101'):
+                                credit_cash_stage_damage(
+                                    picked_char, conn, send_rpc_push, target_nid,
+                                    defender_stats.get('hp_max', 0), applied_damage
+                                )
 
                             if city_capture_id and actual_dmg > 0:
                                 _guild_city_record_damage(city_capture_id, picked_char, actual_dmg)
@@ -19786,6 +20128,17 @@ def client_handler(conn, addr):
                                     # City vehicles keep their destroyed body in
                                     # the scene; HP=0 is the client lifecycle.
                                     pass
+                                elif (isinstance(cash_stage_state, dict)
+                                      and str(cash_stage_state.get('copy_id'))
+                                      == str(picked_char.get('active_copy_id') or '')
+                                      and str(cash_stage_state.get('map_id')) == cur_map
+                                      and cash_stage_state.get('phase') == 'boss'
+                                      and target_nid == '22101'):
+                                    on_npc_killed(
+                                        conn, send_rpc_push, picked_char, target_id,
+                                        target_nid, grant_rewards=False
+                                    )
+                                    finish_cash_stage(picked_char, True)
                                 elif not is_stage_combat:
                                     # Non-EXP despawns keep their existing AOI path.
                                     send_rpc_push(506, encode_sproto([(0, target_id)]))
@@ -20504,6 +20857,10 @@ def client_handler(conn, addr):
                     else:
                         reason = 'missing configured SingleMapID'
                     print(f"[EXP STAGE] denied solo entry id={copy_id}; {reason}")
+                elif picked_char and msg == 107 and cfg and int(cfg.get('subtype', -1)) == 11:
+                    start_cash_stage_run(
+                        conn, picked_char, copy_id, cfg, bool(body.get(1, False)), send_rpc_push
+                    )
                 elif picked_char and is_equipment_copy_id(copy_id):
                     if (msg != 107 or not start_solo_equipment_run(
                             conn, picked_char, copy_id, bool(body.get(1, False)), send_rpc_push)):
@@ -21038,6 +21395,28 @@ def client_handler(conn, addr):
                 if picked_char and is_current_character_connection(conn, picked_char) and picked_char.get('active_copy_id'):
                     copy_id = str(picked_char['active_copy_id'])
                     cfg = COPY_SCENE_CONFIG.get(copy_id)
+                    cash_state = picked_char.get('cash_stage_state')
+                    if (cfg and int(cfg.get('subtype', -1)) == 11
+                            and isinstance(cash_state, dict)
+                            and not cash_state.get('result_recorded')
+                            and str(picked_char.get('map_id')) == str(cash_state.get('map_id'))):
+                        if not int(cash_state.get('end_time', 0)):
+                            started_at = int(time.time())
+                            cash_state['started_at'] = started_at
+                            cash_state['end_time'] = started_at + max(
+                                1, int(cash_state.get('duration') or cfg.get('exist_time') or 300)
+                            )
+                        if int(cash_state.get('end_time', 0)) <= int(time.time()):
+                            finish_cash_stage(picked_char, False)
+                        else:
+                            cash_state['phase'] = 'boss'
+                            cash_timer = picked_char.get('_cash_stage_timer')
+                            if cash_timer is None or not cash_timer.is_alive():
+                                schedule_cash_stage_timeout(picked_char)
+                            send_rpc_push(629, encode_sproto([
+                                (0, int(cash_state['end_time'])), (1, 2)
+                            ]))
+                            save_chars(all_accounts_chars)
                     if cfg and cfg['subtype'] == 7:
                         current_map = str(picked_char.get('map_id', ''))
                         if current_map == str(cfg.get('map_id')) and not picked_char.get('street_race_result_recorded'):
@@ -21155,6 +21534,11 @@ def client_handler(conn, addr):
                         # only be exited through its explicit leave/revive flow.
                         print(f"[EXP STAGE] denied generic scene entry player={picked_char.get('id')} target={mid} current={current_map}")
                     else:
+                        cash_state = picked_char.get('cash_stage_state')
+                        if (isinstance(cash_state, dict)
+                                and str(mid) != str(cash_state.get('map_id'))):
+                            finish_cash_stage(picked_char, False, notify=False)
+                            picked_char.pop('cash_stage_state', None)
                         if is_public_world_map(mid):
                             # Ordinary MapInfoData BIG_WORLD scenes (including
                             # DSJ_zhuCheng/101) are not copy instances. CopySceneData
@@ -22399,10 +22783,14 @@ def client_handler(conn, addr):
                     in_equipment_stage = picked_char.get('equipment_stage_state') is not None
                     active_copy_cfg = COPY_SCENE_CONFIG.get(str(picked_char.get('active_copy_id') or ''))
                     in_street_race = bool(active_copy_cfg and active_copy_cfg.get('subtype') == 7)
+                    in_cash_stage = bool(
+                        active_copy_cfg and active_copy_cfg.get('subtype') == 11
+                        and isinstance(picked_char.get('cash_stage_state'), dict)
+                    )
                     in_rank_pvp = (str(picked_char.get('map_id', '')) == RANK_PVP_MAP_ID
                                    and isinstance(picked_char.get('_rank_pvp_match'), dict))
                     has_leave_timer = '_exp_leave_timer' in picked_char
-                    if (in_exp_stage or in_equipment_stage or in_street_race or in_rank_pvp
+                    if (in_exp_stage or in_equipment_stage or in_street_race or in_cash_stage or in_rank_pvp
                             or has_leave_timer or in_guild_boss) and not is_current_character_connection(conn, picked_char):
                         print(f"[LEAVE COPY] denied stale character socket player={picked_char.get('id')}")
                         if session is not None:
@@ -22430,6 +22818,9 @@ def client_handler(conn, addr):
                         picked_char['street_race_checkpoint_progress'] = 0
                         picked_char.pop('street_race_last_car_pos', None)
                         picked_char.pop('street_race_pending_result', None)
+
+                    if in_cash_stage:
+                        finish_cash_stage(picked_char, False, notify=False)
 
                     if in_rank_pvp:
                         rank_match = picked_char.get("_rank_pvp_match")
@@ -22544,6 +22935,8 @@ def client_handler(conn, addr):
                         picked_char.pop('exp_members', None)
                         picked_char['exp_defer_start'] = False
                         print('[LEAVE COPY] Removed player from EXP run')
+                    if in_cash_stage:
+                        picked_char.pop('cash_stage_state', None)
                     if picked_char.get('active_copy_id'):
                         saved_pos = picked_char.get('pre_copy_pos')
                         saved_map = picked_char.get('pre_copy_map', '11')
