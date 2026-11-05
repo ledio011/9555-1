@@ -5148,6 +5148,7 @@ def character_attribute_other_fields(character, stats, hp_cur):
         (6, guild_id), (7, guild_job), (8, guild_name),
         (9, levels[1]), (10, levels[2]), (11, levels[3]), (12, levels[4]),
         (13, sum(levels.values())), (15, 1),
+        (16, int(character.get('pk_mode', 0))),
         (17, 1 if dance_active else 0),
         (18, str(dance.get('dance_id', '')) if dance_active else '')
     ]
@@ -12002,6 +12003,7 @@ def init_character_fields(c):
         'inventory': [],
         'pos': [29860, 100, -17005, 0],
         'map_id': "11",
+        'pk_mode': 0,
         'tutorial': 0,
         'death_count': 0,
         'download_complete': False,
@@ -12025,6 +12027,11 @@ def init_character_fields(c):
     }
     for k, v in fields.items():
         if k not in c: c[k] = v
+    try:
+        pk_mode = int(c.get('pk_mode', 0))
+    except (TypeError, ValueError):
+        pk_mode = 0
+    c['pk_mode'] = pk_mode if pk_mode in (0, 1, 2) else 0
 
     # A downed player may reconnect while a server-authored revive offer is
     # still open. Keep HP at zero only when that offer is still bound to this
@@ -18380,6 +18387,18 @@ def client_handler(conn, addr):
                                     inherited = True
                 if not inherited:
                     print(f"[BACKPACK] rejected attribute inheritance player={picked_char.get('id') if picked_char else 0} detail={inherit_debug}")
+                send_rpc_response(session)
+
+            elif msg == 226: # request_change_pk_mode: only change PK mode on an explicit client request
+                requested_mode = get_val_int(body, 0, -1)
+                if (picked_char and is_current_character_connection(conn, picked_char)
+                        and requested_mode in (0, 1, 2)):
+                    if requested_mode != 2 or _guild_id_for_character(picked_char):
+                        with get_character_transaction_lock(picked_char):
+                            picked_char['pk_mode'] = requested_mode
+                            save_chars(all_accounts_chars)
+                        sync_char_attrs_rpc(conn, picked_char)
+                        broadcast_aoi_attribute(picked_char)
                 send_rpc_response(session)
 
             elif msg == 223: # change_show_type: persist whether this character displays fashion
