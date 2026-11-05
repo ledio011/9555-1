@@ -1,4 +1,4 @@
-import socket, struct, copy, threading, random, json, os, time, traceback, math, re, uuid
+import socket, struct, copy, threading, random, json, os, time, traceback, math, re, uuid, shutil
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Tuple
 
@@ -13,6 +13,29 @@ SERVER_DEBUG_LOGS = os.environ.get("GAME_SERVER_DEBUG", "").lower() in ("1", "tr
 def debug_log(*args, **kwargs):
     if SERVER_DEBUG_LOGS:
         print(*args, **kwargs)
+
+class RepeatingTask:
+    """Run a periodic callback on one daemon thread instead of one timer thread per tick."""
+    def __init__(self, interval, callback):
+        self.interval = max(0.01, float(interval))
+        self.callback = callback
+        self._stop_event = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self._thread.start()
+        return self
+
+    def _run(self):
+        while not self._stop_event.wait(self.interval):
+            if self.callback() is False:
+                return
+
+    def cancel(self):
+        self._stop_event.set()
+
+    def is_alive(self):
+        return self._thread.is_alive()
 
 # Verified from the shipped APK: GameDefine.PLAYER_MAX_LEVEL = 80.
 PLAYER_MAX_LEVEL = 80
@@ -2803,7 +2826,7 @@ def _save_chars_atomic(data):
             fcntl.flock(process_lock.fileno(), fcntl.LOCK_EX)
         # 1. Write new state to temporary file
         with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(_serializable_character_data(data), f, indent=4, default=_json_default_handler)
+            json.dump(_serializable_character_data(data), f, default=_json_default_handler)
             f.flush()
             os.fsync(f.fileno())
 
@@ -2811,7 +2834,7 @@ def _save_chars_atomic(data):
         if os.path.exists(CHAR_DB) and os.path.getsize(CHAR_DB) > 10:
             try:
                 with open(CHAR_DB, "r", encoding="utf-8") as src, open(BAK_DB, "w", encoding="utf-8") as dst:
-                    dst.write(src.read())
+                    shutil.copyfileobj(src, dst, length=1024 * 1024)
                     dst.flush()
                     os.fsync(dst.fileno())
             except: pass
@@ -7513,10 +7536,10 @@ def start_equipment_stage_runtime(conn, owner, state):
         finish_equipment_stage(run, win=False)
     def tick():
         if not state.get('ai_active') or state.get('_finish_handled'):
-            return
+            return False
         char = current_owner()
         if not char:
-            return
+            return False
         active_conn = ALL_CONNECTIONS.get(int(char.get('id', 0)), (conn, char))[0] or conn
         try:
             more = run_exp_monster_ai_shared(
@@ -7524,11 +7547,7 @@ def start_equipment_stage_runtime(conn, owner, state):
         except Exception as exc:
             print(f"[EQUIP AI] {exc}")
             more = bool(state.get('ai_active'))
-        if more and state.get('ai_active') and not state.get('_finish_handled'):
-            timer = threading.Timer(0.2, tick)
-            timer.daemon = True
-            state['ai_timer'] = timer
-            timer.start()
+        return bool(more and state.get('ai_active') and not state.get('_finish_handled'))
     def timeout():
         if not state.get('_finish_handled') and int(time.time()) >= int(state.get('end_time', 0)):
             finish_equipment_stage(state, win=False)
@@ -7540,10 +7559,7 @@ def start_equipment_stage_runtime(conn, owner, state):
         timer.daemon = True
         state['timeout_timer'] = timer
         timer.start()
-        timer = threading.Timer(0.2, tick)
-        timer.daemon = True
-        state['ai_timer'] = timer
-        timer.start()
+        state['ai_timer'] = RepeatingTask(0.2, tick).start()
 
 def flush_exp_kill_tracker(exp_state, conn, picked_char, send_rpc_push):
     """Credit each valid NPC death once, including partial waves at timeout."""
@@ -8332,15 +8348,14 @@ def start_exp_stage_runtime(conn, owner, state):
         else:
             finish_exp_stage(dead_conn or conn, push, dead_char, run, win=False)
     def tick():
-        if not state.get('ai_active'): return
+        if not state.get('ai_active'): return False
         char = current_owner()
-        if not char: return
+        if not char: return False
         active_conn = ALL_CONNECTIONS.get(int(char.get('id', 0)), (conn, char))[0] or conn
         try: more = run_exp_monster_ai_shared(state, exp_run_map_id(state), char, push, push, active_conn, on_player_die)
         except Exception as exc:
             print(f'[EXP AI] {exc}'); more = bool(state.get('ai_active'))
-        if more and state.get('ai_active'):
-            t = threading.Timer(0.2, tick); t.daemon = True; state['ai_timer'] = t; t.start()
+        return bool(more and state.get('ai_active'))
     def timeout():
         run_lock = state.setdefault('_kill_lock', threading.RLock())
         with run_lock:
@@ -8351,7 +8366,7 @@ def start_exp_stage_runtime(conn, owner, state):
                 finish_exp_stage(active_conn, push, char, state, win=False)
     t = threading.Timer(max(1, int(state.get('end_time', time.time()+1))-int(time.time())), timeout)
     t.daemon = True; state['timeout_timer'] = t; t.start()
-    t = threading.Timer(0.2, tick); t.daemon = True; state['ai_timer'] = t; t.start()
+    state['ai_timer'] = RepeatingTask(0.2, tick).start()
 
 
 def _spawn_guild_boss(conn, char, boss_id, map_id):
@@ -8421,13 +8436,15 @@ def _guild_boss_sync_npc(guild, map_id, inst_id, stats, hp_cur):
         sync_npc_attrs_rpc(peer_conn, inst_id, stats, hp_cur)
 
 def _schedule_guild_boss_tick(runtime_key, runtime):
-    timer = threading.Timer(0.2, _guild_boss_ai_tick, args=(runtime_key,))
-    timer.daemon = True
     with GUILD_BOSS_LOCK:
         if GUILD_BOSS_RUNTIMES.get(runtime_key) is not runtime or runtime.get('finished'):
             return
-        runtime['timer'] = timer
-    timer.start()
+        task = runtime.get('timer')
+        if task is not None and task.is_alive():
+            return
+        runtime['timer'] = RepeatingTask(
+            0.2, lambda: _guild_boss_ai_tick(runtime_key)
+        ).start()
 
 def _guild_boss_remove_instance(runtime_key, inst_id, map_id):
     with GUILD_BOSS_LOCK:
@@ -8475,15 +8492,17 @@ def _guild_boss_ai_tick(runtime_key):
     with GUILD_BOSS_LOCK:
         runtime = GUILD_BOSS_RUNTIMES.get(runtime_key)
     if not runtime or runtime.get('finished'):
-        return
+        return False
     tick_lock = runtime['tick_lock']
     if not tick_lock.acquire(False):
-        _schedule_guild_boss_tick(runtime_key, runtime)
-        return
+        return True
     try:
         _guild_boss_ai_tick_locked(runtime_key, runtime)
     finally:
         tick_lock.release()
+    with GUILD_BOSS_LOCK:
+        return (GUILD_BOSS_RUNTIMES.get(runtime_key) is runtime
+                and not runtime.get('finished'))
 
 def _guild_boss_skill_range(skill, attack_distance):
     skill_cfg = SKILL_CONFIG[skill]
@@ -23794,11 +23813,8 @@ def start_solo_equipment_run(conn, char, copy_id, use_time_item, send_rpc_push):
 def start_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    if hasattr(socket, "SO_REUSEPORT"):
-        try:
-            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        except Exception:
-            pass
+    # Do not enable SO_REUSEPORT: this server's game state is process-local,
+    # so a second instance must not accept a subset of clients on the same port.
     server.bind(("0.0.0.0", PORT))
     server.listen(20)
     print(f"GAME SERVER 9555 READY ON PORT {PORT}")
