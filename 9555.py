@@ -12486,12 +12486,17 @@ def _guild_shop_purchase_count(char, item_id, row):
         purchases[str(item_id)] = record
     return max(0, int(record.get('count', 0) or 0))
 
-def _shop_row_available_for_character(char, row):
+def _shop_row_available_for_character(char, row, class_filter=0):
     try:
         level = int(char.get('level', 1) or 1)
         profession = int(char.get('prof', 0) or 0)
-        return (int(row.get('min_level', 0)) <= level <= int(row.get('max_level', 80))
-                and int(row.get('profession', -1)) in (-1, profession))
+        category = int(class_filter or 0)
+        row_class = int(row.get('class', 0) or 0)
+        return (
+            int(row.get('min_level', 0)) <= level <= int(row.get('max_level', 80))
+            and int(row.get('profession', -1)) in (-1, profession)
+            and (category <= 0 or row_class == category)
+        )
     except (TypeError, ValueError):
         return False
 
@@ -14765,6 +14770,7 @@ def handle_shop_request(conn, char, msg, body, send_rpc_push, send_rpc_response,
 
     if msg == 143:
         page = max(1, get_val_int(body, 1, 1))
+        class_filter = get_val_int(body, 4, 0)
         # Type 2 has no exported catalog. Type 4 is populated from PurchaseData
         # below because the client resolves those shop_item IDs as product IDs.
         if shop_type == 4:
@@ -14774,7 +14780,7 @@ def handle_shop_request(conn, char, msg, body, send_rpc_push, send_rpc_response,
             ))
         elif shop_type in (0, 1):
             rows = [row for row in SHOP_DATA.get(shop_type, {}).values()
-                    if _shop_row_available_for_character(char, row)]
+                    if _shop_row_available_for_character(char, row, class_filter)]
             rows.sort(key=lambda row: (
                 int(row.get('display_order', row.get('weight', 0))),
                 str(row.get('id', ''))
