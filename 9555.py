@@ -7277,7 +7277,9 @@ def ensure_tower_state(char):
     state["sum_time"] = max(0, int(state.get("sum_time", 0) or 0))
     state["wipe_out_state"] = max(0, min(2, int(state.get("wipe_out_state", 0) or 0)))
     state["wipe_time"] = max(0, int(state.get("wipe_time", 0) or 0))
-    state.setdefault("claimed_special", [])
+    if not isinstance(state.get("claimed_special"), list):
+        state["claimed_special"] = []
+
     if state["times"] > 0 or state["floor"] > 0:
         char["tower_rank_floor"] = max(
             int(char.get("tower_rank_floor", 0) or 0), state["floor"] + 1)
@@ -7492,13 +7494,25 @@ def start_tower_floor(conn, char, floor_id, send_rpc_push, continuation=False):
     char_id = int(char.get("id", 0) or 0)
     config = TOWER_CONFIG.get(floor_id)
     state = ensure_tower_state(char)
-    if (not is_current_character_connection(conn, char)
-            or (floor_id > max(state["floor"], state["cur_floor"]) and not continuation)
-            or int(char.get("level", 1) or 1) < int((config or {}).get("limit_level", 1))
-            or not tower_floor_is_valid(floor_id)
-            or state["wipe_out_state"] != 0
-            or (is_tower_map(char.get("map_id")) and not continuation)):
-        print(f"[TOWER] entry rejected player={char_id} floor={floor_id}")
+    reject_reason = None
+    if not is_current_character_connection(conn, char):
+        reject_reason = "stale_connection"
+    elif (floor_id > max(state["floor"], state["cur_floor"])
+          and not continuation):
+        reject_reason = "locked_floor"
+    elif int(char.get("level", 1) or 1) < int((config or {}).get("limit_level", 1)):
+        reject_reason = "level_requirement"
+    elif not tower_floor_is_valid(floor_id):
+        reject_reason = "invalid_floor_data"
+    elif state["wipe_out_state"] != 0:
+        reject_reason = "wipeout_active"
+    elif is_tower_map(char.get("map_id")) and not continuation:
+        reject_reason = "already_in_tower"
+    if reject_reason:
+        print(f"[TOWER] entry rejected player={char_id} floor={floor_id} "
+              f"reason={reject_reason} map={char.get('map_id')} "
+              f"level={char.get('level')} cur_floor={state['cur_floor']} "
+              f"best_floor={state['floor']} wipe_state={state['wipe_out_state']}")
         return False
 
     clear_tower_npcs(char, conn, send_rpc_push)
@@ -7569,9 +7583,8 @@ def tower_claim_wipeout(char, conn, send_rpc_push, request_id):
         return False
     start_floor = int(char.get("tower_wipe_start_floor", state["cur_floor"]))
     target_floor = int(char.get("tower_wipe_target_floor", state["floor"]))
-    if str(request_id) not in ("0", str(start_floor), str(target_floor)):
-        print(f"[TOWER] wipeout claim rejected invalid id player={char.get('id')} id={request_id}")
-        return False
+    # The APK reuses curFloorId for type 0 and does not set it when opening
+    # the wipeout reward page. Derive the authoritative range from saved state.
     floor_ids = list(range(start_floor, target_floor + 1))
     rewards = tower_reward_list(floor_ids)
     if (not rewards or not can_add_reward_list_to_inventory(char, rewards)):
@@ -23180,11 +23193,15 @@ def client_handler(conn, addr):
                             start_floor = int(state["cur_floor"])
                             target_floor = int(state["floor"])
                             duration = tower_wipeout_duration(start_floor, target_floor)
+                            tower_run = picked_char.get("tower_run")
                             if (duration is None or duration <= 0
                                     or state["wipe_out_state"] != 0
                                     or is_tower_map(picked_char.get("map_id"))
-                                    or picked_char.get("tower_run", {}).get("status") == "running"):
-                                print(f"[TOWER] wipeout rejected player={char_id} state={state['wipe_out_state']}")
+                                    or (isinstance(tower_run, dict)
+                                        and tower_run.get("status") == "running")):
+                                print(f"[TOWER] wipeout rejected player={char_id} "
+                                      f"range={start_floor}-{target_floor} duration={duration} "
+                                      f"state={state['wipe_out_state']} map={picked_char.get('map_id')}")
                             elif wipe_type == 0:
                                 state["wipe_out_state"] = 1
                                 state["wipe_time"] = int(time.time()) + duration
@@ -23196,6 +23213,7 @@ def client_handler(conn, addr):
                                     (0, tower_info_payload(picked_char))
                                 ]))
                             elif wipe_type == 1:
+                                # Matches the APK: summed ExistTime (seconds) / 60.
                                 cost = duration // 60
                                 if get_currency_balance(picked_char, 2) >= cost:
                                     set_currency_balance(
@@ -23211,7 +23229,8 @@ def client_handler(conn, addr):
                                         (0, tower_info_payload(picked_char))
                                     ]))
                                 else:
-                                    print(f"[TOWER] instant wipeout insufficient diamonds player={char_id} cost={cost}")
+                                    print(f"[TOWER] instant wipeout insufficient diamonds "
+                                          f"player={char_id} cost={cost} duration={duration}")
                             else:
                                 print(f"[TOWER] invalid wipeout type player={char_id} type={wipe_type}")
                     else:
