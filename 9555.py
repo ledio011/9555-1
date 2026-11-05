@@ -12318,11 +12318,7 @@ def serve_resource_http(conn, initial_data):
         conn.sendall(headers)
         if parts[0] == "GET":
             with open(local_path, "rb") as resource_file:
-                while True:
-                    block = resource_file.read(65536)
-                    if not block:
-                        break
-                    conn.sendall(block)
+                conn.sendfile(resource_file)
         print(f"[HTTP 9555] 200 {normalized} ({size} bytes)")
     except Exception as exc:
         print(f"[HTTP 9555] failed: {exc}")
