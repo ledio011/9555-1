@@ -21332,11 +21332,24 @@ def client_handler(conn, addr):
                                 )
                                 if save_chars(all_accounts_chars):
                                     granted = True
-                                    sync_char_attrs_rpc(conn, picked_char)
+                                    property_payload = encode_sproto([
+                                        (13, get_currency_balance(picked_char, 0)),
+                                        (14, get_currency_balance(picked_char, 1)),
+                                        (15, get_currency_balance(picked_char, 2)),
+                                        (16, get_currency_balance(picked_char, 3)),
+                                        (17, get_currency_balance(picked_char, 4)),
+                                        (18, get_currency_balance(picked_char, 5)),
+                                    ])
+                                    character_payload = encode_sproto([
+                                        (0, picked_char['id']),
+                                        (5, property_payload),
+                                    ])
+                                    send_rpc_push(510, encode_sproto([(0, character_payload)]))
                                     print(
                                         f"[VIDEO REWARD] granted player={picked_char.get('id')} "
                                         f"count={count + 1}/{VIDEO_REWARD_DAILY_LIMIT} "
-                                        f"diamonds={VIDEO_REWARD_DIAMONDS}"
+                                        f"diamonds={VIDEO_REWARD_DIAMONDS} "
+                                        f"balance={get_currency_balance(picked_char, 2)}"
                                     )
                                 else:
                                     picked_char['video_reward_day'] = old_day
