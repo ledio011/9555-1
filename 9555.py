@@ -9581,7 +9581,7 @@ def snapshot_character_reward_state(picked_char, include_mails=False):
     keys = {bucket for bucket, _tag in BACKPACKS.values()}
     keys.update(MONEY_FIELDS)
     keys.update(('next_item_index', 'exp', 'level', 'hp', 'title_exp', 'active_missions',
-                 'big_sale_purchases'))
+                 'big_sale_purchases', 'shop_purchases'))
     if include_mails:
         keys.add('mails')
     present = {key for key in keys if key in picked_char}
@@ -12419,6 +12419,28 @@ def _shop_item_bytes(row, purchased=0):
     ]
     return encode_sproto(fields)
 
+def _shop_reward_currency_type(item_id):
+    """Return the balance index for a client ADD_COIN/ADD_GOLD/ADD_DIAMOND item."""
+    try:
+        item_type = int(ITEM_CONFIG.get(str(item_id), {}).get('type', -1))
+    except (TypeError, ValueError):
+        return None
+    return {7: 0, 8: 1, 9: 2}.get(item_type)
+
+def _shop_reward_currency(item_id, count):
+    """Resolve client ADD_COIN/ADD_GOLD/ADD_DIAMOND shop rows to balances."""
+    config = ITEM_CONFIG.get(str(item_id), {})
+    currency_type = _shop_reward_currency_type(item_id)
+    if currency_type is None:
+        return None
+    try:
+        amount = int(config.get('function', 0)) * int(count)
+    except (TypeError, ValueError):
+        return None
+    if amount <= 0:
+        return None
+    return currency_type, amount
+
 def _send_tab_reply(send_rpc_push, send_rpc_response, session, push_tag, payload):
     send_rpc_push(push_tag, payload)
     if session is not None:
@@ -14806,21 +14828,42 @@ def handle_shop_request(conn, char, msg, body, send_rpc_push, send_rpc_response,
                 quantity_valid = per_order <= 0 or count <= per_order
                 limit_valid = available <= 0 or purchased + count <= available
                 cost = price * count
+                direct_currency_type = _shop_reward_currency_type(item_id)
+                currency_reward = _shop_reward_currency(item_id, count)
+                item_configured = item_id in ITEM_CONFIG
+                can_receive = (
+                    currency_reward is not None
+                    or (direct_currency_type is None and item_configured
+                        and can_add_to_inventory(char, item_id, count, quality))
+                )
                 if (item_id in ITEM_CONFIG and quantity_valid and limit_valid and price >= 0
                         and 0 <= money_type < len(MONEY_FIELDS)
                         and get_currency_balance(char, money_type) >= cost
-                        and can_add_to_inventory(char, item_id, count, quality)):
+                        and can_receive):
+                    snapshot = snapshot_character_reward_state(char)
                     set_currency_balance(char, money_type, get_currency_balance(char, money_type) - cost)
-                    if add_to_inventory(char, item_id, count, quality):
+                    if currency_reward is not None:
+                        reward_type, reward_amount = currency_reward
+                        set_currency_balance(
+                            char, reward_type,
+                            get_currency_balance(char, reward_type) + reward_amount
+                        )
+                        reward_added = True
+                    else:
+                        reward_added = add_to_inventory(char, item_id, count, quality)
+                    if reward_added:
                         purchases = char.setdefault('shop_purchases', {})
                         record = purchases[item_shop_id]
                         record['count'] = purchased + count
-                        save_chars(all_accounts_chars)
-                        sync_all_backpacks(char, send_rpc_push)
-                        sync_char_attrs_rpc(conn, char)
-                        success = True
+                        if save_chars(all_accounts_chars):
+                            if currency_reward is None:
+                                sync_all_backpacks(char, send_rpc_push)
+                            sync_char_attrs_rpc(conn, char)
+                            success = True
+                        else:
+                            restore_character_reward_state(char, snapshot)
                     else:
-                        set_currency_balance(char, money_type, get_currency_balance(char, money_type) + cost)
+                        restore_character_reward_state(char, snapshot)
 
         purchased = _shop_purchase_count(char, item_shop_id, row) if row else 0
         send_rpc_push(652, encode_sproto([
