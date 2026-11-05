@@ -1,4 +1,4 @@
-import socket, struct, copy, threading, random, json, os, time, traceback, math, re, uuid, shutil
+import socket, struct, copy, threading, random, json, os, time, traceback, math, re
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Tuple
 
@@ -8,35 +8,6 @@ except ImportError:
     fcntl = None
 
 PORT = int(os.environ.get("PORT", 15678))
-SERVER_DEBUG_LOGS = os.environ.get("GAME_SERVER_DEBUG", "").lower() in ("1", "true", "yes")
-
-def debug_log(*args, **kwargs):
-    if SERVER_DEBUG_LOGS:
-        print(*args, **kwargs)
-
-class RepeatingTask:
-    """Run a periodic callback on one daemon thread instead of one timer thread per tick."""
-    def __init__(self, interval, callback):
-        self.interval = max(0.01, float(interval))
-        self.callback = callback
-        self._stop_event = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-
-    def start(self):
-        self._thread.start()
-        return self
-
-    def _run(self):
-        while not self._stop_event.wait(self.interval):
-            if self.callback() is False:
-                return
-
-    def cancel(self):
-        self._stop_event.set()
-
-    def is_alive(self):
-        return self._thread.is_alive()
-
 # Verified from the shipped APK: GameDefine.PLAYER_MAX_LEVEL = 80.
 PLAYER_MAX_LEVEL = 80
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -98,7 +69,6 @@ MAIL_ID_COUNTER = 1000000  # Will be initialized from max existing mailId on sta
 CHAR_DB_SAVE_LOCK = threading.Lock() # serialize atomic snapshots to the shared temp/backup files
 TEAM_ID_COUNTER_LOCK = threading.Lock()
 EXP_RUN_COUNTER_LOCK = threading.Lock()
-CASH_STAGE_LOCK = threading.RLock()
 MAIL_ID_COUNTER_LOCK = threading.Lock()
 DANCE_REWARD_TIMER_LOCK = threading.Lock()
 DANCE_REWARD_TIMERS = {}  # character ID -> active personal-dance reward timer
@@ -106,8 +76,6 @@ GUILD_DANCE_REWARD_MISSING_LOGGED = set()
 GUILD_DANCE_SPEAKER_LOCK = threading.RLock()
 GUILD_DANCE_SPEAKERS = {}  # guild ID -> active speaker instance records
 GUILD_DANCE_SPEAKER_TIMERS = {}  # NPC instance ID -> that speaker's expiry timer
-PERSONAL_DANCE_SPEAKER_TIMERS = {}  # NPC instance ID -> personal speaker expiry timer
-PERSONAL_DANCE_SPEAKER_TIMER_LOCK = threading.Lock()
 GUILD_BOSS_REWARD_LOCK = threading.RLock()
 DANCE_SERVER_EPOCH = str(time.time_ns())  # do not credit offline time across a restart
 
@@ -116,48 +84,6 @@ def next_global_inst_id():
     with GLOBAL_INST_COUNTER_LOCK:
         GLOBAL_INST_COUNTER += 1
         return GLOBAL_INST_COUNTER
-
-def spawn_personal_dance_speaker_model(activity, x, z, heading, conn, send_rpc_push):
-    npc_id = str(activity.get('NpcID', '80001') or '80001')
-    map_id = str(activity.get('MapId', '101') or '101')
-    name = NPC_CONFIG.get(npc_id, {}).get('name', 'Personal Stereo')
-    inst_id, attr = build_npc_attr_sproto(npc_id, name, x, z, heading)
-    NPC_INSTANCE_MAP[inst_id] = map_id
-    send_rpc_push(509, encode_sproto([(0, attr)]))
-    stats = get_npc_attr(npc_id)
-    sync_npc_attrs_rpc(
-        conn,
-        inst_id, stats, NPC_HP_MAP.get(inst_id, stats['hp_max'])
-    )
-    return inst_id
-
-def expire_personal_dance_speaker_model(char_id, map_id, inst_id):
-    current_timer = threading.current_thread()
-    with PERSONAL_DANCE_SPEAKER_TIMER_LOCK:
-        if PERSONAL_DANCE_SPEAKER_TIMERS.get(int(inst_id)) is not current_timer:
-            return
-        PERSONAL_DANCE_SPEAKER_TIMERS.pop(int(inst_id), None)
-    conn, char = ALL_CONNECTIONS.get(int(char_id), (None, None))
-    if conn and char and str(char.get('map_id', '')) == str(map_id):
-        send_rpc_push_safe(conn, 506, encode_sproto([(0, int(inst_id))]))
-    NPC_HP_MAP.pop(int(inst_id), None)
-    NPC_INST_MAP.pop(int(inst_id), None)
-    NPC_INSTANCE_MAP.pop(int(inst_id), None)
-    NPC_ATTR_MAP.pop(int(inst_id), None)
-    DEAD_NPC_SET.discard(int(inst_id))
-
-def schedule_personal_dance_speaker_expiry(char_id, map_id, inst_id, expires_at):
-    remaining = float(expires_at) - time.time()
-    if remaining <= 0:
-        return
-    timer = threading.Timer(
-        remaining, expire_personal_dance_speaker_model,
-        args=(int(char_id), str(map_id), int(inst_id))
-    )
-    timer.daemon = True
-    with PERSONAL_DANCE_SPEAKER_TIMER_LOCK:
-        PERSONAL_DANCE_SPEAKER_TIMERS[int(inst_id)] = timer
-    timer.start()
 
 def next_team_id():
     global TEAM_ID_COUNTER
@@ -191,20 +117,11 @@ MAP_CONNECT_DATA = {} # (src_id, target_id) -> PosX, PosY, PosZ
 GUILD_CAPTURE_DATA = {} # id -> mapId (kept for existing Gang-city map routing)
 GUILD_CAPTURE_CONFIG = {} # id -> schedule metadata from GuildCaptureData
 GUILD_LEVEL_DATA = {} # guild level -> cumulative exp/max members/daily donation count
-SEX_MINI_GAME_ID = "1301"
 GUILD_DONATE_DATA = {} # donation id -> authoritative cost and reward
 GUILD_SKILL_DATA = {} # skill type -> ordered level rows
 GUILD_BATTLE_DATA = {} # id -> configured Gang Battle schedule/selection data
 GUILD_STAR_DATA = {} # id -> configured Gang Star upgrade data
-SHOP_DATA = {} # shop type -> shop item ID -> ShopData row for player shops
 GUILD_SHOP_DATA = {} # shop item ID -> ShopData row for Guild shop
-SHOP_ITEMS_PER_PAGE = 8
-SHOP_PRODUCTS_PER_PAGE = 9
-PURCHASE_DATA = {} # product ID -> client recharge product metadata
-BIG_PACKAGE_DATA = {} # package ID -> client BigPackageData offer metadata
-MONTHLY_CARD_DATA = {} # monthly card ID -> client monthly card metadata
-DAILY_BUY_CONFIG = {} # daily purchase ID -> client DailyBuyData product metadata
-INVEST_CONFIG = {} # investment ID -> client InvestData offer/reward metadata
 GUILD_BOSS_DATA = {} # guild boss/activity rows shown by the Gang activity panel
 GUILD_BOSS_POST_KILL_EXIT_SECONDS = 5  # fallback only; GuildBossData.WaitTime is used
 # The in-scene rank panel has no scroll/sort (client Bar-Fight variant caps at 6 rows).
@@ -229,12 +146,11 @@ GUILD_BOSS_RANDOM_BADGE_COUNTS = {
     '_three_ghb': 1,
     '_last_ghb': 1,
 }
-ITEM_PACKAGE_RANDOM_BADGE_LEVELS = {
-    '9403': 1, '9603': 1, '9604': 2, '9601': 3, '9602': 4, '9605': 6,
-}
-ITEM_PACKAGE_BADGE_TYPES = {
-    str(item_id): badge_type
-    for item_id, badge_type in zip(range(9700, 9709), range(1, 10))
+BADGE_CASE_LV1_ITEM_IDS = GUILD_BOSS_RANDOM_BADGE_ITEM_IDS
+ITEM_PACKAGE_RANDOM_REWARD_POOLS = {
+    # ItemData/Localization describe both cases as yielding one random Lv.1 badge.
+    '9403': BADGE_CASE_LV1_ITEM_IDS,
+    '9603': BADGE_CASE_LV1_ITEM_IDS,
 }
 # The shipped ShowRewardData rows for these Guild Boss IDs have item IDs but
 # blank ItemCount fields. The APK defaults those counts to -1, so it does not
@@ -260,9 +176,6 @@ SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
 SHOW_REWARD_EXPLICIT_COUNT_CONFIG = {} # ShowRewardData id -> rewards with an explicit positive item count
 SHOW_REWARD_ITEM_SLOT_CONFIG = {} # ShowRewardData id -> authored Item1..Item8 slots (not Exp/Money columns)
 SHOW_REWARD_BASE_CONFIG = {} # ShowRewardData id -> authored Exp/Money1/Money2 values
-SLOT_DATA_CONFIG = {} # SlotData ID -> client prize metadata and paid/free weights
-SLOT_AUTO_CONFIG = {} # SlotAutoData ID -> spin count and authoritative price
-SLOT_SUM_REWARD_THRESHOLD = 10 # SlotUIRootLogic.SumMaxLimit in the client APK
 STREET_RACE_REWARD_BY_LEVEL = {} # level -> AdaptData _drop_bc ShowRewardData id
 STREET_RACE_REWARD_BY_KEY_LEVEL = {} # AdaptData reward key -> level -> ShowRewardData id
 DANCE_REWARD_DROP_BY_KEY_LEVEL = {} # AdaptData dance drop key -> level -> drop id
@@ -356,7 +269,7 @@ try:
                         'min_level': int(parts[23]) if parts[23].isdigit() else 1,
                         'reward_ids': [parts[25] if len(parts)>25 else "", parts[27] if len(parts)>27 else "", parts[29] if len(parts)>29 else ""]
                     }
-        debug_log(f"[MISSION DATA LOADED] count={len(missions_data)}")
+        print(f"[MISSION DATA LOADED] count={len(missions_data)}")
 
     # Merge decompiled missions.json if present (supplementing missing missions/fields)
     json_md_paths = [
@@ -401,7 +314,7 @@ try:
             for _mk, _mv in missions_data.items():
                 if int(_mv.get('require_num') or 0) <= 0:
                     _mv['require_num'] = 1
-            debug_log(f"[MISSION JSON MERGED] count={len(missions_data)}")
+            print(f"[MISSION JSON MERGED] count={len(missions_data)}")
             break
 
     # Load decompiled mission_rewards.json if present
@@ -423,7 +336,7 @@ try:
                         'item_amounts': item_amts,
                         'amounts': item_amts
                     }
-            debug_log(f"[MISSION REWARDS JSON LOADED] count={len(rewards_data)}")
+            print(f"[MISSION REWARDS JSON LOADED] count={len(rewards_data)}")
             break
 
     rd_path = os.path.join(text_asset_root, "ShowRewardData")
@@ -447,7 +360,7 @@ try:
                                 items.append(iid)
                                 amounts.append(icount)
                     rewards_data[rid] = {'exp': exp, 'cash': cash, 'items': items, 'amounts': amounts, 'item_amounts': amounts}
-        debug_log(f"[REWARDS DATA LOADED] count={len(rewards_data)}")
+        print(f"[REWARDS DATA LOADED] count={len(rewards_data)}")
 
     def is_data(line): return line.startswith("*,") or ("," in line and line.split(",")[1].isdigit())
 
@@ -472,7 +385,7 @@ try:
                         'params': [int(parts[i]) if len(parts) > i and parts[i].isdigit() else 0 for i in range(17, 22)],
                         'adds': adds
                     }
-        debug_log(f"[EFF CONFIG LOADED] count={len(EFF_CONFIG)}")
+        print(f"[EFF CONFIG LOADED] count={len(EFF_CONFIG)}")
 
     # Load SkillData
     skill_path = os.path.join(text_asset_root, "SkillData")
@@ -500,7 +413,7 @@ try:
                         eff_id = SKILL_CONFIG[sid][eff_key]
                         if eff_id and eff_id not in EFF_TO_SKILL:
                             EFF_TO_SKILL[eff_id] = sid
-        debug_log(f"[SKILL CONFIG LOADED] count={len(SKILL_CONFIG)}")
+        print(f"[SKILL CONFIG LOADED] count={len(SKILL_CONFIG)}")
 
     # Load BaseLvData for EXP requirements and stats
     lv_path = os.path.join(text_asset_root, "BaseLvData")
@@ -529,7 +442,7 @@ try:
                             'defa': int(parts[31]), 'dgea': int(parts[32]), 'resa': int(parts[33]),
                             'hita': int(parts[34]), 'cria': int(parts[35])
                         }
-        debug_log(f"[LEVEL TABLE LOADED] levels={len(LEVEL_DATA)}")
+        print(f"[LEVEL TABLE LOADED] levels={len(LEVEL_DATA)}")
 
     # Load MapInfoData
     map_info_path = os.path.join(text_asset_root, "MapInfoData")
@@ -554,7 +467,7 @@ try:
                         'gather_area_id': parts[25] if len(parts) > 25 else '',
                         'open_lv': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 0
                     }
-        debug_log(f"[MAP CONFIG LOADED] count={len(MAP_CONFIG)}")
+        print(f"[MAP CONFIG LOADED] count={len(MAP_CONFIG)}")
 
     # Match SceneManager.IsInGatherArea for server-validated dance requests.
     map_area_path = os.path.join(text_asset_root, "MapAreaInfoData")
@@ -573,7 +486,7 @@ try:
                     }
                 except (TypeError, ValueError):
                     continue
-        debug_log(f"[MAP AREA CONFIG LOADED] count={len(MAP_AREA_CONFIG)}")
+        print(f"[MAP AREA CONFIG LOADED] count={len(MAP_AREA_CONFIG)}")
 
     # Load MapConnectInfoData
     conn_path = os.path.join(text_asset_root, "MapConnectInfoData")
@@ -590,7 +503,7 @@ try:
                         pz = float(parts[6])
                         MAP_CONNECT_DATA[(src, dst)] = (px, py, pz)
                     except: pass
-        debug_log(f"[MAP CONNECT DATA LOADED] count={len(MAP_CONNECT_DATA)}")
+        print(f"[MAP CONNECT DATA LOADED] count={len(MAP_CONNECT_DATA)}")
 
     # Load GuildCaptureData
     gc_path = os.path.join(text_asset_root, "GuildCaptureData")
@@ -621,7 +534,7 @@ try:
                         }
                     except (IndexError, TypeError, ValueError):
                         continue
-        debug_log(f"[GUILD CAPTURE DATA LOADED] count={len(GUILD_CAPTURE_DATA)}")
+        print(f"[GUILD CAPTURE DATA LOADED] count={len(GUILD_CAPTURE_DATA)}")
 
     # Guild UI tables are authoritative for capacity, donations, skill cost,
     # and guild-shop inventory. Keep these separate from unrelated shop logic.
@@ -672,128 +585,17 @@ try:
                 if len(parts) < 17 or parts[0] != "*":
                     continue
                 try:
-                    shop_type = int(parts[2])
-                    if shop_type not in (0, 1, 3):
+                    if int(parts[2]) != 3:
                         continue
-                    shop_row = {
+                    GUILD_SHOP_DATA[str(parts[1])] = {
                         "id": str(parts[1]), "item_id": str(parts[3]),
-                        "quality": int(parts[4]) if parts[4].strip().isdigit() else None,
-                        "profession": int(parts[5] or -1),
+                        "quality": int(parts[4] or 0), "profession": int(parts[5] or -1),
                         "price_type": int(parts[6] or 0), "price": int(parts[7] or 0),
-                        "reset_cycle": int(parts[8] or 0),
-                        "limit": int(parts[9] or 0),
+                        "reset_cycle": int(parts[8] or 0), "limit": int(parts[9] or 0),
                         "single_limit": int(parts[10] or 0), "discount": int(parts[11] or 0),
                         "weight": int(parts[12] or 0), "min_level": int(parts[15] or 0),
                         "max_level": int(parts[16] or 80),
-                        "display_order": (
-                            int(parts[19]) if len(parts) > 19 and parts[19].strip().isdigit()
-                            else int(parts[12] or 0)
-                        ),
-                        "start_time": parts[13].strip() if len(parts) > 13 else "",
-                        "end_time": parts[14].strip() if len(parts) > 14 else "",
                         "class": int(parts[21] or 0) if len(parts) > 21 and parts[21] else 0
-                    }
-                    if shop_type == 3:
-                        GUILD_SHOP_DATA[str(parts[1])] = shop_row
-                    else:
-                        SHOP_DATA.setdefault(shop_type, {})[str(parts[1])] = shop_row
-                except (TypeError, ValueError):
-                    continue
-    purchase_path = os.path.join(text_asset_root, "PurchaseData")
-    if os.path.exists(purchase_path):
-        with open(purchase_path, "r", encoding="utf-8") as table_file:
-            for row in table_file:
-                parts = row.strip().split(",")
-                if len(parts) < 9 or parts[0] != "*" or not parts[1].strip():
-                    continue
-                try:
-                    product_type = int(parts[5])
-                    PURCHASE_DATA[parts[1].strip()] = {
-                        "product_id": parts[1].strip(),
-                        "type": product_type,
-                        "key": parts[6].strip() if len(parts) > 6 else "",
-                        "price_type": int(parts[4]) if parts[4].strip().isdigit() else -1,
-                        "price": int(parts[2]) if parts[2].strip().isdigit() else 0,
-                    }
-                except (IndexError, TypeError, ValueError):
-                    continue
-    big_package_path = os.path.join(text_asset_root, "BigPackageData")
-    if os.path.exists(big_package_path):
-        with open(big_package_path, "r", encoding="utf-8") as table_file:
-            for row in table_file:
-                parts = row.strip().split(",")
-                if len(parts) < 53 or parts[0] != "*" or not parts[1].strip().isdigit():
-                    continue
-                try:
-                    BIG_PACKAGE_DATA[parts[1].strip()] = {
-                        "id": parts[1].strip(),
-                        "max_count": int(parts[2]) if parts[2].strip().isdigit() else 0,
-                        "sell_type": int(parts[3]) if parts[3].strip().isdigit() else 0,
-                        "sort_id": int(parts[4]) if parts[4].strip().isdigit() else 0,
-                        "profession_rewards": {
-                            profession: [
-                                (parts[index].strip(),
-                                 int(parts[index + 2]) if parts[index + 2].strip().isdigit() else 0,
-                                 int(parts[index + 1]) if parts[index + 1].strip().isdigit() else 0)
-                                for index in range(start, start + 12, 3)
-                                if parts[index].strip()
-                            ]
-                            for profession, start in ((0, 6), (1, 18), (2, 30))
-                        },
-                        "common_rewards": (
-                            [(parts[42].strip(),
-                              int(parts[44]) if parts[44].strip().isdigit() else 0,
-                              int(parts[43]) if parts[43].strip().isdigit() else 0)]
-                            if parts[42].strip() else []
-                        ),
-                        "price_type": int(parts[45]) if parts[45].strip().isdigit() else -1,
-                        "price": int(parts[46]) if parts[46].strip().isdigit() else 0,
-                        "product_id": parts[47].strip(),
-                        "level_min": int(parts[51]) if parts[51].strip().isdigit() else 0,
-                        "level_max": int(parts[52]) if parts[52].strip().isdigit() else 80,
-                        "time_list": parts[56].strip() if len(parts) > 56 else "",
-                    }
-                except (IndexError, TypeError, ValueError):
-                    continue
-    monthly_card_path = os.path.join(text_asset_root, "MonthlyCardData")
-    if os.path.exists(monthly_card_path):
-        with open(monthly_card_path, "r", encoding="utf-8") as table_file:
-            for row in table_file:
-                parts = row.strip().split(",")
-                if len(parts) < 19 or parts[0] != "*" or not parts[1].strip().isdigit():
-                    continue
-                MONTHLY_CARD_DATA[parts[1].strip()] = {
-                    "id": parts[1].strip(),
-                    "product_id": parts[17].strip(),
-                }
-    daily_buy_path = os.path.join(text_asset_root, "DailyBuyData")
-    if os.path.exists(daily_buy_path):
-        with open(daily_buy_path, "r", encoding="utf-8") as table_file:
-            for row in table_file:
-                parts = row.strip().split(",")
-                if len(parts) < 17 or parts[0] != "*" or not parts[1].isdigit():
-                    continue
-                DAILY_BUY_CONFIG[parts[1]] = {
-                    "id": parts[1], "product_id": parts[14].strip(),
-                    "dollar": parts[15].strip(),
-                    "value": int(parts[16]) if parts[16].isdigit() else 0
-                }
-    invest_path = os.path.join(text_asset_root, "InvestData")
-    if os.path.exists(invest_path):
-        with open(invest_path, "r", encoding="utf-8") as table_file:
-            for row in table_file:
-                parts = row.strip().split(",")
-                if len(parts) < 10 or parts[0] != "*" or not parts[1].isdigit():
-                    continue
-                try:
-                    INVEST_CONFIG[parts[1]] = {
-                        "id": parts[1], "item_id": parts[2].strip(),
-                        "item_count": int(parts[3] or 0),
-                        "quality": int(parts[4] or 0),
-                        "price_type": int(parts[5]) if parts[5].isdigit() else -1,
-                        "price": int(parts[6]) if parts[6].isdigit() else 0,
-                        "product_id": parts[7].strip(), "dollar": parts[8].strip(),
-                        "level_target": int(parts[9]) if parts[9].isdigit() else 0
                     }
                 except (TypeError, ValueError):
                     continue
@@ -932,7 +734,7 @@ try:
                         'hita_abs': int(parts[60]) if len(parts) > 60 and parts[60].isdigit() else 0,
                         'cria_abs': int(parts[61]) if len(parts) > 61 and parts[61].isdigit() else 0,
                     }
-        debug_log(f"[NPC CONFIG LOADED] count={len(NPC_CONFIG)}")
+        print(f"[NPC CONFIG LOADED] count={len(NPC_CONFIG)}")
 
     # MonsterData is authored with two IDs absent from this APK's NpcData.
     # Alias only their stat/template records; preserve the authored ID in the
@@ -971,7 +773,7 @@ try:
                         'patrol_distance': int(parts[18]) if parts[18].isdigit() else 400,
                         'wait_time': int(parts[19]) if len(parts) > 19 and parts[19].isdigit() else 300,
                     }
-        debug_log(f"[AI DATA CONFIG LOADED] count={len(AI_DATA_CONFIG)}")
+        print(f"[AI DATA CONFIG LOADED] count={len(AI_DATA_CONFIG)}")
 
     # Override ALL map 11 mission monsters with proper absolute stats
     # These are percentage-based in NpcData with level 9999, which causes incorrect stats
@@ -1128,7 +930,7 @@ try:
                     else:
                         if mid not in MONSTER_DATA: MONSTER_DATA[mid] = []
                         MONSTER_DATA[mid].append(entry)
-        debug_log(f"[MONSTER DATA LOADED] monsters_map={len(MONSTER_DATA)} static_npcs_map={len(STATIC_NPC_DATA)}")
+        print(f"[MONSTER DATA LOADED] monsters_map={len(MONSTER_DATA)} static_npcs_map={len(STATIC_NPC_DATA)}")
 
     # Load DailyExpData
     DAILY_EXP_CONFIG = {}
@@ -1146,7 +948,7 @@ try:
                         'group_time': int(parts[5]) if parts[5].isdigit() else 60,
                         'monsters': [x for x in parts[6].split("#") if x]
                     }
-        debug_log(f"[DAILY EXP CONFIG LOADED] count={len(DAILY_EXP_CONFIG)}")
+        print(f"[DAILY EXP CONFIG LOADED] count={len(DAILY_EXP_CONFIG)}")
 
     # Load KillTargetMissionData (Mission Spawns)
     # KillTargetMissionData rows are keyed by their own ID column.
@@ -1176,7 +978,7 @@ try:
                         'num': flash_num,
                         'require': require_num
                     })
-        debug_log(f"[KILL TARGET DATA LOADED] count={len(KILL_TARGET_SPAWNS)}")
+        print(f"[KILL TARGET DATA LOADED] count={len(KILL_TARGET_SPAWNS)}")
 
     # Load TargetCarMissionData
     tc_path = os.path.join(text_asset_root, "TargetCarMissionData")
@@ -1196,7 +998,7 @@ try:
                         'num': 1,
                         'require': require_num
                     })
-        debug_log(f"[TARGET CAR DATA LOADED] count={len(TARGET_CAR_SPAWNS)}")
+        print(f"[TARGET CAR DATA LOADED] count={len(TARGET_CAR_SPAWNS)}")
 
     # Load MissionRequireData (Counts and NPC targets for generic kill/collect missions)
     mr_path = os.path.join(text_asset_root, "MissionRequireData")
@@ -1213,7 +1015,7 @@ try:
                         'require_num': int(parts[5]) if parts[5].isdigit() else 1,
                         'item_id': parts[6] if len(parts) > 6 else ''
                     }
-        debug_log(f"[MISSION REQUIRE DATA LOADED] count={len(MISSION_REQUIRE_DATA)}")
+        print(f"[MISSION REQUIRE DATA LOADED] count={len(MISSION_REQUIRE_DATA)}")
 
     # Load MoveTargetMissionData (Arrive Target missions)
     mt_path = os.path.join(text_asset_root, "MoveTargetMissionData")
@@ -1227,7 +1029,7 @@ try:
                         'target_num': int(parts[3]) if parts[3].isdigit() else 1,
                         'target_point': parts[4] if len(parts) > 4 else ''
                     }
-        debug_log(f"[MOVE TARGET DATA LOADED] count={len(MOVE_TARGET_DATA)}")
+        print(f"[MOVE TARGET DATA LOADED] count={len(MOVE_TARGET_DATA)}")
 
     # Load SurveyMissionData (Survey missions)
     sv_path = os.path.join(text_asset_root, "SurveyMissionData")
@@ -1245,7 +1047,7 @@ try:
                         'auto_refresh_time': int(parts[11]) if len(parts) > 11 and parts[11].isdigit() else 0,
                         'need_num': int(parts[12]) if len(parts) > 12 and parts[12].isdigit() else 1
                     }
-        debug_log(f"[SURVEY DATA LOADED] count={len(SURVEY_DATA)}")
+        print(f"[SURVEY DATA LOADED] count={len(SURVEY_DATA)}")
 
     # Load ordered stops for MULTI_DELIVERY missions. Message 178 increments
     # one stop at a time, and message 182 may finish only after the final stop.
@@ -1262,7 +1064,7 @@ try:
                     })
         for stops in MULTI_DELIVERY_DATA.values():
             stops.sort(key=lambda stop: stop['index'])
-        debug_log(f"[MULTI DELIVERY DATA LOADED] count={len(MULTI_DELIVERY_DATA)}")
+        print(f"[MULTI DELIVERY DATA LOADED] count={len(MULTI_DELIVERY_DATA)}")
 
     # Universal Mission Requirements & Placements Enrichment
     for mid, m in missions_data.items():
@@ -1372,7 +1174,7 @@ try:
                     }
         garage_count = sum(1 for v in MOUNT_CONFIG.values() if v.get('need_show') == 1)
         motor_count = sum(1 for v in MOUNT_CONFIG.values() if v.get('is_motor') == 1)
-        debug_log(f"[MOUNT CONFIG LOADED] total={len(MOUNT_CONFIG)} garage={garage_count} motorcycles={motor_count}")
+        print(f"[MOUNT CONFIG LOADED] total={len(MOUNT_CONFIG)} garage={garage_count} motorcycles={motor_count}")
 
     # ColorData is the authority for garage paint prices. The client sends
     # only mountId/colorId in mount_use_color, so never trust a client price.
@@ -1387,7 +1189,7 @@ try:
                             'price_type': int(parts[3]),
                             'price': int(parts[4])
                         }
-        debug_log(f"[COLOR CONFIG LOADED] colors={len(COLOR_CONFIG)}")
+        print(f"[COLOR CONFIG LOADED] colors={len(COLOR_CONFIG)}")
 
     # Only configured PVE world-boss IDs may enter the corresponding scene.
     wild_boss_path = os.path.join(text_asset_root, "WildBossData")
@@ -1402,7 +1204,7 @@ try:
                         'min_level': int(parts[13]) if parts[13].isdigit() else 1,
                         'max_level': int(parts[14]) if parts[14].isdigit() else 80,
                     }
-        debug_log(f"[WILD BOSS CONFIG LOADED] count={len(WILD_BOSS_CONFIG)}")
+        print(f"[WILD BOSS CONFIG LOADED] count={len(WILD_BOSS_CONFIG)}")
 
     # Daily-copy UI receives its state from TAG 555.  Keep the IDs/types in
     # lockstep with CopySceneData so client tutorials can locate their target.
@@ -1426,7 +1228,6 @@ try:
                         'daily_slot': int(parts[16]) if len(parts) > 16 and parts[16].isdigit() else -1,
                         'time_inc': parts[8] if len(parts) > 8 else '',
                         'end_time': int(parts[10]) if parts[10].isdigit() else 0,
-                        'parm1': int(parts[14]) if len(parts) > 14 and parts[14].lstrip('-').isdigit() else 0,
                         'max_plays': int(parts[18]) if parts[18].isdigit() else 0,
                         'min_level': int(parts[19]) if parts[19].isdigit() else 1,
                         'max_level': int(parts[20]) if len(parts) > 20 and parts[20].isdigit() else 80,
@@ -1444,7 +1245,7 @@ try:
                         # copy ID for DailyExpData, rewards, and progress.
                         'single_map_id': parts[31] if len(parts) > 31 and parts[31].isdigit() else ''
                     }
-        debug_log(f"[COPY SCENE CONFIG LOADED] daily_copies={len(COPY_SCENE_CONFIG)}")
+        print(f"[COPY SCENE CONFIG LOADED] daily_copies={len(COPY_SCENE_CONFIG)}")
 
     # The APK builds each race route from PointType=2 CarMissionBlockData rows.
     # BlockIndex 0 is the local car start; positive indexes are ordered checkpoints.
@@ -1497,7 +1298,7 @@ try:
                         'flags': int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else 0,
                         'level': int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
                     }
-        debug_log(f"[ITEM CONFIG LOADED] items={len(ITEM_CONFIG)}")
+        print(f"[ITEM CONFIG LOADED] items={len(ITEM_CONFIG)}")
 
     # TitleData is needed for the client's honor reward display and its
     # explicit title-promotion request (Honor is attribute_other.title_exp).
@@ -1517,7 +1318,7 @@ try:
                                and int(parts[index]) > 0
                         ]
                     }
-        debug_log(f"[TITLE CONFIG LOADED] levels={len(TITLE_CONFIG)}")
+        print(f"[TITLE CONFIG LOADED] levels={len(TITLE_CONFIG)}")
 
     # BadgeData is separate from ItemData.  The APK uses it to validate the
     # next badge tier, required stack count, currency type, and merge cost.
@@ -1537,7 +1338,7 @@ try:
                         'value2': _badge_int(8, -1), 'money_type': _badge_int(9, 0),
                         'upgrade_cost': _badge_int(10, 0), 'upgrade_count': max(1, _badge_int(11, 4))
                     }
-        debug_log(f"[BADGE CONFIG LOADED] badges={len(BADGE_CONFIG)}")
+        print(f"[BADGE CONFIG LOADED] badges={len(BADGE_CONFIG)}")
 
     # RefineData is the source of truth for star-refine levels, costs,
     # protection materials, chances, and the attributes awarded per part.
@@ -1564,7 +1365,7 @@ try:
                 }
                 REFINE_CONFIG[row['id']] = row
                 REFINE_BY_PART_LEVEL[(row['job'], row['part'], row['level'])] = row
-        debug_log(f"[REFINE CONFIG LOADED] rows={len(REFINE_CONFIG)}")
+        print(f"[REFINE CONFIG LOADED] rows={len(REFINE_CONFIG)}")
 
     # Street Race's actual reward preview is resolved by AdaptData's
     # _drop_bc key, then ShowRewardData.  Read those client tables rather
@@ -1629,82 +1430,7 @@ try:
                         'money1': _show_reward_base_value('Money1'),
                         'money2': _show_reward_base_value('Money2'),
                     }
-        debug_log(f"[SHOW REWARD CONFIG LOADED] count={len(SHOW_REWARD_CONFIG)}")
-
-    slot_path = os.path.join(text_asset_root, "SlotData")
-    if os.path.exists(slot_path):
-        slot_columns = {}
-        with open(slot_path, "r", encoding="utf-8") as slot_file:
-            for line in slot_file:
-                parts = line.strip().split(",")
-                if len(parts) > 2 and parts[0] == "*" and parts[1] == "ID":
-                    slot_columns = {name.strip(): index for index, name in enumerate(parts)
-                                    if name.strip()}
-                    continue
-                if len(parts) < 3 or parts[0] != "*" or not parts[1].isdigit():
-                    continue
-                def _slot_value(name, default=""):
-                    index = slot_columns.get(name)
-                    return parts[index].strip() if index is not None and index < len(parts) else default
-                def _slot_int(name, default=0):
-                    try:
-                        return int(_slot_value(name, str(default)))
-                    except (TypeError, ValueError):
-                        return default
-                slot_id = _slot_value("ID")
-                SLOT_DATA_CONFIG[slot_id] = {
-                    "id": slot_id,
-                    "prob": _slot_int("Prob"),
-                    "prob_free": _slot_int("Prob_Free"),
-                    "drop_id": _slot_value("DropID"),
-                    "show_reward_id": _slot_value("ShowRewardID"),
-                    "reward_map": _slot_value("RewardMap"),
-                    "reward_effect": _slot_value("RewardEffect"),
-                    "desc": _slot_value("Desc"),
-                    "rank": _slot_int("Rank"),
-                    "max_play_num": _slot_int("MaxPlayNum"),
-                    "price_type": _slot_int("PriceType"),
-                    "price_cost": _slot_int("PriceCost"),
-                    "cast_type": _slot_value("CastType"),
-                }
-
-    slot_auto_path = os.path.join(text_asset_root, "SlotAutoData")
-    if os.path.exists(slot_auto_path):
-        auto_columns = {}
-        with open(slot_auto_path, "r", encoding="utf-8") as auto_file:
-            for line in auto_file:
-                parts = line.strip().split(",")
-                if len(parts) > 2 and parts[0] == "*" and parts[1] == "ID":
-                    auto_columns = {name.strip(): index for index, name in enumerate(parts)
-                                    if name.strip()}
-                    continue
-                if len(parts) < 3 or parts[0] != "*" or not parts[1].isdigit():
-                    continue
-                def _auto_value(name, default=""):
-                    index = auto_columns.get(name)
-                    return parts[index].strip() if index is not None and index < len(parts) else default
-                def _auto_int(name, default=0):
-                    try:
-                        return int(_auto_value(name, str(default)))
-                    except (TypeError, ValueError):
-                        return default
-                auto_id = _auto_value("ID")
-                SLOT_AUTO_CONFIG[auto_id] = {
-                    "id": auto_id,
-                    "roll_num": _auto_int("RollNum"),
-                    "max_play_num": _auto_int("MaxPlayNum"),
-                    "price_type": _auto_int("PriceType", -1),
-                    "price_cost": _auto_int("PriceCost"),
-                }
-
-    missing_slot_rewards = sorted(
-        slot_id for slot_id, slot_cfg in SLOT_DATA_CONFIG.items()
-        if (slot_cfg["prob"] > 0 or slot_cfg["prob_free"] > 0)
-        and not SHOW_REWARD_ITEM_SLOT_CONFIG.get(slot_cfg["show_reward_id"])
-    )
-    if missing_slot_rewards:
-        print(f"[SLOT CONFIG] missing authored rewards for slot IDs={missing_slot_rewards}")
-    debug_log(f"[SLOT CONFIG LOADED] prizes={len(SLOT_DATA_CONFIG)} spin_options={len(SLOT_AUTO_CONFIG)}")
+        print(f"[SHOW REWARD CONFIG LOADED] count={len(SHOW_REWARD_CONFIG)}")
 
     adapt_path = os.path.join(text_asset_root, "AdaptData")
     if os.path.exists(adapt_path):
@@ -1745,7 +1471,7 @@ try:
                     'hita': int(parts[18]) if len(parts) > 18 and parts[18].isdigit() else 316,
                     'cria': int(parts[19]) if len(parts) > 19 and parts[19].isdigit() else 3158,
                 }
-        debug_log(f"[ADAPT DATA LOADED] count={len(ADAPT_DATA)}")
+        print(f"[ADAPT DATA LOADED] count={len(ADAPT_DATA)}")
         dance_drop_ids = {
             str(drop_id)
             for reward_key in ('_drop_jh', '_drop_jhdj')
@@ -1810,7 +1536,7 @@ try:
                 key.strip(): values[index].strip() if index < len(values) else ""
                 for index, key in enumerate(table_header)
             }
-        debug_log(f"[{table_name.upper()} LOADED] count={len(target_table)}")
+        print(f"[{table_name.upper()} LOADED] count={len(target_table)}")
 
     # Level rewards have two separate client flows: the milestone page
     # (LevelRewardData) and the level-up popup (LevelPackageData). Keep their
@@ -1834,7 +1560,7 @@ try:
                 key.strip(): values[index].strip() if index < len(values) else ""
                 for index, key in enumerate(table_header)
             }
-        debug_log(f"[{table_name.upper()} LOADED] count={len(target_table)}")
+        print(f"[{table_name.upper()} LOADED] count={len(target_table)}")
 
     # Daily activity and claim thresholds are also client-authored tables.
     # DailyActiveData has three legacy/unexported columns before Score, Count,
@@ -1857,7 +1583,7 @@ try:
                     "Title": row[8].strip(),
                     "Desc": row[9].strip(),
                 }
-        debug_log(f"[DAILY ACTIVE CONFIG LOADED] count={len(DAILY_ACTIVE_CONFIG)}")
+        print(f"[DAILY ACTIVE CONFIG LOADED] count={len(DAILY_ACTIVE_CONFIG)}")
 
     daily_active_reward_path = os.path.join(text_asset_root, "DailyActiveRewardData")
     if os.path.exists(daily_active_reward_path):
@@ -1873,7 +1599,7 @@ try:
                 key.strip(): values[index].strip() if index < len(values) else ""
                 for index, key in enumerate(table_header)
             }
-        debug_log(f"[DAILY ACTIVE REWARD CONFIG LOADED] count={len(DAILY_ACTIVE_REWARD_CONFIG)}")
+        print(f"[DAILY ACTIVE REWARD CONFIG LOADED] count={len(DAILY_ACTIVE_REWARD_CONFIG)}")
 
     # Load FunctionData (feature unlock gates by level)
     func_path = os.path.join(text_asset_root, "FunctionData")
@@ -1891,7 +1617,7 @@ try:
                         'unlock_type': int(parts[10]) if len(parts) > 10 and parts[10].isdigit() else 0,
                         'side_mission': parts[13] if len(parts) > 13 else ''
                     }
-        debug_log(f"[FUNCTION DATA LOADED] count={len(FUNCTION_DATA)}")
+        print(f"[FUNCTION DATA LOADED] count={len(FUNCTION_DATA)}")
 
     # Load EquipData (equipment definitions)
     equip_path = os.path.join(text_asset_root, "EquipData")
@@ -1925,7 +1651,7 @@ try:
                         'identify': parts[25].strip() if len(parts) > 25 else '',
                         'quality_id': parts[26].strip() if len(parts) > 26 else ''
                     }
-        debug_log(f"[EQUIP CONFIG LOADED] count={len(EQUIP_CONFIG)}")
+        print(f"[EQUIP CONFIG LOADED] count={len(EQUIP_CONFIG)}")
 
     # EquipData.DropId1..6 select the attribute roll pool for the item's
     # initial quality. EquipDrop stores the number of attributes and the
@@ -1962,7 +1688,7 @@ try:
                         ],
                         'attributes': attributes
                     }
-        debug_log(f"[EQUIP DROP CONFIG LOADED] count={len(EQUIP_DROP_CONFIG)}")
+        print(f"[EQUIP DROP CONFIG LOADED] count={len(EQUIP_DROP_CONFIG)}")
 
     # Weapons use skill affixes from WeaponDrop rather than stat affixes from
     # EquipDrop. The random_attri packet has skillId for this equipment slot.
@@ -1995,7 +1721,7 @@ try:
                         ],
                         'skills': skills
                     }
-        debug_log(f"[WEAPON DROP CONFIG LOADED] count={len(WEAPON_DROP_CONFIG)}")
+        print(f"[WEAPON DROP CONFIG LOADED] count={len(WEAPON_DROP_CONFIG)}")
 
     # These are the same tables EquipData/GameItem use to calculate displayed
     # quality and per-level equipment attributes in the APK.
@@ -2013,7 +1739,7 @@ try:
                         'equip_inherit': int(parts[7]) if len(parts) > 7 and parts[7].isdigit() else 0,
                         'weapon_inherit': int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else 0
                     })
-        debug_log(f"[QUALITY CONFIG LOADED] ids={len(QUALITY_CONFIG)}")
+        print(f"[QUALITY CONFIG LOADED] ids={len(QUALITY_CONFIG)}")
 
     upgrade_path = os.path.join(text_asset_root, "EquipmentUpgradeData")
     if os.path.exists(upgrade_path):
@@ -2033,7 +1759,7 @@ try:
                         'money_k': int(parts[17]) if len(parts) > 17 and parts[17].lstrip('-').isdigit() else 0,
                         'money_b': int(parts[18]) if len(parts) > 18 and parts[18].lstrip('-').isdigit() else 0
                     }
-        debug_log(f"[EQUIPMENT UPGRADE CONFIG LOADED] positions={len(EQUIPMENT_UPGRADE_CONFIG)}")
+        print(f"[EQUIPMENT UPGRADE CONFIG LOADED] positions={len(EQUIPMENT_UPGRADE_CONFIG)}")
 
     # Load DownloadRewardData (expansion download rewards)
     dl_path = os.path.join(text_asset_root, "DownloadRewardData")
@@ -2051,7 +1777,7 @@ try:
                             DOWNLOAD_REWARD_DATA.append((item_id, count, quality))
                         elif item_id and count > 0 and item_id not in ITEM_CONFIG:
                             print(f"[WARN] Download reward item {item_id} not found in ItemData, skipping")
-        debug_log(f"[DOWNLOAD REWARD LOADED] items={len(DOWNLOAD_REWARD_DATA)}")
+        print(f"[DOWNLOAD REWARD LOADED] items={len(DOWNLOAD_REWARD_DATA)}")
 
     # Load SkillupgradeData (skill upgrade costs by level)
     sku_path = os.path.join(text_asset_root, "SkillupgradeData")
@@ -2065,7 +1791,7 @@ try:
                         'price_type': int(parts[2]) if parts[2].isdigit() else 0,
                         'price_value': int(parts[3]) if parts[3].isdigit() else 0
                     }
-        debug_log(f"[SKILL UPGRADE DATA LOADED] levels={len(SKILL_UPGRADE_DATA)}")
+        print(f"[SKILL UPGRADE DATA LOADED] levels={len(SKILL_UPGRADE_DATA)}")
 
     # Load RelifeData (respawn tier config)
     relife_path = os.path.join(text_asset_root, "RelifeData")
@@ -2081,7 +1807,7 @@ try:
                         'use_count': int(parts[4]) if parts[4].isdigit() else 1
                     })
         RELIFE_DATA.sort(key=lambda x: x['min_count'])
-        debug_log(f"[RELIFE DATA LOADED] tiers={len(RELIFE_DATA)}")
+        print(f"[RELIFE DATA LOADED] tiers={len(RELIFE_DATA)}")
 
     # Load ServerData (server list definitions)
     srv_path = os.path.join(text_asset_root, "ServerData")
@@ -2107,7 +1833,7 @@ try:
                         'new_server': int(parts[14]) if parts[14].isdigit() else 0,
                         'player_state': int(parts[15]) if parts[15].lstrip('-').isdigit() else -4,
                     })
-        debug_log(f"[SERVER DATA LOADED] servers={len(SERVER_DATA_LIST)}")
+        print(f"[SERVER DATA LOADED] servers={len(SERVER_DATA_LIST)}")
 
     # Load ConfigData (global game configuration)
     cfg_path = os.path.join(text_asset_root, "ConfigData")
@@ -2125,7 +1851,7 @@ try:
                     else:  # int
                         try: GAME_CONFIG[key] = int(raw_val)
                         except: GAME_CONFIG[key] = raw_val
-        debug_log(f"[GAME CONFIG LOADED] keys={len(GAME_CONFIG)}")
+        print(f"[GAME CONFIG LOADED] keys={len(GAME_CONFIG)}")
 
 except: traceback.print_exc()
 
@@ -2829,7 +2555,7 @@ def _save_chars_atomic(data):
             fcntl.flock(process_lock.fileno(), fcntl.LOCK_EX)
         # 1. Write new state to temporary file
         with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(_serializable_character_data(data), f, default=_json_default_handler)
+            json.dump(_serializable_character_data(data), f, indent=4, default=_json_default_handler)
             f.flush()
             os.fsync(f.fileno())
 
@@ -2837,7 +2563,7 @@ def _save_chars_atomic(data):
         if os.path.exists(CHAR_DB) and os.path.getsize(CHAR_DB) > 10:
             try:
                 with open(CHAR_DB, "r", encoding="utf-8") as src, open(BAK_DB, "w", encoding="utf-8") as dst:
-                    shutil.copyfileobj(src, dst, length=1024 * 1024)
+                    dst.write(src.read())
                     dst.flush()
                     os.fsync(dst.fileno())
             except: pass
@@ -4467,8 +4193,7 @@ def is_active_daily_copy_current(char):
     # Copy entry uses the copy ID as its map, except Street Race, whose
     # configured map ID is the actual scene. Do not infer an active daily
     # run merely because a shared world map appears as another copy's MapId.
-    expected_map = (str(cfg.get('map_id') or active_copy_id)
-                    if cfg.get('subtype') in (7, 11) else active_copy_id)
+    expected_map = str(cfg.get('map_id') or active_copy_id) if cfg.get('subtype') == 7 else active_copy_id
     if active_copy_id in DAILY_EXP_CONFIG and cfg.get('single_map_id'):
         expected_map = str(cfg['single_map_id'])
     return current_map == expected_map
@@ -4755,7 +4480,7 @@ def get_relife_config(death_count):
         return RELIFE_DATA[-1]
     return {'id': 1, 'min_count': 1, 'max_count': 999999, 'use_count': 1}
 
-def remember_relife_offer(char, rebirth_type, cost, item_id='9011', killer=None):
+def remember_relife_offer(char, rebirth_type, cost, item_id='9202', killer=None):
     """Bind a one-shot revive prompt to the character and map that died."""
     if not isinstance(char, dict):
         return encode_sproto([(0, int(rebirth_type)), (1, max(1, int(cost))), (2, str(item_id))])
@@ -4782,7 +4507,7 @@ def encode_pending_relife_offer(offer):
     fields = [
         (0, int(offer.get('type', 1))),
         (1, max(1, int(offer.get('cost', 1)))),
-        (2, str(offer.get('item_id') or '9011')),
+        (2, str(offer.get('item_id') or '9202')),
     ]
     if offer.get('killer_id'):
         fields.extend([(3, int(offer['killer_id'])), (4, str(offer.get('killer_name', '')))])
@@ -5374,8 +5099,6 @@ def get_char_ov(c, sort_index=None):
 
 MONEY_FIELDS = ('cash', 'gold', 'diamond', 'guild_contribute', 'battle_coin', 'activity_coin')
 MONEY_DEFAULTS = (1000, 100, 1000, 0, 0, 0)
-VIDEO_REWARD_DAILY_LIMIT = 20
-VIDEO_REWARD_DIAMONDS = 10
 CHARACTER_TRANSACTION_LOCKS = {}
 CHARACTER_TRANSACTION_LOCKS_GUARD = threading.Lock()
 
@@ -7110,7 +6833,7 @@ def build_npc_attr_sproto(nid, name, x, z, o, existing_inst_id=None):
         hp_cur = hp_max
         NPC_HP_MAP[inst_id] = hp_max
         NPC_INST_MAP[inst_id] = str(nid)
-        debug_log(f"[NPC SPAWN] inst_id={inst_id} npcid={nid} hp_max={hp_max} atk={atk} def={df}")
+        print(f"[NPC SPAWN] inst_id={inst_id} npcid={nid} hp_max={hp_max} atk={atk} def={df}")
     else:
         # Reconnects must recreate the current NPC at its live position and
         # health without allocating a second server instance.
@@ -7540,10 +7263,10 @@ def start_equipment_stage_runtime(conn, owner, state):
         finish_equipment_stage(run, win=False)
     def tick():
         if not state.get('ai_active') or state.get('_finish_handled'):
-            return False
+            return
         char = current_owner()
         if not char:
-            return False
+            return
         active_conn = ALL_CONNECTIONS.get(int(char.get('id', 0)), (conn, char))[0] or conn
         try:
             more = run_exp_monster_ai_shared(
@@ -7551,7 +7274,11 @@ def start_equipment_stage_runtime(conn, owner, state):
         except Exception as exc:
             print(f"[EQUIP AI] {exc}")
             more = bool(state.get('ai_active'))
-        return bool(more and state.get('ai_active') and not state.get('_finish_handled'))
+        if more and state.get('ai_active') and not state.get('_finish_handled'):
+            timer = threading.Timer(0.2, tick)
+            timer.daemon = True
+            state['ai_timer'] = timer
+            timer.start()
     def timeout():
         if not state.get('_finish_handled') and int(time.time()) >= int(state.get('end_time', 0)):
             finish_equipment_stage(state, win=False)
@@ -7563,7 +7290,10 @@ def start_equipment_stage_runtime(conn, owner, state):
         timer.daemon = True
         state['timeout_timer'] = timer
         timer.start()
-        state['ai_timer'] = RepeatingTask(0.2, tick).start()
+        timer = threading.Timer(0.2, tick)
+        timer.daemon = True
+        state['ai_timer'] = timer
+        timer.start()
 
 def flush_exp_kill_tracker(exp_state, conn, picked_char, send_rpc_push):
     """Credit each valid NPC death once, including partial waves at timeout."""
@@ -8216,20 +7946,16 @@ def _finish_exp_stage_impl(conn, send_rpc_push, picked_char, exp_state, win=True
 
     print(f"[EXP STAGE] Finished copy={copy_id} win={win} total_kills={exp_state['total_kills']} exp={exp_reward} cash={cash_reward}")
 
-def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid, grant_rewards=True):
+def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid):
     state = picked_char.get('exp_stage_state') if picked_char else None
     if state and inst_id:
         run_lock = state.setdefault('_kill_lock', threading.RLock())
         with run_lock:
-            return _on_npc_killed_locked(
-                conn, send_rpc_push, picked_char, inst_id, npcid, grant_rewards
-            )
-    return _on_npc_killed_locked(
-        conn, send_rpc_push, picked_char, inst_id, npcid, grant_rewards
-    )
+            return _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid)
+    return _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid)
 
 
-def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, grant_rewards=True):
+def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid):
     if not picked_char: return
 
     exp_state = picked_char.get('exp_stage_state')
@@ -8284,7 +8010,7 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
         # cannot be resolved for mission credit.
         if exp_kill_counted:
             print(f"[EXP KILL] COUNTED wave_kills={exp_state['wave_kills']} total_kills={exp_state['total_kills']} wave={exp_state['cur_wave']} group={exp_state['cur_group']}")
-        if valid_kill and grant_rewards:
+        if valid_kill:
             kt = exp_state.get('kill_tracker', [])
             # Mission progress is per defeated instance.  A wave can contain
             # many copies of the same NPC ID, so keep duplicates here and
@@ -8320,7 +8046,7 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
         exp_state.get('monster_heading', {}).pop(inst_id, None) if exp_state else None
         exp_state.get('attack_cd', {}).pop(inst_id, None) if exp_state else None
 
-    if valid_kill and grant_rewards:
+    if valid_kill:
         npc_stats = get_npc_attr(npcid)
         npc_lv = npc_stats.get('lv', 1)
         char_lv = picked_char.get('level', 1)
@@ -8356,14 +8082,15 @@ def start_exp_stage_runtime(conn, owner, state):
         else:
             finish_exp_stage(dead_conn or conn, push, dead_char, run, win=False)
     def tick():
-        if not state.get('ai_active'): return False
+        if not state.get('ai_active'): return
         char = current_owner()
-        if not char: return False
+        if not char: return
         active_conn = ALL_CONNECTIONS.get(int(char.get('id', 0)), (conn, char))[0] or conn
         try: more = run_exp_monster_ai_shared(state, exp_run_map_id(state), char, push, push, active_conn, on_player_die)
         except Exception as exc:
             print(f'[EXP AI] {exc}'); more = bool(state.get('ai_active'))
-        return bool(more and state.get('ai_active'))
+        if more and state.get('ai_active'):
+            t = threading.Timer(0.2, tick); t.daemon = True; state['ai_timer'] = t; t.start()
     def timeout():
         run_lock = state.setdefault('_kill_lock', threading.RLock())
         with run_lock:
@@ -8374,7 +8101,7 @@ def start_exp_stage_runtime(conn, owner, state):
                 finish_exp_stage(active_conn, push, char, state, win=False)
     t = threading.Timer(max(1, int(state.get('end_time', time.time()+1))-int(time.time())), timeout)
     t.daemon = True; state['timeout_timer'] = t; t.start()
-    state['ai_timer'] = RepeatingTask(0.2, tick).start()
+    t = threading.Timer(0.2, tick); t.daemon = True; state['ai_timer'] = t; t.start()
 
 
 def _spawn_guild_boss(conn, char, boss_id, map_id):
@@ -8444,15 +8171,13 @@ def _guild_boss_sync_npc(guild, map_id, inst_id, stats, hp_cur):
         sync_npc_attrs_rpc(peer_conn, inst_id, stats, hp_cur)
 
 def _schedule_guild_boss_tick(runtime_key, runtime):
+    timer = threading.Timer(0.2, _guild_boss_ai_tick, args=(runtime_key,))
+    timer.daemon = True
     with GUILD_BOSS_LOCK:
         if GUILD_BOSS_RUNTIMES.get(runtime_key) is not runtime or runtime.get('finished'):
             return
-        task = runtime.get('timer')
-        if task is not None and task.is_alive():
-            return
-        runtime['timer'] = RepeatingTask(
-            0.2, lambda: _guild_boss_ai_tick(runtime_key)
-        ).start()
+        runtime['timer'] = timer
+    timer.start()
 
 def _guild_boss_remove_instance(runtime_key, inst_id, map_id):
     with GUILD_BOSS_LOCK:
@@ -8500,17 +8225,15 @@ def _guild_boss_ai_tick(runtime_key):
     with GUILD_BOSS_LOCK:
         runtime = GUILD_BOSS_RUNTIMES.get(runtime_key)
     if not runtime or runtime.get('finished'):
-        return False
+        return
     tick_lock = runtime['tick_lock']
     if not tick_lock.acquire(False):
-        return True
+        _schedule_guild_boss_tick(runtime_key, runtime)
+        return
     try:
         _guild_boss_ai_tick_locked(runtime_key, runtime)
     finally:
         tick_lock.release()
-    with GUILD_BOSS_LOCK:
-        return (GUILD_BOSS_RUNTIMES.get(runtime_key) is runtime
-                and not runtime.get('finished'))
 
 def _guild_boss_skill_range(skill, attack_distance):
     skill_cfg = SKILL_CONFIG[skill]
@@ -8678,7 +8401,7 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
                     relife_cfg = get_relife_config(death_count)
                     relife_type = 0 if map_relife_type(str(v_char.get('map_id', ''))) == 2 else 1
                     offer = remember_relife_offer(
-                        v_char, relife_type, relife_cfg.get('use_count', 1), '9011')
+                        v_char, relife_type, relife_cfg.get('use_count', 1), '9202')
                     send_rpc_push_safe(v_conn, 618, offer)
                     save_chars(all_accounts_chars)
     _schedule_guild_boss_tick(runtime_key, runtime)
@@ -9056,7 +8779,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         # proximity-driven.
         # Sending TAG 509 duplicates those client-owned actors and leaves a
         # second server copy alive after the client reports the local death.
-        debug_log(f"[NPC SPAWN] client-owned MonsterData simulation map={map_str}; suppress server duplicates")
+        print(f"[NPC SPAWN] client-owned MonsterData simulation map={map_str}; suppress server duplicates")
         return
     if map_str != "11" and (map_str in STATIC_NPC_DATA or map_str in MONSTER_DATA):
         if map_str in STATIC_NPC_DATA:
@@ -9688,8 +9411,7 @@ def snapshot_character_reward_state(picked_char, include_mails=False):
     """Snapshot only persistent fields mutated by reward grants, not live runtime state."""
     keys = {bucket for bucket, _tag in BACKPACKS.values()}
     keys.update(MONEY_FIELDS)
-    keys.update(('next_item_index', 'exp', 'level', 'hp', 'title_exp', 'active_missions',
-                 'big_sale_purchases', 'shop_purchases'))
+    keys.update(('next_item_index', 'exp', 'level', 'hp', 'title_exp', 'active_missions'))
     if include_mails:
         keys.add('mails')
     present = {key for key in keys if key in picked_char}
@@ -9701,288 +9423,6 @@ def restore_character_reward_state(picked_char, snapshot):
         picked_char.pop(key, None)
     for key, value in values.items():
         picked_char[key] = value
-
-def ensure_slot_state(picked_char):
-    state = picked_char.get('slot_state')
-    if not isinstance(state, dict):
-        state = {}
-    try:
-        free_spins = max(0, int(state.get('free_spins', picked_char.get('slot_free_spins', 0))))
-    except (TypeError, ValueError):
-        free_spins = 0
-    try:
-        sum_num = max(0, int(state.get('sum_num', 0)))
-    except (TypeError, ValueError):
-        sum_num = 0
-    pending = state.get('pending')
-    if not isinstance(pending, dict):
-        pending = {}
-    state['free_spins'] = free_spins
-    state['sum_num'] = sum_num
-    state['pending'] = pending
-    picked_char['slot_state'] = state
-    return state
-
-def slot_reward_list(slot_id):
-    slot_cfg = SLOT_DATA_CONFIG.get(str(slot_id), {})
-    reward_id = str(slot_cfg.get('show_reward_id', '') or '')
-    authored_rewards = SHOW_REWARD_ITEM_SLOT_CONFIG.get(reward_id, [])
-    if not authored_rewards:
-        return []
-    rewards = []
-    value_item_types = {
-        7: '1001',  # ADD_COIN
-        8: '1002',  # ADD_GOLD
-        9: '1003',  # ADD_DIAMOND
-        10: '2002', # ADD_HONOR
-        11: '2001', # ADD_EXP
-    }
-    for item_id, quality, amount in authored_rewards:
-        item_id = str(item_id)
-        try:
-            quality, amount = int(quality), int(amount)
-        except (TypeError, ValueError):
-            return []
-        if amount <= 0:
-            return []
-        if item_id in DIRECT_REWARD_RESOURCE_IDS:
-            rewards.append((item_id, quality, amount))
-            continue
-
-        item_cfg = ITEM_CONFIG.get(item_id)
-        if not item_cfg:
-            return []
-        try:
-            item_type = int(item_cfg.get('type', -1))
-            function_value = int(item_cfg.get('function', 0) or 0)
-        except (TypeError, ValueError):
-            return []
-        value_item_id = value_item_types.get(item_type)
-        if value_item_id:
-            multiplier = function_value or 1
-            if multiplier < 1:
-                return []
-            rewards.append((value_item_id, 0, amount * multiplier))
-            continue
-
-        rewards.append((item_id, quality, amount))
-    return rewards
-
-def slot_item_payload(slot_uuid, slot_id):
-    rewards = slot_reward_list(slot_id)
-    if not rewards:
-        return None
-    reward_items = [
-        encode_sproto([(0, item_id), (1, amount), (3, quality)])
-        for item_id, quality, amount in rewards
-    ]
-    return encode_sproto([
-        (0, str(slot_uuid)), (1, str(slot_id)), (2, reward_items)
-    ])
-
-def slot_state_payload(picked_char, include_rules=False):
-    state = ensure_slot_state(picked_char)
-    info = encode_sproto([
-        (1, int(state['free_spins'])),
-        (2, int(state['sum_num']))
-    ])
-    pending = {}
-    for slot_uuid, entry in state['pending'].items():
-        if not isinstance(entry, dict):
-            continue
-        slot_id = str(entry.get('id', '') or '')
-        payload = slot_item_payload(slot_uuid, slot_id)
-        if payload is not None:
-            pending[str(slot_uuid)] = payload
-    fields = [(0, info)]
-    if include_rules:
-        rules = {}
-        for slot_id, slot_cfg in SLOT_DATA_CONFIG.items():
-            rules[slot_id] = encode_sproto([
-                (0, slot_id), (1, str(slot_cfg['reward_map'])),
-                (2, str(slot_cfg['reward_effect'])), (3, str(slot_cfg['desc'])),
-                (4, int(slot_cfg['rank'])), (5, str(slot_cfg['show_reward_id'])),
-                (6, int(slot_cfg['price_type'])), (7, int(slot_cfg['price_cost']))
-            ])
-        fields.extend([(1, rules), (2, pending)])
-    else:
-        fields.append((1, pending))
-    return encode_sproto(fields)
-
-def slot_spin_result(picked_char, conn, request_body):
-    if not is_current_character_connection(conn, picked_char):
-        print(f"[SLOT] rejected stale spin request player={picked_char.get('id')}")
-        return None, False
-    auto_id = get_val_str(request_body, 0, '')
-    auto_cfg = SLOT_AUTO_CONFIG.get(auto_id)
-    if not auto_cfg:
-        print(f"[SLOT] rejected unknown spin option player={picked_char.get('id')} id={auto_id!r}")
-        return None, False
-    try:
-        roll_count = int(auto_cfg.get('roll_num', 0))
-        price_type = int(auto_cfg.get('price_type', -1))
-        price_cost = int(auto_cfg.get('price_cost', 0))
-    except (TypeError, ValueError):
-        print(f"[SLOT] rejected malformed spin option id={auto_id}")
-        return None, False
-    if roll_count <= 0 or roll_count > 100 or price_cost < 0:
-        print(f"[SLOT] rejected invalid spin option id={auto_id} rolls={roll_count} cost={price_cost}")
-        return None, False
-    if not 0 <= price_type < len(MONEY_FIELDS):
-        print(f"[SLOT] rejected invalid price type id={auto_id} type={price_type}")
-        return None, False
-
-    with get_character_transaction_lock(picked_char):
-        state_was_present = 'slot_state' in picked_char
-        old_state = copy.deepcopy(picked_char.get('slot_state'))
-        state = ensure_slot_state(picked_char)
-        use_free_spin = auto_id == '1' and state['free_spins'] > 0
-        charged = not use_free_spin
-        if charged and get_currency_balance(picked_char, price_type) < price_cost:
-            print(f"[SLOT] insufficient currency player={picked_char.get('id')} "
-                  f"type={price_type} cost={price_cost}")
-            return None, False
-
-        probability_field = 'prob_free' if use_free_spin else 'prob'
-        outcomes = []
-        invalid_outcomes = []
-        for slot_id, slot_cfg in SLOT_DATA_CONFIG.items():
-            try:
-                weight = int(slot_cfg.get(probability_field, 0))
-            except (TypeError, ValueError):
-                invalid_outcomes.append(slot_id)
-                continue
-            if weight < 0:
-                invalid_outcomes.append(slot_id)
-                continue
-            if weight == 0:
-                continue
-            reward_list = slot_reward_list(slot_id)
-            if not reward_list:
-                invalid_outcomes.append(slot_id)
-                continue
-            outcomes.append((slot_id, weight, reward_list))
-        if invalid_outcomes:
-            print(f"[SLOT] rejected spin because weighted outcomes are invalid "
-                  f"player={picked_char.get('id')} field={probability_field} "
-                  f"ids={invalid_outcomes}")
-            return None, False
-        total_weight = sum(weight for _slot_id, weight, _rewards in outcomes)
-        if total_weight <= 0:
-            print(f"[SLOT] no valid outcomes player={picked_char.get('id')} free={use_free_spin}")
-            return None, False
-
-        selected = []
-        for _ in range(roll_count):
-            draw = random.randint(1, total_weight)
-            for slot_id, weight, reward_list in outcomes:
-                draw -= weight
-                if draw <= 0:
-                    selected.append((slot_id, reward_list))
-                    break
-
-        old_money_present = MONEY_FIELDS[price_type] in picked_char
-        old_money = picked_char.get(MONEY_FIELDS[price_type])
-        if use_free_spin:
-            state['free_spins'] -= 1
-        else:
-            set_currency_balance(
-                picked_char, price_type,
-                get_currency_balance(picked_char, price_type) - price_cost
-            )
-        for slot_id, _reward_list in selected:
-            slot_uuid = uuid.uuid4().hex
-            state['pending'][slot_uuid] = {'id': slot_id}
-        state['sum_num'] += roll_count
-        if not save_chars(all_accounts_chars):
-            if state_was_present:
-                picked_char['slot_state'] = old_state
-            else:
-                picked_char.pop('slot_state', None)
-            if old_money_present:
-                picked_char[MONEY_FIELDS[price_type]] = old_money
-            else:
-                picked_char.pop(MONEY_FIELDS[price_type], None)
-            print(f"[SLOT] persistence failed player={picked_char.get('id')} option={auto_id}")
-            return None, False
-
-        print(f"[SLOT] spun player={picked_char.get('id')} option={auto_id} rolls={roll_count} "
-              f"free={use_free_spin} cost={price_cost if charged else 0} outcomes="
-              f"{[slot_id for slot_id, _rewards in selected]}")
-        return slot_state_payload(picked_char), charged
-
-def claim_slot_reward(picked_char, conn, send_rpc_push, slot_uuid):
-    if not is_current_character_connection(conn, picked_char):
-        print(f"[SLOT] rejected stale reward claim player={picked_char.get('id')}")
-        return
-    with get_character_transaction_lock(picked_char):
-        state = ensure_slot_state(picked_char)
-        entry = state['pending'].get(str(slot_uuid))
-        if not isinstance(entry, dict):
-            print(f"[SLOT] ignored missing or duplicate reward claim player={picked_char.get('id')} "
-                  f"uuid={slot_uuid!r}")
-            return
-        rewards = slot_reward_list(entry.get('id', ''))
-        if not rewards:
-            print(f"[SLOT] reward claim has invalid table row player={picked_char.get('id')} "
-                  f"id={entry.get('id')}")
-            return
-        if not can_add_reward_list_to_inventory(picked_char, rewards):
-            print(f"[SLOT] reward claim deferred for backpack capacity player={picked_char.get('id')} "
-                  f"uuid={slot_uuid}")
-            return
-        slot_state_snapshot = copy.deepcopy(state)
-        reward_snapshot = snapshot_character_reward_state(picked_char)
-        grant_item_rewards(picked_char, rewards, save=False)
-        state['pending'].pop(str(slot_uuid), None)
-        if not save_chars(all_accounts_chars):
-            restore_character_reward_state(picked_char, reward_snapshot)
-            picked_char['slot_state'] = slot_state_snapshot
-            print(f"[SLOT] reward persistence failed player={picked_char.get('id')} uuid={slot_uuid}")
-            return
-        sync_char_attrs_rpc(conn, picked_char)
-        if any(item_id not in DIRECT_REWARD_RESOURCE_IDS for item_id, _quality, _amount in rewards):
-            sync_all_backpacks(picked_char, send_rpc_push)
-        print(f"[SLOT] claimed player={picked_char.get('id')} id={entry.get('id')} uuid={slot_uuid}")
-
-def claim_slot_sum_reward(picked_char, conn, send_rpc_push):
-    rewards_to_show = []
-    if not is_current_character_connection(conn, picked_char):
-        print(f"[SLOT] rejected stale milestone claim player={picked_char.get('id')}")
-        return encode_sproto([(0, []), (1, 0)])
-
-    with get_character_transaction_lock(picked_char):
-        state = ensure_slot_state(picked_char)
-        if state['sum_num'] >= SLOT_SUM_REWARD_THRESHOLD:
-            rewards = slot_reward_list('9999')
-            if not rewards:
-                print(f"[SLOT] milestone reward table is missing player={picked_char.get('id')}")
-            elif not can_add_reward_list_to_inventory(picked_char, rewards):
-                print(f"[SLOT] milestone claim deferred for backpack capacity "
-                      f"player={picked_char.get('id')}")
-            else:
-                slot_state_snapshot = copy.deepcopy(state)
-                reward_snapshot = snapshot_character_reward_state(picked_char)
-                grant_item_rewards(picked_char, rewards, save=False)
-                state['sum_num'] -= SLOT_SUM_REWARD_THRESHOLD
-                if save_chars(all_accounts_chars):
-                    rewards_to_show = [
-                        encode_sproto([(0, item_id), (1, amount), (3, quality)])
-                        for item_id, quality, amount in rewards
-                    ]
-                    sync_char_attrs_rpc(conn, picked_char)
-                    if any(item_id not in DIRECT_REWARD_RESOURCE_IDS
-                           for item_id, _quality, _amount in rewards):
-                        sync_all_backpacks(picked_char, send_rpc_push)
-                    print(f"[SLOT] milestone claimed player={picked_char.get('id')} "
-                          f"remaining={state['sum_num']}")
-                else:
-                    restore_character_reward_state(picked_char, reward_snapshot)
-                    picked_char['slot_state'] = slot_state_snapshot
-                    print(f"[SLOT] milestone persistence failed player={picked_char.get('id')}")
-        return encode_sproto([
-            (0, rewards_to_show), (1, int(state['sum_num']))
-        ])
 
 def download_reward_catalog():
     """Return the four rewards shown by the APK's DownloadRewardData table."""
@@ -10044,7 +9484,7 @@ def ensure_download_rewards_granted(picked_char):
           f"items={[(item_id, count) for item_id, _quality, count in pending]}")
     return True
 
-def resolve_item_package_rewards(item_id, package_count=1, character=None):
+def resolve_item_package_rewards(item_id, package_count=1):
     """Return exact client package rewards when their source data exists."""
     item_id = str(item_id)
     try:
@@ -10053,74 +9493,21 @@ def resolve_item_package_rewards(item_id, package_count=1, character=None):
         return []
     if package_count < 1:
         return []
-
-    cfg = ITEM_CONFIG.get(item_id, {})
-    equipment_rewards = resolve_equipment_pack_rewards(
-        item_id, package_count, character
-    )
-    if equipment_rewards is not None:
-        return equipment_rewards
-
-    badge_level = ITEM_PACKAGE_RANDOM_BADGE_LEVELS.get(item_id)
-    badge_type = ITEM_PACKAGE_BADGE_TYPES.get(item_id)
-    if badge_level is not None or badge_type is not None:
-        expected_level = badge_level if badge_level is not None else 1
-        candidates = [
-            str(badge_id) for badge_id, badge_cfg in BADGE_CONFIG.items()
-            if int(badge_cfg.get('level', -1)) == expected_level
-            and (badge_type is None or int(badge_cfg.get('badge_type', -1)) == badge_type)
-            and str(badge_id) in ITEM_CONFIG
-        ]
-        if not candidates:
-            return []
+    random_pool = ITEM_PACKAGE_RANDOM_REWARD_POOLS.get(item_id)
+    if random_pool:
         totals = {}
         for _ in range(package_count):
-            reward_id = str(random.choice(candidates))
-            quality = int(ITEM_CONFIG.get(reward_id, {}).get('quality', 0))
-            totals[(reward_id, quality)] = totals.get((reward_id, quality), 0) + 1
-        return [(reward_id, quality, count)
-                for (reward_id, quality), count in sorted(totals.items())]
+            reward_id = str(random.choice(random_pool))
+            totals[reward_id] = totals.get(reward_id, 0) + 1
+        return [(reward_id, 0, count) for reward_id, count in sorted(totals.items())]
 
+    cfg = ITEM_CONFIG.get(item_id, {})
     function_id = str(cfg.get('function', 0))
     rewards = ITEM_PACKAGE_FIXED_REWARDS.get(function_id)
     if rewards is None:
         rewards = SHOW_REWARD_CONFIG.get(function_id, [])
     return [(str(reward[0]), int(reward[1]), int(reward[2]) * package_count)
             for reward in rewards if len(reward) >= 3 and str(reward[0])]
-
-def resolve_equipment_pack_rewards(item_id, package_count=1, character=None):
-    """Roll profession/tier equipment packs using ItemData and EquipData."""
-    try:
-        function_id = int(ITEM_CONFIG.get(str(item_id), {}).get('function', 0) or 0)
-        package_count = int(package_count)
-    except (TypeError, ValueError):
-        return None
-
-    profession_group = function_id // 100 - 740
-    tier = function_id % 100
-    if profession_group not in (0, 1, 2) or tier > 8:
-        return None
-    profession = profession_group
-    allowed_classes = set(range(1, 9)) if tier == 0 else {tier}
-    if character is not None:
-        max_class = _max_shop_equipment_class(character, profession)
-        allowed_classes = {equip_class for equip_class in allowed_classes
-                           if equip_class <= max_class}
-    candidates = []
-    for equip_id, equip_cfg in EQUIP_CONFIG.items():
-        try:
-            if (int(equip_cfg.get('position', -1)) not in range(1, 6)
-                    or int(equip_cfg.get('class', 0)) not in allowed_classes
-                    or int(equip_cfg.get('job', -1)) != profession
-                    or int(ITEM_CONFIG.get(str(equip_id), {}).get('type', -1)) != 2):
-                continue
-            quality = int(ITEM_CONFIG.get(str(equip_id), {}).get('quality', 0))
-            candidates.append((str(equip_id), quality, 1))
-        except (TypeError, ValueError):
-            continue
-    if not candidates or package_count < 1:
-        return []
-    return [random.choice(candidates) for _ in range(package_count)]
 
 def resolve_weapon_pack_rewards(item_id, character, package_count=1):
     """Roll the APK's 7300/7301-7308 weapon packs from EquipData + WeaponDrop."""
@@ -10138,10 +9525,6 @@ def resolve_weapon_pack_rewards(item_id, character, package_count=1):
         return None
     if not character or package_count < 1:
         return []
-    if function_id == 74500:
-        max_class = _max_shop_equipment_class(character)
-        allowed_classes = {equip_class for equip_class in allowed_classes
-                           if equip_class <= max_class}
 
     candidates = []
     for equip_id, equip_cfg in EQUIP_CONFIG.items():
@@ -10221,36 +9604,6 @@ def current_daily_stamp():
     """The server's daily-copy reset key (UTC calendar day adjusted for 03:00 AM reset)."""
     adjusted_time = time.time() - (3 * 3600)
     return time.strftime('%Y-%m-%d', time.gmtime(adjusted_time))
-
-def video_reward_state(char):
-    """Return the persisted daily reward count, resetting it at the server daily boundary."""
-    stamp = current_daily_stamp()
-    if char.get('video_reward_day') != stamp:
-        char['video_reward_day'] = stamp
-        char['video_reward_count'] = 0
-    try:
-        count = max(0, min(VIDEO_REWARD_DAILY_LIMIT, int(char.get('video_reward_count', 0))))
-    except (TypeError, ValueError):
-        count = 0
-    char['video_reward_count'] = count
-    return count
-
-def video_reward_payload(char, granted=False):
-    """Build the server response for a daily video-reward claim."""
-    return encode_sproto([
-        (0, video_reward_state(char)),
-        (1, VIDEO_REWARD_DAILY_LIMIT),
-        (2, VIDEO_REWARD_DIAMONDS),
-        (3, 1 if granted else 0),
-    ])
-
-def video_reward_sync_payload(char):
-    """Build the protocol-692 sync, which has no claim-result field."""
-    return encode_sproto([
-        (0, video_reward_state(char)),
-        (1, VIDEO_REWARD_DAILY_LIMIT),
-        (2, VIDEO_REWARD_DIAMONDS),
-    ])
 
 def street_race_daily_copy_id():
     """Return today's Street Race route, following the 03:00 UTC daily reset."""
@@ -10427,262 +9780,6 @@ def copy_attempts_remaining(picked_char, copy_id, cfg):
     if copy_id not in remaining:
         remaining[copy_id] = int(cfg.get('max_plays', 3))
     return max(0, int(remaining[copy_id]))
-
-
-def is_cash_stage_copy(copy_id):
-    cfg = COPY_SCENE_CONFIG.get(str(copy_id or ''), {})
-    return int(cfg.get('type', 0)) == 1 and int(cfg.get('subtype', -1)) == 11
-
-
-def cash_stage_copy_ids():
-    return [
-        str(copy_id) for copy_id, cfg in COPY_SCENE_CONFIG.items()
-        if int(cfg.get('type', 0)) == 1 and int(cfg.get('subtype', -1)) == 11
-    ]
-
-
-def cash_stage_attempts_remaining(char):
-    copy_ids = cash_stage_copy_ids()
-    if not copy_ids:
-        return 0
-    return min(
-        copy_attempts_remaining(char, copy_id, COPY_SCENE_CONFIG[copy_id])
-        for copy_id in copy_ids
-    )
-
-
-def cash_stage_reward_budget(char):
-    """Return the authored Cash Stage payout for the character's AdaptData level."""
-    try:
-        level = max(1, min(int(char.get('level', 1)), PLAYER_MAX_LEVEL))
-    except (TypeError, ValueError):
-        level = 1
-    reward_id = STREET_RACE_REWARD_BY_KEY_LEVEL.get('_drop_jbfb', {}).get(level)
-    if not reward_id:
-        print(f"[CASH STAGE] missing AdaptData _drop_jbfb reward for level={level}")
-        return 0
-    cash_amount = sum(
-        max(0, int(amount))
-        for item_id, _quality, amount in SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(str(reward_id), [])
-        if str(item_id) == '1001'
-    )
-    if cash_amount <= 0:
-        print(f"[CASH STAGE] missing cash payout ShowRewardData id={reward_id} level={level}")
-    return cash_amount
-
-
-def send_cash_stage_result_to_char(char, result):
-    """Deliver a Cash Stage result or preserve it for the next login."""
-    if not char or not result:
-        return False
-    char['pending_cash_stage_result'] = result.hex()
-    delivered = send_push_to_char(char.get('id', 0), 552, result)
-    if delivered:
-        char.pop('pending_cash_stage_result', None)
-        save_chars(all_accounts_chars)
-    return delivered
-
-
-def replay_pending_cash_stage_result(char):
-    pending = char.get('pending_cash_stage_result') if char else None
-    if not pending:
-        return False
-    try:
-        result = bytes.fromhex(str(pending))
-    except (TypeError, ValueError):
-        print(f"[CASH STAGE] discarded invalid pending result player={char.get('id')}")
-        char.pop('pending_cash_stage_result', None)
-        save_chars(all_accounts_chars)
-        return False
-    if send_push_to_char(char.get('id', 0), 552, result):
-        char.pop('pending_cash_stage_result', None)
-        save_chars(all_accounts_chars)
-        return True
-    return False
-
-
-def finish_cash_stage(char, win, notify=True):
-    if not char:
-        return False
-    with CASH_STAGE_LOCK:
-        state = char.get('cash_stage_state')
-        if not isinstance(state, dict) or state.get('result_recorded'):
-            return False
-        state['result_recorded'] = True
-        state['win'] = bool(win)
-        timer = char.pop('_cash_stage_timer', None)
-        if timer is not None:
-            timer.cancel()
-        result = None
-        if notify:
-            result_items = []
-            cash_earned = max(0, int(state.get('cash_earned', 0)))
-            if cash_earned:
-                result_items.append(encode_sproto([
-                    (0, '1001'), (1, cash_earned), (3, 0)
-                ]))
-            result = encode_sproto([
-                (0, 11), (1, str(state.get('copy_id', '201'))),
-                (2, bool(win)), (3, 1 if win else 0), (4, 1 if win else 0),
-                (5, result_items)
-            ])
-            char['pending_cash_stage_result'] = result.hex()
-        save_chars(all_accounts_chars)
-    if result is not None:
-        if not send_cash_stage_result_to_char(char, result):
-            save_chars(all_accounts_chars)
-    return True
-
-
-def cash_stage_timeout(char, copy_id, run_id):
-    state = char.get('cash_stage_state') if char else None
-    if (isinstance(state, dict)
-            and str(state.get('copy_id')) == str(copy_id)
-            and str(state.get('run_id')) == str(run_id)
-            and not state.get('result_recorded')):
-        finish_cash_stage(char, False)
-
-
-def schedule_cash_stage_timeout(char):
-    state = char.get('cash_stage_state') if char else None
-    if not isinstance(state, dict) or state.get('result_recorded'):
-        return
-    previous_timer = char.pop('_cash_stage_timer', None)
-    if previous_timer is not None:
-        previous_timer.cancel()
-    delay = max(0.01, float(state.get('end_time', time.time())) - time.time())
-    timer = threading.Timer(
-        delay, cash_stage_timeout,
-        args=(char, str(state.get('copy_id', '')), str(state.get('run_id', '')))
-    )
-    timer.daemon = True
-    char['_cash_stage_timer'] = timer
-    timer.start()
-
-
-def start_cash_stage_run(conn, char, copy_id, cfg, use_time_item, send_rpc_push):
-    copy_id = str(copy_id)
-    map_id = str(cfg.get('map_id') or copy_id)
-    char_id = int(char.get('id', 0))
-    if (not is_current_character_connection(conn, char)
-            or map_id not in MAP_CONFIG
-            or int(char.get('level', 1)) < int(cfg.get('min_level', 1))
-            or int(char.get('level', 1)) > int(cfg.get('max_level', PLAYER_MAX_LEVEL))):
-        print(f"[CASH STAGE] denied entry id={copy_id}; invalid session/map/level")
-        send_rpc_push(555, sync_copy_scenes(char))
-        return False
-
-    existing = char.get('cash_stage_state')
-    if (isinstance(existing, dict) and not existing.get('result_recorded')
-            and str(existing.get('copy_id')) == copy_id
-            and str(char.get('map_id')) == map_id):
-        return True
-    if (is_active_copy_current(char) or char.get('exp_stage_state')
-            or char.get('equipment_stage_state')):
-        print(f"[CASH STAGE] denied entry id={copy_id}; player already in a copy")
-        send_rpc_push(555, sync_copy_scenes(char))
-        return False
-
-    team = get_team_for_char(char_id)
-    if team and (team.get('active_run') or team.get('pending_run') or team.get('matching')):
-        print(f"[CASH STAGE] denied entry id={copy_id}; team has an active/matching run")
-        send_rpc_push(555, sync_copy_scenes(char))
-        return False
-
-    ticket_used = False
-    with CASH_STAGE_LOCK:
-        remaining = cash_stage_attempts_remaining(char)
-        if remaining <= 0 and use_time_item:
-            ticket_id = str(cfg.get('time_inc') or '')
-            inventory = char.get('inventory', [])
-            ticket = next((item for item in inventory
-                           if str(item.get('id')) == ticket_id
-                           and int(item.get('amount', 1)) > 0), None) if ticket_id else None
-            if ticket is not None:
-                ticket['amount'] = int(ticket.get('amount', 1)) - 1
-                if ticket['amount'] <= 0:
-                    inventory.remove(ticket)
-                char['inventory'] = inventory
-                for configured_id in cash_stage_copy_ids():
-                    configured_cfg = COPY_SCENE_CONFIG[configured_id]
-                    state = ensure_daily_copy_state(char)
-                    state.setdefault('remaining', {})[configured_id] = (
-                        copy_attempts_remaining(char, configured_id, configured_cfg) + 1
-                    )
-                remaining = cash_stage_attempts_remaining(char)
-                ticket_used = True
-        if remaining <= 0:
-            print(f"[CASH STAGE] denied entry id={copy_id}; daily attempts exhausted")
-            send_rpc_push(555, sync_copy_scenes(char))
-            return False
-
-        daily_state = ensure_daily_copy_state(char)
-        for configured_id in cash_stage_copy_ids():
-            configured_cfg = COPY_SCENE_CONFIG[configured_id]
-            daily_state.setdefault('remaining', {})[configured_id] = max(
-                0, copy_attempts_remaining(char, configured_id, configured_cfg) - 1
-            )
-        duration = max(1, int(cfg.get('exist_time') or 300))
-        if char.get('pre_copy_pos') is None:
-            char['pre_copy_pos'] = list(char.get('pos', [29860, 100, -17005, 0]))
-            char['pre_copy_map'] = str(char.get('map_id', '11'))
-        char['active_copy_id'] = copy_id
-        char['cash_stage_state'] = {
-            'copy_id': copy_id,
-            'map_id': map_id,
-            'phase': 'sneaking',
-            'duration': duration,
-            'started_at': 0,
-            'run_id': uuid.uuid4().hex,
-            'end_time': 0,
-            'damage_dealt': 0,
-            'cash_earned': 0,
-            'result_recorded': False,
-        }
-        save_chars(all_accounts_chars)
-
-    if ticket_used:
-        sync_all_backpacks(char, send_rpc_push)
-    send_rpc_push(555, sync_copy_scenes(char))
-    advance_missions(char, send_rpc_push, 'dungeon', target_id=copy_id)
-    start_map_transition(conn, char, map_id, send_rpc_push)
-    print(f"[CASH STAGE] entered id={copy_id} map={map_id} "
-          f"remaining={cash_stage_attempts_remaining(char)} ticket={ticket_used}")
-    return True
-
-
-def credit_cash_stage_damage(char, conn, send_rpc_push, npc_id, hp_max, damage):
-    """Credit validated boss damage proportionally to the authored level payout."""
-    if (str(npc_id) != '22101' or int(damage) <= 0
-            or not is_current_character_connection(conn, char)):
-        return 0
-    with CASH_STAGE_LOCK:
-        state = char.get('cash_stage_state') if char else None
-        if (not isinstance(state, dict) or state.get('result_recorded')
-                or state.get('phase') != 'boss'
-                or not is_cash_stage_copy(state.get('copy_id'))
-                or str(state.get('map_id')) != str(char.get('map_id'))):
-            return 0
-        if int(state.get('end_time', 0)) <= int(time.time()):
-            finish_cash_stage(char, False)
-            return 0
-        hp_max = max(1, int(hp_max))
-        previous_damage = max(0, int(state.get('damage_dealt', 0)))
-        previous_cash = max(0, int(state.get('cash_earned', 0)))
-        state['damage_dealt'] = min(hp_max, previous_damage + int(damage))
-        total_cash = cash_stage_reward_budget(char) * state['damage_dealt'] // hp_max
-        added_cash = max(0, total_cash - previous_cash)
-        state['cash_earned'] = total_cash
-        if added_cash:
-            grant_item_rewards(
-                char, [('1001', 0, added_cash)], conn, send_rpc_push, save=False
-            )
-            reward_item = encode_sproto([
-                (0, '1001'), (1, total_cash), (3, 0)
-            ])
-            send_rpc_push(615, encode_sproto([(0, [reward_item])]))
-            save_chars(all_accounts_chars)
-        return added_cash
 
 def single_dance_time_remaining(picked_char, now=None):
     """Return the remaining free-dance seconds shown in Minimap > Daily."""
@@ -11377,76 +10474,6 @@ def _rank_pvp_sort_items(sort_type=3):
             (4, str(int(sort_type))),
             (5, rank_pos)
         ]))
-    return rows
-
-def _rank_character_sort_items(sort_type):
-    ranked = []
-    for character in _rank_pvp_all_characters():
-        try:
-            if sort_type == 1:
-                score = int(get_character_stats(character).get('power', 0) or 0)
-            elif sort_type == 2:
-                score = int(character.get('level', 1) or 1)
-            elif sort_type == 5:
-                score_value = character.get('tower_rank_floor')
-                if score_value is None:
-                    continue
-                score = max(0, int(score_value))
-            elif sort_type == 8:
-                scores = character.get('sex_mini_scores', {})
-                score_value = max(
-                    (int(value) for value in scores.values()),
-                    default=None
-                ) if isinstance(scores, dict) else None
-                if score_value is None:
-                    score_value = character.get('climax_night_score', character.get('sex_rank_score'))
-                if score_value is None:
-                    continue
-                score = max(0, int(score_value))
-            else:
-                continue
-            char_id = int(character.get('id', 0) or 0)
-        except (TypeError, ValueError, AttributeError):
-            continue
-        ranked.append((score, char_id, character))
-    ranked.sort(key=lambda row: (-row[0], row[1]))
-    rows = []
-    for score, char_id, character in ranked[:50]:
-        rows.append(encode_sproto([
-            (0, char_id), (1, score << 32),
-            (2, str(character.get('name', 'Hero'))),
-            (3, int(character.get('prof', 0) or 0)),
-            (4, str(sort_type))
-        ]))
-    return rows
-
-def _rank_guild_sort_items(sort_type=6):
-    rows = []
-    for guild in _guild_ranked_list()[:50]:
-        chief = _guild_char_by_id(guild.get('chief_id', 0)) or {}
-        chief_name = str(chief.get('name') or guild.get('chief_name') or '')
-        guild_name = str(guild.get('name', '') or '')
-        guild_name = guild_name.replace('#', '')
-        chief_name = chief_name.replace('#', '')
-        city_hash = {
-            str(capture_id): encode_sproto([(0, str(map_id))])
-            for capture_id, map_id in GUILD_CAPTURE_DATA.items()
-            if str(GUILD_CITY_OWNERS.get(str(capture_id), {}).get('guild_id', 0))
-               == str(guild.get('id', 0))
-        }
-        fields = [
-            (0, int(guild.get('id', 0) or 0)),
-            (1, max(0, int(guild.get('exp', 0) or 0)) << 32),
-            (2, f"{guild_name}#{chief_name}"),
-            (3, _guild_level(guild)),
-            (4, str(sort_type)),
-            (5, max(0, min(7, int(guild.get('icon', 0) or 0)))),
-            (7, _guild_member_count(guild)),
-            (8, _guild_max_player(guild))
-        ]
-        if city_hash:
-            fields.append((6, city_hash))
-        rows.append(encode_sproto(fields))
     return rows
 
 
@@ -12520,7 +11547,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
 
     save_chars(all_accounts_chars)
     # TAG 503: enter_map
-    debug_log("[DEBUG] BEFORE MAP ENTER")
+    print("[DEBUG] BEFORE MAP ENTER")
     try:
         # TAG 503 must use the same per-character send lock as TAG 504 and
         # timer-driven pushes. A raw conn.sendall here can interleave a
@@ -12529,7 +11556,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         # mapInfoId(0), line_index(1), line_count(2)
         data = encode_sproto([(0, target_map_id), (1, 0), (2, 1)])
         send_rpc_push(503, data)
-        debug_log(f"[M1003 DEBUG] TX 503 map_id={target_map_id}")
+        print(f"[M1003 DEBUG] TX 503 map_id={target_map_id}")
         print(f"[MAP ENTER SEND] map_id={target_map_id} scene={scene_name} pos={picked_char['pos']}")
 
         # TAG 504: main_player_create
@@ -12590,12 +11617,12 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
             # The APK cannot create the zombie player (or the VS panel) until
             # map_ready.  Remember it here; MSG 100 sends the actual tag 544.
             picked_char['boss_waiting_for_map_ready'] = True
-            debug_log(f"[M1003 DEBUG] Prepared Boss did={did} inst={boss_inst_id} max_hp={boss_stats['hp_max']} (awaiting map_ready)")
+            print(f"[M1003 DEBUG] Prepared Boss did={did} inst={boss_inst_id} max_hp={boss_stats['hp_max']} (awaiting map_ready)")
 
     except Exception:
         print("[!] FAILED TO SEND MAP ENTER TRANSITION")
         traceback.print_exc()
-    debug_log("[DEBUG] AFTER MAP ENTER")
+    print("[DEBUG] AFTER MAP ENTER")
 
 def is_skill_locked(sid, level, prof, owned_skill_ids=None):
     """Check starter and currently granted weapon skills; level is not ownership."""
@@ -12652,7 +11679,11 @@ def serve_resource_http(conn, initial_data):
         conn.sendall(headers)
         if parts[0] == "GET":
             with open(local_path, "rb") as resource_file:
-                conn.sendfile(resource_file)
+                while True:
+                    block = resource_file.read(65536)
+                    if not block:
+                        break
+                    conn.sendall(block)
         print(f"[HTTP 9555] 200 {normalized} ({size} bytes)")
     except Exception as exc:
         print(f"[HTTP 9555] failed: {exc}")
@@ -12810,24 +11841,6 @@ def _guild_member_count(guild, include_candidates=False):
         return len(members)
     return sum(1 for member in members.values() if int(member.get('job', 3)) != 4)
 
-def _guild_ranked_list():
-    return sorted(
-        GUILD_STATES.values(),
-        key=lambda item: (-_guild_level(item), -int(item.get('exp', 0) or 0),
-                          int(item.get('id', 0) or 0))
-    )
-
-def _guild_champion_id():
-    ranked = _guild_ranked_list()
-    champion_id = int(ranked[0].get('id', 0) or 0) if ranked else 0
-    return champion_id if champion_id > 0 else -1
-
-def _guild_sync_champion_id():
-    payload = encode_sproto([(11, _guild_champion_id())])
-    for connection, _character in list(ALL_CONNECTIONS.values()):
-        if connection is not None:
-            send_rpc_push_safe(connection, 614, payload)
-
 def _guild_member_info_bytes(guild, member_id, member):
     char = _guild_char_by_id(member_id) or {}
     try:
@@ -12918,23 +11931,6 @@ def _guild_info_response(char, guild=None):
         (3, True), (4, int(get_currency_balance(char, 3)))
     ])
 
-def _guild_donation_refresh(guild):
-    if not guild:
-        return
-    member_payload = _guild_member_list_response(guild)
-    for member_id, member in (guild.get('members') or {}).items():
-        try:
-            char_id = int(member_id)
-        except (TypeError, ValueError):
-            continue
-        if not member or int(member.get('job', 3)) == 4:
-            continue
-        connection, char = ALL_CONNECTIONS.get(char_id, (None, None))
-        if connection is None or char is None:
-            continue
-        send_rpc_push_safe(connection, 563, _guild_info_response(char, guild))
-        send_rpc_push_safe(connection, 581, member_payload)
-
 def _guild_member_list_response(guild):
     members = {}
     for member_id, member in (guild.get('members') or {}).items():
@@ -12946,7 +11942,8 @@ def _guild_member_list_response(guild):
 
 def _guild_list_response(char, page=1):
     char_id = int((char or {}).get('id', 0) or 0)
-    ordered = _guild_ranked_list()
+    ordered = sorted(GUILD_STATES.values(),
+                     key=lambda item: (-_guild_level(item), -int(item.get('exp', 0)), int(item.get('id', 0))))
     per_page = 10  # GuildListInfoRootLogic.PAGE_NUM
     max_page = max(1, (len(ordered) + per_page - 1) // per_page)
     page = min(max(1, int(page or 1)), max_page)
@@ -13185,82 +12182,16 @@ def _guild_refresh_members(guild, send_rpc_push=None, include_info=True):
             send_rpc_push_safe(connection, 563, payload)
         send_rpc_push_safe(connection, 581, _guild_member_list_response(guild))
 
-def _shop_item_quality(row):
-    item_id = str(row.get('item_id', ''))
-    configured_quality = ITEM_CONFIG.get(item_id, {}).get('quality', 0)
-    quality = row.get('quality')
-    if quality is None:
-        quality = configured_quality
-    return int(quality or 0)
-
-def _shop_item_bytes(row, purchased=0):
-    item_id = str(row.get('item_id', ''))
+def _guild_shop_item_bytes(row, purchased=0):
     fields = [
-        (0, str(row.get('id', ''))), (1, item_id),
-        (2, _shop_item_quality(row)), (3, int(row.get('price_type', 0))),
+        (0, str(row.get('id', ''))), (1, str(row.get('item_id', ''))),
+        (2, int(row.get('quality', 0))), (3, int(row.get('price_type', 0))),
         (4, int(row.get('price', 0))), (5, int(row.get('limit', 0))),
         # The APK shop_item decoder reserves wire tag 6; these are 7, 8, 9.
         (7, max(0, int(purchased))), (8, int(row.get('discount', 0))),
         (9, int(row.get('class', 0)))
     ]
     return encode_sproto(fields)
-
-def _shop_reward_currency_type(item_id):
-    """Return the balance index for a client ADD_COIN/ADD_GOLD/ADD_DIAMOND item."""
-    try:
-        item_type = int(ITEM_CONFIG.get(str(item_id), {}).get('type', -1))
-    except (TypeError, ValueError):
-        return None
-    return {7: 0, 8: 1, 9: 2}.get(item_type)
-
-def _shop_reward_currency(item_id, count):
-    """Resolve client ADD_COIN/ADD_GOLD/ADD_DIAMOND shop rows to balances."""
-    config = ITEM_CONFIG.get(str(item_id), {})
-    currency_type = _shop_reward_currency_type(item_id)
-    if currency_type is None:
-        return None
-    try:
-        amount = int(config.get('function', 0)) * int(count)
-    except (TypeError, ValueError):
-        return None
-    if amount <= 0:
-        return None
-    return currency_type, amount
-
-def _send_tab_reply(send_rpc_push, send_rpc_response, session, push_tag, payload):
-    send_rpc_push(push_tag, payload)
-    if session is not None:
-        send_rpc_response(session)
-
-def daily_buy_state_payload():
-    """Return the client daily-buy state map for configured product IDs."""
-    daily_buys = {
-        product_id: encode_sproto([(0, product_id), (1, 0)])
-        for product_id in sorted(DAILY_BUY_CONFIG, key=lambda value: int(value))
-    }
-    return encode_sproto([(0, daily_buys)])
-
-def invest_pack_state_payload():
-    """Return configured investment offer and milestone state without payment grants."""
-    investments = {
-        invest_id: encode_sproto([(0, invest_id), (1, 0)])
-        for invest_id in sorted(INVEST_CONFIG, key=lambda value: int(value))
-    }
-    return encode_sproto([(0, investments)])
-
-def _shop_purchase_count(char, item_id, row):
-    purchases = char.setdefault('shop_purchases', {})
-    cycle = max(0, int(row.get('reset_cycle', 0) or 0))
-    stamp = str(current_daily_stamp()) if cycle > 0 else 'never'
-    record = purchases.get(str(item_id), {})
-    if not isinstance(record, dict) or str(record.get('stamp', '')) != stamp:
-        record = {'stamp': stamp, 'count': 0}
-        purchases[str(item_id)] = record
-    try:
-        return max(0, int(record.get('count', 0) or 0))
-    except (TypeError, ValueError):
-        record['count'] = 0
-        return 0
 
 def _guild_shop_purchase_count(char, item_id, row):
     purchases = char.setdefault('guild_shop_purchases', {})
@@ -13271,45 +12202,6 @@ def _guild_shop_purchase_count(char, item_id, row):
         record = {'stamp': stamp, 'count': 0}
         purchases[str(item_id)] = record
     return max(0, int(record.get('count', 0) or 0))
-
-def _shop_row_available_for_character(char, row, class_filter=0):
-    try:
-        level = int(char.get('level', 1) or 1)
-        profession = int(char.get('prof', 0) or 0)
-        category = int(class_filter or 0)
-        row_class = int(row.get('class', 0) or 0)
-        return (
-            int(row.get('min_level', 0)) <= level <= int(row.get('max_level', 80))
-            and int(row.get('profession', -1)) in (-1, profession)
-            and (category <= 0 or row_class == category)
-        )
-    except (TypeError, ValueError):
-        return False
-
-def _max_shop_equipment_class(char, profession=None):
-    """Find the highest equipment-pack tier unlocked by this character's shop rows."""
-    try:
-        level = int(char.get('level', 1) or 1)
-        profession = int(char.get('prof', 0) if profession is None else profession)
-    except (AttributeError, TypeError, ValueError):
-        return 0
-
-    max_class = 0
-    for row in SHOP_DATA.get(1, {}).values():
-        try:
-            row_profession = int(row.get('profession', -1))
-            if (not int(row.get('min_level', 0)) <= level <= int(row.get('max_level', 80))
-                    or row_profession not in (-1, profession)):
-                continue
-            item_config = ITEM_CONFIG.get(str(row.get('item_id', '')), {})
-            function_id = int(item_config.get('function', 0) or 0)
-            profession_group = function_id // 100 - 740
-            tier = function_id % 100
-            if profession_group == profession and 1 <= tier <= 8:
-                max_class = max(max_class, tier)
-        except (TypeError, ValueError):
-            continue
-    return max_class
 
 def _guild_boss_daily_id(now=None):
     """Return the one Gang Boss assigned to the current UTC weekday.
@@ -13944,6 +12836,10 @@ def _guild_boss_return_char(conn, char, guild, boss_id, event_start, reason):
     with GUILD_BOSS_LOCK:
         if char.get('_guild_boss_exit_key') == exit_key:
             return False
+        previous_exit_key = char.get('_guild_boss_exit_key')
+        previous_active_copy = char.get('active_copy_id')
+        previous_return_map = char.get('pre_copy_map')
+        previous_return_pos = char.get('pre_copy_pos')
         char['_guild_boss_exit_key'] = exit_key
         return_map = str(char.get('pre_copy_map') or '11')
         return_pos = char.get('pre_copy_pos')
@@ -13953,7 +12849,9 @@ def _guild_boss_return_char(conn, char, guild, boss_id, event_start, reason):
         char['pre_copy_pos'] = None
         char['pre_copy_map'] = None
         char['active_copy_id'] = None
-        if int(char.get('hp', 0) or 0) <= 0:
+        revive = int(char.get('hp', 0) or 0) <= 0
+    try:
+        if revive:
             char['hp'] = get_character_stats(char)['hp_max']
             char.pop('_pending_relife', None)
             sync_char_attrs_rpc(conn, char)
@@ -13963,6 +12861,20 @@ def _guild_boss_return_char(conn, char, guild, boss_id, event_start, reason):
                 send_push_to_char(cid, tag, data),
             override_pos=return_pos
         )
+    except Exception as exit_error:
+        if str(char.get('map_id', '')) == str(boss_row.get('map_id', '')):
+            with GUILD_BOSS_LOCK:
+                if previous_exit_key is None:
+                    char.pop('_guild_boss_exit_key', None)
+                else:
+                    char['_guild_boss_exit_key'] = previous_exit_key
+                char['active_copy_id'] = previous_active_copy
+                char['pre_copy_map'] = previous_return_map
+                char['pre_copy_pos'] = previous_return_pos
+        print(f"[GUILD BOSS EXIT ERROR] player={char.get('id')} boss={boss_id} "
+              f"reason={reason}: {exit_error}")
+        traceback.print_exc()
+        return False
     print(f"[GUILD BOSS] player returned id={char.get('id')} "
           f"boss={boss_id} reason={reason} map={char.get('map_id')}")
     return True
@@ -14810,7 +13722,6 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         fee = 499 if cost_type == 1 else 49 if cost_type == 2 else 0
         valid_name = bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _]{4,14}", name))
         success = False
-        champion_id_before = _guild_champion_id()
         with GUILD_DB_LOCK, get_character_transaction_lock(char):
             name_used = any(str(item.get('name', '')).casefold() == name.casefold()
                             for item in GUILD_STATES.values())
@@ -14851,8 +13762,6 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
             send_rpc_push(563, _guild_info_response(char, guild))
             sync_char_attrs_rpc(conn, char)
             _guild_refresh_members(guild)
-            if _guild_champion_id() != champion_id_before:
-                _guild_sync_champion_id()
         else:
             send_rpc_push(567, encode_sproto([(1, 0)]))
 
@@ -15121,8 +14030,6 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         cfg = GUILD_DONATE_DATA.get(donation_id)
         member = _guild_member_id(guild, char_id) if guild else None
         success = False
-        response_sent = False
-        champion_id_before = _guild_champion_id()
         if cfg and guild and member and int(member.get('job', 4)) != 4:
             _guild_donate_records(char, guild)
             remaining = member.setdefault('donate_remaining', {})
@@ -15144,27 +14051,16 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
                     _save_guild_states()
                     success = True
             if success:
-                member = _guild_member_id(guild, char_id) or {}
-                send_rpc_push(585, encode_sproto([
-                    (0, 0), (1, donation_id),
-                    (2, int(member.get('contribute', 0) or 0)),
-                    (3, int(member.get('all_contribute', 0) or 0)),
-                    (4, _guild_level(guild)), (5, int(guild.get('exp', 0) or 0))
-                ]))
-                response_sent = True
                 sync_char_attrs_rpc(conn, char)
-                _guild_donation_refresh(guild)
-                if _guild_champion_id() != champion_id_before:
-                    _guild_sync_champion_id()
-        if not response_sent:
-            member = _guild_member_id(guild, char_id) if guild else {}
-            send_rpc_push(585, encode_sproto([
-                (0, 1), (1, donation_id),
-                (2, int(member.get('contribute', 0) or 0)),
-                (3, int(member.get('all_contribute', 0) or 0)),
-                (4, _guild_level(guild) if guild else 0),
-                (5, int(guild.get('exp', 0) or 0) if guild else 0)
-            ]))
+                _guild_refresh_members(guild)
+        member = _guild_member_id(guild, char_id) if guild else {}
+        send_rpc_push(585, encode_sproto([
+            (0, 0 if success else 1), (1, donation_id),
+            (2, int(get_currency_balance(char, 3))),
+            (3, int(member.get('all_contribute', 0) or 0)),
+            (4, _guild_level(guild) if guild else 0),
+            (5, int(guild.get('exp', 0)) if guild else 0)
+        ]))
 
     elif msg == 176:  # search_guild
         name = get_val_str(body, 0, '').strip().casefold()
@@ -15515,15 +14411,12 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
                 if int(char.get('level', 1)) >= int(row.get('min_level', 0))
                 and int(char.get('level', 1)) <= int(row.get('max_level', 80))
                 and int(row.get('profession', -1)) in (-1, int(char.get('prof', 0)))]
-        rows.sort(key=lambda row: (
-            int(row.get('display_order', row.get('weight', 0))),
-            str(row.get('id', ''))
-        ))
+        rows.sort(key=lambda row: (int(row.get('weight', 0)), str(row.get('id', ''))))
         per_page = 30
         max_page = max(1, (len(rows) + per_page - 1) // per_page)
         page = min(page, max_page)
         shop_rows = [encode_sproto([
-            (0, str(row['id'])), (1, str(row['item_id'])), (2, _shop_item_quality(row)),
+            (0, str(row['id'])), (1, str(row['item_id'])), (2, int(row.get('quality', 0))),
             (3, int(row.get('price_type', 0))), (4, int(row.get('price', 0))),
             (5, int(row.get('limit', 0))),
             (7, _guild_shop_purchase_count(char, row['id'], row)),
@@ -15550,7 +14443,7 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
             is_box = item_type == 15  # GameDefine.ITEM_TYPE.BOX
             quantity_valid = (per_order <= 0 or not is_box or count <= per_order)
             limit_valid = available <= 0 or purchased + count <= available
-            quality = _shop_item_quality(row)
+            quality = int(row.get('quality', ITEM_CONFIG.get(item_id, {}).get('quality', 0)) or 0)
             # ShopTabRootLogic.UpdateBuyCost charges Price * count; Discount is
             # shown as a label and is not applied to the amount sent by the APK.
             cost = max(0, int(row.get('price', 0) or 0)) * count
@@ -15575,277 +14468,12 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         purchased = _guild_shop_purchase_count(char, item_shop_id, row) if row else 0
         send_rpc_push(652, encode_sproto([
             (0, 0 if success else 1),
-            (1, _shop_item_bytes(row, purchased) if row else encode_sproto([])),
+            (1, _guild_shop_item_bytes(row, purchased) if row else encode_sproto([])),
             (2, 3), (3, count if success else 0)
         ]))
 
     if session is not None:
         send_rpc_response(session)
-
-def handle_shop_request(conn, char, msg, body, send_rpc_push, send_rpc_response, session):
-    """Handle the configured player shops; the Guild shop stays in its own handler."""
-    if not char or not is_current_character_connection(conn, char):
-        if session is not None:
-            send_rpc_response(session)
-        return
-
-    shop_type = get_val_int(body, 0 if msg == 143 else 2, -1)
-    if shop_type not in (0, 1, 2, 4, 5, 6, 7):
-        if session is not None:
-            send_rpc_response(session)
-        return
-
-    if msg == 143:
-        page = max(1, get_val_int(body, 1, 1))
-        class_filter = get_val_int(body, 4, 0)
-        # Type 2 has no exported catalog. Type 4 is populated from PurchaseData
-        # below because the client resolves those shop_item IDs as product IDs.
-        if shop_type == 4:
-            rows = [row for row in PURCHASE_DATA.values() if row.get('type') == 4]
-            rows.sort(key=lambda row: (
-                len(row.get('key', '')), row.get('key', ''), row['product_id']
-            ))
-        elif shop_type in (0, 1):
-            rows = [row for row in SHOP_DATA.get(shop_type, {}).values()
-                    if _shop_row_available_for_character(char, row, class_filter)]
-            rows.sort(key=lambda row: (
-                int(row.get('display_order', row.get('weight', 0))),
-                str(row.get('id', ''))
-            ))
-        else:
-            rows = []
-        per_page = (SHOP_PRODUCTS_PER_PAGE if shop_type == 4
-                    else SHOP_ITEMS_PER_PAGE)
-        max_page = max(1, (len(rows) + per_page - 1) // per_page)
-        requested_item_id = get_val_str(body, 2, '').strip()
-        if requested_item_id and shop_type in (0, 1):
-            requested_index = next((
-                index for index, row in enumerate(rows)
-                if row.get('item_id') == requested_item_id
-            ), None)
-            if requested_index is not None:
-                page = requested_index // per_page + 1
-        page = min(page, max_page)
-        if shop_type == 4:
-            shop_rows = [encode_sproto([(0, row['product_id'])])
-                         for row in rows[(page - 1) * per_page:page * per_page]]
-        else:
-            shop_rows = [_shop_item_bytes(
-                row, _shop_purchase_count(char, row['id'], row))
-                for row in rows[(page - 1) * per_page:page * per_page]
-            ]
-        send_rpc_push(554, encode_sproto([
-            (0, shop_type), (1, page), (2, max_page), (3, shop_rows),
-            (4, get_val_int(body, 3, 0))
-        ]))
-    elif msg == 144:
-        item_shop_id = get_val_str(body, 0, '')
-        count = get_val_int(body, 1, 0)
-        row = SHOP_DATA.get(shop_type, {}).get(item_shop_id)
-        success = False
-        if (row and count > 0 and _shop_row_available_for_character(char, row)):
-            try:
-                per_order = max(0, int(row.get('single_limit', 0) or 0))
-                available = max(0, int(row.get('limit', 0) or 0))
-                price = int(row.get('price', 0))
-                money_type = int(row.get('price_type', -1))
-                item_id = str(row.get('item_id', ''))
-                quality = _shop_item_quality(row)
-            except (TypeError, ValueError):
-                per_order = available = price = 0
-                money_type = -1
-                item_id = ''
-                quality = 0
-
-            with get_character_transaction_lock(char):
-                purchased = _shop_purchase_count(char, item_shop_id, row)
-                quantity_valid = per_order <= 0 or count <= per_order
-                limit_valid = available <= 0 or purchased + count <= available
-                cost = price * count
-                direct_currency_type = _shop_reward_currency_type(item_id)
-                currency_reward = _shop_reward_currency(item_id, count)
-                item_configured = item_id in ITEM_CONFIG
-                can_receive = (
-                    currency_reward is not None
-                    or (direct_currency_type is None and item_configured
-                        and can_add_to_inventory(char, item_id, count, quality))
-                )
-                if (item_id in ITEM_CONFIG and quantity_valid and limit_valid and price >= 0
-                        and 0 <= money_type < len(MONEY_FIELDS)
-                        and get_currency_balance(char, money_type) >= cost
-                        and can_receive):
-                    snapshot = snapshot_character_reward_state(char)
-                    set_currency_balance(char, money_type, get_currency_balance(char, money_type) - cost)
-                    if currency_reward is not None:
-                        reward_type, reward_amount = currency_reward
-                        set_currency_balance(
-                            char, reward_type,
-                            get_currency_balance(char, reward_type) + reward_amount
-                        )
-                        reward_added = True
-                    else:
-                        reward_added = add_to_inventory(char, item_id, count, quality)
-                    if reward_added:
-                        purchases = char.setdefault('shop_purchases', {})
-                        record = purchases[item_shop_id]
-                        record['count'] = purchased + count
-                        if save_chars(all_accounts_chars):
-                            if currency_reward is None:
-                                sync_all_backpacks(char, send_rpc_push)
-                            sync_char_attrs_rpc(conn, char)
-                            success = True
-                        else:
-                            restore_character_reward_state(char, snapshot)
-                    else:
-                        restore_character_reward_state(char, snapshot)
-
-        purchased = _shop_purchase_count(char, item_shop_id, row) if row else 0
-        send_rpc_push(652, encode_sproto([
-            (0, 0 if success else 1),
-            (1, _shop_item_bytes(row, purchased) if row else encode_sproto([])),
-            (2, shop_type), (3, count if success else 0)
-        ]))
-
-    if session is not None:
-        send_rpc_response(session)
-
-def _big_sale_purchase_count(char, package_id):
-    purchases = (char or {}).get('big_sale_purchases', {})
-    record = purchases.get(str(package_id), {}) if isinstance(purchases, dict) else {}
-    try:
-        if isinstance(record, dict):
-            return max(0, int(record.get('count', 0) or 0))
-        return max(0, int(record or 0))
-    except (TypeError, ValueError):
-        return 0
-
-def _big_sale_rewards(row, profession):
-    try:
-        profession = int(profession)
-    except (TypeError, ValueError):
-        return []
-    rewards = list(row.get('profession_rewards', {}).get(profession, []))
-    rewards.extend(row.get('common_rewards', []))
-    result = []
-    for item_id, quality, amount in rewards:
-        item_id = str(item_id).strip()
-        try:
-            quality = int(quality)
-            amount = int(amount)
-        except (TypeError, ValueError):
-            return []
-        if not item_id or amount <= 0:
-            return []
-        result.append((item_id, quality, amount))
-    return result
-
-def big_sale_state_payload(char):
-    """Build the client ret_special_big_pack map from eligible BigPackageData rows."""
-    try:
-        level = int((char or {}).get('level', 1) or 1)
-    except (TypeError, ValueError):
-        level = 1
-    packs = {}
-    for package_id, row in sorted(
-            BIG_PACKAGE_DATA.items(),
-            key=lambda entry: (entry[1].get('sort_id', 0), entry[0])):
-        if (row.get('sell_type') != 2
-                or level < row.get('level_min', 0)
-                or level > row.get('level_max', 80)):
-            continue
-        purchased = _big_sale_purchase_count(char, package_id)
-        max_count = max(0, int(row.get('max_count', 0) or 0))
-        state = 2 if purchased else 0
-        remaining = max(0, max_count - purchased) if max_count else 0
-        packs[package_id] = encode_sproto([
-            (0, package_id), (1, state), (2, remaining), (3, 0)
-        ])
-    return encode_sproto([(0, packs)])
-
-def handle_big_sale_purchase(conn, char, body, send_rpc_push, send_rpc_response, session):
-    """Fulfill only verified in-game-currency Big Sale packages."""
-    package_id = get_val_str(body, 0, '').strip()
-    row = BIG_PACKAGE_DATA.get(package_id)
-    success = False
-    rewards = []
-
-    if row and row.get('sell_type') == 2 and not str(row.get('product_id', '')).strip():
-        try:
-            level = int(char.get('level', 1) or 1)
-            money_type = int(row.get('price_type', -1))
-            price = int(row.get('price', -1))
-            max_count = max(0, int(row.get('max_count', 0) or 0))
-        except (TypeError, ValueError):
-            level = 0
-            money_type = -1
-            price = -1
-            max_count = 0
-        rewards = _big_sale_rewards(row, char.get('prof', 0))
-        rewards_valid = bool(rewards) and all(
-            item_id in DIRECT_REWARD_RESOURCE_IDS or item_id in ITEM_CONFIG
-            for item_id, _quality, _amount in rewards
-        )
-        available = (level >= int(row.get('level_min', 0))
-                     and level <= int(row.get('level_max', 80)))
-        with get_character_transaction_lock(char):
-            purchased = _big_sale_purchase_count(char, package_id)
-            count_valid = purchased == 0 and (max_count <= 0 or purchased < max_count)
-            if (available and count_valid and rewards_valid and price >= 0
-                    and 0 <= money_type < len(MONEY_FIELDS)
-                    and get_currency_balance(char, money_type) >= price
-                    and can_add_reward_list_to_inventory(char, rewards)):
-                snapshot = snapshot_character_reward_state(char)
-                set_currency_balance(
-                    char, money_type, get_currency_balance(char, money_type) - price
-                )
-                grant_item_rewards(char, rewards, save=False)
-                purchases = char.setdefault('big_sale_purchases', {})
-                purchases[package_id] = {'count': 1, 'stamp': 'never'}
-                if save_chars(all_accounts_chars):
-                    success = True
-                    sync_all_backpacks(char, send_rpc_push)
-                    sync_char_attrs_rpc(conn, char)
-                else:
-                    restore_character_reward_state(char, snapshot)
-
-    reward_items = [
-        encode_sproto([(0, item_id), (1, amount), (3, quality)])
-        for item_id, quality, amount in rewards
-    ] if success else []
-    send_rpc_push(650, encode_sproto([
-        (0, reward_items), (1, 3), (3, package_id), (7, 0 if success else 1)
-    ]))
-    if session is not None:
-        send_rpc_response(session)
-
-def monthly_card_state_payload():
-    """Return the configured card as not purchased; payment fulfillment is separate."""
-    if not MONTHLY_CARD_DATA:
-        return encode_sproto([])
-    card_id = sorted(MONTHLY_CARD_DATA)[0]
-    return encode_sproto([
-        (0, encode_sproto([(0, card_id), (1, 0), (2, -1)]))
-    ])
-
-def handle_shop_offer_request(conn, char, msg, send_rpc_push, send_rpc_response, session):
-    if not char or not is_current_character_connection(conn, char):
-        if session is not None:
-            send_rpc_response(session)
-        return
-    if msg == 274:
-        push_tag = 656
-        payload = big_sale_state_payload(char)
-    elif msg == 299:
-        push_tag = 678
-        payload = monthly_card_state_payload()
-    elif msg == 300:
-        push_tag = 679
-        payload = monthly_card_state_payload()
-    else:
-        if session is not None:
-            send_rpc_response(session)
-        return
-    _send_tab_reply(send_rpc_push, send_rpc_response, session, push_tag, payload)
 
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
@@ -15879,7 +14507,7 @@ def client_handler(conn, addr):
             # Serialise writes because that delay runs in a timer thread.
             with send_lock:
                 conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
-            debug_log(f"[TX] PUSH TAG={tag} SIZE={len(data)}")
+            print(f"[TX] PUSH TAG={tag} SIZE={len(data)}")
         except Exception:
             print(f"[!] FAILED TO SEND PUSH TAG={tag}")
             traceback.print_exc()
@@ -16110,7 +14738,7 @@ def client_handler(conn, addr):
                     socket_current = is_current_character_connection(conn, picked_char)
                 except Exception:
                     socket_current = False
-                debug_log(
+                print(
                     f"[MAP101 WATCHDOG] player={watch_char_id} ready_for={now - watch_ready_at:.1f}s "
                     f"rx_after_ready={map101_post_ready_rx_count} "
                     f"msg101_after_ready={map101_post_ready_move_count} "
@@ -16139,9 +14767,7 @@ def client_handler(conn, addr):
             try:
                 required_level = int(activity.get('UnlockLevel', 8))
                 duration = int(activity.get('DurationTime', 0))
-                char_pos = picked_char.get('pos') or [0, 0, 0, 0]
-                px, pz = int(char_pos[0]), int(char_pos[2])
-                heading = int(char_pos[3]) if len(char_pos) > 3 else 0
+                px, pz = int((picked_char.get('pos') or [])[0]), int((picked_char.get('pos') or [0, 0, 0])[2])
                 requested_x, requested_z = int(x), int(z)
                 in_map = str(picked_char.get('map_id')) == str(activity.get('MapId', '101'))
                 in_range = math.hypot(requested_x - px, requested_z - pz) <= 500
@@ -16164,14 +14790,6 @@ def client_handler(conn, addr):
                     save_chars(all_accounts_chars)
                 success = True
         if success:
-            map_id = str(activity.get('MapId', '101') or '101')
-            speaker_inst_id = spawn_personal_dance_speaker_model(
-                activity, requested_x, requested_z, heading, conn, send_rpc_push
-            )
-            schedule_personal_dance_speaker_expiry(
-                picked_char.get('id', 0), map_id, speaker_inst_id,
-                runtime['speaker_end_time']
-            )
             send_rpc_push(686, dance_state_info_payload(picked_char, now))
         return success
 
@@ -16297,7 +14915,7 @@ def client_handler(conn, addr):
             # an elapsed end_time, before the map transition begins.
             send_rpc_push(629, encode_sproto([(0, int(time.time())), (1, 2)]))
             start_map_transition(conn, picked_char, return_map, send_rpc_push, override_pos=return_pos)
-            debug_log('[M1003 DEBUG] Arena exit countdown finished; returned to saved city position')
+            print('[M1003 DEBUG] Arena exit countdown finished; returned to saved city position')
 
         leave_after_notice(5)
 
@@ -16321,7 +14939,7 @@ def client_handler(conn, addr):
 
             raw = sproto_unpack(data); pkg = decode_sproto(raw, 0)
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
-            debug_log(f"[RX] MSG={msg} SESSION={session}")
+            print(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
             if (picked_char and str(picked_char.get('map_id', '')) == '101'
                     and map101_ready_at is not None):
@@ -16541,8 +15159,6 @@ def client_handler(conn, addr):
                     else:
                         # Fallback: original hardcoded list
                         fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
-                    if "105" not in fids:
-                        fids.append("105")
                     # Build func_info: state=1 means tutorial completed, state=0 means tutorial pending
                     # For MAIN_MISSION (100), state depends on whether player has completed the tutorial
                     # For class 4 tutorial records (e.g. 4083 ROB_CAR_TIP), state depends on completed_tutorials
@@ -16555,10 +15171,7 @@ def client_handler(conn, addr):
                                 class4_fids.add(fid)
                     funcs = {}
                     for fid in fids:
-                        if fid == "105":
-                            # The client repeatedly shows the empty-potion-slot tip until state reaches its condition (2).
-                            func_state = 2
-                        elif fid == "100":
+                        if fid == "100":
                             # MAIN_MISSION: state=1 only if tutorial is already finished
                             func_state = 1 if player_tutorial == 1 else 0
                         elif fid in class4_fids:
@@ -16568,14 +15181,8 @@ def client_handler(conn, addr):
                             func_state = 1
                         funcs[fid] = encode_sproto([(0, fid), (1, func_state)])
                     send_rpc_push(614, encode_sproto([
-                        (0, int(time.time())), (2, 0), (4, 10000), (9, funcs),
-                        (11, _guild_champion_id()), (12, random.randint(1, 10000)),
-                        (13, 1), (14, int(time.time()))
+                        (0, int(time.time())), (2, 0), (4, 10000), (9, funcs), (12, random.randint(1, 10000)), (13, 1), (14, int(time.time()))
                     ]))
-
-                    # The client has no separate request for this button's
-                    # quota; initialize its count, limit, and reward on login.
-                    send_rpc_push(692, video_reward_sync_payload(picked_char))
 
                     # Sync every player bag through its client-owned container
                     # protocol: item 611, equipment 592, badge 604, fashion 616.
@@ -16750,14 +15357,14 @@ def client_handler(conn, addr):
                                 picked_char['pos'] = [x_coord, y_coord, z_coord, o_coord]
                                 print(f"[LOGIN SPAWN FIX] map={mid} pos={picked_char['pos']}")
 
-                    debug_log("[DEBUG] BEFORE MAP ENTER")
+                    print("[DEBUG] BEFORE MAP ENTER")
                     try:
                         ph_p = encode_sproto([(0, 503)])
                         data = encode_sproto([(0, mid), (1, 0), (2, 1)])
                         pf_p = sproto_pack(ph_p + data)
                         conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
-                        debug_log(f"[M1003 DEBUG] TX 503 map_id={mid}")
-                        debug_log(f"[TX] PUSH TAG=503 SIZE={len(data)}")
+                        print(f"[M1003 DEBUG] TX 503 map_id={mid}")
+                        print(f"[TX] PUSH TAG=503 SIZE={len(data)}")
                         print(f"[MAP ENTER SEND] map_id={mid} scene={scene_name} pos={picked_char['pos']}")
 
                         # TAG 504: main_player_create
@@ -16796,7 +15403,6 @@ def client_handler(conn, addr):
                                     picked_char.pop('pending_exp_result', None)
                                     save_chars(all_accounts_chars)
                             except Exception: pass
-                        replay_pending_cash_stage_result(picked_char)
 
                         # MULTIPLAYER AOI SYNC - Broadcast this new player to existing players
                         # Skip player-to-player AOI on single-player maps (e.g., Map 11)
@@ -16815,7 +15421,7 @@ def client_handler(conn, addr):
                     except Exception:
                         print("[!] FAILED TO SEND INITIAL MAP ENTER")
                         traceback.print_exc()
-                    debug_log("[DEBUG] AFTER MAP ENTER")
+                    print("[DEBUG] AFTER MAP ENTER")
 
             elif msg == 100: # map_ready
                 if picked_char:
@@ -16918,20 +15524,6 @@ def client_handler(conn, addr):
                                 and supports_normal_relife(mid)):
                             send_rpc_push(618, encode_pending_relife_offer(pending_relife))
                             print(f"[RELIFE] replayed pending offer after reconnect player={picked_char.get('id')} map={mid}")
-                    cash_state = picked_char.get('cash_stage_state')
-                    if (isinstance(cash_state, dict)
-                            and str(cash_state.get('map_id')) == str(mid)
-                            and cash_state.get('phase') == 'boss'
-                            and not cash_state.get('result_recorded')):
-                        if int(cash_state.get('end_time', 0)) <= int(time.time()):
-                            finish_cash_stage(picked_char, False)
-                        else:
-                            cash_timer = picked_char.get('_cash_stage_timer')
-                            if cash_timer is None or not cash_timer.is_alive():
-                                schedule_cash_stage_timeout(picked_char)
-                            send_rpc_push(629, encode_sproto([
-                                (0, int(cash_state['end_time'])), (1, 2)
-                            ]))
                     if mid == "501":
                         rank_match = picked_char.get("_rank_pvp_match")
                         pending_result = picked_char.get("rank_pvp_pending_result")
@@ -16981,7 +15573,7 @@ def client_handler(conn, addr):
                                 boss_id = picked_char.get('boss_inst_id')
                                 # Only timeout if boss is still alive (not already won/lost)
                                 if boss_id and NPC_HP_MAP.get(boss_id, 0) > 0:
-                                    debug_log('[M1003 DEBUG] Arena 60s timeout reached; returning')
+                                    print('[M1003 DEBUG] Arena 60s timeout reached; returning')
                                     schedule_domin_return(restore_hp=True)
 
                         t = threading.Timer(60.0, arena_timeout)
@@ -16997,7 +15589,7 @@ def client_handler(conn, addr):
                             # Tag 544 creates ObjZombiePlayer and opens the VS UI.
                             send_rpc_push(544, encode_sproto([(0, get_boss_char(boss_id, did, player_level))]))
                             sync_npc_attrs_rpc(conn, boss_id, boss_stats, NPC_HP_MAP.get(boss_id, boss_stats['hp_max']))
-                            debug_log(f"[M1003 DEBUG] Spawned Boss did={did} inst={boss_id} after map_ready")
+                            print(f"[M1003 DEBUG] Spawned Boss did={did} inst={boss_id} after map_ready")
 
                             # Tag 547 closes the VS UI and activates the APK's
                             # built-in zombie auto-fight.  Sending it immediately
@@ -17007,12 +15599,11 @@ def client_handler(conn, addr):
                                         and picked_char.get('boss_inst_id') == expected_boss_id
                                         and NPC_HP_MAP.get(expected_boss_id, 0) > 0):
                                     send_rpc_push(547, encode_sproto([]))
-                                    debug_log(f"[M1003 DEBUG] Arena started boss={expected_boss_id}; APK zombie AI enabled")
+                                    print(f"[M1003 DEBUG] Arena started boss={expected_boss_id}; APK zombie AI enabled")
                             arena_timer = threading.Timer(2.5, start_domin_battle)
                             arena_timer.daemon = True
                             arena_timer.start()
                     send_rpc_push(519, sync_mission_data(picked_char))
-                    replay_pending_cash_stage_result(picked_char)
                     if street_race_result_restore_pending:
                         pending_race_result = picked_char.get('street_race_pending_result')
                         try:
@@ -17038,12 +15629,6 @@ def client_handler(conn, addr):
                     char_map = str(reconnect_char.get('map_id') or '11')
                     active_copy_id = str(reconnect_char.get('active_copy_id') or '')
                     active_cfg = COPY_SCENE_CONFIG.get(active_copy_id, {})
-                    cash_stage_state = reconnect_char.get('cash_stage_state')
-                    cash_stage_reconnect = bool(
-                        active_cfg.get('subtype') == 11
-                        and isinstance(cash_stage_state, dict)
-                        and str(cash_stage_state.get('map_id')) == char_map
-                    )
                     equipment_run = reconnect_char.get('equipment_stage_state')
                     equipment_reconnect = bool(
                         equipment_run and equipment_run.get('stage_kind') == 'equipment'
@@ -17106,31 +15691,6 @@ def client_handler(conn, addr):
                         if stage_team:
                             send_team_update(stage_team['id'])
                         print(f"[EQUIP STAGE] reconnect restored copy={active_copy_id} "
-                              f"player={reconnect_char_id} type={reconnect_type} map={char_map}")
-                    elif cash_stage_reconnect:
-                        cash_stage_reloading = reconnect_type == 1 or requested_map != char_map
-                        if cash_stage_reloading:
-                            start_map_transition(
-                                conn, picked_char, char_map, send_rpc_push,
-                                override_pos=list(picked_char.get('pos') or [0, 100, 0, 0])
-                            )
-                        elif (not cash_stage_state.get('result_recorded')
-                              and cash_stage_state.get('phase') == 'boss'):
-                            if int(cash_stage_state.get('end_time', 0)) <= int(time.time()):
-                                finish_cash_stage(picked_char, False)
-                            else:
-                                cash_timer = picked_char.get('_cash_stage_timer')
-                                if cash_timer is None or not cash_timer.is_alive():
-                                    schedule_cash_stage_timeout(picked_char)
-                                send_rpc_push(629, encode_sproto([
-                                    (0, int(cash_stage_state['end_time'])), (1, 2)
-                                ]))
-                        send_rpc_push(555, sync_copy_scenes(picked_char))
-                        send_rpc_push(519, sync_mission_data(picked_char))
-                        if not cash_stage_reloading:
-                            replay_pending_cash_stage_result(picked_char)
-                        save_chars(all_accounts_chars)
-                        print(f"[CASH STAGE] reconnect restored id={active_copy_id} "
                               f"player={reconnect_char_id} type={reconnect_type} map={char_map}")
                     elif is_street_race_reconnect:
                         # Rebind the authenticated character before route recovery;
@@ -18495,7 +17055,6 @@ def client_handler(conn, addr):
                 display_rewards = []
                 opened = False
                 failure_reason = 'invalid request or package configuration'
-                deferred_backpack_updates = []
                 if picked_char and is_current_character_connection(conn, picked_char) and 1 <= open_count <= 99:
                     with get_character_transaction_lock(picked_char):
                         first = find_backpack_item(picked_char, first_index, 2)
@@ -18562,10 +17121,10 @@ def client_handler(conn, addr):
                                         rewards = weapon_pack_rewards
                                     else:
                                         random_badge_package = (
-                                            package_id in ITEM_PACKAGE_RANDOM_BADGE_LEVELS
+                                            package_id in ITEM_PACKAGE_RANDOM_REWARD_POOLS
                                         )
                                         rewards = resolve_item_package_rewards(
-                                            package_id, package_count, picked_char)
+                                            package_id, package_count)
                                     valid_rewards = bool(rewards) and all(
                                         item_id in ITEM_CONFIG and amount > 0
                                         for item_id, _quality, amount in rewards
@@ -18597,15 +17156,9 @@ def client_handler(conn, addr):
                                                 consumed_item['amount'] = int(consumed_item.get('amount', 1)) - amount
                                                 if consumed_item['amount'] <= 0:
                                                     picked_char[BACKPACKS[container_type][0]].remove(consumed_item)
-                                                    if random_badge_package:
-                                                        deferred_backpack_updates.append(
-                                                            (container_type, None, consumed_index))
-                                                    else:
+                                                    if not random_badge_package:
                                                         push_backpack_item_update(send_rpc_push, container_type, None, consumed_index)
-                                                elif random_badge_package:
-                                                    deferred_backpack_updates.append(
-                                                        (container_type, consumed_item, consumed_index))
-                                                else:
+                                                elif not random_badge_package:
                                                     push_backpack_item_update(send_rpc_push, container_type, consumed_item)
                                             if partner_item:
                                                 remaining_keys = package_count
@@ -18620,14 +17173,9 @@ def client_handler(conn, addr):
                                                     remaining_keys -= consumed_amount
                                                     if key_item['amount'] <= 0:
                                                         picked_char['inventory'].remove(key_item)
-                                                        if random_badge_package:
-                                                            deferred_backpack_updates.append((2, None, key_index))
-                                                        else:
+                                                        if not random_badge_package:
                                                             push_backpack_item_update(send_rpc_push, 2, None, key_index)
-                                                    elif random_badge_package:
-                                                        deferred_backpack_updates.append(
-                                                            (2, key_item, key_index))
-                                                    else:
+                                                    elif not random_badge_package:
                                                         push_backpack_item_update(send_rpc_push, 2, key_item)
                                             grant_item_rewards(
                                                 picked_char, rewards,
@@ -18641,10 +17189,6 @@ def client_handler(conn, addr):
                                                 failure_reason = 'badge case reward could not be saved'
                                             else:
                                                 if random_badge_package:
-                                                    for container_type, item_update, index_id in deferred_backpack_updates:
-                                                        push_backpack_item_update(
-                                                            send_rpc_push, container_type,
-                                                            item_update, index_id)
                                                     sync_all_backpacks(picked_char, send_rpc_push)
                                                 display_rewards = [encode_sproto([
                                                     (0, item_id), (1, amount), (3, quality)
@@ -19404,9 +17948,6 @@ def client_handler(conn, addr):
                     picked_char['hp'] = new_hp
                     sync_char_attrs_rpc(conn, picked_char)
                     if old_hp > 0 and new_hp == 0:
-                        if (isinstance(picked_char.get('cash_stage_state'), dict)
-                                and str(picked_char['cash_stage_state'].get('map_id')) == current_map):
-                            finish_cash_stage(picked_char, False)
                         if current_map == RANK_PVP_MAP_ID:
                             # RankPVP's client expects TAG 551 (tiantti_result, win=false),
                             # whose handler opens CopyFailShowRoot and completes the scene.
@@ -19416,7 +17957,7 @@ def client_handler(conn, addr):
                             print(f"[RANK PVP] player defeated player={picked_char.get('id')} "
                                   f"result=failure_ui relife_suppressed=1")
                         elif current_map == '502':
-                            debug_log('[M1003 DEBUG] Player died in arena; scheduling loss return')
+                            print('[M1003 DEBUG] Player died in arena; scheduling loss return')
                             schedule_domin_return(restore_hp=True)
                         elif supports_normal_relife(current_map):
                             death_count = int(picked_char.get('death_count', 0)) + 1
@@ -19425,7 +17966,7 @@ def client_handler(conn, addr):
                             relife_type = 0 if map_relife_type(current_map) == 2 else 1
                             offer_payload = remember_relife_offer(
                                 picked_char, relife_type,
-                                relife_cfg.get('use_count', 1), '9011')
+                                relife_cfg.get('use_count', 1), '9202')
                             send_rpc_push(618, offer_payload)
                             save_chars(all_accounts_chars)
                             print(f"[RELIFE] player downed by NPC player={picked_char.get('id')} map={current_map} type={relife_type}")
@@ -19755,7 +18296,7 @@ def client_handler(conn, addr):
                                     # an optional Add Foe action in this dialog.
                                     relife_req = remember_relife_offer(
                                         target_char, 0, relife_cfg.get('use_count', 1),
-                                        '9011', killer=picked_char)
+                                        '9202', killer=picked_char)
                                     try:
                                         t_ph = encode_sproto([(0, 618)])
                                         t_pf = sproto_pack(t_ph + relife_req)
@@ -19784,11 +18325,8 @@ def client_handler(conn, addr):
                             sync_char_attrs_rpc(conn, picked_char)
                             if old_hp > 0 and new_hp == 0:
                                 current_map = str(picked_char.get('map_id', ''))
-                                if (isinstance(picked_char.get('cash_stage_state'), dict)
-                                        and str(picked_char['cash_stage_state'].get('map_id')) == current_map):
-                                    finish_cash_stage(picked_char, False)
                                 if current_map == '502':
-                                    debug_log('[M1003 DEBUG] Player died in arena; scheduling loss return')
+                                    print('[M1003 DEBUG] Player died in arena; scheduling loss return')
                                     schedule_domin_return(restore_hp=True)
                                 elif supports_normal_relife(current_map):
                                     death_count = int(picked_char.get('death_count', 0)) + 1
@@ -19797,7 +18335,7 @@ def client_handler(conn, addr):
                                     relife_type = 0 if map_relife_type(current_map) == 2 else 1
                                     send_rpc_push(618, remember_relife_offer(
                                         picked_char, relife_type,
-                                        relife_cfg.get('use_count', 1), '9011'))
+                                        relife_cfg.get('use_count', 1), '9202'))
                                     save_chars(all_accounts_chars)
 
                             # Do NOT echo TAG 511 back to the attacker; the client already displays damage locally.
@@ -19852,19 +18390,6 @@ def client_handler(conn, addr):
                             target_nid = NPC_INST_MAP.get(target_id, str(target_id))
                             if not is_exp:
                                 NPC_INST_MAP[target_id] = target_nid
-                            if str(target_nid) == '22101':
-                                cash_state = picked_char.get('cash_stage_state')
-                                if (not isinstance(cash_state, dict)
-                                        or cash_state.get('result_recorded')
-                                        or cash_state.get('phase') != 'boss'
-                                        or str(cash_state.get('map_id')) != cur_map
-                                        or str(cash_state.get('copy_id'))
-                                        != str(picked_char.get('active_copy_id') or '')
-                                        or not is_current_character_connection(conn, picked_char)):
-                                    phase = cash_state.get('phase', '-') if isinstance(cash_state, dict) else '-'
-                                    print(f"[CASH STAGE] rejected boss hit player={picked_char.get('id')} "
-                                          f"target={target_id} phase={phase}")
-                                    continue
                             city_capture_id, city_capture_cfg = _guild_capture_for_map(cur_map)
                             if (city_capture_cfg and str(city_capture_cfg.get('npc_id', '')) == str(target_nid)):
                                 city_event, city_event_active = _guild_city_event(city_capture_id)
@@ -20014,7 +18539,6 @@ def client_handler(conn, addr):
                             exp_npc_died = False
                             exp_dead_target = False
                             world_npc_died = False
-                            applied_damage = 0
                             if is_stage_combat:
                                 # EXP and equipment squads can submit hits from
                                 # different client threads at nearly the same
@@ -20058,9 +18582,7 @@ def client_handler(conn, addr):
                                             or int(hp_now) <= 0):
                                         exp_dead_target = True
                                     else:
-                                        hp_before = max(0, int(hp_now))
-                                        applied_damage = min(hp_before, max(0, int(actual_dmg)))
-                                        hp_after = hp_before - applied_damage
+                                        hp_after = max(0, int(hp_now) - max(0, int(actual_dmg)))
                                         NPC_HP_MAP[target_id] = hp_after
                                         world_npc_died = hp_after == 0
                                         if world_npc_died:
@@ -20070,16 +18592,6 @@ def client_handler(conn, addr):
                                 stage_label = 'EQUIP' if is_equipment else 'EXP'
                                 print(f"[{stage_label} HIT] rejected target already dead/inactive target={target_id}")
                                 continue
-
-                            cash_stage_state = picked_char.get('cash_stage_state') if picked_char else None
-                            if (not is_stage_combat and isinstance(cash_stage_state, dict)
-                                    and str(cash_stage_state.get('copy_id'))
-                                    == str(picked_char.get('active_copy_id') or '')
-                                    and target_nid == '22101'):
-                                credit_cash_stage_damage(
-                                    picked_char, conn, send_rpc_push, target_nid,
-                                    defender_stats.get('hp_max', 0), applied_damage
-                                )
 
                             if city_capture_id and actual_dmg > 0:
                                 _guild_city_record_damage(city_capture_id, picked_char, actual_dmg)
@@ -20128,17 +18640,6 @@ def client_handler(conn, addr):
                                     # City vehicles keep their destroyed body in
                                     # the scene; HP=0 is the client lifecycle.
                                     pass
-                                elif (isinstance(cash_stage_state, dict)
-                                      and str(cash_stage_state.get('copy_id'))
-                                      == str(picked_char.get('active_copy_id') or '')
-                                      and str(cash_stage_state.get('map_id')) == cur_map
-                                      and cash_stage_state.get('phase') == 'boss'
-                                      and target_nid == '22101'):
-                                    on_npc_killed(
-                                        conn, send_rpc_push, picked_char, target_id,
-                                        target_nid, grant_rewards=False
-                                    )
-                                    finish_cash_stage(picked_char, True)
                                 elif not is_stage_combat:
                                     # Non-EXP despawns keep their existing AOI path.
                                     send_rpc_push(506, encode_sproto([(0, target_id)]))
@@ -20177,7 +18678,7 @@ def client_handler(conn, addr):
                                         send_rpc_push(510, encode_sproto([(0, aoi_attr)]))
 
                                     did = picked_char.get('active_domin_id', '1')
-                                    debug_log(f"[M1003 DEBUG] Boss {target_id} killed by client dmg. Winning did={did}")
+                                    print(f"[M1003 DEBUG] Boss {target_id} killed by client dmg. Winning did={did}")
                                     cap_target = did
                                     for act_m, act_mdata in list(picked_char.get('active_missions', {}).items()):
                                         cap_cfg = missions_data.get(act_m, {})
@@ -20629,7 +19130,7 @@ def client_handler(conn, addr):
 
             elif msg == 311: # enter_domin_pk_scene
                 did = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
-                debug_log(f"[M1003 DEBUG] RX 311 domin_id={did}")
+                print(f"[M1003 DEBUG] RX 311 domin_id={did}")
                 if picked_char:
                     # Validate Domin ID against active capture missions
                     # Only allow entering the Domin territory that matches the current mission
@@ -20647,7 +19148,7 @@ def client_handler(conn, addr):
                                 break
                     # Reject if no active capture mission matches the requested Domin ID
                     if not valid_domin:
-                        debug_log(f"[M1003 DEBUG] RX 311 rejected: no active capture mission for domin_id={did}")
+                        print(f"[M1003 DEBUG] RX 311 rejected: no active capture mission for domin_id={did}")
                         # Reject the request - send empty response
                         if session is not None:
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -20660,7 +19161,7 @@ def client_handler(conn, addr):
                     latest_pos = picked_char.get('pos', [34611, 100, -49480, 8632])
                     picked_char['pre_arena_pos'] = list(latest_pos)
                     picked_char['pre_arena_map'] = str(picked_char.get('map_id', '11'))
-                    debug_log(f"[M1003 DEBUG] Saved pre-arena pos: {picked_char['pre_arena_pos']}, map: {picked_char['pre_arena_map']}")
+                    print(f"[M1003 DEBUG] Saved pre-arena pos: {picked_char['pre_arena_pos']}, map: {picked_char['pre_arena_map']}")
                     picked_char['active_domin_id'] = valid_domin_id
                     start_map_transition(conn, picked_char, "502", send_rpc_push)
                 if session is not None:
@@ -20857,10 +19358,6 @@ def client_handler(conn, addr):
                     else:
                         reason = 'missing configured SingleMapID'
                     print(f"[EXP STAGE] denied solo entry id={copy_id}; {reason}")
-                elif picked_char and msg == 107 and cfg and int(cfg.get('subtype', -1)) == 11:
-                    start_cash_stage_run(
-                        conn, picked_char, copy_id, cfg, bool(body.get(1, False)), send_rpc_push
-                    )
                 elif picked_char and is_equipment_copy_id(copy_id):
                     if (msg != 107 or not start_solo_equipment_run(
                             conn, picked_char, copy_id, bool(body.get(1, False)), send_rpc_push)):
@@ -21080,8 +19577,6 @@ def client_handler(conn, addr):
                 if sort_type == 3: # RANK_TYPE.LADDER (Rank PVP)
                     _rank_pvp_ensure_world()
                     items = _rank_pvp_sort_items(sort_type)
-                elif sort_type == 6: # RANK_TYPE.GUILD
-                    items = _rank_guild_sort_items(sort_type)
                 elif sort_type == 7: # RANK_TYPE.CAR (Street Race)
                     # CAR sort_items use character ID, name#mountId[#colorId],
                     # and (day-centiseconds - elapsed) in score's high word.
@@ -21096,8 +19591,6 @@ def client_handler(conn, addr):
                             (3, row['prof']),
                             (4, str(sort_type)) # sortType
                         ]))
-                elif sort_type in (1, 2, 5, 8):
-                    items = _rank_character_sort_items(sort_type)
 
                 send_rpc_push(598, encode_sproto([(0, items), (1, sort_type)]))
                 if session is not None:
@@ -21149,7 +19642,7 @@ def client_handler(conn, addr):
                             continue
 
                         revive_cost = max(1, int(offer.get('cost', 1)))
-                        revive_item_id = str(offer.get('item_id') or '9011')
+                        revive_item_id = str(offer.get('item_id') or '9202')
                         if is_inplace:
                             inventory = picked_char.get('inventory', [])
                             revive_stack = next((item for item in inventory
@@ -21395,28 +19888,6 @@ def client_handler(conn, addr):
                 if picked_char and is_current_character_connection(conn, picked_char) and picked_char.get('active_copy_id'):
                     copy_id = str(picked_char['active_copy_id'])
                     cfg = COPY_SCENE_CONFIG.get(copy_id)
-                    cash_state = picked_char.get('cash_stage_state')
-                    if (cfg and int(cfg.get('subtype', -1)) == 11
-                            and isinstance(cash_state, dict)
-                            and not cash_state.get('result_recorded')
-                            and str(picked_char.get('map_id')) == str(cash_state.get('map_id'))):
-                        if not int(cash_state.get('end_time', 0)):
-                            started_at = int(time.time())
-                            cash_state['started_at'] = started_at
-                            cash_state['end_time'] = started_at + max(
-                                1, int(cash_state.get('duration') or cfg.get('exist_time') or 300)
-                            )
-                        if int(cash_state.get('end_time', 0)) <= int(time.time()):
-                            finish_cash_stage(picked_char, False)
-                        else:
-                            cash_state['phase'] = 'boss'
-                            cash_timer = picked_char.get('_cash_stage_timer')
-                            if cash_timer is None or not cash_timer.is_alive():
-                                schedule_cash_stage_timeout(picked_char)
-                            send_rpc_push(629, encode_sproto([
-                                (0, int(cash_state['end_time'])), (1, 2)
-                            ]))
-                            save_chars(all_accounts_chars)
                     if cfg and cfg['subtype'] == 7:
                         current_map = str(picked_char.get('map_id', ''))
                         if current_map == str(cfg.get('map_id')) and not picked_char.get('street_race_result_recorded'):
@@ -21464,7 +19935,7 @@ def client_handler(conn, addr):
             elif msg in [106, 246, 273, 207, 201, 194, 322]:
                 # Scene/Dungeon Entry
                 mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
-                debug_log(f"[RX] Scene Entry: {mid} (MSG={msg})")
+                print(f"[RX] Scene Entry: {mid} (MSG={msg})")
                 if picked_char:
                     if is_current_character_connection(conn, picked_char):
                         reconcile_exp_stage_login(picked_char)
@@ -21534,11 +20005,6 @@ def client_handler(conn, addr):
                         # only be exited through its explicit leave/revive flow.
                         print(f"[EXP STAGE] denied generic scene entry player={picked_char.get('id')} target={mid} current={current_map}")
                     else:
-                        cash_state = picked_char.get('cash_stage_state')
-                        if (isinstance(cash_state, dict)
-                                and str(mid) != str(cash_state.get('map_id'))):
-                            finish_cash_stage(picked_char, False, notify=False)
-                            picked_char.pop('cash_stage_state', None)
                         if is_public_world_map(mid):
                             # Ordinary MapInfoData BIG_WORLD scenes (including
                             # DSJ_zhuCheng/101) are not copy instances. CopySceneData
@@ -22093,7 +20559,7 @@ def client_handler(conn, addr):
                 if session is not None:
                     ph=encode_sproto([(1,session)]);pf=sproto_pack(ph+encode_sproto([]));conn.sendall(struct.pack('>H',len(pf))+pf)
 
-            elif msg in [118, 218, 145, 202, 210, 225, 242, 243, 244, 249, 252, 253, 254, 255, 256, 257, 258, 261, 262, 265, 266, 278, 296, 297, 313, 319, 452]:
+            elif msg in [118, 218, 145, 202, 210, 225, 242, 252, 253, 254, 255, 256, 257, 258, 261, 262, 265, 266, 278, 296, 297, 299, 313, 319]:
                 resp_data = encode_sproto([])
                 if msg == 118:
                     # Check if this is a random name request (body has field 0 = type)
@@ -22223,87 +20689,13 @@ def client_handler(conn, addr):
                         else:
                             print(f"[REWARD SECURITY] duplicate 30-day sign rejected player={picked_char.get('id')}")
 
-                elif msg == 452 and picked_char: # watch_video_info / daily reward button
-                    granted = False
-                    with get_character_transaction_lock(picked_char):
-                        if is_current_character_connection(conn, picked_char):
-                            print(f"[VIDEO REWARD] claim received player={picked_char.get('id')} session={session}")
-                            old_day = picked_char.get('video_reward_day')
-                            old_count = picked_char.get('video_reward_count')
-                            old_diamonds = picked_char.get('diamond', MONEY_DEFAULTS[2])
-                            count = video_reward_state(picked_char)
-                            if count < VIDEO_REWARD_DAILY_LIMIT:
-                                picked_char['video_reward_count'] = count + 1
-                                set_currency_balance(
-                                    picked_char, 2,
-                                    get_currency_balance(picked_char, 2) + VIDEO_REWARD_DIAMONDS
-                                )
-                                if save_chars(all_accounts_chars):
-                                    granted = True
-                                    property_payload = encode_sproto([
-                                        (13, get_currency_balance(picked_char, 0)),
-                                        (14, get_currency_balance(picked_char, 1)),
-                                        (15, get_currency_balance(picked_char, 2)),
-                                        (16, get_currency_balance(picked_char, 3)),
-                                        (17, get_currency_balance(picked_char, 4)),
-                                        (18, get_currency_balance(picked_char, 5)),
-                                    ])
-                                    character_payload = encode_sproto([
-                                        (0, picked_char['id']),
-                                        (5, property_payload),
-                                    ])
-                                    send_rpc_push(510, encode_sproto([(0, character_payload)]))
-                                    print(
-                                        f"[VIDEO REWARD] granted player={picked_char.get('id')} "
-                                        f"count={count + 1}/{VIDEO_REWARD_DAILY_LIMIT} "
-                                        f"diamonds={VIDEO_REWARD_DIAMONDS} "
-                                        f"balance={get_currency_balance(picked_char, 2)}"
-                                    )
-                                else:
-                                    picked_char['video_reward_day'] = old_day
-                                    if old_count is None:
-                                        picked_char.pop('video_reward_count', None)
-                                    else:
-                                        picked_char['video_reward_count'] = old_count
-                                    picked_char['diamond'] = old_diamonds
-                                    print(f"[VIDEO REWARD] persistence failed player={picked_char.get('id')}")
-                            else:
-                                print(f"[VIDEO REWARD] daily limit reached player={picked_char.get('id')}")
-                        else:
-                            print(
-                                f"[VIDEO REWARD] rejected stale connection "
-                                f"player={picked_char.get('id')} session={session} conn_id={conn_id}"
-                            )
-                    # The APK listens for tag 693 to update the reward count
-                    # and show its success notice; the RPC session only needs
-                    # the normal empty response.
-                    send_rpc_push(693, video_reward_payload(picked_char, granted))
-                    send_rpc_response(session)
-
                 elif msg == 258 and picked_char: # request_daily_buy
-                    _send_tab_reply(
-                        send_rpc_push, send_rpc_response, session,
-                        646, daily_buy_state_payload()
-                    )
-
-                elif msg == 277 and picked_char: # update_sex_mini_score
-                    activity_id = get_val_str(body, 0, '')
-                    reported_score = max(0, get_val_int(body, 1, 0))
-                    if (activity_id == SEX_MINI_GAME_ID
-                            and is_current_character_connection(conn, picked_char)):
-                        with get_character_transaction_lock(picked_char):
-                            scores = picked_char.get('sex_mini_scores')
-                            if not isinstance(scores, dict):
-                                scores = {}
-                                picked_char['sex_mini_scores'] = scores
-                            previous_score = max(0, int(scores.get(activity_id, 0) or 0))
-                            if reported_score > previous_score:
-                                scores[activity_id] = reported_score
-                                if not save_chars(all_accounts_chars):
-                                    scores[activity_id] = previous_score
-                                    print(f"[CLIMAX RANK] score save failed player={picked_char.get('id')}")
-                    if session is not None:
-                        send_rpc_response(session)
+                    d_buys = {
+                        "1": encode_sproto([(0, "1"), (1, 0)]),
+                        "2": encode_sproto([(0, "2"), (1, 0)]),
+                        "3": encode_sproto([(0, "3"), (1, 0)]),
+                    }
+                    send_rpc_push(646, encode_sproto([(0, d_buys)]))
 
                 elif msg == 278 and picked_char: # request_retrieve_info
                     if is_current_character_connection(conn, picked_char):
@@ -22498,42 +20890,22 @@ def client_handler(conn, addr):
                             (4, 0), (5, ""), (6, 0), (7, now_ts), (8, 0)
                         ])
                     }
-                    _send_tab_reply(
-                        send_rpc_push, send_rpc_response, session,
-                        619, encode_sproto([(0, acts)])
-                    )
+                    send_rpc_push(619, encode_sproto([(0, acts)]))
 
                 elif msg == 202 and picked_char: # request_tower_copy_info
                     t_info = encode_sproto([(0, 0), (1, 100), (2, 1), (3, 1), (4, 0), (5, 0)])
                     send_rpc_push(606, encode_sproto([(0, t_info), (1, [])]))
 
                 elif msg == 242 and picked_char: # request_slot_info
-                    if is_current_character_connection(conn, picked_char):
-                        with get_character_transaction_lock(picked_char):
-                            send_rpc_push(633, slot_state_payload(picked_char, include_rules=True))
-
-                elif msg == 243 and picked_char: # spin_slot
-                    slot_result, charged = slot_spin_result(picked_char, conn, body)
-                    if slot_result is not None:
-                        if charged:
-                            sync_char_attrs_rpc(conn, picked_char)
-                        send_rpc_push(634, slot_result)
-
-                elif msg == 249 and picked_char: # request_slot_reward
-                    claim_slot_reward(
-                        picked_char, conn, send_rpc_push, get_val_str(body, 0, '')
-                    )
-
-                elif msg == 244 and picked_char: # request_slot_sum_reward
-                    send_rpc_push(
-                        635, claim_slot_sum_reward(picked_char, conn, send_rpc_push)
-                    )
+                    # ret_slot_info expects:
+                    # tag 0: slot_info object with curNum(long) at tag 1, sumNum(long) at tag 2
+                    # tag 1: Dictionary<string, slot_data>
+                    # tag 2: Dictionary<string, slot_item>
+                    slot_info_obj = encode_sproto([(1, 0), (2, 0)])
+                    send_rpc_push(633, encode_sproto([(0, slot_info_obj), (1, {}), (2, {})]))
 
                 elif msg == 257 and picked_char: # request_invest_pack
-                    _send_tab_reply(
-                        send_rpc_push, send_rpc_response, session,
-                        645, invest_pack_state_payload()
-                    )
+                    send_rpc_push(645, encode_sproto([(0, {})]))
 
                 elif msg == 256 and picked_char: # request_level_pack
                     send_rpc_push(644, level_package_state_payload(picked_char))
@@ -22783,14 +21155,10 @@ def client_handler(conn, addr):
                     in_equipment_stage = picked_char.get('equipment_stage_state') is not None
                     active_copy_cfg = COPY_SCENE_CONFIG.get(str(picked_char.get('active_copy_id') or ''))
                     in_street_race = bool(active_copy_cfg and active_copy_cfg.get('subtype') == 7)
-                    in_cash_stage = bool(
-                        active_copy_cfg and active_copy_cfg.get('subtype') == 11
-                        and isinstance(picked_char.get('cash_stage_state'), dict)
-                    )
                     in_rank_pvp = (str(picked_char.get('map_id', '')) == RANK_PVP_MAP_ID
                                    and isinstance(picked_char.get('_rank_pvp_match'), dict))
                     has_leave_timer = '_exp_leave_timer' in picked_char
-                    if (in_exp_stage or in_equipment_stage or in_street_race or in_cash_stage or in_rank_pvp
+                    if (in_exp_stage or in_equipment_stage or in_street_race or in_rank_pvp
                             or has_leave_timer or in_guild_boss) and not is_current_character_connection(conn, picked_char):
                         print(f"[LEAVE COPY] denied stale character socket player={picked_char.get('id')}")
                         if session is not None:
@@ -22818,9 +21186,6 @@ def client_handler(conn, addr):
                         picked_char['street_race_checkpoint_progress'] = 0
                         picked_char.pop('street_race_last_car_pos', None)
                         picked_char.pop('street_race_pending_result', None)
-
-                    if in_cash_stage:
-                        finish_cash_stage(picked_char, False, notify=False)
 
                     if in_rank_pvp:
                         rank_match = picked_char.get("_rank_pvp_match")
@@ -22935,8 +21300,6 @@ def client_handler(conn, addr):
                         picked_char.pop('exp_members', None)
                         picked_char['exp_defer_start'] = False
                         print('[LEAVE COPY] Removed player from EXP run')
-                    if in_cash_stage:
-                        picked_char.pop('cash_stage_state', None)
                     if picked_char.get('active_copy_id'):
                         saved_pos = picked_char.get('pre_copy_pos')
                         saved_map = picked_char.get('pre_copy_map', '11')
@@ -23799,25 +22162,6 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif ((msg == 143 and get_val_int(body, 0, -1) in (0, 1, 2, 4, 5, 6, 7))
-                  or (msg == 144 and get_val_int(body, 2, -1) in (0, 1, 2, 4, 5, 6, 7))):
-                handle_shop_request(
-                    conn, picked_char, msg, body, send_rpc_push,
-                    send_rpc_response, session
-                )
-
-            elif msg == 272:
-                handle_big_sale_purchase(
-                    conn, picked_char, body, send_rpc_push,
-                    send_rpc_response, session
-                )
-
-            elif msg in (274, 299, 300):
-                handle_shop_offer_request(
-                    conn, picked_char, msg, send_rpc_push,
-                    send_rpc_response, session
-                )
-
             elif (msg in (146, 147, 148, 149, 150, 151, 152, 153, 154,
                           169, 170, 173, 174, 175, 176, 195, 212, 231, 233, 247,
                           285, 286, 287, 288, 289, 291, 293, 294, 295, 315, 318, 319, 320)
@@ -24348,8 +22692,11 @@ def start_solo_equipment_run(conn, char, copy_id, use_time_item, send_rpc_push):
 def start_server():
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    # Do not enable SO_REUSEPORT: this server's game state is process-local,
-    # so a second instance must not accept a subset of clients on the same port.
+    if hasattr(socket, "SO_REUSEPORT"):
+        try:
+            server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except Exception:
+            pass
     server.bind(("0.0.0.0", PORT))
     server.listen(20)
     print(f"GAME SERVER 9555 READY ON PORT {PORT}")
