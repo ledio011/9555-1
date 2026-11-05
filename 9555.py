@@ -7372,11 +7372,23 @@ def tower_floor_is_valid(floor_id):
     if not config or config.get("subtype") != 9:
         return False
     map_id = str(config.get("map_id") or "")
+    map_config = MAP_CONFIG.get(map_id, {})
     rows = MONSTER_DATA.get(map_id, [])
-    return bool(map_id in MAP_CONFIG and rows
-                and all(str(row.get("nid") or "") in NPC_CONFIG for row in rows)
-                and tower_reward_list([floor_id]) is not None
-                and int(config.get("exist_time", 0) or 0) > 0)
+    if (not map_config or int(map_config.get("type", -1)) != 9
+            or TOWER_MAP_TO_FLOOR.get(map_id) != int(floor_id)
+            or not rows or tower_reward_list([floor_id]) is None
+            or int(config.get("exist_time", 0) or 0) <= 0):
+        return False
+    for row in rows:
+        npc_config = NPC_CONFIG.get(str(row.get("nid") or ""))
+        if not npc_config:
+            return False
+        skills = [skill.strip() for skill in
+                  re.split(r"[;,]", str(npc_config.get("skill_group") or ""))
+                  if skill.strip()]
+        if not skills or any(skill not in SKILL_CONFIG for skill in skills):
+            return False
+    return True
 
 
 def _tower_find_character(char_id):
@@ -7432,8 +7444,9 @@ def tower_finish_run(char, run_id, won, conn=None, send_rpc_push=None):
         state["sum_time"] += max(0, now - int(run.get("start_time", now)))
         if won:
             state["floor"] = max(int(state["floor"]), floor_id)
-            state["cur_floor"] = floor_id + 1
-            state["times"] += 1
+            # Keep the cleared floor selected until the client sends Continue.
+            state["cur_floor"] = floor_id
+            state["times"] = 1
             char["tower_rank_floor"] = max(
                 int(char.get("tower_rank_floor", 0) or 0), floor_id + 1)
             grant_item_rewards(char, rewards, conn, send_rpc_push, save=False)
@@ -7495,11 +7508,14 @@ def start_tower_floor(conn, char, floor_id, send_rpc_push, continuation=False):
     config = TOWER_CONFIG.get(floor_id)
     state = ensure_tower_state(char)
     reject_reason = None
+    tower_unlock_level = int(FUNCTION_DATA.get("4003", {}).get("condition", 17) or 17)
     if not is_current_character_connection(conn, char):
         reject_reason = "stale_connection"
     elif (floor_id > max(state["floor"], state["cur_floor"])
           and not continuation):
         reject_reason = "locked_floor"
+    elif int(char.get("level", 1) or 1) < tower_unlock_level:
+        reject_reason = "feature_level_requirement"
     elif int(char.get("level", 1) or 1) < int((config or {}).get("limit_level", 1)):
         reject_reason = "level_requirement"
     elif not tower_floor_is_valid(floor_id):
@@ -7593,7 +7609,7 @@ def tower_claim_wipeout(char, conn, send_rpc_push, request_id):
     grant_item_rewards(char, rewards, conn, send_rpc_push, save=False)
     state["floor"] = max(state["floor"], target_floor)
     state["cur_floor"] = min(target_floor + 1, max(TOWER_CONFIG.keys(), default=-1) + 1)
-    state["times"] += len(floor_ids)
+    state["times"] = 1
     state["sum_time"] += sum(int(TOWER_CONFIG[floor_id].get("exist_time", 0) or 0)
                              for floor_id in floor_ids)
     char["tower_rank_floor"] = max(
