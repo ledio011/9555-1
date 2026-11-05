@@ -701,11 +701,28 @@ try:
                         "max_count": int(parts[2]) if parts[2].strip().isdigit() else 0,
                         "sell_type": int(parts[3]) if parts[3].strip().isdigit() else 0,
                         "sort_id": int(parts[4]) if parts[4].strip().isdigit() else 0,
+                        "profession_rewards": {
+                            profession: [
+                                (parts[index].strip(),
+                                 int(parts[index + 2]) if parts[index + 2].strip().isdigit() else 0,
+                                 int(parts[index + 1]) if parts[index + 1].strip().isdigit() else 0)
+                                for index in range(start, start + 12, 3)
+                                if parts[index].strip()
+                            ]
+                            for profession, start in ((0, 6), (1, 18), (2, 30))
+                        },
+                        "common_rewards": (
+                            [(parts[42].strip(),
+                              int(parts[44]) if parts[44].strip().isdigit() else 0,
+                              int(parts[43]) if parts[43].strip().isdigit() else 0)]
+                            if parts[42].strip() else []
+                        ),
                         "price_type": int(parts[45]) if parts[45].strip().isdigit() else -1,
                         "price": int(parts[46]) if parts[46].strip().isdigit() else 0,
                         "product_id": parts[47].strip(),
                         "level_min": int(parts[51]) if parts[51].strip().isdigit() else 0,
                         "level_max": int(parts[52]) if parts[52].strip().isdigit() else 80,
+                        "time_list": parts[56].strip() if len(parts) > 56 else "",
                     }
                 except (IndexError, TypeError, ValueError):
                     continue
@@ -9563,7 +9580,8 @@ def snapshot_character_reward_state(picked_char, include_mails=False):
     """Snapshot only persistent fields mutated by reward grants, not live runtime state."""
     keys = {bucket for bucket, _tag in BACKPACKS.values()}
     keys.update(MONEY_FIELDS)
-    keys.update(('next_item_index', 'exp', 'level', 'hp', 'title_exp', 'active_missions'))
+    keys.update(('next_item_index', 'exp', 'level', 'hp', 'title_exp', 'active_missions',
+                 'big_sale_purchases'))
     if include_mails:
         keys.add('mails')
     present = {key for key in keys if key in picked_char}
@@ -14814,6 +14832,36 @@ def handle_shop_request(conn, char, msg, body, send_rpc_push, send_rpc_response,
     if session is not None:
         send_rpc_response(session)
 
+def _big_sale_purchase_count(char, package_id):
+    purchases = (char or {}).get('big_sale_purchases', {})
+    record = purchases.get(str(package_id), {}) if isinstance(purchases, dict) else {}
+    try:
+        if isinstance(record, dict):
+            return max(0, int(record.get('count', 0) or 0))
+        return max(0, int(record or 0))
+    except (TypeError, ValueError):
+        return 0
+
+def _big_sale_rewards(row, profession):
+    try:
+        profession = int(profession)
+    except (TypeError, ValueError):
+        return []
+    rewards = list(row.get('profession_rewards', {}).get(profession, []))
+    rewards.extend(row.get('common_rewards', []))
+    result = []
+    for item_id, quality, amount in rewards:
+        item_id = str(item_id).strip()
+        try:
+            quality = int(quality)
+            amount = int(amount)
+        except (TypeError, ValueError):
+            return []
+        if not item_id or amount <= 0:
+            return []
+        result.append((item_id, quality, amount))
+    return result
+
 def big_sale_state_payload(char):
     """Build the client ret_special_big_pack map from eligible BigPackageData rows."""
     try:
@@ -14828,10 +14876,70 @@ def big_sale_state_payload(char):
                 or level < row.get('level_min', 0)
                 or level > row.get('level_max', 80)):
             continue
+        purchased = _big_sale_purchase_count(char, package_id)
+        max_count = max(0, int(row.get('max_count', 0) or 0))
+        state = 2 if purchased else 0
+        remaining = max(0, max_count - purchased) if max_count else 0
         packs[package_id] = encode_sproto([
-            (0, package_id), (1, 0), (2, 0), (3, 0)
+            (0, package_id), (1, state), (2, remaining), (3, 0)
         ])
     return encode_sproto([(0, packs)])
+
+def handle_big_sale_purchase(conn, char, body, send_rpc_push, send_rpc_response, session):
+    """Fulfill only verified in-game-currency Big Sale packages."""
+    package_id = get_val_str(body, 0, '').strip()
+    row = BIG_PACKAGE_DATA.get(package_id)
+    success = False
+    rewards = []
+
+    if row and row.get('sell_type') == 2 and not str(row.get('product_id', '')).strip():
+        try:
+            level = int(char.get('level', 1) or 1)
+            money_type = int(row.get('price_type', -1))
+            price = int(row.get('price', -1))
+            max_count = max(0, int(row.get('max_count', 0) or 0))
+        except (TypeError, ValueError):
+            level = 0
+            money_type = -1
+            price = -1
+            max_count = 0
+        rewards = _big_sale_rewards(row, char.get('prof', 0))
+        rewards_valid = bool(rewards) and all(
+            item_id in DIRECT_REWARD_RESOURCE_IDS or item_id in ITEM_CONFIG
+            for item_id, _quality, _amount in rewards
+        )
+        available = (level >= int(row.get('level_min', 0))
+                     and level <= int(row.get('level_max', 80)))
+        with get_character_transaction_lock(char):
+            purchased = _big_sale_purchase_count(char, package_id)
+            count_valid = purchased == 0 and (max_count <= 0 or purchased < max_count)
+            if (available and count_valid and rewards_valid and price >= 0
+                    and 0 <= money_type < len(MONEY_FIELDS)
+                    and get_currency_balance(char, money_type) >= price
+                    and can_add_reward_list_to_inventory(char, rewards)):
+                snapshot = snapshot_character_reward_state(char)
+                set_currency_balance(
+                    char, money_type, get_currency_balance(char, money_type) - price
+                )
+                grant_item_rewards(char, rewards, save=False)
+                purchases = char.setdefault('big_sale_purchases', {})
+                purchases[package_id] = {'count': 1, 'stamp': 'never'}
+                if save_chars(all_accounts_chars):
+                    success = True
+                    sync_all_backpacks(char, send_rpc_push)
+                    sync_char_attrs_rpc(conn, char)
+                else:
+                    restore_character_reward_state(char, snapshot)
+
+    reward_items = [
+        encode_sproto([(0, item_id), (1, amount), (3, quality)])
+        for item_id, quality, amount in rewards
+    ] if success else []
+    send_rpc_push(650, encode_sproto([
+        (0, reward_items), (1, 3), (3, package_id), (7, 0 if success else 1)
+    ]))
+    if session is not None:
+        send_rpc_response(session)
 
 def monthly_card_state_payload():
     """Return the configured card as not purchased; payment fulfillment is separate."""
@@ -22567,6 +22675,12 @@ def client_handler(conn, addr):
                   or (msg == 144 and get_val_int(body, 2, -1) in (0, 1, 2, 4, 5, 6, 7))):
                 handle_shop_request(
                     conn, picked_char, msg, body, send_rpc_push,
+                    send_rpc_response, session
+                )
+
+            elif msg == 272:
+                handle_big_sale_purchase(
+                    conn, picked_char, body, send_rpc_push,
                     send_rpc_response, session
                 )
 
