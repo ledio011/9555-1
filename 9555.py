@@ -21320,6 +21320,7 @@ def client_handler(conn, addr):
                     granted = False
                     with get_character_transaction_lock(picked_char):
                         if is_current_character_connection(conn, picked_char):
+                            print(f"[VIDEO REWARD] claim received player={picked_char.get('id')} session={session}")
                             old_day = picked_char.get('video_reward_day')
                             old_count = picked_char.get('video_reward_count')
                             old_diamonds = picked_char.get('diamond', MONEY_DEFAULTS[2])
@@ -21361,6 +21362,11 @@ def client_handler(conn, addr):
                                     print(f"[VIDEO REWARD] persistence failed player={picked_char.get('id')}")
                             else:
                                 print(f"[VIDEO REWARD] daily limit reached player={picked_char.get('id')}")
+                        else:
+                            print(
+                                f"[VIDEO REWARD] rejected stale connection "
+                                f"player={picked_char.get('id')} session={session} conn_id={conn_id}"
+                            )
                     # The APK listens for tag 693 to update the reward count
                     # and show its success notice; the RPC session only needs
                     # the normal empty response.
