@@ -18047,6 +18047,7 @@ def client_handler(conn, addr):
                 display_rewards = []
                 opened = False
                 failure_reason = 'invalid request or package configuration'
+                deferred_backpack_updates = []
                 if picked_char and is_current_character_connection(conn, picked_char) and 1 <= open_count <= 99:
                     with get_character_transaction_lock(picked_char):
                         first = find_backpack_item(picked_char, first_index, 2)
@@ -18148,9 +18149,15 @@ def client_handler(conn, addr):
                                                 consumed_item['amount'] = int(consumed_item.get('amount', 1)) - amount
                                                 if consumed_item['amount'] <= 0:
                                                     picked_char[BACKPACKS[container_type][0]].remove(consumed_item)
-                                                    if not random_badge_package:
+                                                    if random_badge_package:
+                                                        deferred_backpack_updates.append(
+                                                            (container_type, None, consumed_index))
+                                                    else:
                                                         push_backpack_item_update(send_rpc_push, container_type, None, consumed_index)
-                                                elif not random_badge_package:
+                                                elif random_badge_package:
+                                                    deferred_backpack_updates.append(
+                                                        (container_type, consumed_item, consumed_index))
+                                                else:
                                                     push_backpack_item_update(send_rpc_push, container_type, consumed_item)
                                             if partner_item:
                                                 remaining_keys = package_count
@@ -18165,9 +18172,14 @@ def client_handler(conn, addr):
                                                     remaining_keys -= consumed_amount
                                                     if key_item['amount'] <= 0:
                                                         picked_char['inventory'].remove(key_item)
-                                                        if not random_badge_package:
+                                                        if random_badge_package:
+                                                            deferred_backpack_updates.append((2, None, key_index))
+                                                        else:
                                                             push_backpack_item_update(send_rpc_push, 2, None, key_index)
-                                                    elif not random_badge_package:
+                                                    elif random_badge_package:
+                                                        deferred_backpack_updates.append(
+                                                            (2, key_item, key_index))
+                                                    else:
                                                         push_backpack_item_update(send_rpc_push, 2, key_item)
                                             grant_item_rewards(
                                                 picked_char, rewards,
@@ -18181,6 +18193,10 @@ def client_handler(conn, addr):
                                                 failure_reason = 'badge case reward could not be saved'
                                             else:
                                                 if random_badge_package:
+                                                    for container_type, item_update, index_id in deferred_backpack_updates:
+                                                        push_backpack_item_update(
+                                                            send_rpc_push, container_type,
+                                                            item_update, index_id)
                                                     sync_all_backpacks(picked_char, send_rpc_push)
                                                 display_rewards = [encode_sproto([
                                                     (0, item_id), (1, amount), (3, quality)
