@@ -190,6 +190,7 @@ MAP_CONNECT_DATA = {} # (src_id, target_id) -> PosX, PosY, PosZ
 GUILD_CAPTURE_DATA = {} # id -> mapId (kept for existing Gang-city map routing)
 GUILD_CAPTURE_CONFIG = {} # id -> schedule metadata from GuildCaptureData
 GUILD_LEVEL_DATA = {} # guild level -> cumulative exp/max members/daily donation count
+SEX_MINI_GAME_ID = "1301"
 GUILD_DONATE_DATA = {} # donation id -> authoritative cost and reward
 GUILD_SKILL_DATA = {} # skill type -> ordered level rows
 GUILD_BATTLE_DATA = {} # id -> configured Gang Battle schedule/selection data
@@ -11115,6 +11116,76 @@ def _rank_pvp_sort_items(sort_type=3):
         ]))
     return rows
 
+def _rank_character_sort_items(sort_type):
+    ranked = []
+    for character in _rank_pvp_all_characters():
+        try:
+            if sort_type == 1:
+                score = int(get_character_stats(character).get('power', 0) or 0)
+            elif sort_type == 2:
+                score = int(character.get('level', 1) or 1)
+            elif sort_type == 5:
+                score_value = character.get('tower_rank_floor')
+                if score_value is None:
+                    continue
+                score = max(0, int(score_value))
+            elif sort_type == 8:
+                scores = character.get('sex_mini_scores', {})
+                score_value = max(
+                    (int(value) for value in scores.values()),
+                    default=None
+                ) if isinstance(scores, dict) else None
+                if score_value is None:
+                    score_value = character.get('climax_night_score', character.get('sex_rank_score'))
+                if score_value is None:
+                    continue
+                score = max(0, int(score_value))
+            else:
+                continue
+            char_id = int(character.get('id', 0) or 0)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        ranked.append((score, char_id, character))
+    ranked.sort(key=lambda row: (-row[0], row[1]))
+    rows = []
+    for score, char_id, character in ranked[:50]:
+        rows.append(encode_sproto([
+            (0, char_id), (1, score << 32),
+            (2, str(character.get('name', 'Hero'))),
+            (3, int(character.get('prof', 0) or 0)),
+            (4, str(sort_type))
+        ]))
+    return rows
+
+def _rank_guild_sort_items(sort_type=6):
+    rows = []
+    for guild in _guild_ranked_list()[:50]:
+        chief = _guild_char_by_id(guild.get('chief_id', 0)) or {}
+        chief_name = str(chief.get('name') or guild.get('chief_name') or '')
+        guild_name = str(guild.get('name', '') or '')
+        guild_name = guild_name.replace('#', '')
+        chief_name = chief_name.replace('#', '')
+        city_hash = {
+            str(capture_id): encode_sproto([(0, str(map_id))])
+            for capture_id, map_id in GUILD_CAPTURE_DATA.items()
+            if str(GUILD_CITY_OWNERS.get(str(capture_id), {}).get('guild_id', 0))
+               == str(guild.get('id', 0))
+        }
+        fields = [
+            (0, int(guild.get('id', 0) or 0)),
+            (1, max(0, int(guild.get('exp', 0) or 0)) << 32),
+            (2, f"{guild_name}#{chief_name}"),
+            (3, _guild_level(guild)),
+            (4, str(sort_type)),
+            (5, max(0, min(7, int(guild.get('icon', 0) or 0)))),
+            (7, _guild_member_count(guild)),
+            (8, _guild_max_player(guild))
+        ]
+        if city_hash:
+            fields.append((6, city_hash))
+        rows.append(encode_sproto(fields))
+    return rows
+
 
 def sync_copy_scenes(picked_char):
     """Build TAG 555 from the APK's CopySceneData definitions."""
@@ -12476,6 +12547,24 @@ def _guild_member_count(guild, include_candidates=False):
         return len(members)
     return sum(1 for member in members.values() if int(member.get('job', 3)) != 4)
 
+def _guild_ranked_list():
+    return sorted(
+        GUILD_STATES.values(),
+        key=lambda item: (-_guild_level(item), -int(item.get('exp', 0) or 0),
+                          int(item.get('id', 0) or 0))
+    )
+
+def _guild_champion_id():
+    ranked = _guild_ranked_list()
+    champion_id = int(ranked[0].get('id', 0) or 0) if ranked else 0
+    return champion_id if champion_id > 0 else -1
+
+def _guild_sync_champion_id():
+    payload = encode_sproto([(11, _guild_champion_id())])
+    for connection, _character in list(ALL_CONNECTIONS.values()):
+        if connection is not None:
+            send_rpc_push_safe(connection, 614, payload)
+
 def _guild_member_info_bytes(guild, member_id, member):
     char = _guild_char_by_id(member_id) or {}
     try:
@@ -12566,6 +12655,23 @@ def _guild_info_response(char, guild=None):
         (3, True), (4, int(get_currency_balance(char, 3)))
     ])
 
+def _guild_donation_refresh(guild):
+    if not guild:
+        return
+    member_payload = _guild_member_list_response(guild)
+    for member_id, member in (guild.get('members') or {}).items():
+        try:
+            char_id = int(member_id)
+        except (TypeError, ValueError):
+            continue
+        if not member or int(member.get('job', 3)) == 4:
+            continue
+        connection, char = ALL_CONNECTIONS.get(char_id, (None, None))
+        if connection is None or char is None:
+            continue
+        send_rpc_push_safe(connection, 563, _guild_info_response(char, guild))
+        send_rpc_push_safe(connection, 581, member_payload)
+
 def _guild_member_list_response(guild):
     members = {}
     for member_id, member in (guild.get('members') or {}).items():
@@ -12577,8 +12683,7 @@ def _guild_member_list_response(guild):
 
 def _guild_list_response(char, page=1):
     char_id = int((char or {}).get('id', 0) or 0)
-    ordered = sorted(GUILD_STATES.values(),
-                     key=lambda item: (-_guild_level(item), -int(item.get('exp', 0)), int(item.get('id', 0))))
+    ordered = _guild_ranked_list()
     per_page = 10  # GuildListInfoRootLogic.PAGE_NUM
     max_page = max(1, (len(ordered) + per_page - 1) // per_page)
     page = min(max(1, int(page or 1)), max_page)
@@ -14442,6 +14547,7 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         fee = 499 if cost_type == 1 else 49 if cost_type == 2 else 0
         valid_name = bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 _]{4,14}", name))
         success = False
+        champion_id_before = _guild_champion_id()
         with GUILD_DB_LOCK, get_character_transaction_lock(char):
             name_used = any(str(item.get('name', '')).casefold() == name.casefold()
                             for item in GUILD_STATES.values())
@@ -14482,6 +14588,8 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
             send_rpc_push(563, _guild_info_response(char, guild))
             sync_char_attrs_rpc(conn, char)
             _guild_refresh_members(guild)
+            if _guild_champion_id() != champion_id_before:
+                _guild_sync_champion_id()
         else:
             send_rpc_push(567, encode_sproto([(1, 0)]))
 
@@ -14750,6 +14858,8 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         cfg = GUILD_DONATE_DATA.get(donation_id)
         member = _guild_member_id(guild, char_id) if guild else None
         success = False
+        response_sent = False
+        champion_id_before = _guild_champion_id()
         if cfg and guild and member and int(member.get('job', 4)) != 4:
             _guild_donate_records(char, guild)
             remaining = member.setdefault('donate_remaining', {})
@@ -14771,16 +14881,27 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
                     _save_guild_states()
                     success = True
             if success:
+                member = _guild_member_id(guild, char_id) or {}
+                send_rpc_push(585, encode_sproto([
+                    (0, 0), (1, donation_id),
+                    (2, int(member.get('contribute', 0) or 0)),
+                    (3, int(member.get('all_contribute', 0) or 0)),
+                    (4, _guild_level(guild)), (5, int(guild.get('exp', 0) or 0))
+                ]))
+                response_sent = True
                 sync_char_attrs_rpc(conn, char)
-                _guild_refresh_members(guild)
-        member = _guild_member_id(guild, char_id) if guild else {}
-        send_rpc_push(585, encode_sproto([
-            (0, 0 if success else 1), (1, donation_id),
-            (2, int(get_currency_balance(char, 3))),
-            (3, int(member.get('all_contribute', 0) or 0)),
-            (4, _guild_level(guild) if guild else 0),
-            (5, int(guild.get('exp', 0)) if guild else 0)
-        ]))
+                _guild_donation_refresh(guild)
+                if _guild_champion_id() != champion_id_before:
+                    _guild_sync_champion_id()
+        if not response_sent:
+            member = _guild_member_id(guild, char_id) if guild else {}
+            send_rpc_push(585, encode_sproto([
+                (0, 1), (1, donation_id),
+                (2, int(member.get('contribute', 0) or 0)),
+                (3, int(member.get('all_contribute', 0) or 0)),
+                (4, _guild_level(guild) if guild else 0),
+                (5, int(guild.get('exp', 0) or 0) if guild else 0)
+            ]))
 
     elif msg == 176:  # search_guild
         name = get_val_str(body, 0, '').strip().casefold()
@@ -16184,7 +16305,9 @@ def client_handler(conn, addr):
                             func_state = 1
                         funcs[fid] = encode_sproto([(0, fid), (1, func_state)])
                     send_rpc_push(614, encode_sproto([
-                        (0, int(time.time())), (2, 0), (4, 10000), (9, funcs), (12, random.randint(1, 10000)), (13, 1), (14, int(time.time()))
+                        (0, int(time.time())), (2, 0), (4, 10000), (9, funcs),
+                        (11, _guild_champion_id()), (12, random.randint(1, 10000)),
+                        (13, 1), (14, int(time.time()))
                     ]))
 
                     # The client has no separate request for this button's
@@ -20600,6 +20723,8 @@ def client_handler(conn, addr):
                 if sort_type == 3: # RANK_TYPE.LADDER (Rank PVP)
                     _rank_pvp_ensure_world()
                     items = _rank_pvp_sort_items(sort_type)
+                elif sort_type == 6: # RANK_TYPE.GUILD
+                    items = _rank_guild_sort_items(sort_type)
                 elif sort_type == 7: # RANK_TYPE.CAR (Street Race)
                     # CAR sort_items use character ID, name#mountId[#colorId],
                     # and (day-centiseconds - elapsed) in score's high word.
@@ -20614,6 +20739,8 @@ def client_handler(conn, addr):
                             (3, row['prof']),
                             (4, str(sort_type)) # sortType
                         ]))
+                elif sort_type in (1, 2, 5, 8):
+                    items = _rank_character_sort_items(sort_type)
 
                 send_rpc_push(598, encode_sproto([(0, items), (1, sort_type)]))
                 if session is not None:
@@ -21774,6 +21901,25 @@ def client_handler(conn, addr):
                         send_rpc_push, send_rpc_response, session,
                         646, daily_buy_state_payload()
                     )
+
+                elif msg == 277 and picked_char: # update_sex_mini_score
+                    activity_id = get_val_str(body, 0, '')
+                    reported_score = max(0, get_val_int(body, 1, 0))
+                    if (activity_id == SEX_MINI_GAME_ID
+                            and is_current_character_connection(conn, picked_char)):
+                        with get_character_transaction_lock(picked_char):
+                            scores = picked_char.get('sex_mini_scores')
+                            if not isinstance(scores, dict):
+                                scores = {}
+                                picked_char['sex_mini_scores'] = scores
+                            previous_score = max(0, int(scores.get(activity_id, 0) or 0))
+                            if reported_score > previous_score:
+                                scores[activity_id] = reported_score
+                                if not save_chars(all_accounts_chars):
+                                    scores[activity_id] = previous_score
+                                    print(f"[CLIMAX RANK] score save failed player={picked_char.get('id')}")
+                    if session is not None:
+                        send_rpc_response(session)
 
                 elif msg == 278 and picked_char: # request_retrieve_info
                     if is_current_character_connection(conn, picked_char):
