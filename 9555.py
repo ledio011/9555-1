@@ -5269,6 +5269,8 @@ def get_char_ov(c, sort_index=None):
 
 MONEY_FIELDS = ('cash', 'gold', 'diamond', 'guild_contribute', 'battle_coin', 'activity_coin')
 MONEY_DEFAULTS = (1000, 100, 1000, 0, 0, 0)
+VIDEO_REWARD_DAILY_LIMIT = 20
+VIDEO_REWARD_DIAMONDS = 10
 CHARACTER_TRANSACTION_LOCKS = {}
 CHARACTER_TRANSACTION_LOCKS_GUARD = threading.Lock()
 
@@ -9832,6 +9834,36 @@ def current_daily_stamp():
     """The server's daily-copy reset key (UTC calendar day adjusted for 03:00 AM reset)."""
     adjusted_time = time.time() - (3 * 3600)
     return time.strftime('%Y-%m-%d', time.gmtime(adjusted_time))
+
+def video_reward_state(char):
+    """Return the persisted daily reward count, resetting it at the server daily boundary."""
+    stamp = current_daily_stamp()
+    if char.get('video_reward_day') != stamp:
+        char['video_reward_day'] = stamp
+        char['video_reward_count'] = 0
+    try:
+        count = max(0, min(VIDEO_REWARD_DAILY_LIMIT, int(char.get('video_reward_count', 0))))
+    except (TypeError, ValueError):
+        count = 0
+    char['video_reward_count'] = count
+    return count
+
+def video_reward_payload(char, granted=False):
+    """Build the server response for a daily video-reward claim."""
+    return encode_sproto([
+        (0, video_reward_state(char)),
+        (1, VIDEO_REWARD_DAILY_LIMIT),
+        (2, VIDEO_REWARD_DIAMONDS),
+        (3, 1 if granted else 0),
+    ])
+
+def video_reward_sync_payload(char):
+    """Build the protocol-692 sync, which has no claim-result field."""
+    return encode_sproto([
+        (0, video_reward_state(char)),
+        (1, VIDEO_REWARD_DAILY_LIMIT),
+        (2, VIDEO_REWARD_DIAMONDS),
+    ])
 
 def street_race_daily_copy_id():
     """Return today's Street Race route, following the 03:00 UTC daily reset."""
@@ -15775,6 +15807,10 @@ def client_handler(conn, addr):
                         (0, int(time.time())), (2, 0), (4, 10000), (9, funcs), (12, random.randint(1, 10000)), (13, 1), (14, int(time.time()))
                     ]))
 
+                    # The client has no separate request for this button's
+                    # quota; initialize its count, limit, and reward on login.
+                    send_rpc_push(692, video_reward_sync_payload(picked_char))
+
                     # Sync every player bag through its client-owned container
                     # protocol: item 611, equipment 592, badge 604, fashion 616.
                     sync_all_backpacks(picked_char, send_rpc_push)
@@ -21279,6 +21315,40 @@ def client_handler(conn, addr):
                             sync_char_attrs_rpc(conn, picked_char)
                         else:
                             print(f"[REWARD SECURITY] duplicate 30-day sign rejected player={picked_char.get('id')}")
+
+                elif msg == 452 and picked_char: # watch_video_info / daily reward button
+                    granted = False
+                    with get_character_transaction_lock(picked_char):
+                        if is_current_character_connection(conn, picked_char):
+                            old_day = picked_char.get('video_reward_day')
+                            old_count = picked_char.get('video_reward_count')
+                            old_diamonds = picked_char.get('diamond', MONEY_DEFAULTS[2])
+                            count = video_reward_state(picked_char)
+                            if count < VIDEO_REWARD_DAILY_LIMIT:
+                                picked_char['video_reward_count'] = count + 1
+                                set_currency_balance(
+                                    picked_char, 2,
+                                    get_currency_balance(picked_char, 2) + VIDEO_REWARD_DIAMONDS
+                                )
+                                if save_chars(all_accounts_chars):
+                                    granted = True
+                                    sync_char_attrs_rpc(conn, picked_char)
+                                    print(
+                                        f"[VIDEO REWARD] granted player={picked_char.get('id')} "
+                                        f"count={count + 1}/{VIDEO_REWARD_DAILY_LIMIT} "
+                                        f"diamonds={VIDEO_REWARD_DIAMONDS}"
+                                    )
+                                else:
+                                    picked_char['video_reward_day'] = old_day
+                                    if old_count is None:
+                                        picked_char.pop('video_reward_count', None)
+                                    else:
+                                        picked_char['video_reward_count'] = old_count
+                                    picked_char['diamond'] = old_diamonds
+                                    print(f"[VIDEO REWARD] persistence failed player={picked_char.get('id')}")
+                            else:
+                                print(f"[VIDEO REWARD] daily limit reached player={picked_char.get('id')}")
+                    send_rpc_response(session, video_reward_payload(picked_char, granted))
 
                 elif msg == 258 and picked_char: # request_daily_buy
                     _send_tab_reply(
