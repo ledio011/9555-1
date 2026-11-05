@@ -5271,7 +5271,6 @@ MONEY_FIELDS = ('cash', 'gold', 'diamond', 'guild_contribute', 'battle_coin', 'a
 MONEY_DEFAULTS = (1000, 100, 1000, 0, 0, 0)
 VIDEO_REWARD_DAILY_LIMIT = 20
 VIDEO_REWARD_DIAMONDS = 10
-VIDEO_REWARD_COOLDOWN_SECONDS = 30
 CHARACTER_TRANSACTION_LOCKS = {}
 CHARACTER_TRANSACTION_LOCKS_GUARD = threading.Lock()
 
@@ -9848,16 +9847,6 @@ def video_reward_state(char):
         count = 0
     char['video_reward_count'] = count
     return count
-
-def video_reward_cooldown_remaining(char, now=None):
-    """Return seconds until the next claim is allowed, ignoring invalid saved timestamps."""
-    try:
-        next_at = float(char.get('video_reward_next_at', 0) or 0)
-    except (TypeError, ValueError):
-        return 0.0
-    if not 0 <= next_at < float('inf'):
-        return 0.0
-    return max(0.0, next_at - (time.time() if now is None else float(now)))
 
 def video_reward_payload(char, granted=False):
     """Build the server response for a daily video-reward claim."""
@@ -21333,19 +21322,10 @@ def client_handler(conn, addr):
                         if is_current_character_connection(conn, picked_char):
                             old_day = picked_char.get('video_reward_day')
                             old_count = picked_char.get('video_reward_count')
-                            old_next_at = picked_char.get('video_reward_next_at')
                             old_diamonds = picked_char.get('diamond', MONEY_DEFAULTS[2])
                             count = video_reward_state(picked_char)
-                            now = time.time()
-                            cooldown = video_reward_cooldown_remaining(picked_char, now)
-                            if cooldown > 0:
-                                print(
-                                    f"[VIDEO REWARD] cooldown player={picked_char.get('id')} "
-                                    f"remaining={cooldown:.1f}s"
-                                )
-                            elif count < VIDEO_REWARD_DAILY_LIMIT:
+                            if count < VIDEO_REWARD_DAILY_LIMIT:
                                 picked_char['video_reward_count'] = count + 1
-                                picked_char['video_reward_next_at'] = now + VIDEO_REWARD_COOLDOWN_SECONDS
                                 set_currency_balance(
                                     picked_char, 2,
                                     get_currency_balance(picked_char, 2) + VIDEO_REWARD_DIAMONDS
@@ -21364,15 +21344,15 @@ def client_handler(conn, addr):
                                         picked_char.pop('video_reward_count', None)
                                     else:
                                         picked_char['video_reward_count'] = old_count
-                                    if old_next_at is None:
-                                        picked_char.pop('video_reward_next_at', None)
-                                    else:
-                                        picked_char['video_reward_next_at'] = old_next_at
                                     picked_char['diamond'] = old_diamonds
                                     print(f"[VIDEO REWARD] persistence failed player={picked_char.get('id')}")
                             else:
                                 print(f"[VIDEO REWARD] daily limit reached player={picked_char.get('id')}")
-                    send_rpc_response(session, video_reward_payload(picked_char, granted))
+                    # The APK listens for tag 693 to update the reward count
+                    # and show its success notice; the RPC session only needs
+                    # the normal empty response.
+                    send_rpc_push(693, video_reward_payload(picked_char, granted))
+                    send_rpc_response(session)
 
                 elif msg == 258 and picked_char: # request_daily_buy
                     _send_tab_reply(
