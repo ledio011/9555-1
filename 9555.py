@@ -16142,6 +16142,8 @@ def client_handler(conn, addr):
                     else:
                         # Fallback: original hardcoded list
                         fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
+                    if "105" not in fids:
+                        fids.append("105")
                     # Build func_info: state=1 means tutorial completed, state=0 means tutorial pending
                     # For MAIN_MISSION (100), state depends on whether player has completed the tutorial
                     # For class 4 tutorial records (e.g. 4083 ROB_CAR_TIP), state depends on completed_tutorials
@@ -16154,7 +16156,10 @@ def client_handler(conn, addr):
                                 class4_fids.add(fid)
                     funcs = {}
                     for fid in fids:
-                        if fid == "100":
+                        if fid == "105":
+                            # The client repeatedly shows the empty-potion-slot tip until state reaches its condition (2).
+                            func_state = 2
+                        elif fid == "100":
                             # MAIN_MISSION: state=1 only if tutorial is already finished
                             func_state = 1 if player_tutorial == 1 else 0
                         elif fid in class4_fids:
