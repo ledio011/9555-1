@@ -16868,6 +16868,10 @@ def client_handler(conn, addr):
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
             debug_log(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
+            if msg in (202, 203, 204, 205, 208, 230):
+                print(f"[TOWER RX] player={picked_char.get('id') if picked_char else None} "
+                      f"msg={msg} session={session} fields={sorted(body)} "
+                      f"map={picked_char.get('map_id') if picked_char else None}")
             if (picked_char and str(picked_char.get('map_id', '')) == '101'
                     and map101_ready_at is not None):
                 map101_post_ready_rx_count += 1
@@ -23128,6 +23132,9 @@ def client_handler(conn, addr):
                                 _tower_schedule_wipeout(picked_char.get("id", 0), state["wipe_time"])
                     tower_info_response(picked_char, send_rpc_push)
                     tower_send_pending_result(picked_char, send_rpc_push)
+                    print(f"[TOWER] info sent player={picked_char.get('id')} "
+                          f"floor={state['floor']} cur_floor={state['cur_floor']} "
+                          f"wipe_state={state['wipe_out_state']}")
 
                 elif msg == 203 and picked_char: # grant_tower_reward
                     reward_type = get_val_int(body, 0, -1)
@@ -23169,8 +23176,11 @@ def client_handler(conn, addr):
                         print(f"[TOWER] reward claim rejected stale connection player={picked_char.get('id')}")
 
                 elif msg == 204 and picked_char: # enter_tower_copy_info
-                    start_tower_floor(
+                    started = start_tower_floor(
                         conn, picked_char, get_val_int(body, 0, -1), send_rpc_push)
+                    print(f"[TOWER] entry {'started' if started else 'not started'} "
+                          f"player={picked_char.get('id')} request_floor="
+                          f"{get_val_int(body, 0, -1)} map={picked_char.get('map_id')}")
 
                 elif msg == 205 and picked_char: # continue_tower_copy
                     run = picked_char.get("tower_run")
@@ -23228,6 +23238,8 @@ def client_handler(conn, addr):
                                 send_rpc_push(607, encode_sproto([
                                     (0, tower_info_payload(picked_char))
                                 ]))
+                                print(f"[TOWER] timed wipeout started player={char_id} "
+                                      f"range={start_floor}-{target_floor} duration={duration}")
                             elif wipe_type == 1:
                                 # Matches the APK: summed ExistTime (seconds) / 60.
                                 cost = duration // 60
@@ -23244,6 +23256,8 @@ def client_handler(conn, addr):
                                     send_rpc_push(607, encode_sproto([
                                         (0, tower_info_payload(picked_char))
                                     ]))
+                                    print(f"[TOWER] quick wipeout started player={char_id} "
+                                          f"range={start_floor}-{target_floor} cost={cost}")
                                 else:
                                     print(f"[TOWER] instant wipeout insufficient diamonds "
                                           f"player={char_id} cost={cost} duration={duration}")
