@@ -51,6 +51,10 @@ NPC_INST_MAP = {} # inst_id -> nid (to resolve rewards)
 NPC_INSTANCE_MAP = {} # inst_id -> map ID, to reject cross-map forged death reports
 NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_ATTR_MAP = {} # runtime NPC payloads for reconnect replay
+TOWER_NPC_OWNER = {} # inst_id -> character ID for private climbing-tower NPCs
+TOWER_NPC_SPAWN_INDEX = {} # inst_id -> MonsterData row index
+TOWER_WIPE_TIMERS = {} # character ID -> active climbing-tower wipeout timer
+TOWER_TIMER_LOCK = threading.Lock()
 # Striped locks serialize world-NPC HP/death transitions without retaining a
 # lock object forever for every short-lived NPC instance.
 NPC_HP_LOCKS = tuple(threading.RLock() for _ in range(256))
@@ -256,6 +260,8 @@ MOUNT_CONFIG = {} # garage vehicle id -> client MountData definition
 COLOR_CONFIG = {} # color id -> authoritative PriceType/PriceCost from ColorData
 WILD_BOSS_CONFIG = {} # ID -> configured PVE world boss and required level band
 COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
+TOWER_CONFIG = {} # floor index -> TowerData fields used by the APK
+TOWER_MAP_TO_FLOOR = {} # map ID -> TowerData floor index
 SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
 SHOW_REWARD_EXPLICIT_COUNT_CONFIG = {} # ShowRewardData id -> rewards with an explicit positive item count
 SHOW_REWARD_ITEM_SLOT_CONFIG = {} # ShowRewardData id -> authored Item1..Item8 slots (not Exp/Money columns)
@@ -1445,6 +1451,51 @@ try:
                         'single_map_id': parts[31] if len(parts) > 31 and parts[31].isdigit() else ''
                     }
         debug_log(f"[COPY SCENE CONFIG LOADED] daily_copies={len(COPY_SCENE_CONFIG)}")
+
+    tower_path = os.path.join(text_asset_root, "TowerData")
+    if os.path.exists(tower_path):
+        tower_columns = {}
+        with open(tower_path, "r", encoding="utf-8") as tower_file:
+            for line in tower_file:
+                parts = line.strip().split(",")
+                if len(parts) > 2 and parts[0] == "*" and parts[1] == "FloorID":
+                    tower_columns = {name.strip(): index for index, name in enumerate(parts)
+                                     if name.strip()}
+                    continue
+                if len(parts) < 3 or parts[0] != "*" or not parts[1].isdigit():
+                    continue
+
+                def _tower_value(name, default=""):
+                    index = tower_columns.get(name)
+                    return parts[index].strip() if index is not None and index < len(parts) else default
+
+                def _tower_int(name, default=0):
+                    value = _tower_value(name, str(default))
+                    return int(value) if value.lstrip("-").isdigit() else default
+
+                floor_id = _tower_int("FloorID", -1)
+                map_id = _tower_value("MapID")
+                if floor_id < 0 or not map_id.isdigit():
+                    continue
+                TOWER_CONFIG[floor_id] = {
+                    "floor_id": floor_id,
+                    "map_id": map_id,
+                    "show_reward_id": _tower_value("ShowRewardID"),
+                    "drop_id": _tower_value("DropID"),
+                    "wait_time": _tower_int("WaitTime", 0),
+                    "subtype": _tower_int("SubType", 0),
+                    "exist_time": _tower_int("ExistTime", 0),
+                    "special_reward_id": _tower_value("SpecialRewardId"),
+                    "special_drop_ids": {
+                        0: _tower_value("XDSpecialDropId"),
+                        1: _tower_value("QJSpecialDropId"),
+                        2: _tower_value("NQSpecialDropId"),
+                    },
+                    "need_combo": _tower_int("NeedComboVal", 0),
+                    "limit_level": _tower_int("LimitLevel", 1),
+                }
+                TOWER_MAP_TO_FLOOR[map_id] = floor_id
+        debug_log(f"[TOWER CONFIG LOADED] floors={len(TOWER_CONFIG)}")
 
     # The APK builds each race route from PointType=2 CarMissionBlockData rows.
     # BlockIndex 0 is the local car start; positive indexes are ordered checkpoints.
@@ -7084,10 +7135,10 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     # Client uses Mathf.CeilToInt(num5) - use ceiling, not truncation
     return int(math.ceil(max(1, final_dmg))), True, is_cri
 
-def build_npc_attr_sproto(nid, name, x, z, o, existing_inst_id=None):
+def build_npc_attr_sproto(nid, name, x, z, o, existing_inst_id=None, player_level=1):
     """Build NPC attribute sproto for TAG 509 (npc_create).
     Bug 1/6: Shared function to eliminate code duplication between send_npc_create and send_npc_wrapper."""
-    npc_stats = get_npc_attr(nid)
+    npc_stats = get_npc_attr(nid, player_level)
     hp_max = npc_stats['hp_max']
     atk = npc_stats['atk']
     df = npc_stats['def']
@@ -7134,6 +7185,419 @@ def build_npc_attr_sproto(nid, name, x, z, o, existing_inst_id=None):
     ])
     NPC_ATTR_MAP[inst_id] = attr
     return inst_id, attr
+
+
+def is_tower_map(map_id):
+    return str(map_id) in TOWER_MAP_TO_FLOOR
+
+
+def clear_tower_npcs(char, conn=None, send_rpc_push=None):
+    if not isinstance(char, dict):
+        return
+    char_id = int(char.get('id', 0) or 0)
+    run = char.get('tower_run')
+    if not isinstance(run, dict):
+        return
+    for inst_id in list(run.get('active_npcs', [])):
+        if TOWER_NPC_OWNER.get(int(inst_id)) != char_id:
+            continue
+        if conn and send_rpc_push:
+            send_rpc_push(506, encode_sproto([(0, int(inst_id))]))
+        TOWER_NPC_OWNER.pop(int(inst_id), None)
+        TOWER_NPC_SPAWN_INDEX.pop(int(inst_id), None)
+        NPC_HP_MAP.pop(int(inst_id), None)
+        NPC_INST_MAP.pop(int(inst_id), None)
+        NPC_INSTANCE_MAP.pop(int(inst_id), None)
+        NPC_ATTR_MAP.pop(int(inst_id), None)
+    run['active_npcs'] = []
+
+
+def spawn_tower_map_npcs(conn, map_id, char):
+    char_id = int(char.get('id', 0) or 0)
+    run = char.get('tower_run')
+    if (not isinstance(run, dict) or run.get('status') != 'running'
+            or str(run.get('map_id')) != str(map_id)
+            or int(run.get('owner_id', 0) or 0) != char_id):
+        print(f"[TOWER] suppressed NPC spawn without active owned run player={char_id} map={map_id}")
+        return
+    entries = MONSTER_DATA.get(str(map_id), [])
+    if not entries:
+        print(f"[TOWER] missing MonsterData rows player={char_id} map={map_id}")
+        return
+
+    active_by_index = {}
+    for inst_id in list(run.get('active_npcs', [])):
+        inst_id = int(inst_id)
+        if (TOWER_NPC_OWNER.get(inst_id) == char_id
+                and NPC_INSTANCE_MAP.get(inst_id) == str(map_id)
+                and inst_id in NPC_INST_MAP
+                and inst_id not in active_by_index.values()):
+            active_by_index[TOWER_NPC_SPAWN_INDEX.get(inst_id, -1)] = inst_id
+        else:
+            run['active_npcs'].remove(inst_id)
+
+    killed = set()
+    for index in run.get('killed_spawns', []):
+        try:
+            killed.add(int(index))
+        except (TypeError, ValueError):
+            continue
+    player_level = max(1, int(char.get('level', 1) or 1))
+    for index, entry in enumerate(entries):
+        if index in killed:
+            continue
+        nid = str(entry.get('nid') or '')
+        if nid not in NPC_CONFIG:
+            print(f"[TOWER] missing NPC config player={char_id} map={map_id} nid={nid}")
+            continue
+        inst_id = active_by_index.get(index)
+        inst_id, attr = build_npc_attr_sproto(
+            nid, "", entry.get('x', 0), entry.get('z', 0), entry.get('o', 0),
+            existing_inst_id=inst_id, player_level=player_level)
+        NPC_INSTANCE_MAP[inst_id] = str(map_id)
+        TOWER_NPC_OWNER[inst_id] = char_id
+        TOWER_NPC_SPAWN_INDEX[inst_id] = index
+        if inst_id not in run['active_npcs']:
+            run['active_npcs'].append(inst_id)
+        send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
+        sync_npc_attrs_rpc(
+            conn, inst_id, get_npc_attr(nid, player_level), NPC_HP_MAP.get(inst_id, 0))
+
+
+def ensure_tower_state(char):
+    state = char.setdefault("tower_state", {})
+    if not isinstance(state, dict):
+        state = {}
+        char["tower_state"] = state
+    max_floor_id = max(TOWER_CONFIG.keys(), default=0)
+    max_floor_count = max_floor_id + 1
+    state["floor"] = max(0, min(max_floor_id, int(state.get("floor", 0) or 0)))
+    state["cur_floor"] = max(0, min(max_floor_count, int(state.get("cur_floor", 0) or 0)))
+    state["times"] = max(0, int(state.get("times", 0) or 0))
+    state["sum_time"] = max(0, int(state.get("sum_time", 0) or 0))
+    state["wipe_out_state"] = max(0, min(2, int(state.get("wipe_out_state", 0) or 0)))
+    state["wipe_time"] = max(0, int(state.get("wipe_time", 0) or 0))
+    state.setdefault("claimed_special", [])
+    if state["times"] > 0 or state["floor"] > 0:
+        char["tower_rank_floor"] = max(
+            int(char.get("tower_rank_floor", 0) or 0), state["floor"] + 1)
+    return state
+
+
+def tower_info_payload(char):
+    state = ensure_tower_state(char)
+    return encode_sproto([
+        (0, state["floor"]), (1, state["cur_floor"]), (2, state["times"]),
+        (3, state["sum_time"]), (4, state["wipe_out_state"]),
+        (5, state["wipe_time"]), (6, max(TOWER_CONFIG.keys(), default=-1) + 1)
+    ])
+
+
+def tower_special_reward_payload(char):
+    state = ensure_tower_state(char)
+    claimed = {int(floor) for floor in state.get("claimed_special", [])
+               if str(floor).lstrip("-").isdigit()}
+    return [
+        encode_sproto([(0, floor_id), (1, 1 if floor_id in claimed else 0)])
+        for floor_id, config in sorted(TOWER_CONFIG.items())
+        if config.get("special_reward_id")
+    ]
+
+
+def tower_info_response(char, send_rpc_push):
+    send_rpc_push(606, encode_sproto([
+        (0, tower_info_payload(char)), (2, tower_special_reward_payload(char))
+    ]))
+
+
+def tower_reward_list(floor_ids, use_special=False, prof=0):
+    rewards = {}
+    for floor_id in floor_ids:
+        config = TOWER_CONFIG.get(int(floor_id))
+        if not config:
+            return None
+        if use_special:
+            special_drop_ids = config.get("special_drop_ids", {})
+            reward_id = (special_drop_ids.get(int(prof))
+                         or config.get("special_reward_id"))
+        else:
+            reward_id = config.get("show_reward_id")
+        entries = SHOW_REWARD_CONFIG.get(str(reward_id or ""))
+        if not entries:
+            return None
+        for item_id, quality, amount in entries:
+            try:
+                amount = int(amount)
+                quality = int(quality)
+            except (TypeError, ValueError):
+                return None
+            if not item_id or amount <= 0:
+                return None
+            key = (str(item_id), quality)
+            rewards[key] = rewards.get(key, 0) + amount
+    return [(item_id, quality, amount)
+            for (item_id, quality), amount in sorted(rewards.items())]
+
+
+def tower_run_result_payload(run, result_state):
+    floor_id = int(result_state.get("floor_id", run.get("floor_id", 0)))
+    config = TOWER_CONFIG.get(floor_id, {})
+    rewards = result_state.get("items", []) if result_state.get("win") else []
+    return encode_sproto([
+        (0, 9), (1, str(config.get("map_id") or run.get("map_id") or floor_id)),
+        (2, bool(result_state.get("win"))),
+        (3, 1 if result_state.get("win") else 0),
+        (4, 1 if result_state.get("win") else 0),
+        (5, [encode_sproto([(0, item_id), (1, amount), (3, quality)])
+             for item_id, quality, amount in rewards]),
+        (6, floor_id)
+    ])
+
+
+def tower_send_pending_result(char, send_rpc_push):
+    run = char.get("tower_run")
+    pending = run.get("pending_result") if isinstance(run, dict) else None
+    if not isinstance(pending, dict):
+        return False
+    send_rpc_push(552, tower_run_result_payload(run, pending))
+    run["pending_result"] = None
+    save_chars(all_accounts_chars)
+    return True
+
+
+def tower_floor_is_valid(floor_id):
+    config = TOWER_CONFIG.get(int(floor_id))
+    if not config or config.get("subtype") != 9:
+        return False
+    map_id = str(config.get("map_id") or "")
+    rows = MONSTER_DATA.get(map_id, [])
+    return bool(map_id in MAP_CONFIG and rows
+                and all(str(row.get("nid") or "") in NPC_CONFIG for row in rows)
+                and tower_reward_list([floor_id]) is not None
+                and int(config.get("exist_time", 0) or 0) > 0)
+
+
+def _tower_find_character(char_id):
+    try:
+        char_id = int(char_id)
+    except (TypeError, ValueError):
+        return None
+    characters = (all_accounts_chars.values()
+                  if isinstance(all_accounts_chars, dict) else all_accounts_chars)
+    for char in characters:
+        if int(char.get("id", 0) or 0) == char_id:
+            return char
+    return None
+
+
+def _tower_cancel_timer(timer_map, char_id):
+    with TOWER_TIMER_LOCK:
+        timer = timer_map.pop(int(char_id), None)
+    if timer:
+        timer.cancel()
+
+
+def _tower_send_push(char, tag, data):
+    char_id = int(char.get("id", 0) or 0)
+    conn = ALL_CONNECTIONS.get(char_id, (None, None))[0]
+    if conn:
+        send_rpc_push_safe(conn, tag, data)
+        return True
+    return False
+
+
+def tower_finish_run(char, run_id, won, conn=None, send_rpc_push=None):
+    if not isinstance(char, dict):
+        return False
+    char_id = int(char.get("id", 0) or 0)
+    with get_character_transaction_lock(char):
+        run = char.get("tower_run")
+        if (not isinstance(run, dict) or run.get("status") != "running"
+                or str(run.get("run_id")) != str(run_id)):
+            return False
+        floor_id = int(run.get("floor_id", -1))
+        config = TOWER_CONFIG.get(floor_id)
+        if not config:
+            won = False
+        rewards = tower_reward_list([floor_id]) if won else []
+        if won and (not rewards or not can_add_reward_list_to_inventory(char, rewards)):
+            print(f"[TOWER] reward validation failed player={char_id} floor={floor_id}")
+            won = False
+            rewards = []
+
+        state = ensure_tower_state(char)
+        now = int(time.time())
+        state["sum_time"] += max(0, now - int(run.get("start_time", now)))
+        if won:
+            state["floor"] = max(int(state["floor"]), floor_id)
+            state["cur_floor"] = floor_id + 1
+            state["times"] += 1
+            char["tower_rank_floor"] = max(
+                int(char.get("tower_rank_floor", 0) or 0), floor_id + 1)
+            grant_item_rewards(char, rewards, conn, send_rpc_push, save=False)
+        run["status"] = "won" if won else "failed"
+        run["pending_result"] = {
+            "win": bool(won), "floor_id": floor_id,
+            "items": list(rewards) if won else []
+        }
+        active_conn = conn or ALL_CONNECTIONS.get(char_id, (None, None))[0]
+        push = send_rpc_push
+        if push is None and active_conn:
+            push = lambda tag, data: send_rpc_push_safe(active_conn, tag, data)
+        clear_tower_npcs(char, active_conn, push)
+        save_chars(all_accounts_chars)
+
+        result = tower_run_result_payload(run, run["pending_result"])
+        if push:
+            push(552, result)
+            run["pending_result"] = None
+            save_chars(all_accounts_chars)
+        print(f"[TOWER] finished player={char_id} floor={floor_id} win={won} rewards={len(rewards or [])}")
+        return True
+
+
+def tower_npc_killed(char, inst_id, conn=None, send_rpc_push=None):
+    try:
+        inst_id = int(inst_id)
+        char_id = int(char.get("id", 0) or 0)
+    except (TypeError, ValueError, AttributeError):
+        return
+    if TOWER_NPC_OWNER.get(inst_id) != char_id:
+        return
+    with get_character_transaction_lock(char):
+        spawn_index = TOWER_NPC_SPAWN_INDEX.pop(inst_id, None)
+        TOWER_NPC_OWNER.pop(inst_id, None)
+        run = char.get("tower_run")
+        if (not isinstance(run, dict) or run.get("status") != "running"
+                or str(run.get("map_id")) != str(char.get("map_id"))):
+            return
+        if spawn_index is None:
+            return
+        killed = run.setdefault("killed_spawns", [])
+        if int(spawn_index) not in killed:
+            killed.append(int(spawn_index))
+        active_npcs = run.setdefault("active_npcs", [])
+        if inst_id in active_npcs:
+            active_npcs.remove(inst_id)
+        entries = MONSTER_DATA.get(str(run.get("map_id")), [])
+        if len(killed) >= len(entries) and not active_npcs:
+            tower_finish_run(char, run.get("run_id"), True, conn, send_rpc_push)
+
+
+def start_tower_floor(conn, char, floor_id, send_rpc_push, continuation=False):
+    try:
+        floor_id = int(floor_id)
+    except (TypeError, ValueError):
+        return False
+    char_id = int(char.get("id", 0) or 0)
+    config = TOWER_CONFIG.get(floor_id)
+    state = ensure_tower_state(char)
+    if (not is_current_character_connection(conn, char)
+            or (floor_id > max(state["floor"], state["cur_floor"]) and not continuation)
+            or int(char.get("level", 1) or 1) < int((config or {}).get("limit_level", 1))
+            or not tower_floor_is_valid(floor_id)
+            or state["wipe_out_state"] != 0
+            or (is_tower_map(char.get("map_id")) and not continuation)):
+        print(f"[TOWER] entry rejected player={char_id} floor={floor_id}")
+        return False
+
+    clear_tower_npcs(char, conn, send_rpc_push)
+    now = int(time.time())
+    run_id = uuid.uuid4().hex
+    char["tower_run"] = {
+        "run_id": run_id, "owner_id": char_id, "floor_id": floor_id,
+        "map_id": str(config["map_id"]), "status": "running",
+        "start_time": now,
+        "active_npcs": [], "killed_spawns": [], "pending_result": None
+    }
+    state["cur_floor"] = floor_id
+    state["wipe_out_state"] = 0
+    char["active_copy_id"] = str(config["map_id"])
+    player_stats = get_character_stats(char)
+    char["hp"] = int(player_stats.get("hp_max", char.get("hp", 1)) or 1)
+    if not continuation:
+        char["pre_copy_pos"] = list(char.get("pos", [0, 100, 0, 0]))
+        char["pre_copy_map"] = str(char.get("map_id") or "11")
+    save_chars(all_accounts_chars)
+    start_map_transition(conn, char, config["map_id"], send_rpc_push)
+    sync_char_attrs_rpc(conn, char)
+    tower_info_response(char, send_rpc_push)
+    return True
+
+
+def _tower_wipeout_complete(char_id, expected_time):
+    char = _tower_find_character(char_id)
+    if not char:
+        return
+    with get_character_transaction_lock(char):
+        state = ensure_tower_state(char)
+        if (state["wipe_out_state"] != 1
+                or state["wipe_time"] != int(expected_time)
+                or int(time.time()) < state["wipe_time"]):
+            return
+        state["wipe_out_state"] = 2
+        save_chars(all_accounts_chars)
+        _tower_send_push(char, 607, encode_sproto([(0, tower_info_payload(char))]))
+
+
+def _tower_schedule_wipeout(char_id, wipe_time):
+    delay = max(1, int(wipe_time) - int(time.time()))
+    timer = threading.Timer(delay, _tower_wipeout_complete, args=(char_id, wipe_time))
+    timer.daemon = True
+    with TOWER_TIMER_LOCK:
+        old_timer = TOWER_WIPE_TIMERS.get(int(char_id))
+        TOWER_WIPE_TIMERS[int(char_id)] = timer
+    if old_timer:
+        old_timer.cancel()
+    timer.start()
+
+
+def tower_wipeout_duration(start_floor, target_floor):
+    if start_floor < 0 or target_floor < start_floor:
+        return None
+    floor_ids = list(range(start_floor, target_floor + 1))
+    if any(floor_id not in TOWER_CONFIG for floor_id in floor_ids):
+        return None
+    return sum(max(0, int(TOWER_CONFIG[floor_id].get("exist_time", 0) or 0))
+               for floor_id in floor_ids)
+
+
+def tower_claim_wipeout(char, conn, send_rpc_push, request_id):
+    state = ensure_tower_state(char)
+    if state["wipe_out_state"] != 2:
+        print(f"[TOWER] wipeout claim rejected player={char.get('id')} state={state['wipe_out_state']}")
+        return False
+    start_floor = int(char.get("tower_wipe_start_floor", state["cur_floor"]))
+    target_floor = int(char.get("tower_wipe_target_floor", state["floor"]))
+    if str(request_id) not in ("0", str(start_floor), str(target_floor)):
+        print(f"[TOWER] wipeout claim rejected invalid id player={char.get('id')} id={request_id}")
+        return False
+    floor_ids = list(range(start_floor, target_floor + 1))
+    rewards = tower_reward_list(floor_ids)
+    if (not rewards or not can_add_reward_list_to_inventory(char, rewards)):
+        print(f"[TOWER] wipeout rewards invalid/full player={char.get('id')} floors={floor_ids}")
+        return False
+    grant_item_rewards(char, rewards, conn, send_rpc_push, save=False)
+    state["floor"] = max(state["floor"], target_floor)
+    state["cur_floor"] = min(target_floor + 1, max(TOWER_CONFIG.keys(), default=-1) + 1)
+    state["times"] += len(floor_ids)
+    state["sum_time"] += sum(int(TOWER_CONFIG[floor_id].get("exist_time", 0) or 0)
+                             for floor_id in floor_ids)
+    char["tower_rank_floor"] = max(
+        int(char.get("tower_rank_floor", 0) or 0), target_floor + 1)
+    state["wipe_out_state"] = 0
+    state["wipe_time"] = 0
+    char.pop("tower_wipe_start_floor", None)
+    char.pop("tower_wipe_target_floor", None)
+    _tower_cancel_timer(TOWER_WIPE_TIMERS, char.get("id", 0))
+    save_chars(all_accounts_chars)
+    items = [encode_sproto([(0, item_id), (1, amount), (3, quality)])
+             for item_id, quality, amount in rewards]
+    send_rpc_push(625, encode_sproto([
+        (0, 0), (1, int(request_id)), (2, items),
+        (3, tower_info_payload(char)), (4, tower_special_reward_payload(char))
+    ]))
+    return True
 
 
 def _build_exp_npc_wrapper(send_rpc_push, exp_state):
@@ -8322,7 +8786,8 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
         exp_state.get('attack_cd', {}).pop(inst_id, None) if exp_state else None
 
     if valid_kill and grant_rewards:
-        npc_stats = get_npc_attr(npcid)
+        npc_stats = get_npc_attr(
+            npcid, picked_char.get('level', 1) if is_tower_map(picked_char.get('map_id')) else 1)
         npc_lv = npc_stats.get('lv', 1)
         char_lv = picked_char.get('level', 1)
 
@@ -8337,6 +8802,8 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
         else:
             grant_item_rewards(picked_char, kill_rewards, conn, send_rpc_push, save=False)
 
+    if is_tower_map(picked_char.get('map_id')) and inst_id:
+        tower_npc_killed(picked_char, inst_id, conn, send_rpc_push)
 
 
 
@@ -8964,6 +9431,10 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
     if boss_id:
         if picked_char:
             _spawn_guild_boss(conn, picked_char, boss_id, map_str)
+        return
+    if is_tower_map(map_str):
+        # Tower NPCs are created after Unity reports map_ready; sending TAG 509
+        # while the scene is loading leaves invisible or untargetable enemies.
         return
     if is_equipment_copy_map(map_str):
         # Equipment-copy maps use ordered MonsterData groups and share their
@@ -12467,6 +12938,17 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
 
     src_map = str(picked_char.get('map_id') or '11')
     target_map_id = str(target_map_id) or '11'
+    if is_tower_map(src_map) and not is_tower_map(target_map_id):
+        tower_run = picked_char.get('tower_run')
+        if isinstance(tower_run, dict) and tower_run.get('status') == 'running':
+            tower_run['status'] = 'failed'
+            tower_run['pending_result'] = None
+            clear_tower_npcs(picked_char, conn, send_rpc_push)
+            save_chars(all_accounts_chars)
+        if not is_tower_map(target_map_id):
+            picked_char['active_copy_id'] = None
+            picked_char['pre_copy_map'] = None
+            picked_char['pre_copy_pos'] = None
     if src_map == '101' and target_map_id != '101':
         settle_personal_dance(picked_char, stop=True)
         # Clean up AOI-tracked Liberty City NPCs when leaving map 101
@@ -16945,6 +17427,14 @@ def client_handler(conn, addr):
                                 except (TypeError, ValueError):
                                     picked_char.pop('pending_exp_result', None)
                             print(f"[EQUIP STAGE] map_ready restored wave/timer/result copy={equipment_state.get('copy_id')}")
+                    elif is_tower_map(mid):
+                        tower_run = picked_char.get("tower_run")
+                        if (is_current_character_connection(conn, picked_char)
+                                and isinstance(tower_run, dict)
+                                and str(tower_run.get("map_id")) == mid):
+                            if tower_run.get("status") == "running":
+                                spawn_tower_map_npcs(conn, mid, picked_char)
+                            tower_send_pending_result(picked_char, send_rpc_push)
                     else:
                         pending_relife = picked_char.get('_pending_relife')
                         if (int(picked_char.get('hp', 0)) <= 0
@@ -19464,6 +19954,12 @@ def client_handler(conn, addr):
                         elif current_map == '502':
                             debug_log('[M1003 DEBUG] Player died in arena; scheduling loss return')
                             schedule_domin_return(restore_hp=True)
+                        elif is_tower_map(current_map):
+                            tower_run = picked_char.get('tower_run')
+                            if isinstance(tower_run, dict):
+                                tower_finish_run(
+                                    picked_char, tower_run.get('run_id'), False,
+                                    conn, send_rpc_push)
                         elif supports_normal_relife(current_map):
                             death_count = int(picked_char.get('death_count', 0)) + 1
                             picked_char['death_count'] = death_count
@@ -19836,6 +20332,12 @@ def client_handler(conn, addr):
                                 if current_map == '502':
                                     debug_log('[M1003 DEBUG] Player died in arena; scheduling loss return')
                                     schedule_domin_return(restore_hp=True)
+                                elif is_tower_map(current_map):
+                                    tower_run = picked_char.get('tower_run')
+                                    if isinstance(tower_run, dict):
+                                        tower_finish_run(
+                                            picked_char, tower_run.get('run_id'), False,
+                                            conn, send_rpc_push)
                                 elif supports_normal_relife(current_map):
                                     death_count = int(picked_char.get('death_count', 0)) + 1
                                     picked_char['death_count'] = death_count
@@ -19866,6 +20368,7 @@ def client_handler(conn, addr):
                             cur_map = str(picked_char.get('map_id', ''))
                             is_exp = is_exp_map(cur_map)
                             is_equipment = is_equipment_copy_map(cur_map)
+                            is_tower = is_tower_map(cur_map)
                             is_stage_combat = is_exp or is_equipment
                             exp_state_hit = (picked_char.get('exp_stage_state') if is_exp
                                              else picked_char.get('equipment_stage_state') if is_equipment
@@ -19876,6 +20379,17 @@ def client_handler(conn, addr):
                                     or target_id not in NPC_HP_MAP):
                                 print(f"[COMBAT SECURITY] rejected unknown/cross-map NPC target={target_id} map={cur_map}")
                                 continue
+                            if is_tower:
+                                tower_state = picked_char.get('tower_run')
+                                if (not isinstance(tower_state, dict)
+                                        or tower_state.get('status') != 'running'
+                                        or str(tower_state.get('map_id')) != cur_map
+                                        or int(tower_state.get('owner_id', 0) or 0) != int(picked_char.get('id', 0) or 0)
+                                        or TOWER_NPC_OWNER.get(target_id) != int(picked_char.get('id', 0) or 0)
+                                        or target_id not in tower_state.get('active_npcs', [])
+                                        or target_id not in TOWER_NPC_SPAWN_INDEX):
+                                    print(f"[TOWER HIT] rejected inactive/unowned target={target_id} player={picked_char.get('id')} map={cur_map}")
+                                    continue
                             if is_stage_combat:
                                 active_ids = exp_state_hit.get('active_monsters', []) if exp_state_hit else []
                                 spawned_ids = exp_state_hit.get('spawned_npcs', set()) if exp_state_hit else set()
@@ -19925,7 +20439,7 @@ def client_handler(conn, addr):
                             else:
                                 city_capture_id = None
                                 city_capture_cfg = None
-                            stage_label = 'EQUIP' if is_equipment else 'EXP' if is_exp else 'WORLD'
+                            stage_label = 'TOWER' if is_tower else 'EQUIP' if is_equipment else 'EXP' if is_exp else 'WORLD'
                             print(f"[{stage_label} MSG111] target_id={target_id} target_nid={target_nid} map={cur_map} is_stage={is_stage_combat} client_dmg={client_dmg}")
 
                             nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
@@ -20309,6 +20823,12 @@ def client_handler(conn, addr):
                                     or is_equipment_copy_map(picked_char.get('map_id', ''))):
                     stage_label = 'EQUIP' if is_equipment_copy_map(picked_char.get('map_id', '')) else 'EXP'
                     print(f"[{stage_label} DEATH] ignored client death report inst_id={inst_id} map={picked_char.get('map_id')}")
+                    if session is not None:
+                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                        conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    continue
+                if picked_char and is_tower_map(picked_char.get('map_id', '')):
+                    print(f"[TOWER DEATH] ignored client death report inst_id={inst_id} player={picked_char.get('id')}")
                     if session is not None:
                         ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                         conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -22567,8 +23087,158 @@ def client_handler(conn, addr):
                     )
 
                 elif msg == 202 and picked_char: # request_tower_copy_info
-                    t_info = encode_sproto([(0, 0), (1, 100), (2, 1), (3, 1), (4, 0), (5, 0)])
-                    send_rpc_push(606, encode_sproto([(0, t_info), (1, [])]))
+                    state = ensure_tower_state(picked_char)
+                    if state["wipe_out_state"] == 1:
+                        if state["wipe_time"] <= int(time.time()):
+                            _tower_wipeout_complete(picked_char.get("id", 0), state["wipe_time"])
+                            state = ensure_tower_state(picked_char)
+                        else:
+                            with TOWER_TIMER_LOCK:
+                                timer_active = int(picked_char.get("id", 0)) in TOWER_WIPE_TIMERS
+                            if not timer_active:
+                                _tower_schedule_wipeout(picked_char.get("id", 0), state["wipe_time"])
+                    tower_info_response(picked_char, send_rpc_push)
+                    tower_send_pending_result(picked_char, send_rpc_push)
+
+                elif msg == 203 and picked_char: # grant_tower_reward
+                    reward_type = get_val_int(body, 0, -1)
+                    reward_id = get_val_int(body, 1, -1)
+                    if is_current_character_connection(conn, picked_char):
+                        if reward_type == 0:
+                            tower_claim_wipeout(
+                                picked_char, conn, send_rpc_push, reward_id)
+                        elif reward_type == 1:
+                            floor_id = reward_id
+                            with get_character_transaction_lock(picked_char):
+                                state = ensure_tower_state(picked_char)
+                                config = TOWER_CONFIG.get(floor_id)
+                                claimed = {int(floor) for floor in state["claimed_special"]
+                                           if str(floor).lstrip("-").isdigit()}
+                                rewards = (tower_reward_list(
+                                    [floor_id], use_special=True,
+                                    prof=int(picked_char.get("prof", 0) or 0))
+                                           if config and config.get("special_reward_id") else None)
+                                if (floor_id >= 0 and config and rewards
+                                        and floor_id <= state["floor"]
+                                        and floor_id not in claimed
+                                        and can_add_reward_list_to_inventory(picked_char, rewards)):
+                                    grant_item_rewards(
+                                        picked_char, rewards, conn, send_rpc_push, save=False)
+                                    state["claimed_special"].append(floor_id)
+                                    save_chars(all_accounts_chars)
+                                    send_rpc_push(625, encode_sproto([
+                                        (0, 1), (1, floor_id),
+                                        (2, [encode_sproto([
+                                            (0, item_id), (1, amount), (3, quality)
+                                        ]) for item_id, quality, amount in rewards]),
+                                        (3, tower_info_payload(picked_char)),
+                                        (4, tower_special_reward_payload(picked_char))
+                                    ]))
+                                else:
+                                    print(f"[TOWER] special claim rejected player={picked_char.get('id')} floor={floor_id}")
+                    else:
+                        print(f"[TOWER] reward claim rejected stale connection player={picked_char.get('id')}")
+
+                elif msg == 204 and picked_char: # enter_tower_copy_info
+                    start_tower_floor(
+                        conn, picked_char, get_val_int(body, 0, -1), send_rpc_push)
+
+                elif msg == 205 and picked_char: # continue_tower_copy
+                    run = picked_char.get("tower_run")
+                    if (is_current_character_connection(conn, picked_char)
+                            and isinstance(run, dict)
+                            and run.get("status") in ("won", "failed")):
+                        floor_id = int(run.get("floor_id", -1))
+                        target_floor = floor_id if run.get("status") == "failed" else floor_id + 1
+                        if (target_floor in TOWER_CONFIG
+                                and int(picked_char.get("level", 1) or 1)
+                                >= int(TOWER_CONFIG[target_floor].get("limit_level", 1))):
+                            start_tower_floor(
+                                conn, picked_char, target_floor, send_rpc_push,
+                                continuation=True)
+                        else:
+                            saved_map = str(picked_char.get("pre_copy_map") or "11")
+                            saved_pos = picked_char.get("pre_copy_pos")
+                            clear_tower_npcs(picked_char, conn, send_rpc_push)
+                            run["status"] = "complete"
+                            picked_char["active_copy_id"] = None
+                            start_map_transition(
+                                conn, picked_char, saved_map, send_rpc_push,
+                                override_pos=saved_pos)
+                            picked_char["pre_copy_map"] = None
+                            picked_char["pre_copy_pos"] = None
+                            save_chars(all_accounts_chars)
+                    else:
+                        print(f"[TOWER] continue rejected player={picked_char.get('id')} run={run}")
+
+                elif msg == 208 and picked_char: # tower_wipe_out
+                    wipe_type = get_val_int(body, 0, -1)
+                    char_id = int(picked_char.get("id", 0) or 0)
+                    if is_current_character_connection(conn, picked_char):
+                        with get_character_transaction_lock(picked_char):
+                            state = ensure_tower_state(picked_char)
+                            start_floor = int(state["cur_floor"])
+                            target_floor = int(state["floor"])
+                            duration = tower_wipeout_duration(start_floor, target_floor)
+                            if (duration is None or duration <= 0
+                                    or state["wipe_out_state"] != 0
+                                    or is_tower_map(picked_char.get("map_id"))
+                                    or picked_char.get("tower_run", {}).get("status") == "running"):
+                                print(f"[TOWER] wipeout rejected player={char_id} state={state['wipe_out_state']}")
+                            elif wipe_type == 0:
+                                state["wipe_out_state"] = 1
+                                state["wipe_time"] = int(time.time()) + duration
+                                picked_char["tower_wipe_start_floor"] = start_floor
+                                picked_char["tower_wipe_target_floor"] = target_floor
+                                save_chars(all_accounts_chars)
+                                _tower_schedule_wipeout(char_id, state["wipe_time"])
+                                send_rpc_push(607, encode_sproto([
+                                    (0, tower_info_payload(picked_char))
+                                ]))
+                            elif wipe_type == 1:
+                                cost = duration // 60
+                                if get_currency_balance(picked_char, 2) >= cost:
+                                    set_currency_balance(
+                                        picked_char, 2,
+                                        get_currency_balance(picked_char, 2) - cost)
+                                    state["wipe_out_state"] = 2
+                                    state["wipe_time"] = int(time.time())
+                                    picked_char["tower_wipe_start_floor"] = start_floor
+                                    picked_char["tower_wipe_target_floor"] = target_floor
+                                    save_chars(all_accounts_chars)
+                                    sync_char_attrs_rpc(conn, picked_char)
+                                    send_rpc_push(607, encode_sproto([
+                                        (0, tower_info_payload(picked_char))
+                                    ]))
+                                else:
+                                    print(f"[TOWER] instant wipeout insufficient diamonds player={char_id} cost={cost}")
+                            else:
+                                print(f"[TOWER] invalid wipeout type player={char_id} type={wipe_type}")
+                    else:
+                        print(f"[TOWER] wipeout rejected stale connection player={char_id}")
+
+                elif msg == 230 and picked_char: # tower_reset
+                    reset = False
+                    if is_current_character_connection(conn, picked_char):
+                        with get_character_transaction_lock(picked_char):
+                            state = ensure_tower_state(picked_char)
+                            run = picked_char.get("tower_run")
+                            if (state["cur_floor"] != 0 and state["times"] > 0
+                                    and state["wipe_out_state"] != 1
+                                    and not is_tower_map(picked_char.get("map_id"))
+                                    and not (isinstance(run, dict) and run.get("status") == "running")):
+                                state["cur_floor"] = 0
+                                state["times"] = 0
+                                state["wipe_out_state"] = 0
+                                state["wipe_time"] = 0
+                                picked_char.pop("tower_wipe_start_floor", None)
+                                picked_char.pop("tower_wipe_target_floor", None)
+                                _tower_cancel_timer(TOWER_WIPE_TIMERS, picked_char.get("id", 0))
+                                save_chars(all_accounts_chars)
+                                reset = True
+                    send_rpc_push(626, encode_sproto([(0, reset)]))
+                    if reset:
+                        tower_info_response(picked_char, send_rpc_push)
 
                 elif msg == 242 and picked_char: # request_slot_info
                     if is_current_character_connection(conn, picked_char):
