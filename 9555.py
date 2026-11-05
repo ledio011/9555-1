@@ -4728,7 +4728,7 @@ def get_relife_config(death_count):
         return RELIFE_DATA[-1]
     return {'id': 1, 'min_count': 1, 'max_count': 999999, 'use_count': 1}
 
-def remember_relife_offer(char, rebirth_type, cost, item_id='9202', killer=None):
+def remember_relife_offer(char, rebirth_type, cost, item_id='9011', killer=None):
     """Bind a one-shot revive prompt to the character and map that died."""
     if not isinstance(char, dict):
         return encode_sproto([(0, int(rebirth_type)), (1, max(1, int(cost))), (2, str(item_id))])
@@ -4755,7 +4755,7 @@ def encode_pending_relife_offer(offer):
     fields = [
         (0, int(offer.get('type', 1))),
         (1, max(1, int(offer.get('cost', 1)))),
-        (2, str(offer.get('item_id') or '9202')),
+        (2, str(offer.get('item_id') or '9011')),
     ]
     if offer.get('killer_id'):
         fields.extend([(3, int(offer['killer_id'])), (4, str(offer.get('killer_name', '')))])
@@ -8651,7 +8651,7 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
                     relife_cfg = get_relife_config(death_count)
                     relife_type = 0 if map_relife_type(str(v_char.get('map_id', ''))) == 2 else 1
                     offer = remember_relife_offer(
-                        v_char, relife_type, relife_cfg.get('use_count', 1), '9202')
+                        v_char, relife_type, relife_cfg.get('use_count', 1), '9011')
                     send_rpc_push_safe(v_conn, 618, offer)
                     save_chars(all_accounts_chars)
     _schedule_guild_boss_tick(runtime_key, runtime)
@@ -9703,15 +9703,41 @@ def slot_reward_list(slot_id):
     if not authored_rewards:
         return []
     rewards = []
+    value_item_types = {
+        7: '1001',  # ADD_COIN
+        8: '1002',  # ADD_GOLD
+        9: '1003',  # ADD_DIAMOND
+        10: '2002', # ADD_HONOR
+        11: '2001', # ADD_EXP
+    }
     for item_id, quality, amount in authored_rewards:
         item_id = str(item_id)
         try:
             quality, amount = int(quality), int(amount)
         except (TypeError, ValueError):
             return []
-        if amount <= 0 or (item_id not in DIRECT_REWARD_RESOURCE_IDS
-                           and item_id not in ITEM_CONFIG):
+        if amount <= 0:
             return []
+        if item_id in DIRECT_REWARD_RESOURCE_IDS:
+            rewards.append((item_id, quality, amount))
+            continue
+
+        item_cfg = ITEM_CONFIG.get(item_id)
+        if not item_cfg:
+            return []
+        try:
+            item_type = int(item_cfg.get('type', -1))
+            function_value = int(item_cfg.get('function', 0) or 0)
+        except (TypeError, ValueError):
+            return []
+        value_item_id = value_item_types.get(item_type)
+        if value_item_id:
+            multiplier = function_value or 1
+            if multiplier < 1:
+                return []
+            rewards.append((value_item_id, 0, amount * multiplier))
+            continue
+
         rewards.append((item_id, quality, amount))
     return rewards
 
@@ -9792,14 +9818,28 @@ def slot_spin_result(picked_char, conn, request_body):
 
         probability_field = 'prob_free' if use_free_spin else 'prob'
         outcomes = []
+        invalid_outcomes = []
         for slot_id, slot_cfg in SLOT_DATA_CONFIG.items():
             try:
-                weight = max(0, int(slot_cfg.get(probability_field, 0)))
+                weight = int(slot_cfg.get(probability_field, 0))
             except (TypeError, ValueError):
+                invalid_outcomes.append(slot_id)
+                continue
+            if weight < 0:
+                invalid_outcomes.append(slot_id)
+                continue
+            if weight == 0:
                 continue
             reward_list = slot_reward_list(slot_id)
-            if weight > 0 and reward_list:
-                outcomes.append((slot_id, weight, reward_list))
+            if not reward_list:
+                invalid_outcomes.append(slot_id)
+                continue
+            outcomes.append((slot_id, weight, reward_list))
+        if invalid_outcomes:
+            print(f"[SLOT] rejected spin because weighted outcomes are invalid "
+                  f"player={picked_char.get('id')} field={probability_field} "
+                  f"ids={invalid_outcomes}")
+            return None, False
         total_weight = sum(weight for _slot_id, weight, _rewards in outcomes)
         if total_weight <= 0:
             print(f"[SLOT] no valid outcomes player={picked_char.get('id')} free={use_free_spin}")
@@ -18913,7 +18953,7 @@ def client_handler(conn, addr):
                             relife_type = 0 if map_relife_type(current_map) == 2 else 1
                             offer_payload = remember_relife_offer(
                                 picked_char, relife_type,
-                                relife_cfg.get('use_count', 1), '9202')
+                                relife_cfg.get('use_count', 1), '9011')
                             send_rpc_push(618, offer_payload)
                             save_chars(all_accounts_chars)
                             print(f"[RELIFE] player downed by NPC player={picked_char.get('id')} map={current_map} type={relife_type}")
@@ -19243,7 +19283,7 @@ def client_handler(conn, addr):
                                     # an optional Add Foe action in this dialog.
                                     relife_req = remember_relife_offer(
                                         target_char, 0, relife_cfg.get('use_count', 1),
-                                        '9202', killer=picked_char)
+                                        '9011', killer=picked_char)
                                     try:
                                         t_ph = encode_sproto([(0, 618)])
                                         t_pf = sproto_pack(t_ph + relife_req)
@@ -19282,7 +19322,7 @@ def client_handler(conn, addr):
                                     relife_type = 0 if map_relife_type(current_map) == 2 else 1
                                     send_rpc_push(618, remember_relife_offer(
                                         picked_char, relife_type,
-                                        relife_cfg.get('use_count', 1), '9202'))
+                                        relife_cfg.get('use_count', 1), '9011'))
                                     save_chars(all_accounts_chars)
 
                             # Do NOT echo TAG 511 back to the attacker; the client already displays damage locally.
@@ -20589,7 +20629,7 @@ def client_handler(conn, addr):
                             continue
 
                         revive_cost = max(1, int(offer.get('cost', 1)))
-                        revive_item_id = str(offer.get('item_id') or '9202')
+                        revive_item_id = str(offer.get('item_id') or '9011')
                         if is_inplace:
                             inventory = picked_char.get('inventory', [])
                             revive_stack = next((item for item in inventory
