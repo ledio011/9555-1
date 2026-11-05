@@ -7555,6 +7555,74 @@ def start_tower_floor(conn, char, floor_id, send_rpc_push, continuation=False):
     return True
 
 
+def start_tower_wipeout(conn, char, wipe_type, send_rpc_push):
+    char_id = int(char.get("id", 0) or 0)
+    if not is_current_character_connection(conn, char):
+        print(f"[TOWER] wipeout rejected player={char_id} reason=stale_connection")
+        return False
+    with get_character_transaction_lock(char):
+        state = ensure_tower_state(char)
+        start_floor = int(state["cur_floor"])
+        target_floor = int(state["floor"])
+        duration = tower_wipeout_duration(start_floor, target_floor)
+        tower_run = char.get("tower_run")
+        if duration is None or duration <= 0:
+            reason = "invalid_floor_range"
+        elif state["wipe_out_state"] != 0:
+            reason = "wipeout_already_active"
+        elif is_tower_map(char.get("map_id")):
+            reason = "currently_in_tower"
+        elif isinstance(tower_run, dict) and tower_run.get("status") == "running":
+            reason = "tower_run_active"
+        else:
+            reason = None
+
+        if reason:
+            print(f"[TOWER] wipeout rejected player={char_id} reason={reason} "
+                  f"type={wipe_type} range={start_floor}-{target_floor} "
+                  f"duration={duration} state={state['wipe_out_state']} "
+                  f"map={char.get('map_id')}")
+            return False
+
+        if wipe_type == 0:
+            state["wipe_out_state"] = 1
+            state["wipe_time"] = int(time.time()) + duration
+            char["tower_wipe_start_floor"] = start_floor
+            char["tower_wipe_target_floor"] = target_floor
+            save_chars(all_accounts_chars)
+            _tower_schedule_wipeout(char_id, state["wipe_time"])
+            send_rpc_push(607, encode_sproto([
+                (0, tower_info_payload(char))
+            ]))
+            print(f"[TOWER] timed wipeout started player={char_id} "
+                  f"range={start_floor}-{target_floor} duration={duration}")
+            return True
+
+        if wipe_type == 1:
+            cost = duration // 60
+            balance = get_currency_balance(char, 2)
+            if balance < cost:
+                print(f"[TOWER] quick wipeout rejected player={char_id} "
+                      f"reason=insufficient_diamonds cost={cost} balance={balance}")
+                return False
+            set_currency_balance(char, 2, balance - cost)
+            state["wipe_out_state"] = 2
+            state["wipe_time"] = int(time.time())
+            char["tower_wipe_start_floor"] = start_floor
+            char["tower_wipe_target_floor"] = target_floor
+            save_chars(all_accounts_chars)
+            sync_char_attrs_rpc(conn, char)
+            send_rpc_push(607, encode_sproto([
+                (0, tower_info_payload(char))
+            ]))
+            print(f"[TOWER] quick wipeout started player={char_id} "
+                  f"range={start_floor}-{target_floor} cost={cost} balance={balance-cost}")
+            return True
+
+        print(f"[TOWER] wipeout rejected player={char_id} reason=invalid_type type={wipe_type}")
+        return False
+
+
 def _tower_wipeout_complete(char_id, expected_time):
     char = _tower_find_character(char_id)
     if not char:
@@ -16872,6 +16940,31 @@ def client_handler(conn, addr):
                 print(f"[TOWER RX] player={picked_char.get('id') if picked_char else None} "
                       f"msg={msg} session={session} fields={sorted(body)} "
                       f"map={picked_char.get('map_id') if picked_char else None}")
+            if msg in (204, 208):
+                request_value = get_val_int(body, 0, -1)
+                print(f"[TOWER ACTION] player="
+                      f"{picked_char.get('id') if picked_char else None} "
+                      f"msg={msg} value={request_value} "
+                      f"raw={body.get(0)!r} raw_type={type(body.get(0)).__name__} "
+                      f"current_socket={is_current_character_connection(conn, picked_char) if picked_char else False}")
+                if picked_char:
+                    try:
+                        if msg == 204:
+                            started = start_tower_floor(
+                                conn, picked_char, request_value, send_rpc_push)
+                            print(f"[TOWER ACTION RESULT] player={picked_char.get('id')} "
+                                  f"msg=204 started={started} map={picked_char.get('map_id')} "
+                                  f"run={picked_char.get('tower_run')}")
+                        else:
+                            start_tower_wipeout(
+                                conn, picked_char, request_value, send_rpc_push)
+                    except Exception as tower_error:
+                        print(f"[TOWER ACTION ERROR] player={picked_char.get('id')} "
+                              f"msg={msg} error={tower_error}")
+                        traceback.print_exc()
+                else:
+                    print(f"[TOWER ACTION REJECTED] msg={msg} reason=no_character")
+                continue
             if (picked_char and str(picked_char.get('map_id', '')) == '101'
                     and map101_ready_at is not None):
                 map101_post_ready_rx_count += 1
@@ -23175,13 +23268,6 @@ def client_handler(conn, addr):
                     else:
                         print(f"[TOWER] reward claim rejected stale connection player={picked_char.get('id')}")
 
-                elif msg == 204 and picked_char: # enter_tower_copy_info
-                    started = start_tower_floor(
-                        conn, picked_char, get_val_int(body, 0, -1), send_rpc_push)
-                    print(f"[TOWER] entry {'started' if started else 'not started'} "
-                          f"player={picked_char.get('id')} request_floor="
-                          f"{get_val_int(body, 0, -1)} map={picked_char.get('map_id')}")
-
                 elif msg == 205 and picked_char: # continue_tower_copy
                     run = picked_char.get("tower_run")
                     if (is_current_character_connection(conn, picked_char)
@@ -23209,62 +23295,6 @@ def client_handler(conn, addr):
                             save_chars(all_accounts_chars)
                     else:
                         print(f"[TOWER] continue rejected player={picked_char.get('id')} run={run}")
-
-                elif msg == 208 and picked_char: # tower_wipe_out
-                    wipe_type = get_val_int(body, 0, -1)
-                    char_id = int(picked_char.get("id", 0) or 0)
-                    if is_current_character_connection(conn, picked_char):
-                        with get_character_transaction_lock(picked_char):
-                            state = ensure_tower_state(picked_char)
-                            start_floor = int(state["cur_floor"])
-                            target_floor = int(state["floor"])
-                            duration = tower_wipeout_duration(start_floor, target_floor)
-                            tower_run = picked_char.get("tower_run")
-                            if (duration is None or duration <= 0
-                                    or state["wipe_out_state"] != 0
-                                    or is_tower_map(picked_char.get("map_id"))
-                                    or (isinstance(tower_run, dict)
-                                        and tower_run.get("status") == "running")):
-                                print(f"[TOWER] wipeout rejected player={char_id} "
-                                      f"range={start_floor}-{target_floor} duration={duration} "
-                                      f"state={state['wipe_out_state']} map={picked_char.get('map_id')}")
-                            elif wipe_type == 0:
-                                state["wipe_out_state"] = 1
-                                state["wipe_time"] = int(time.time()) + duration
-                                picked_char["tower_wipe_start_floor"] = start_floor
-                                picked_char["tower_wipe_target_floor"] = target_floor
-                                save_chars(all_accounts_chars)
-                                _tower_schedule_wipeout(char_id, state["wipe_time"])
-                                send_rpc_push(607, encode_sproto([
-                                    (0, tower_info_payload(picked_char))
-                                ]))
-                                print(f"[TOWER] timed wipeout started player={char_id} "
-                                      f"range={start_floor}-{target_floor} duration={duration}")
-                            elif wipe_type == 1:
-                                # Matches the APK: summed ExistTime (seconds) / 60.
-                                cost = duration // 60
-                                if get_currency_balance(picked_char, 2) >= cost:
-                                    set_currency_balance(
-                                        picked_char, 2,
-                                        get_currency_balance(picked_char, 2) - cost)
-                                    state["wipe_out_state"] = 2
-                                    state["wipe_time"] = int(time.time())
-                                    picked_char["tower_wipe_start_floor"] = start_floor
-                                    picked_char["tower_wipe_target_floor"] = target_floor
-                                    save_chars(all_accounts_chars)
-                                    sync_char_attrs_rpc(conn, picked_char)
-                                    send_rpc_push(607, encode_sproto([
-                                        (0, tower_info_payload(picked_char))
-                                    ]))
-                                    print(f"[TOWER] quick wipeout started player={char_id} "
-                                          f"range={start_floor}-{target_floor} cost={cost}")
-                                else:
-                                    print(f"[TOWER] instant wipeout insufficient diamonds "
-                                          f"player={char_id} cost={cost} duration={duration}")
-                            else:
-                                print(f"[TOWER] invalid wipeout type player={char_id} type={wipe_type}")
-                    else:
-                        print(f"[TOWER] wipeout rejected stale connection player={char_id}")
 
                 elif msg == 230 and picked_char: # tower_reset
                     reset = False
