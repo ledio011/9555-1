@@ -10508,6 +10508,30 @@ def finish_cash_stage(char, win, notify=True):
         state = char.get('cash_stage_state')
         if not isinstance(state, dict) or state.get('result_recorded'):
             return False
+        if win:
+            reward_total = cash_stage_reward_budget(char)
+            cash_earned = max(0, int(state.get('cash_earned', 0)))
+            reward_bonus = max(0, reward_total - cash_earned)
+            if reward_bonus:
+                conn = ALL_CONNECTIONS.get(int(char.get('id', 0)), (None, None))[0]
+                grant_item_rewards(
+                    char, [('1001', 0, reward_bonus)], conn,
+                    (lambda tag, data: send_push_to_char(char.get('id', 0), tag, data)),
+                    save=False
+                )
+                reward_item = encode_sproto([
+                    (0, '1001'), (1, reward_total), (3, 0)
+                ])
+                send_push_to_char(
+                    char.get('id', 0), 615,
+                    encode_sproto([(0, [reward_item])])
+                )
+            state['cash_earned'] = max(cash_earned, reward_total)
+            daily_state = ensure_daily_copy_state(char)
+            best_grades = daily_state.setdefault('best_grades', {})
+            best_grades[str(state.get('copy_id', ''))] = max(
+                int(best_grades.get(str(state.get('copy_id', '')), 0)), 3
+            )
         state['result_recorded'] = True
         state['win'] = bool(win)
         timer = char.pop('_cash_stage_timer', None)
@@ -10523,7 +10547,7 @@ def finish_cash_stage(char, win, notify=True):
                 ]))
             result = encode_sproto([
                 (0, 11), (1, str(state.get('copy_id', '201'))),
-                (2, bool(win)), (3, 1 if win else 0), (4, 1 if win else 0),
+                (2, bool(win)), (3, 7 if win else 0), (4, 3 if win else 0),
                 (5, result_items)
             ])
             char['pending_cash_stage_result'] = result.hex()
@@ -11491,7 +11515,10 @@ def sync_copy_scenes(picked_char):
             (6, 0),
             (7, cfg['subtype'])
         ]
-        if best_grade is not None:
+        best_copy_grade = state.get('best_grades', {}).get(copy_id)
+        if best_copy_grade is not None:
+            info_fields.append((2, int(best_copy_grade)))
+        elif best_grade is not None:
             info_fields.append((2, int(best_grade)))
         if best_str:
             info_fields.append((4, str(best_str)))
@@ -20334,6 +20361,17 @@ def client_handler(conn, addr):
                 if inst_id and inst_id in NPC_HP_MAP: del NPC_HP_MAP[inst_id]
 
                 if picked_char and not is_duplicate:
+                    cash_state = picked_char.get('cash_stage_state')
+                    cash_stage_boss_death = bool(
+                        isinstance(cash_state, dict)
+                        and not cash_state.get('result_recorded')
+                        and cash_state.get('phase') == 'boss'
+                        and is_cash_stage_copy(cash_state.get('copy_id'))
+                        and str(cash_state.get('map_id')) == cur_map
+                        and str(cash_state.get('copy_id'))
+                        == str(picked_char.get('active_copy_id') or '')
+                        and str(npcid) == '22101'
+                    )
                     if die_type in [2, 6]:
                         advance_missions(picked_char, send_rpc_push, 'car', die_type=die_type)
 
@@ -20384,6 +20422,12 @@ def client_handler(conn, addr):
                                     (4, drop_item_m11),
                                     (7, picked_char['id'])
                                 ]))
+                    elif cash_stage_boss_death:
+                        on_npc_killed(
+                            conn, send_rpc_push, picked_char, inst_id, npcid,
+                            grant_rewards=False
+                        )
+                        finish_cash_stage(picked_char, True)
                     else:
                         # EXP combat already broadcast TAG 510 with HP=0 to
                         # every squad member. Do not immediately remove the NPC
