@@ -173,7 +173,8 @@ GUILD_BATTLE_DATA = {} # id -> configured Gang Battle schedule/selection data
 GUILD_STAR_DATA = {} # id -> configured Gang Star upgrade data
 SHOP_DATA = {} # shop type -> shop item ID -> ShopData row for player shops
 GUILD_SHOP_DATA = {} # shop item ID -> ShopData row for Guild shop
-SHOP_ITEMS_PER_PAGE = 9
+SHOP_ITEMS_PER_PAGE = 8
+SHOP_PRODUCTS_PER_PAGE = 9
 PURCHASE_DATA = {} # product ID -> client recharge product metadata
 BIG_PACKAGE_DATA = {} # package ID -> client BigPackageData offer metadata
 MONTHLY_CARD_DATA = {} # monthly card ID -> client monthly card metadata
@@ -9654,7 +9655,7 @@ def ensure_download_rewards_granted(picked_char):
           f"items={[(item_id, count) for item_id, _quality, count in pending]}")
     return True
 
-def resolve_item_package_rewards(item_id, package_count=1):
+def resolve_item_package_rewards(item_id, package_count=1, character=None):
     """Return exact client package rewards when their source data exists."""
     item_id = str(item_id)
     try:
@@ -9665,7 +9666,9 @@ def resolve_item_package_rewards(item_id, package_count=1):
         return []
 
     cfg = ITEM_CONFIG.get(item_id, {})
-    equipment_rewards = resolve_equipment_pack_rewards(item_id, package_count)
+    equipment_rewards = resolve_equipment_pack_rewards(
+        item_id, package_count, character
+    )
     if equipment_rewards is not None:
         return equipment_rewards
 
@@ -9696,7 +9699,7 @@ def resolve_item_package_rewards(item_id, package_count=1):
     return [(str(reward[0]), int(reward[1]), int(reward[2]) * package_count)
             for reward in rewards if len(reward) >= 3 and str(reward[0])]
 
-def resolve_equipment_pack_rewards(item_id, package_count=1):
+def resolve_equipment_pack_rewards(item_id, package_count=1, character=None):
     """Roll profession/tier equipment packs using ItemData and EquipData."""
     try:
         function_id = int(ITEM_CONFIG.get(str(item_id), {}).get('function', 0) or 0)
@@ -9710,6 +9713,10 @@ def resolve_equipment_pack_rewards(item_id, package_count=1):
         return None
     profession = profession_group
     allowed_classes = set(range(1, 9)) if tier == 0 else {tier}
+    if character is not None:
+        max_class = _max_shop_equipment_class(character, profession)
+        allowed_classes = {equip_class for equip_class in allowed_classes
+                           if equip_class <= max_class}
     candidates = []
     for equip_id, equip_cfg in EQUIP_CONFIG.items():
         try:
@@ -9742,6 +9749,10 @@ def resolve_weapon_pack_rewards(item_id, character, package_count=1):
         return None
     if not character or package_count < 1:
         return []
+    if function_id == 74500:
+        max_class = _max_shop_equipment_class(character)
+        allowed_classes = {equip_class for equip_class in allowed_classes
+                           if equip_class <= max_class}
 
     candidates = []
     for equip_id, equip_cfg in EQUIP_CONFIG.items():
@@ -12500,6 +12511,31 @@ def _shop_row_available_for_character(char, row, class_filter=0):
     except (TypeError, ValueError):
         return False
 
+def _max_shop_equipment_class(char, profession=None):
+    """Find the highest equipment-pack tier unlocked by this character's shop rows."""
+    try:
+        level = int(char.get('level', 1) or 1)
+        profession = int(char.get('prof', 0) if profession is None else profession)
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+    max_class = 0
+    for row in SHOP_DATA.get(1, {}).values():
+        try:
+            row_profession = int(row.get('profession', -1))
+            if (not int(row.get('min_level', 0)) <= level <= int(row.get('max_level', 80))
+                    or row_profession not in (-1, profession)):
+                continue
+            item_config = ITEM_CONFIG.get(str(row.get('item_id', '')), {})
+            function_id = int(item_config.get('function', 0) or 0)
+            profession_group = function_id // 100 - 740
+            tier = function_id % 100
+            if profession_group == profession and 1 <= tier <= 8:
+                max_class = max(max_class, tier)
+        except (TypeError, ValueError):
+            continue
+    return max_class
+
 def _guild_boss_daily_id(now=None):
     """Return the one Gang Boss assigned to the current UTC weekday.
 
@@ -14787,7 +14823,8 @@ def handle_shop_request(conn, char, msg, body, send_rpc_push, send_rpc_response,
             ))
         else:
             rows = []
-        per_page = SHOP_ITEMS_PER_PAGE
+        per_page = (SHOP_PRODUCTS_PER_PAGE if shop_type == 4
+                    else SHOP_ITEMS_PER_PAGE)
         max_page = max(1, (len(rows) + per_page - 1) // per_page)
         requested_item_id = get_val_str(body, 2, '').strip()
         if requested_item_id and shop_type in (0, 1):
@@ -17678,7 +17715,7 @@ def client_handler(conn, addr):
                                             package_id in ITEM_PACKAGE_RANDOM_BADGE_LEVELS
                                         )
                                         rewards = resolve_item_package_rewards(
-                                            package_id, package_count)
+                                            package_id, package_count, picked_char)
                                     valid_rewards = bool(rewards) and all(
                                         item_id in ITEM_CONFIG and amount > 0
                                         for item_id, _quality, amount in rewards
