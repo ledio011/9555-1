@@ -5252,43 +5252,42 @@ def get_character_stats(c):
         2013: 'crr'
     }
     percent_totals = {field: 0 for field in percent_fields.values()}
-    badge_percent_totals = {field: 0 for field in percent_fields.values()}
     totals = {
         'atk': atk, 'hp_max': hp_max, 'def': df, 'hit': hit, 'eva': eva,
         'cri': cri, 'res': res, 'exd': ld['exd'][prof], 'exr': ld['exr'][prof],
         'crd': ld['crd'][prof], 'crr': ld['crr'][prof], 'rec': 0, 'mov': 500
     }
-    # Primary percentage attributes contribute to power through their adjusted
-    # combat stats; secondary percentages use the client's per-item score weights.
     coeffs = [
         {"atk":16, "hp":1, "def":11, "hit":2, "eva":5.5, "cri":10, "res":10},
         {"atk":20, "hp":1, "def":12, "hit":1, "eva":6, "cri":5, "res":10},
         {"atk":7, "hp":1, "def":7.4, "hit":3, "eva":3.7, "cri":15, "res":10}
     ][prof    ]
-    extra_combat_weights = {
-        1008: 5, 1009: 5, 1012: 5, 1013: 5,
+    attribute_combat_weights = {
+        1001: coeffs['atk'], 1002: coeffs['hp'], 1003: coeffs['def'],
+        1004: coeffs['hit'], 1005: coeffs['eva'], 1006: coeffs['cri'],
+        1007: coeffs['res'], 1008: 5, 1009: 5, 1012: 5, 1013: 5,
+        2001: 5, 2002: 5, 2003: 5, 2004: 5, 2005: 5, 2006: 5, 2007: 5,
         2008: 5, 2009: 5, 2012: 5, 2013: 5
     }
-    extra_combat_power = 0
-    badge_combat_power = 0
+    power_attribute_score = 0
+
+    def attribute_combat_value(attribute_id, value):
+        try:
+            return int(value) * attribute_combat_weights.get(int(attribute_id), 0)
+        except (TypeError, ValueError):
+            return 0
 
     def add_item_attribute(attribute_id, value):
         try:
             attribute_id = int(attribute_id)
+            value = int(value)
             if attribute_id in percent_fields:
                 field = percent_fields[attribute_id]
-                percent_totals[field] += int(value)
+                percent_totals[field] += value
                 return
             field = attr_fields.get(attribute_id)
             if field:
-                totals[field] += int(value)
-        except (TypeError, ValueError):
-            pass
-
-    def add_extra_combat_power(attribute_id, value):
-        nonlocal extra_combat_power
-        try:
-            extra_combat_power += int(value) * extra_combat_weights.get(int(attribute_id), 0)
+                totals[field] += value
         except (TypeError, ValueError):
             pass
 
@@ -5302,6 +5301,7 @@ def get_character_stats(c):
             quality = get_game_item_quality(item, equip_cfg)
             item_level = (equipment_enhance_level(c, item) if bucket == 'equipped_equip'
                           else max(0, int(item.get('level', 0) or 0)))
+            item_power_score = 0
             for attribute_index, (stat_key, _value_key) in enumerate((
                     ('base_stat', 'base_val'), ('stat1', 'stat1_val'),
                     ('stat2', 'stat2_val'), ('ex_stat', 'ex_stat_val'))):
@@ -5312,7 +5312,7 @@ def get_character_stats(c):
                 )
                 if attribute_id:
                     add_item_attribute(attribute_id, value)
-                    add_extra_combat_power(attribute_id, value)
+                    item_power_score += attribute_combat_value(attribute_id, value)
             if (not is_fashion and int(item_cfg.get('type', -1)) == 2
                     and equipment_subtype(item) != 0):
                 random_attrs = item.get('random_attri')
@@ -5323,12 +5323,17 @@ def get_character_stats(c):
                         add_item_attribute(
                             random_attribute_id, random_attribute_value
                         )
-                        add_extra_combat_power(random_attribute_id, random_attribute_value)
+                        item_power_score += attribute_combat_value(
+                            random_attribute_id, random_attribute_value
+                        )
+            # GameItem.GetItemCombatVal floors each equipment/fashion item.
+            power_attribute_score += math.floor(item_power_score)
 
     badge_color_levels = {}
     for item in c.get('equipped_badges', []):
         badge_cfg = BADGE_CONFIG.get(str(item.get('id', '')), {})
         if badge_cfg:
+            badge_power_score = 0
             for status_key, value_key in (('status1', 'value1'), ('status2', 'value2')):
                 try:
                     attribute_id = int(badge_cfg.get(status_key, -1))
@@ -5338,13 +5343,9 @@ def get_character_stats(c):
                 if attribute_id <= 0:
                     continue
                 add_item_attribute(attribute_id, value)
-                if attribute_id in percent_fields:
-                    badge_percent_totals[percent_fields[attribute_id]] += value
-                # GameItem.GetItemCombatVal uses the profession's client
-                # attribute weights; all badge attributes are weighted 5.
-                if (attribute_id in percent_fields
-                        or attribute_id in (1008, 1009, 1012, 1013)):
-                    badge_combat_power += value * 5
+                badge_power_score += attribute_combat_value(attribute_id, value)
+            # GameItem.GetItemCombatVal floors each badge independently.
+            power_attribute_score += math.floor(badge_power_score)
             color = int(badge_cfg.get('color', -1))
             level = int(badge_cfg.get('level', 0))
             if color in (0, 1, 2) and level > 0:
@@ -5369,7 +5370,9 @@ def get_character_stats(c):
             break
         set_attribute_value = math.floor(sum(levels) / divisor)
         add_item_attribute(set_attribute_id, set_attribute_value)
-        add_extra_combat_power(set_attribute_id, set_attribute_value)
+        power_attribute_score += math.floor(
+            attribute_combat_value(set_attribute_id, set_attribute_value)
+        )
         break
 
     # Guild skills are shared by accepted guild members. GuildSkillData's
@@ -5399,7 +5402,9 @@ def get_character_stats(c):
             attribute_id = skill_row.get('parm1', 0)
             value = skill_row.get('parm2', 0)
             add_item_attribute(attribute_id, value)
-            add_extra_combat_power(attribute_id, value)
+            power_attribute_score += math.floor(
+                attribute_combat_value(attribute_id, value)
+            )
 
         # Activated Guild Star nodes grant both configured attributes to every
         # accepted member; candidates do not receive the guild-wide bonuses.
@@ -5412,11 +5417,13 @@ def get_character_stats(c):
                     is_active = False
                 if not is_active:
                     continue
+                star_power_score = 0
                 for attribute_key, value_key in (('status1', 'value1'), ('status2', 'value2')):
                     attribute_id = star_cfg.get(attribute_key, 0)
                     value = star_cfg.get(value_key, 0)
                     add_item_attribute(attribute_id, value)
-                    add_extra_combat_power(attribute_id, value)
+                    star_power_score += attribute_combat_value(attribute_id, value)
+                power_attribute_score += math.floor(star_power_score)
 
     # The APK displays TitleData bonuses in Chara > Title. Apply the owned
     # title's configured attributes through the same percentage/stat path as
@@ -5425,9 +5432,11 @@ def get_character_stats(c):
         title_level = max(0, int(c.get('title_level', 0)))
     except (TypeError, ValueError):
         title_level = 0
+    title_power_score = 0
     for attribute_id, value in TITLE_CONFIG.get(title_level, {}).get('stats', []):
         add_item_attribute(attribute_id, value)
-        add_extra_combat_power(attribute_id, value)
+        title_power_score += attribute_combat_value(attribute_id, value)
+    power_attribute_score += math.floor(title_power_score)
 
     # RefineData's four parts (neck, ring 1, ring 2, belt) are part of the
     # client's combat attributes and displayed combat power, even though they
@@ -5437,31 +5446,28 @@ def get_character_stats(c):
         refine_row = REFINE_BY_PART_LEVEL.get((int(prof), part, level))
         if not refine_row:
             continue
+        refine_power_score = 0
         for attribute_id, value in refine_row.get('stats', []):
             if attribute_id:
                 add_item_attribute(attribute_id, value)
-                add_extra_combat_power(attribute_id, value)
+                refine_power_score += attribute_combat_value(attribute_id, value)
+        # RefineData.GetCombatValue floors each refine node independently.
+        power_attribute_score += math.floor(refine_power_score)
 
-    # Apply every percentage to runtime combat stats, but do not convert the
-    # badge's percentage stat increase into global power a second time. The
-    # client scores each badge directly with GetItemCombatVal's attribute
-    # weights; non-badge percentage sources still affect weighted power.
-    power_totals = totals.copy()
-    for field, bonus in percent_totals.items():
-        power_bonus = bonus - badge_percent_totals[field]
-        power_totals[field] += math.floor(power_totals[field] * power_bonus / 10000.0)
+    # Apply percentage attributes to runtime combat stats. Global power uses
+    # the client's per-attribute score for each configured bonus rather than
+    # multiplying a percentage into the whole character's base stat.
     for field, bonus in percent_totals.items():
         totals[field] += math.floor(totals[field] * bonus / 10000.0)
 
-    raw_power = (power_totals['atk'] * coeffs['atk'] +
-                 power_totals['hp_max'] * coeffs['hp'] +
-                 power_totals['def'] * coeffs['def'] +
-                 power_totals['hit'] * coeffs['hit'] +
-                 power_totals['eva'] * coeffs['eva'] +
-                 power_totals['cri'] * coeffs['cri'] +
-                 power_totals['res'] * coeffs['res'] +
-                 extra_combat_power +
-                 badge_combat_power)
+    raw_power = (atk * coeffs['atk'] +
+                 hp_max * coeffs['hp'] +
+                 df * coeffs['def'] +
+                 hit * coeffs['hit'] +
+                 eva * coeffs['eva'] +
+                 cri * coeffs['cri'] +
+                 res * coeffs['res'] +
+                 power_attribute_score)
     power = int(raw_power)
 
     return {
