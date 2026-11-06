@@ -192,6 +192,7 @@ STATIC_NPC_DATA = {} # mapId -> list of static NPC spawns
 NPC_CONFIG = {}   # npcId -> npc info template
 MAP_CONFIG = {}   # mapId -> map info
 MAP_AREA_CONFIG = {} # MapAreaInfoData geometry used by client gather/safe areas
+SAFE_AREA_CONFIG = {} # MapAreaInfoData rows grouped by safety-area ID
 MAP_CONNECT_DATA = {} # (src_id, target_id) -> PosX, PosY, PosZ
 GUILD_CAPTURE_DATA = {} # id -> mapId (kept for existing Gang-city map routing)
 GUILD_CAPTURE_CONFIG = {} # id -> schedule metadata from GuildCaptureData
@@ -558,6 +559,7 @@ try:
                         'exit_pos': parts[11] if len(parts) > 11 else '',
                         'relife_type': int(parts[22]) if len(parts) > 22 and parts[22].lstrip('-').isdigit() else 0,
                         'relife_cost': int(parts[23]) if len(parts) > 23 and parts[23].isdigit() else 0,
+                        'safe_area_id': parts[24] if len(parts) > 24 else '',
                         'gather_area_id': parts[25] if len(parts) > 25 else '',
                         'open_lv': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 0
                     }
@@ -578,6 +580,8 @@ try:
                                    for i in (3, 5, 7, 9)],
                         'range': int(parts[11]) if parts[11] else 0,
                     }
+                    SAFE_AREA_CONFIG.setdefault(parts[1], []).append(
+                        MAP_AREA_CONFIG[parts[1]])
                 except (TypeError, ValueError):
                     continue
         debug_log(f"[MAP AREA CONFIG LOADED] count={len(MAP_AREA_CONFIG)}")
@@ -5184,8 +5188,11 @@ def character_refine_levels(character):
     character['refine_levels'] = {str(part): level for part, level in levels.items()}
     return levels
 
-def character_attribute_other_fields(character, stats, hp_cur):
-    """Build the player's full attribute_other payload, including dance state."""
+def character_attribute_other_fields(character, stats, hp_cur, camp=None):
+    """Build attribute_other; use PLAYER_2 for remote players, except stage teammates."""
+    if camp is None:
+        camp = (0 if is_exp_map(character.get('map_id'))
+                or is_equipment_copy_map(character.get('map_id')) else 1)
     levels = character_refine_levels(character)
     dance = ensure_dance_runtime(character)
     dance_active = bool(dance.get('running') and str(character.get('map_id')) == '101')
@@ -5207,7 +5214,7 @@ def character_attribute_other_fields(character, stats, hp_cur):
         # leaves the Gang panel on its no-guild path after a reconnect.
         (6, guild_id), (7, guild_job), (8, guild_name),
         (9, levels[1]), (10, levels[2]), (11, levels[3]), (12, levels[4]),
-        (13, sum(levels.values())), (15, 1),
+        (13, sum(levels.values())), (15, int(camp)),
         (16, int(character.get('pk_mode', 0))),
         (17, 1 if dance_active else 0),
         (18, str(dance.get('dance_id', '')) if dance_active else '')
@@ -5596,6 +5603,47 @@ def is_in_map_gather_area(map_id, position):
         return inside
     except (TypeError, ValueError, IndexError, OverflowError):
         return False
+
+def is_in_map_safe_area(map_id, position):
+    """Mirror SceneManager.IsInSafeArea using MapInfoData and MapAreaInfoData."""
+    map_cfg = MAP_CONFIG.get(str(map_id), {})
+    area_id = str(map_cfg.get('safe_area_id', '') or '')
+    if not area_id:
+        return True
+    areas = SAFE_AREA_CONFIG.get(area_id)
+    if not areas:
+        return True
+    try:
+        if not isinstance(position, (list, tuple)) or len(position) < 3:
+            return True
+        x, z = float(position[0]) / 100.0, float(position[2]) / 100.0
+        for area in areas:
+            points = area.get('points', [])
+            if int(area.get('type', 0)) != 0:
+                center_x, center_z = points[0]
+                radius = max(0, int(areas[0].get('range', 0))) / 100.0
+                if radius > 0 and (x - center_x / 100.0) ** 2 + (z - center_z / 100.0) ** 2 <= radius ** 2:
+                    return True
+                continue
+            if len(points) != 4:
+                continue
+            polygon = [(px / 100.0, pz / 100.0) for px, pz in points]
+            inside = False
+            for index, (x1, z1) in enumerate(polygon):
+                x2, z2 = polygon[(index + 1) % len(polygon)]
+                cross = (x - x1) * (z2 - z1) - (z - z1) * (x2 - x1)
+                if (abs(cross) <= 1e-6 and min(x1, x2) <= x <= max(x1, x2)
+                        and min(z1, z2) <= z <= max(z1, z2)):
+                    return True
+                if (z1 > z) != (z2 > z):
+                    edge_x = (x2 - x1) * (z - z1) / (z2 - z1) + x1
+                    if x < edge_x:
+                        inside = not inside
+            if inside:
+                return True
+        return False
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return True
 
 def ensure_dance_runtime(char, now=None):
     """Create/reset the character's personal-dance state from client config."""
@@ -6828,7 +6876,7 @@ def get_full_char(c):
 
     hp_cur = current_character_hp(c, stats)
 
-    attr_oth = encode_sproto(character_attribute_other_fields(c, stats, hp_cur))
+    attr_oth = encode_sproto(character_attribute_other_fields(c, stats, hp_cur, camp=0))
 
     prop = encode_sproto([(13, get_currency_balance(c, 0)), (14, get_currency_balance(c, 1)),
                           (15, get_currency_balance(c, 2)), (16, get_currency_balance(c, 3)),
@@ -6928,7 +6976,9 @@ def sync_char_attrs_rpc(conn, picked_char, conn_id=None):
     hp_cur = current_character_hp(picked_char, stats)
 
     # attribute_other (Tag 1 in character_aoi_attribute)
-    attr_oth = encode_sproto(character_attribute_other_fields(picked_char, stats, hp_cur))
+    attr_oth = encode_sproto(character_attribute_other_fields(
+        picked_char, stats, hp_cur, camp=0
+    ))
 
     # attribute (Tag 2 in character_aoi_attribute)
     attr_base = encode_sproto(character_attribute_fields(stats))
@@ -14332,6 +14382,58 @@ def _guild_member_id(guild, char_id):
     members = guild.setdefault('members', {})
     return members.get(key)
 
+def _same_player_team(first, second):
+    try:
+        first_id = int(first.get('id', 0) or 0)
+        second_id = int(second.get('id', 0) or 0)
+        team_id = int(CHAR_TEAM.get(first_id, 0) or 0)
+        if team_id <= 0 or int(CHAR_TEAM.get(second_id, 0) or 0) != team_id:
+            return False
+        team = TEAM_STATES.get(team_id)
+        members = team.get('members', []) if isinstance(team, dict) else []
+        return first_id in members and second_id in members
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+def can_player_attack_player(attacker, target):
+    """Enforce the APK's player-PvP scene, safety-area, team and PK-mode rules."""
+    if not isinstance(attacker, dict) or not isinstance(target, dict):
+        return False
+    map_id = str(attacker.get('map_id', '') or '')
+    if not map_id or map_id != str(target.get('map_id', '') or ''):
+        return False
+    try:
+        map_type = int(MAP_CONFIG.get(map_id, {}).get('type', -1))
+    except (TypeError, ValueError):
+        return False
+    if not client_expects_player_aoi(map_id):
+        return False
+    if (is_in_map_safe_area(map_id, attacker.get('pos'))
+            or is_in_map_safe_area(map_id, target.get('pos'))):
+        return False
+    if map_type not in (1, 15, 21, 24):
+        # In scenes without client PK-mode rules, the APK checks camps. The
+        # server presents the local player as PLAYER_1 and remote players as
+        # PLAYER_2, so the client permits this opposing-camp attack.
+        return True
+    try:
+        pk_mode = int(attacker.get('pk_mode', 0))
+    except (TypeError, ValueError):
+        return False
+    if pk_mode not in (1, 2):
+        return False
+    attacker_guild_id = _guild_id_for_character(attacker)
+    target_guild_id = _guild_id_for_character(target)
+    guild_battle = map_type == 24
+    if pk_mode == 1 and guild_battle:
+        return attacker_guild_id != target_guild_id
+    if pk_mode == 2:
+        if attacker_guild_id == target_guild_id:
+            return False
+        if guild_battle:
+            return True
+    return not _same_player_team(attacker, target)
+
 def _guild_member_count(guild, include_candidates=False):
     members = guild.get('members', {}) if guild else {}
     if not isinstance(members, dict):
@@ -21320,11 +21422,17 @@ def client_handler(conn, addr):
                                 stage_label = 'EQUIP' if is_equipment else 'EXP'
                                 print(f"[{stage_label} HIT] rejected player target={target_id} attacker={picked_char.get('id')}")
                                 continue
+                            if (not is_current_character_connection(conn, picked_char)
+                                    or target_conn is None
+                                    or not can_player_attack_player(picked_char, target_char)):
+                                print(f"[PvP SECURITY] rejected illegal player hit attacker={picked_char.get('id')} target={target_id} map={picked_char.get('map_id')}")
+                                continue
                             if int(target_char.get('hp', 0)) <= 0:
                                 print(f"[PvP] ignored hit on downed player target={target_id}")
                                 continue
-                            # === PvP: target is an online player ===
-                            # Server-authoritative damage calculation
+                            # The client already resolved this same hit locally.
+                            # Validate it against server stats, but do not roll
+                            # hit/crit/variance again and disagree with its result.
                             target_stats = get_character_stats(target_char)
 
                             # Verify the attacker actually has this skill learned.
@@ -21341,30 +21449,69 @@ def client_handler(conn, addr):
                             always_available.add(starter_skills.get('dodge', ''))
                             always_available.add(starter_skills.get('starter_active', ''))
                             always_available.update(equipped_weapon_skill_ids(picked_char))
-                            if not is_exp and skill_id not in learned_skill_ids and skill_id not in always_available:
-                                # Skill not learned by player and not a starter skill, reject
-                                skill_id = "50001"
-                                effinfo_id = None
-                            skill_lv = char_skill_levels.get(skill_id, 0)
-                            if skill_lv < 0:
-                                skill_id = "50001"
+                            always_available = {str(value) for value in always_available if value}
+                            if skill_id not in learned_skill_ids and skill_id not in always_available:
+                                print(f"[PvP SECURITY] rejected unlearned skill attacker={picked_char.get('id')} skill={skill_id}")
+                                continue
+                            try:
+                                skill_lv = max(0, int(char_skill_levels.get(skill_id, 0) or 0))
+                            except (TypeError, ValueError):
                                 skill_lv = 0
-                                effinfo_id = None
-
                             skill_cfg = SKILL_CONFIG.get(skill_id, {})
-                            if effinfo_id is None:
-                                effinfo_id = skill_cfg.get('eff0', "10000")
-
-                            server_dmg, hit, calc_cri = get_combat_damage(attacker_stats, target_stats, skill_id, skill_lv, pvp_scale=1.0, is_pvp=True, effinfo_id=effinfo_id)
-                            if not hit:
+                            valid_effects = {
+                                str(skill_cfg.get(key) or '')
+                                for key in ('eff0', 'eff1', 'eff2')
+                                if skill_cfg.get(key)
+                            }
+                            if not requested_effinfo_id or requested_effinfo_id not in valid_effects:
+                                print(f"[PvP SECURITY] rejected invalid effect attacker={picked_char.get('id')} skill={skill_id} effect={requested_effinfo_id}")
+                                continue
+                            effinfo_id = requested_effinfo_id
+                            eff_cfg_for_hit = EFF_CONFIG.get(effinfo_id, {})
+                            adds_for_hit = eff_cfg_for_hit.get('adds', {})
+                            hit_p = min((attacker_stats['hit'] + 1.0) /
+                                        (attacker_stats['hita'] + attacker_stats['hit'] + 1.0), 1.0)
+                            dodge_p = min((target_stats['eva'] + 1.0) /
+                                          (target_stats['dgea'] + target_stats['eva'] + 1.0), 0.5)
+                            hit_prob = 1.0 + hit_p - dodge_p + adds_for_hit.get(3001, 0) / 10000.0
+                            crit_p = min((attacker_stats['cri'] + 1.0) /
+                                         (attacker_stats['cri'] + attacker_stats['cria'] + 1.0), 0.9)
+                            resist_p = min((target_stats['res'] + 1.0) /
+                                           (target_stats['res'] + target_stats['resa'] + 1.0), 0.8)
+                            crit_prob = (crit_p - resist_p
+                                         + adds_for_hit.get(3002, 0) / 10000.0)
+                            if (client_dmg < 0 or client_cri_flag != is_cri
+                                    or (client_dmg == 0 and (client_hit_flag or is_cri))
+                                    or (client_dmg > 0 and not client_hit_flag)
+                                    or (client_hit_flag and hit_prob < 0)
+                                    or (not client_hit_flag and hit_prob >= 0.99)
+                                    or (is_cri and crit_prob < 0)
+                                    or (not is_cri and crit_prob >= 0.99)):
+                                print(f"[PvP SECURITY] rejected impossible client result target={target_id} damage={client_dmg} hit={client_hit_flag} crit={is_cri}")
+                                continue
+                            if client_dmg == 0:
                                 server_dmg = 0
                                 calc_cri = False
-                            print(f"[PvP] Server calc dmg={server_dmg} cri={calc_cri} target={target_id}")
+                            else:
+                                max_dmg, can_hit, possible_crit = get_combat_damage(
+                                    attacker_stats, target_stats, skill_id, skill_lv,
+                                    pvp_scale=1.0, is_pvp=True,
+                                    effinfo_id=effinfo_id, forced_hit=True,
+                                    forced_crit=is_cri, max_variance=True
+                                )
+                                if (not can_hit or (is_cri and not possible_crit)
+                                        or client_dmg > max_dmg + 2):
+                                    print(f"[PvP SECURITY] rejected out-of-range client damage target={target_id} damage={client_dmg} max={max_dmg}")
+                                    continue
+                                server_dmg = client_dmg
+                                calc_cri = is_cri
+                            print(f"[PvP] accepted damage={server_dmg} cri={calc_cri} target={target_id}")
 
                             # Apply damage to victim
-                            old_hp = target_char.get('hp', target_stats['hp_max'])
-                            new_hp = max(0, old_hp - server_dmg)
-                            target_char['hp'] = new_hp
+                            with get_character_transaction_lock(target_char):
+                                old_hp = max(0, int(target_char.get('hp', target_stats['hp_max'])))
+                                new_hp = max(0, old_hp - server_dmg)
+                                target_char['hp'] = new_hp
 
                             # Sync victim's HP to victim's own client (TAG 510)
                             sync_char_attrs_rpc(target_conn, target_char)
@@ -22946,7 +23093,7 @@ def client_handler(conn, addr):
                             picked_char.pop('_pending_relife', None)
                             sync_char_attrs_rpc(conn, picked_char)
                             attr_oth = encode_sproto(character_attribute_other_fields(
-                                picked_char, stats, stats['hp_max']
+                                picked_char, stats, stats['hp_max'], camp=0
                             ))
                             relife_char = encode_sproto([
                                 (0, picked_char['id']),
@@ -22956,8 +23103,17 @@ def client_handler(conn, addr):
                             relife_frame_data = encode_sproto([(0, relife_char)])
                             send_rpc_push(512, relife_frame_data)
                             if not is_single_player_map(current_map):
+                                peer_attr_oth = encode_sproto(character_attribute_other_fields(
+                                    picked_char, stats, stats['hp_max']
+                                ))
+                                peer_relife_char = encode_sproto([
+                                    (0, picked_char['id']),
+                                    (1, peer_attr_oth),
+                                    (2, get_movement(pos[0], pos[1], pos[2], pos[3]))
+                                ])
+                                peer_relife_frame_data = encode_sproto([(0, peer_relife_char)])
                                 r_ph = encode_sproto([(0, 512)])
-                                r_pf = sproto_pack(r_ph + relife_frame_data)
+                                r_pf = sproto_pack(r_ph + peer_relife_frame_data)
                                 r_pkt = struct.pack(">H", len(r_pf)) + r_pf
                                 for cid, (other_conn, other_char) in list(ALL_CONNECTIONS.items()):
                                     if (other_char and int(other_char.get('id', 0)) != int(picked_char.get('id', 0))
@@ -23047,34 +23203,44 @@ def client_handler(conn, addr):
 
                     # Build Tag 512 (aoi_relife_player) with correct nested structure
                     # character_relife: id(0), attribute_other(1), movement(2)
-                    attr_oth = encode_sproto(character_attribute_other_fields(
-                        picked_char, p_stats, p_stats['hp_max']
+                    own_attr_oth = encode_sproto(character_attribute_other_fields(
+                        picked_char, p_stats, p_stats['hp_max'], camp=0
                     ))
                     mv_bytes = get_movement(pos[0], pos[1], pos[2], pos[3])
-                    relife_char = encode_sproto([
+                    own_relife_char = encode_sproto([
                         (0, picked_char['id']),
-                        (1, attr_oth),
+                        (1, own_attr_oth),
                         (2, mv_bytes)
                     ])
                     # Build the Tag 512 packet for broadcasting
                     relife_pkt = build_aoi_add_packet(picked_char)  # not used for 512, build manually below
-                    relife_frame_data = encode_sproto([(0, relife_char)])
+                    own_relife_frame_data = encode_sproto([(0, own_relife_char)])
 
                     # Send Tag 512 to the revived player's own client first
-                    send_rpc_push(512, relife_frame_data)
+                    send_rpc_push(512, own_relife_frame_data)
+
+                    peer_attr_oth = encode_sproto(character_attribute_other_fields(
+                        picked_char, p_stats, p_stats['hp_max']
+                    ))
+                    peer_relife_char = encode_sproto([
+                        (0, picked_char['id']),
+                        (1, peer_attr_oth),
+                        (2, mv_bytes)
+                    ])
+                    peer_relife_frame_data = encode_sproto([(0, peer_relife_char)])
 
                     # Broadcast Tag 512 to all other players on the same map
                     # so they see the player revive instead of staying dead/ghost
                     map_id = str(picked_char.get('map_id', '11'))
                     revive_state = picked_char.get('exp_stage_state')
                     if revive_state and revive_state.get('team_id'):
-                        exp_send_push(revive_state, 512, relife_frame_data, exclude=[picked_char.get('id', 0)])
+                        exp_send_push(revive_state, 512, peer_relife_frame_data, exclude=[picked_char.get('id', 0)])
                         send_team_update(revive_state['team_id'])
                         send_team_member_update(revive_state['team_id'], picked_char, force=True)
                     elif not is_single_player_map(map_id):
                         try:
                             r_ph = encode_sproto([(0, 512)])
-                            r_pf = sproto_pack(r_ph + relife_frame_data)
+                            r_pf = sproto_pack(r_ph + peer_relife_frame_data)
                             r_pkt = struct.pack(">H", len(r_pf)) + r_pf
                             for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
                                 if (ch and ch.get('id', 0) != picked_char.get('id', 0)
