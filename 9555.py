@@ -7713,22 +7713,35 @@ def start_tower_floor(conn, char, floor_id, send_rpc_push, continuation=False):
     if not is_current_character_connection(conn, char):
         reject_reason = "stale_connection"
     else:
+        wipeout_claimed = False
+        if not continuation and state["wipe_out_state"] == 2:
+            request_id = int(char.get("tower_wipe_target_floor", state["floor"]) or 0)
+            if tower_claim_wipeout(char, conn, send_rpc_push, request_id):
+                wipeout_claimed = True
+                state = ensure_tower_state(char)
+                floor_id = max(floor_id, state["cur_floor"])
+                config = TOWER_CONFIG.get(floor_id)
+            else:
+                reject_reason = "wipeout_reward_claim_failed"
         if not continuation and state["wipe_out_state"] == 0:
             floor_id = max(floor_id, state["cur_floor"])
             config = TOWER_CONFIG.get(floor_id)
-        if (floor_id > max(state["floor"], state["cur_floor"])
+        if reject_reason is None and (floor_id > max(state["floor"], state["cur_floor"])
                 and not continuation):
             reject_reason = "locked_floor"
-        elif int(char.get("level", 1) or 1) < tower_unlock_level:
+        elif reject_reason is None and int(char.get("level", 1) or 1) < tower_unlock_level:
             reject_reason = "feature_level_requirement"
-        elif int(char.get("level", 1) or 1) < int((config or {}).get("limit_level", 1)):
+        elif reject_reason is None and int(char.get("level", 1) or 1) < int((config or {}).get("limit_level", 1)):
             reject_reason = "level_requirement"
-        elif not tower_floor_is_valid(floor_id):
+        elif reject_reason is None and not tower_floor_is_valid(floor_id):
             reject_reason = "invalid_floor_data"
-        elif state["wipe_out_state"] != 0:
+        elif reject_reason is None and state["wipe_out_state"] != 0:
             reject_reason = "wipeout_claim_required" if state["wipe_out_state"] == 2 else "wipeout_active"
-        elif is_tower_map(char.get("map_id")) and not continuation:
+        elif reject_reason is None and is_tower_map(char.get("map_id")) and not continuation:
             reject_reason = "already_in_tower"
+        if wipeout_claimed:
+            print(f"[TOWER] completed wipeout settled before start player={char_id} "
+                  f"next_floor={state['cur_floor']}")
     if reject_reason:
         print(f"[TOWER] entry rejected player={char_id} floor={floor_id} "
               f"reason={reject_reason} map={char.get('map_id')} "
@@ -21083,7 +21096,10 @@ def client_handler(conn, addr):
                                 exp_send_push(exp_state_hit, 511, encode_sproto([(0, [hit_entry])]), exclude=[picked_char.get('id', 0)])
                                 skill_hit = encode_sproto([(0, picked_char.get('id', 0)), (1, target_id), (2, skill_id), (3, [encode_sproto([(0, target_id), (1, actual_dmg)])])])
                                 exp_send_push(exp_state_hit, 508, skill_hit, exclude=[picked_char.get('id', 0)])
-                            # For non-exp maps, send TAG 511 so client displays damage.
+                            # The attacker already applies this hit locally in
+                            # SkillLogic.DamageOperation. TAG 511 is only for
+                            # the other clients watching the NPC, or the damage
+                            # number is displayed twice to the attacker.
                             if not is_stage_combat:
                                 dmg_entry = encode_sproto([
                                     (0, target_id),
@@ -21093,12 +21109,11 @@ def client_handler(conn, addr):
                                     (4, calc_cri)
                                 ])
                                 dmg_board = encode_sproto([(0, [dmg_entry])])
-                                if city_capture_id:
-                                    for _peer_id, (peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
-                                        if peer_conn and peer_char and str(peer_char.get('map_id', '')) == cur_map:
-                                            send_rpc_push_safe(peer_conn, 511, dmg_board)
-                                else:
-                                    send_rpc_push(511, dmg_board)
+                                attacker_id = int(picked_char.get('id', 0) or 0)
+                                for peer_id, (peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
+                                    if (int(peer_id) != attacker_id and peer_conn and peer_char
+                                            and str(peer_char.get('map_id', '')) == cur_map):
+                                        send_rpc_push_safe(peer_conn, 511, dmg_board)
 
                             # Issue 213: TAG 514 (hit_action) client handler does nothing — skip sending
 
