@@ -7769,8 +7769,10 @@ def tower_finish_run(char, run_id, won, conn=None, send_rpc_push=None):
             # Keep the cleared floor selected until the client sends Continue.
             state["cur_floor"] = floor_id
             state["times"] = 1
-            char["tower_rank_floor"] = max(
-                int(char.get("tower_rank_floor", 0) or 0), floor_id + 1)
+            previous_rank_floor = max(0, int(char.get("tower_rank_floor", 0) or 0))
+            if floor_id + 1 > previous_rank_floor:
+                char["tower_rank_floor"] = floor_id + 1
+                char["tower_rank_reached_at"] = now
         run["status"] = "won" if won else "failed"
         run["pending_result"] = {
             "win": bool(won), "floor_id": floor_id,
@@ -8090,8 +8092,10 @@ def tower_claim_wipeout(char, conn, send_rpc_push, request_id):
         state["sum_time"] += sum(
             int(TOWER_CONFIG[floor_id].get("exist_time", 0) or 0)
             for floor_id in floor_ids)
-        char["tower_rank_floor"] = max(
-            int(char.get("tower_rank_floor", 0) or 0), target_floor + 1)
+        previous_rank_floor = max(0, int(char.get("tower_rank_floor", 0) or 0))
+        if target_floor + 1 > previous_rank_floor:
+            char["tower_rank_floor"] = target_floor + 1
+            char["tower_rank_reached_at"] = int(time.time())
         state["wipe_out_state"] = 0
         state["wipe_time"] = 0
         char.pop("tower_wipe_start_floor", None)
@@ -12395,35 +12399,45 @@ def _rank_character_sort_items(sort_type):
     ranked = []
     for character in _rank_pvp_all_characters():
         try:
+            tie_breaker = 0
             if sort_type == 1:
                 score = int(get_character_stats(character).get('power', 0) or 0)
             elif sort_type == 2:
                 score = int(character.get('level', 1) or 1)
+                tie_breaker = int(character.get('level_rank_reached_at', 0) or 0)
             elif sort_type == 5:
                 score_value = character.get('tower_rank_floor')
                 if score_value is None:
                     continue
-                score = max(0, int(score_value))
+                rank_floor = int(score_value)
+                if rank_floor < 1:
+                    continue
+                # RankItemLogic adds one when displaying the score; the saved
+                # tower_rank_floor is already one-based.
+                score = max(0, min(80, rank_floor) - 1)
+                tie_breaker = int(character.get('tower_rank_reached_at', 0) or 0)
             elif sort_type == 8:
                 scores = character.get('sex_mini_scores', {})
-                score_value = max(
-                    (int(value) for value in scores.values()),
-                    default=None
-                ) if isinstance(scores, dict) else None
+                score_value = (
+                    scores.get(SEX_MINI_GAME_ID, scores.get(int(SEX_MINI_GAME_ID)))
+                    if isinstance(scores, dict) else None
+                )
                 if score_value is None:
                     score_value = character.get('climax_night_score', character.get('sex_rank_score'))
                 if score_value is None:
                     continue
                 score = max(0, int(score_value))
+                if score <= 0:
+                    continue
             else:
                 continue
             char_id = int(character.get('id', 0) or 0)
         except (TypeError, ValueError, AttributeError):
             continue
-        ranked.append((score, char_id, character))
-    ranked.sort(key=lambda row: (-row[0], row[1]))
+        ranked.append((score, tie_breaker, char_id, character))
+    ranked.sort(key=lambda row: (-row[0], row[1] if row[1] > 0 else float('inf'), row[2]))
     rows = []
-    for score, char_id, character in ranked[:50]:
+    for score, _tie_breaker, char_id, character in ranked[:50]:
         rows.append(encode_sproto([
             (0, char_id), (1, score << 32),
             (2, str(character.get('name', 'Hero'))),
@@ -12556,6 +12570,7 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None,
             if rd and picked_char['exp'] >= rd['exp']:
                 picked_char['exp'] -= rd['exp']
                 picked_char['level'] = lv + 1
+                picked_char['level_rank_reached_at'] = int(time.time())
                 leveled_up = True
                 new_stats = get_character_stats(picked_char)
                 picked_char['hp'] = new_stats['hp_max']
@@ -12618,6 +12633,7 @@ def give_mission_rewards(picked_char, mid):
             if picked_char['exp'] >= req_data['exp']:
                 picked_char['exp'] -= req_data['exp']
                 picked_char['level'] = lv + 1
+                picked_char['level_rank_reached_at'] = int(time.time())
                 leveled_up = True
                 # Level Up: Fully Restore HP
                 new_stats = get_character_stats(picked_char)
@@ -23492,11 +23508,16 @@ def client_handler(conn, addr):
                             if not isinstance(scores, dict):
                                 scores = {}
                                 picked_char['sex_mini_scores'] = scores
-                            previous_score = max(0, int(scores.get(activity_id, 0) or 0))
+                            previous_score = max(0, int(
+                                scores.get(SEX_MINI_GAME_ID, 0) or 0
+                            ))
                             if reported_score > previous_score:
-                                scores[activity_id] = reported_score
+                                scores[SEX_MINI_GAME_ID] = reported_score
                                 if not save_chars(all_accounts_chars):
-                                    scores[activity_id] = previous_score
+                                    if previous_score:
+                                        scores[SEX_MINI_GAME_ID] = previous_score
+                                    else:
+                                        scores.pop(SEX_MINI_GAME_ID, None)
                                     print(f"[CLIMAX RANK] score save failed player={picked_char.get('id')}")
                     if session is not None:
                         send_rpc_response(session)
