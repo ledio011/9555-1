@@ -5356,6 +5356,7 @@ def get_character_stats(c):
             break
         set_attribute_value = math.floor(sum(levels) / divisor)
         add_item_attribute(set_attribute_id, set_attribute_value)
+        add_extra_combat_power(set_attribute_id, set_attribute_value)
         break
 
     # Guild skills are shared by accepted guild members. GuildSkillData's
