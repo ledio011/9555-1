@@ -5318,6 +5318,7 @@ def get_character_stats(c):
                         )
                         add_extra_combat_power(random_attribute_id, random_attribute_value)
 
+    badge_color_levels = {}
     for item in c.get('equipped_badges', []):
         badge_cfg = BADGE_CONFIG.get(str(item.get('id', '')), {})
         if badge_cfg:
@@ -5325,6 +5326,32 @@ def get_character_stats(c):
             add_item_attribute(badge_cfg.get('status2'), badge_cfg.get('value2', 0))
             add_extra_combat_power(badge_cfg.get('status1'), badge_cfg.get('value1', 0))
             add_extra_combat_power(badge_cfg.get('status2'), badge_cfg.get('value2', 0))
+            color = int(badge_cfg.get('color', -1))
+            level = int(badge_cfg.get('level', 0))
+            if color in (0, 1, 2) and level > 0:
+                badge_color_levels.setdefault(color, []).append(level)
+
+    # The client activates the first color with at least three equipped
+    # badges and scales its configured set attribute by their total levels.
+    for color in range(3):
+        levels = badge_color_levels.get(color, [])
+        if len(levels) < 3:
+            continue
+        config_index = color + 1
+        try:
+            divisor = float(GAME_CONFIG[f'badge_parm_{config_index}'])
+            set_attribute_id = int(GAME_CONFIG[f'badge_attribute_{config_index}'])
+        except (KeyError, TypeError, ValueError):
+            debug_log(f"[BADGE SET BONUS CONFIG INVALID] color={color}")
+            break
+        if divisor <= 0 or set_attribute_id <= 0:
+            debug_log(f"[BADGE SET BONUS CONFIG INVALID] color={color} divisor={divisor} "
+                      f"attribute={set_attribute_id}")
+            break
+        set_attribute_value = math.floor(sum(levels) / divisor)
+        add_item_attribute(set_attribute_id, set_attribute_value)
+        add_extra_combat_power(set_attribute_id, set_attribute_value)
+        break
 
     # The APK displays TitleData bonuses in Chara > Title. Apply the owned
     # title's configured attributes through the same percentage/stat path as
