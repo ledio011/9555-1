@@ -23032,12 +23032,7 @@ def client_handler(conn, addr):
                             conn.sendall(struct.pack(">H", len(pf)) + pf)
                         continue
                     if not is_exp_map(current_map):
-                        try:
-                            request_raw = body.get(0, b"")
-                            revive_request = decode_sproto(request_raw) if request_raw else {}
-                            is_inplace = bool(revive_request.get(0, False))
-                        except Exception:
-                            is_inplace = False
+                        is_inplace = bool(get_val_int(body, 0, 0))
 
                         offer = picked_char.get('_pending_relife')
                         offer_valid = (supports_normal_relife(current_map)
@@ -23159,12 +23154,7 @@ def client_handler(conn, addr):
                             conn.sendall(struct.pack(">H", len(pf)) + pf)
                         continue
                     # Read isInplace from client request: field 0 = bool
-                    try:
-                        body_raw = body.get(0, b"")
-                        relife_req = decode_sproto(body_raw) if body_raw else {}
-                        is_inplace = bool(relife_req.get(0, False))
-                    except Exception:
-                        is_inplace = False
+                    is_inplace = bool(get_val_int(body, 0, 0))
 
                     revive_cost = max(1, int(get_relife_config(exp_state_check.get('deaths', 1)).get('use_count', 1)))
                     revive_item_id = '9202'
