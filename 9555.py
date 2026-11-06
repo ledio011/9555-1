@@ -7392,19 +7392,14 @@ def tower_info_response(char, send_rpc_push):
     ]))
 
 
-def tower_send_claim_state(char, send_rpc_push):
-    send_rpc_push(607, encode_sproto([(0, tower_info_payload(char))]))
-    tower_info_response(char, send_rpc_push)
-
-
-def tower_send_reward_claim_response(char, claim, send_rpc_push):
+def tower_send_reward_claim_response(char, claim, send_rpc_push, response_id=None):
     items = [
         encode_sproto([(0, item_id), (1, amount), (3, quality)])
         for item_id, quality, amount in claim.get("items", [])
     ]
     payload = encode_sproto([
         (0, int(claim.get("type", 0))),
-        (1, int(claim.get("id", 0))),
+        (1, int(claim.get("id", 0) if response_id is None else response_id)),
         (2, items),
         (3, tower_info_payload(char)),
         (4, tower_special_reward_payload(char))
@@ -7416,11 +7411,12 @@ def tower_send_reward_claim_response(char, claim, send_rpc_push):
     return True
 
 
-def tower_send_pending_reward_claim(char, send_rpc_push):
+def tower_send_pending_reward_claim(char, send_rpc_push, response_id=None):
     claim = char.get("tower_pending_reward_claim")
     if not isinstance(claim, dict):
         return False
-    if not tower_send_reward_claim_response(char, claim, send_rpc_push):
+    if not tower_send_reward_claim_response(
+            char, claim, send_rpc_push, response_id=response_id):
         return False
     char["tower_last_reward_claim"] = copy.deepcopy(claim)
     char.pop("tower_pending_reward_claim", None)
@@ -7434,14 +7430,18 @@ def tower_replay_reward_claim(char, reward_type, request_id, send_rpc_push):
         if not isinstance(claim, dict):
             continue
         try:
-            matches = (int(claim.get("type", -1)) == int(reward_type)
-                       and int(claim.get("id", -1)) == int(request_id))
+            stored_type = int(claim.get("type", -1))
+            matches = (stored_type == int(reward_type)
+                       and (stored_type == 0
+                            or int(claim.get("id", -1)) == int(request_id)))
         except (TypeError, ValueError):
             continue
         if matches:
             if key == "tower_pending_reward_claim":
-                return tower_send_pending_reward_claim(char, send_rpc_push)
-            return tower_send_reward_claim_response(char, claim, send_rpc_push)
+                return tower_send_pending_reward_claim(
+                    char, send_rpc_push, response_id=request_id)
+            return tower_send_reward_claim_response(
+                char, claim, send_rpc_push, response_id=request_id)
     return False
 
 
@@ -7713,35 +7713,22 @@ def start_tower_floor(conn, char, floor_id, send_rpc_push, continuation=False):
     if not is_current_character_connection(conn, char):
         reject_reason = "stale_connection"
     else:
-        requested_floor_id = floor_id
-        wipeout_claimed = False
-        if not continuation and state["wipe_out_state"] == 2:
-            request_id = int(char.get("tower_wipe_target_floor", state["floor"]) or 0)
-            if tower_claim_wipeout(char, conn, send_rpc_push, request_id):
-                wipeout_claimed = True
-                state = ensure_tower_state(char)
-                floor_id = max(floor_id, state["cur_floor"])
-                config = TOWER_CONFIG.get(floor_id)
-            else:
-                reject_reason = "wipeout_reward_claim_failed"
-        if reject_reason is None:
-            state = ensure_tower_state(char)
-            if (floor_id > max(state["floor"], state["cur_floor"])
-                    and not continuation):
-                reject_reason = "locked_floor"
-            elif int(char.get("level", 1) or 1) < tower_unlock_level:
-                reject_reason = "feature_level_requirement"
-            elif int(char.get("level", 1) or 1) < int((config or {}).get("limit_level", 1)):
-                reject_reason = "level_requirement"
-            elif not tower_floor_is_valid(floor_id):
-                reject_reason = "invalid_floor_data"
-            elif state["wipe_out_state"] != 0:
-                reject_reason = "wipeout_active"
-            elif is_tower_map(char.get("map_id")) and not continuation:
-                reject_reason = "already_in_tower"
-        if wipeout_claimed:
-            print(f"[TOWER] completed wipeout settled before start player={char_id} "
-                  f"requested_floor={requested_floor_id} next_floor={state['cur_floor']}")
+        if not continuation and state["wipe_out_state"] == 0:
+            floor_id = max(floor_id, state["cur_floor"])
+            config = TOWER_CONFIG.get(floor_id)
+        if (floor_id > max(state["floor"], state["cur_floor"])
+                and not continuation):
+            reject_reason = "locked_floor"
+        elif int(char.get("level", 1) or 1) < tower_unlock_level:
+            reject_reason = "feature_level_requirement"
+        elif int(char.get("level", 1) or 1) < int((config or {}).get("limit_level", 1)):
+            reject_reason = "level_requirement"
+        elif not tower_floor_is_valid(floor_id):
+            reject_reason = "invalid_floor_data"
+        elif state["wipe_out_state"] != 0:
+            reject_reason = "wipeout_claim_required" if state["wipe_out_state"] == 2 else "wipeout_active"
+        elif is_tower_map(char.get("map_id")) and not continuation:
+            reject_reason = "already_in_tower"
     if reject_reason:
         print(f"[TOWER] entry rejected player={char_id} floor={floor_id} "
               f"reason={reject_reason} map={char.get('map_id')} "
@@ -7767,7 +7754,15 @@ def start_tower_floor(conn, char, floor_id, send_rpc_push, continuation=False):
         char["pre_copy_pos"] = list(char.get("pos", [0, 100, 0, 0]))
         char["pre_copy_map"] = str(char.get("map_id") or "11")
     save_chars(all_accounts_chars)
-    start_map_transition(conn, char, config["map_id"], send_rpc_push)
+    if continuation:
+        # TowerSceneManager advances floors in-place with its own black-screen
+        # movement; a full map-entry push would reload the same Tower scene.
+        char["map_id"] = str(config["map_id"])
+        spawn_tower_map_npcs(conn, config["map_id"], char)
+        print(f"[TOWER] continued in current scene player={char_id} floor={floor_id} "
+              f"map={config['map_id']}")
+    else:
+        start_map_transition(conn, char, config["map_id"], send_rpc_push)
     sync_char_attrs_rpc(conn, char)
     tower_info_response(char, send_rpc_push)
     return True
@@ -23548,8 +23543,6 @@ def client_handler(conn, addr):
                         if reward_type == 0:
                             claimed = tower_claim_wipeout(
                                 picked_char, conn, send_rpc_push, reward_id)
-                            if claimed:
-                                tower_send_claim_state(picked_char, send_rpc_push)
                             print(f"[TOWER REWARD RESULT] player={picked_char.get('id')} "
                                   f"type=0 id={reward_id} accepted={claimed}")
                         elif reward_type == 1:
@@ -23562,8 +23555,6 @@ def client_handler(conn, addr):
                                 if floor_id in claimed:
                                     replayed = tower_replay_reward_claim(
                                         picked_char, 1, floor_id, send_rpc_push)
-                                    if replayed:
-                                        tower_send_claim_state(picked_char, send_rpc_push)
                                     print(f"[TOWER] special claim replayed player={picked_char.get('id')} "
                                           f"floor={floor_id} sent={replayed}")
                                 else:
@@ -23577,12 +23568,10 @@ def client_handler(conn, addr):
                                                 picked_char, rewards, conn, send_rpc_push)):
                                         state["claimed_special"].append(floor_id)
                                         save_chars(all_accounts_chars)
-                                        sent = tower_queue_reward_claim(
+                                        tower_queue_reward_claim(
                                             picked_char, 1, floor_id, rewards, send_rpc_push)
-                                        if sent:
-                                            tower_send_claim_state(picked_char, send_rpc_push)
                                         print(f"[TOWER] special reward claimed player={picked_char.get('id')} "
-                                              f"floor={floor_id} sent={sent}")
+                                              f"floor={floor_id}")
                                     else:
                                         print(f"[TOWER] special claim rejected player={picked_char.get('id')} "
                                               f"floor={floor_id} best_floor={state['floor']} "
