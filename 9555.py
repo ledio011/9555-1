@@ -5250,15 +5250,24 @@ def get_character_stats(c):
         2013: 'crr'
     }
     percent_totals = {field: 0 for field in percent_fields.values()}
+    badge_percent_totals = {field: 0 for field in percent_fields.values()}
     totals = {
         'atk': atk, 'hp_max': hp_max, 'def': df, 'hit': hit, 'eva': eva,
         'cri': cri, 'res': res, 'exd': ld['exd'][prof], 'exr': ld['exr'][prof],
         'crd': ld['crd'][prof], 'crr': ld['crr'][prof], 'rec': 0, 'mov': 500
     }
-    # The APK's per-item combat value also weights secondary and elemental
-    # attributes at 5 points each. These do not map to the primary runtime
-    # fields above, so track their power contribution separately.
+    # Keep badge percentage attributes in the combat stats, but do not let
+    # them multiply the whole character power. Badges contribute their own
+    # GetItemCombatVal score below.
+    coeffs = [
+        {"atk":16, "hp":1, "def":11, "hit":2, "eva":5.5, "cri":10, "res":10},
+        {"atk":20, "hp":1, "def":12, "hit":1, "eva":6, "cri":5, "res":10},
+        {"atk":7, "hp":1, "def":7.4, "hit":3, "eva":3.7, "cri":15, "res":10}
+    ][prof]
     extra_combat_weights = {
+        1001: coeffs['atk'], 1002: coeffs['hp'], 1003: coeffs['def'],
+        1004: coeffs['hit'], 1005: coeffs['eva'], 1006: coeffs['cri'],
+        1007: coeffs['res'],
         1008: 5, 1009: 5, 1012: 5, 1013: 5,
         2001: 5, 2002: 5, 2003: 5, 2004: 5,
         2005: 5, 2006: 5, 2007: 5,
@@ -5322,10 +5331,17 @@ def get_character_stats(c):
     for item in c.get('equipped_badges', []):
         badge_cfg = BADGE_CONFIG.get(str(item.get('id', '')), {})
         if badge_cfg:
-            add_item_attribute(badge_cfg.get('status1'), badge_cfg.get('value1', 0))
-            add_item_attribute(badge_cfg.get('status2'), badge_cfg.get('value2', 0))
-            add_extra_combat_power(badge_cfg.get('status1'), badge_cfg.get('value1', 0))
-            add_extra_combat_power(badge_cfg.get('status2'), badge_cfg.get('value2', 0))
+            for status_key, value_key in (('status1', 'value1'), ('status2', 'value2')):
+                attribute_id = badge_cfg.get(status_key)
+                value = badge_cfg.get(value_key, 0)
+                try:
+                    attribute_id = int(attribute_id)
+                    if attribute_id in percent_fields:
+                        badge_percent_totals[percent_fields[attribute_id]] += int(value)
+                except (TypeError, ValueError):
+                    pass
+                add_item_attribute(attribute_id, value)
+                add_extra_combat_power(attribute_id, value)
             color = int(badge_cfg.get('color', -1))
             level = int(badge_cfg.get('level', 0))
             if color in (0, 1, 2) and level > 0:
@@ -5350,7 +5366,6 @@ def get_character_stats(c):
             break
         set_attribute_value = math.floor(sum(levels) / divisor)
         add_item_attribute(set_attribute_id, set_attribute_value)
-        add_extra_combat_power(set_attribute_id, set_attribute_value)
         break
 
     # The APK displays TitleData bonuses in Chara > Title. Apply the owned
@@ -5377,9 +5392,10 @@ def get_character_stats(c):
                 add_item_attribute(attribute_id, value)
                 add_extra_combat_power(attribute_id, value)
 
-    # Combat power uses each item's configured combat weight for percentage
-    # attributes (5 per point in the APK), not the resulting stat increase.
     power_totals = totals.copy()
+    for field, bonus in percent_totals.items():
+        power_bonus = bonus - badge_percent_totals[field]
+        power_totals[field] += math.floor(power_totals[field] * power_bonus / 10000.0)
 
     # Percentage bonuses are additive and are applied once to the complete
     # level + equipment totals, matching the client's 1/10000 percentage scale.
@@ -5389,17 +5405,8 @@ def get_character_stats(c):
     atk, hp_max, df = totals['atk'], totals['hp_max'], totals['def']
     hit, eva, cri, res = totals['hit'], totals['eva'], totals['cri'], totals['res']
 
-    # Profession-specific coefficients from GameDefine.cs
-    # XD (0), QJ (1), NQS (2)
-    coeffs = [
-        {"atk":16, "hp":1, "def":11, "hit":2, "eva":5.5, "cri":10, "res":10},
-        {"atk":20, "hp":1, "def":12, "hit":1, "eva":6, "cri":5, "res":10},
-        {"atk":7, "hp":1, "def":7.4, "hit":3, "eva":3.7, "cri":15, "res":10}
-    ][prof]
-
-    # Use the APK's profession-specific combat weights and item-only weights
-    # directly. The client consumes attribute_other.combValue as supplied;
-    # it does not apply a further global 3x multiplier.
+    # Preserve the existing equipment/title/refine power calculation while
+    # excluding only badge percentage scaling from the aggregate stat formula.
     raw_power = (power_totals['atk'] * coeffs['atk'] +
                  power_totals['hp_max'] * coeffs['hp'] +
                  power_totals['def'] * coeffs['def'] +
