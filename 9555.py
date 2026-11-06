@@ -5252,6 +5252,7 @@ def get_character_stats(c):
         2013: 'crr'
     }
     percent_totals = {field: 0 for field in percent_fields.values()}
+    badge_percent_totals = {field: 0 for field in percent_fields.values()}
     totals = {
         'atk': atk, 'hp_max': hp_max, 'def': df, 'hit': hit, 'eva': eva,
         'cri': cri, 'res': res, 'exd': ld['exd'][prof], 'exr': ld['exr'][prof],
@@ -5269,6 +5270,7 @@ def get_character_stats(c):
         2008: 5, 2009: 5, 2012: 5, 2013: 5
     }
     extra_combat_power = 0
+    badge_combat_power = 0
 
     def add_item_attribute(attribute_id, value):
         try:
@@ -5328,10 +5330,21 @@ def get_character_stats(c):
         badge_cfg = BADGE_CONFIG.get(str(item.get('id', '')), {})
         if badge_cfg:
             for status_key, value_key in (('status1', 'value1'), ('status2', 'value2')):
-                attribute_id = badge_cfg.get(status_key)
-                value = badge_cfg.get(value_key, 0)
+                try:
+                    attribute_id = int(badge_cfg.get(status_key, -1))
+                    value = int(badge_cfg.get(value_key, 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if attribute_id <= 0:
+                    continue
                 add_item_attribute(attribute_id, value)
-                add_extra_combat_power(attribute_id, value)
+                if attribute_id in percent_fields:
+                    badge_percent_totals[percent_fields[attribute_id]] += value
+                # GameItem.GetItemCombatVal uses the profession's client
+                # attribute weights; all badge attributes are weighted 5.
+                if (attribute_id in percent_fields
+                        or attribute_id in (1008, 1009, 1012, 1013)):
+                    badge_combat_power += value * 5
             color = int(badge_cfg.get('color', -1))
             level = int(badge_cfg.get('level', 0))
             if color in (0, 1, 2) and level > 0:
@@ -5429,29 +5442,31 @@ def get_character_stats(c):
                 add_item_attribute(attribute_id, value)
                 add_extra_combat_power(attribute_id, value)
 
-    # Percentage bonuses are additive and are applied once to the complete
-    # level + equipment totals, matching the client's 1/10000 percentage scale.
+    # Apply every percentage to runtime combat stats, but do not convert the
+    # badge's percentage stat increase into global power a second time. The
+    # client scores each badge directly with GetItemCombatVal's attribute
+    # weights; non-badge percentage sources still affect weighted power.
+    power_totals = totals.copy()
+    for field, bonus in percent_totals.items():
+        power_bonus = bonus - badge_percent_totals[field]
+        power_totals[field] += math.floor(power_totals[field] * power_bonus / 10000.0)
     for field, bonus in percent_totals.items():
         totals[field] += math.floor(totals[field] * bonus / 10000.0)
 
-    atk, hp_max, df = totals['atk'], totals['hp_max'], totals['def']
-    hit, eva, cri, res = totals['hit'], totals['eva'], totals['cri'], totals['res']
-
-    # Percentage attributes already affect the aggregate stats above; don't
-    # also count their item-only combat score in extra_combat_power.
-    raw_power = (atk * coeffs['atk'] +
-                 hp_max * coeffs['hp'] +
-                 df * coeffs['def'] +
-                 hit * coeffs['hit'] +
-                 eva * coeffs['eva'] +
-                 cri * coeffs['cri'] +
-                 res * coeffs['res'] +
-                 extra_combat_power)
+    raw_power = (power_totals['atk'] * coeffs['atk'] +
+                 power_totals['hp_max'] * coeffs['hp'] +
+                 power_totals['def'] * coeffs['def'] +
+                 power_totals['hit'] * coeffs['hit'] +
+                 power_totals['eva'] * coeffs['eva'] +
+                 power_totals['cri'] * coeffs['cri'] +
+                 power_totals['res'] * coeffs['res'] +
+                 extra_combat_power +
+                 badge_combat_power)
     power = int(raw_power)
 
     return {
-        'atk': atk, 'hp_max': hp_max, 'def': df,
-        'hit': hit, 'eva': eva, 'cri': cri, 'res': res,
+        'atk': totals['atk'], 'hp_max': totals['hp_max'], 'def': totals['def'],
+        'hit': totals['hit'], 'eva': totals['eva'], 'cri': totals['cri'], 'res': totals['res'],
         'power': power, 'lv': lv, 'exp': c.get('exp', 0),
         'defa': ld['defa'], 'dgea': ld['dgea'], 'resa': ld['resa'],
         'hita': ld['hita'], 'cria': ld['cria'],
