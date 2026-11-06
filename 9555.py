@@ -7361,7 +7361,8 @@ def tower_send_pending_result(char, send_rpc_push):
     pending = run.get("pending_result") if isinstance(run, dict) else None
     if not isinstance(pending, dict):
         return False
-    send_rpc_push(552, tower_run_result_payload(run, pending))
+    if send_rpc_push(552, tower_run_result_payload(run, pending)) is False:
+        return False
     run["pending_result"] = None
     save_chars(all_accounts_chars)
     return True
@@ -7464,9 +7465,9 @@ def tower_finish_run(char, run_id, won, conn=None, send_rpc_push=None):
 
         result = tower_run_result_payload(run, run["pending_result"])
         if push:
-            push(552, result)
-            run["pending_result"] = None
-            save_chars(all_accounts_chars)
+            if push(552, result) is not False:
+                run["pending_result"] = None
+                save_chars(all_accounts_chars)
         print(f"[TOWER] finished player={char_id} floor={floor_id} win={won} rewards={len(rewards or [])}")
         return True
 
@@ -7555,6 +7556,50 @@ def start_tower_floor(conn, char, floor_id, send_rpc_push, continuation=False):
     return True
 
 
+def continue_tower_run(conn, char, send_rpc_push):
+    char_id = int(char.get("id", 0) or 0)
+    if not is_current_character_connection(conn, char):
+        print(f"[TOWER] continue rejected player={char_id} reason=stale_connection")
+        return False
+    with get_character_transaction_lock(char):
+        run = char.get("tower_run")
+        if not isinstance(run, dict) or run.get("status") not in ("won", "failed"):
+            print(f"[TOWER] continue rejected player={char_id} reason=no_finished_run")
+            return False
+
+        floor_id = int(run.get("floor_id", -1))
+        target_floor = floor_id if run["status"] == "failed" else floor_id + 1
+        config = TOWER_CONFIG.get(target_floor)
+        player_level = int(char.get("level", 1) or 1)
+        if (config and player_level >= int(config.get("limit_level", 1))
+                and tower_floor_is_valid(target_floor)):
+            started = start_tower_floor(
+                conn, char, target_floor, send_rpc_push, continuation=True)
+            print(f"[TOWER] continue player={char_id} from={floor_id} "
+                  f"to={target_floor} started={started}")
+            return started
+
+        if run["status"] == "failed":
+            print(f"[TOWER] retry rejected player={char_id} floor={target_floor} "
+                  f"level={player_level}")
+            return False
+
+        saved_map = str(char.get("pre_copy_map") or "11")
+        saved_pos = char.get("pre_copy_pos")
+        clear_tower_npcs(char, conn, send_rpc_push)
+        run["status"] = "complete"
+        run["pending_result"] = None
+        char["active_copy_id"] = None
+        start_map_transition(
+            conn, char, saved_map, send_rpc_push, override_pos=saved_pos)
+        char["pre_copy_map"] = None
+        char["pre_copy_pos"] = None
+        save_chars(all_accounts_chars)
+        print(f"[TOWER] completed final floor player={char_id} floor={floor_id} "
+              f"return_map={saved_map}")
+        return True
+
+
 def start_tower_wipeout(conn, char, wipe_type, send_rpc_push):
     char_id = int(char.get("id", 0) or 0)
     if not is_current_character_connection(conn, char):
@@ -7562,13 +7607,18 @@ def start_tower_wipeout(conn, char, wipe_type, send_rpc_push):
         return False
     with get_character_transaction_lock(char):
         state = ensure_tower_state(char)
-        start_floor = int(state["cur_floor"])
-        target_floor = int(state["floor"])
+        wipe_state = int(state["wipe_out_state"])
+        if wipe_state == 1 and wipe_type == 1:
+            start_floor = int(char.get("tower_wipe_start_floor", state["cur_floor"]))
+            target_floor = int(char.get("tower_wipe_target_floor", state["floor"]))
+        else:
+            start_floor = int(state["cur_floor"])
+            target_floor = int(state["floor"])
         duration = tower_wipeout_duration(start_floor, target_floor)
         tower_run = char.get("tower_run")
         if duration is None or duration <= 0:
             reason = "invalid_floor_range"
-        elif state["wipe_out_state"] != 0:
+        elif wipe_state not in (0, 1) or (wipe_state == 1 and wipe_type != 1):
             reason = "wipeout_already_active"
         elif is_tower_map(char.get("map_id")):
             reason = "currently_in_tower"
@@ -7610,6 +7660,7 @@ def start_tower_wipeout(conn, char, wipe_type, send_rpc_push):
             state["wipe_time"] = int(time.time())
             char["tower_wipe_start_floor"] = start_floor
             char["tower_wipe_target_floor"] = target_floor
+            _tower_cancel_timer(TOWER_WIPE_TIMERS, char_id)
             save_chars(all_accounts_chars)
             sync_char_attrs_rpc(conn, char)
             send_rpc_push(607, encode_sproto([
@@ -7661,40 +7712,54 @@ def tower_wipeout_duration(start_floor, target_floor):
 
 
 def tower_claim_wipeout(char, conn, send_rpc_push, request_id):
-    state = ensure_tower_state(char)
-    if state["wipe_out_state"] != 2:
-        print(f"[TOWER] wipeout claim rejected player={char.get('id')} state={state['wipe_out_state']}")
-        return False
-    start_floor = int(char.get("tower_wipe_start_floor", state["cur_floor"]))
-    target_floor = int(char.get("tower_wipe_target_floor", state["floor"]))
-    # The APK reuses curFloorId for type 0 and does not set it when opening
-    # the wipeout reward page. Derive the authoritative range from saved state.
-    floor_ids = list(range(start_floor, target_floor + 1))
-    rewards = tower_reward_list(floor_ids)
-    if (not rewards or not can_add_reward_list_to_inventory(char, rewards)):
-        print(f"[TOWER] wipeout rewards invalid/full player={char.get('id')} floors={floor_ids}")
-        return False
-    grant_item_rewards(char, rewards, conn, send_rpc_push, save=False)
-    state["floor"] = max(state["floor"], target_floor)
-    state["cur_floor"] = min(target_floor + 1, max(TOWER_CONFIG.keys(), default=-1) + 1)
-    state["times"] = 1
-    state["sum_time"] += sum(int(TOWER_CONFIG[floor_id].get("exist_time", 0) or 0)
-                             for floor_id in floor_ids)
-    char["tower_rank_floor"] = max(
-        int(char.get("tower_rank_floor", 0) or 0), target_floor + 1)
-    state["wipe_out_state"] = 0
-    state["wipe_time"] = 0
-    char.pop("tower_wipe_start_floor", None)
-    char.pop("tower_wipe_target_floor", None)
-    _tower_cancel_timer(TOWER_WIPE_TIMERS, char.get("id", 0))
-    save_chars(all_accounts_chars)
-    items = [encode_sproto([(0, item_id), (1, amount), (3, quality)])
-             for item_id, quality, amount in rewards]
-    send_rpc_push(625, encode_sproto([
-        (0, 0), (1, int(request_id)), (2, items),
-        (3, tower_info_payload(char)), (4, tower_special_reward_payload(char))
-    ]))
-    return True
+    char_id = int(char.get("id", 0) or 0)
+    with get_character_transaction_lock(char):
+        state = ensure_tower_state(char)
+        if state["wipe_out_state"] != 2:
+            print(f"[TOWER] wipeout claim rejected player={char_id} "
+                  f"state={state['wipe_out_state']}")
+            return False
+        start_floor = int(char.get("tower_wipe_start_floor", state["cur_floor"]))
+        target_floor = int(char.get("tower_wipe_target_floor", state["floor"]))
+        max_floor = max(TOWER_CONFIG.keys(), default=-1)
+        if (start_floor < 0 or target_floor < start_floor or target_floor > state["floor"]
+                or target_floor > max_floor):
+            print(f"[TOWER] wipeout claim rejected player={char_id} "
+                  f"invalid_range={start_floor}-{target_floor}")
+            return False
+
+        # The APK sends the reward-page's default/stale floor ID for type 0;
+        # the saved server range is authoritative.
+        floor_ids = list(range(start_floor, target_floor + 1))
+        rewards = tower_reward_list(floor_ids)
+        if not rewards or not can_add_reward_list_to_inventory(char, rewards):
+            print(f"[TOWER] wipeout rewards invalid/full player={char_id} floors={floor_ids}")
+            return False
+
+        grant_item_rewards(char, rewards, conn, send_rpc_push, save=False)
+        state["floor"] = max(state["floor"], target_floor)
+        state["cur_floor"] = min(target_floor + 1, max_floor + 1)
+        state["times"] = 1
+        state["sum_time"] += sum(
+            int(TOWER_CONFIG[floor_id].get("exist_time", 0) or 0)
+            for floor_id in floor_ids)
+        char["tower_rank_floor"] = max(
+            int(char.get("tower_rank_floor", 0) or 0), target_floor + 1)
+        state["wipe_out_state"] = 0
+        state["wipe_time"] = 0
+        char.pop("tower_wipe_start_floor", None)
+        char.pop("tower_wipe_target_floor", None)
+        _tower_cancel_timer(TOWER_WIPE_TIMERS, char_id)
+        save_chars(all_accounts_chars)
+        items = [encode_sproto([(0, item_id), (1, amount), (3, quality)])
+                 for item_id, quality, amount in rewards]
+        send_rpc_push(625, encode_sproto([
+            (0, 0), (1, int(request_id)), (2, items),
+            (3, tower_info_payload(char)), (4, tower_special_reward_payload(char))
+        ]))
+        print(f"[TOWER] wipeout rewards claimed player={char_id} "
+              f"range={start_floor}-{target_floor} next_floor={state['cur_floor']}")
+        return True
 
 
 def _build_exp_npc_wrapper(send_rpc_push, exp_state):
@@ -16493,9 +16558,11 @@ def client_handler(conn, addr):
             with send_lock:
                 conn.sendall(struct.pack(">H", len(pf_p)) + pf_p)
             debug_log(f"[TX] PUSH TAG={tag} SIZE={len(data)}")
+            return True
         except Exception:
             print(f"[!] FAILED TO SEND PUSH TAG={tag}")
             traceback.print_exc()
+            return False
 
     def send_rpc_response(response_session, response_data=None):
         if response_session is None:
@@ -16940,7 +17007,7 @@ def client_handler(conn, addr):
                 print(f"[TOWER RX] player={picked_char.get('id') if picked_char else None} "
                       f"msg={msg} session={session} fields={sorted(body)} "
                       f"map={picked_char.get('map_id') if picked_char else None}")
-            if msg in (204, 208):
+            if msg in (204, 205, 208):
                 request_value = get_val_int(body, 0, -1)
                 print(f"[TOWER ACTION] player="
                       f"{picked_char.get('id') if picked_char else None} "
@@ -16955,6 +17022,12 @@ def client_handler(conn, addr):
                             print(f"[TOWER ACTION RESULT] player={picked_char.get('id')} "
                                   f"msg=204 started={started} map={picked_char.get('map_id')} "
                                   f"run={picked_char.get('tower_run')}")
+                        elif msg == 205:
+                            continued = continue_tower_run(
+                                conn, picked_char, send_rpc_push)
+                            print(f"[TOWER ACTION RESULT] player={picked_char.get('id')} "
+                                  f"msg=205 continued={continued} map={picked_char.get('map_id')} "
+                                  f"run={picked_char.get('tower_run')}")
                         else:
                             start_tower_wipeout(
                                 conn, picked_char, request_value, send_rpc_push)
@@ -16964,6 +17037,14 @@ def client_handler(conn, addr):
                         traceback.print_exc()
                 else:
                     print(f"[TOWER ACTION REJECTED] msg={msg} reason=no_character")
+                if session is not None:
+                    try:
+                        send_rpc_response(session)
+                    except Exception:
+                        print(f"[TOWER ACTION ERROR] player="
+                              f"{picked_char.get('id') if picked_char else None} "
+                              f"msg={msg} response=failed")
+                        traceback.print_exc()
                 continue
             if (picked_char and str(picked_char.get('map_id', '')) == '101'
                     and map101_ready_at is not None):
@@ -23228,6 +23309,7 @@ def client_handler(conn, addr):
                     print(f"[TOWER] info sent player={picked_char.get('id')} "
                           f"floor={state['floor']} cur_floor={state['cur_floor']} "
                           f"wipe_state={state['wipe_out_state']}")
+                    send_rpc_response(session)
 
                 elif msg == 203 and picked_char: # grant_tower_reward
                     reward_type = get_val_int(body, 0, -1)
@@ -23267,34 +23349,7 @@ def client_handler(conn, addr):
                                     print(f"[TOWER] special claim rejected player={picked_char.get('id')} floor={floor_id}")
                     else:
                         print(f"[TOWER] reward claim rejected stale connection player={picked_char.get('id')}")
-
-                elif msg == 205 and picked_char: # continue_tower_copy
-                    run = picked_char.get("tower_run")
-                    if (is_current_character_connection(conn, picked_char)
-                            and isinstance(run, dict)
-                            and run.get("status") in ("won", "failed")):
-                        floor_id = int(run.get("floor_id", -1))
-                        target_floor = floor_id if run.get("status") == "failed" else floor_id + 1
-                        if (target_floor in TOWER_CONFIG
-                                and int(picked_char.get("level", 1) or 1)
-                                >= int(TOWER_CONFIG[target_floor].get("limit_level", 1))):
-                            start_tower_floor(
-                                conn, picked_char, target_floor, send_rpc_push,
-                                continuation=True)
-                        else:
-                            saved_map = str(picked_char.get("pre_copy_map") or "11")
-                            saved_pos = picked_char.get("pre_copy_pos")
-                            clear_tower_npcs(picked_char, conn, send_rpc_push)
-                            run["status"] = "complete"
-                            picked_char["active_copy_id"] = None
-                            start_map_transition(
-                                conn, picked_char, saved_map, send_rpc_push,
-                                override_pos=saved_pos)
-                            picked_char["pre_copy_map"] = None
-                            picked_char["pre_copy_pos"] = None
-                            save_chars(all_accounts_chars)
-                    else:
-                        print(f"[TOWER] continue rejected player={picked_char.get('id')} run={run}")
+                    send_rpc_response(session)
 
                 elif msg == 230 and picked_char: # tower_reset
                     reset = False
@@ -23318,6 +23373,7 @@ def client_handler(conn, addr):
                     send_rpc_push(626, encode_sproto([(0, reset)]))
                     if reset:
                         tower_info_response(picked_char, send_rpc_push)
+                    send_rpc_response(session)
 
                 elif msg == 242 and picked_char: # request_slot_info
                     if is_current_character_connection(conn, picked_char):
