@@ -5250,24 +5250,19 @@ def get_character_stats(c):
         2013: 'crr'
     }
     percent_totals = {field: 0 for field in percent_fields.values()}
-    badge_percent_totals = {field: 0 for field in percent_fields.values()}
     totals = {
         'atk': atk, 'hp_max': hp_max, 'def': df, 'hit': hit, 'eva': eva,
         'cri': cri, 'res': res, 'exd': ld['exd'][prof], 'exr': ld['exr'][prof],
         'crd': ld['crd'][prof], 'crr': ld['crr'][prof], 'rec': 0, 'mov': 500
     }
-    # Keep badge percentage attributes in the combat stats, but do not let
-    # them multiply the whole character power. Badges contribute their own
-    # GetItemCombatVal score below.
+    # Percentage attributes affect runtime combat stats, but combat power
+    # counts their configured item score rather than scaling the whole stat.
     coeffs = [
         {"atk":16, "hp":1, "def":11, "hit":2, "eva":5.5, "cri":10, "res":10},
         {"atk":20, "hp":1, "def":12, "hit":1, "eva":6, "cri":5, "res":10},
         {"atk":7, "hp":1, "def":7.4, "hit":3, "eva":3.7, "cri":15, "res":10}
-    ][prof]
+    ][prof    ]
     extra_combat_weights = {
-        1001: coeffs['atk'], 1002: coeffs['hp'], 1003: coeffs['def'],
-        1004: coeffs['hit'], 1005: coeffs['eva'], 1006: coeffs['cri'],
-        1007: coeffs['res'],
         1008: 5, 1009: 5, 1012: 5, 1013: 5,
         2001: 5, 2002: 5, 2003: 5, 2004: 5,
         2005: 5, 2006: 5, 2007: 5,
@@ -5334,12 +5329,6 @@ def get_character_stats(c):
             for status_key, value_key in (('status1', 'value1'), ('status2', 'value2')):
                 attribute_id = badge_cfg.get(status_key)
                 value = badge_cfg.get(value_key, 0)
-                try:
-                    attribute_id = int(attribute_id)
-                    if attribute_id in percent_fields:
-                        badge_percent_totals[percent_fields[attribute_id]] += int(value)
-                except (TypeError, ValueError):
-                    pass
                 add_item_attribute(attribute_id, value)
                 add_extra_combat_power(attribute_id, value)
             color = int(badge_cfg.get('color', -1))
@@ -5393,9 +5382,6 @@ def get_character_stats(c):
                 add_extra_combat_power(attribute_id, value)
 
     power_totals = totals.copy()
-    for field, bonus in percent_totals.items():
-        power_bonus = bonus - badge_percent_totals[field]
-        power_totals[field] += math.floor(power_totals[field] * power_bonus / 10000.0)
 
     # Percentage bonuses are additive and are applied once to the complete
     # level + equipment totals, matching the client's 1/10000 percentage scale.
@@ -5405,8 +5391,8 @@ def get_character_stats(c):
     atk, hp_max, df = totals['atk'], totals['hp_max'], totals['def']
     hit, eva, cri, res = totals['hit'], totals['eva'], totals['cri'], totals['res']
 
-    # Preserve the existing equipment/title/refine power calculation while
-    # excluding only badge percentage scaling from the aggregate stat formula.
+    # Preserve flat equipment/title/refine stat contributions while avoiding
+    # a second aggregate multiplication for percentage attributes.
     raw_power = (power_totals['atk'] * coeffs['atk'] +
                  power_totals['hp_max'] * coeffs['hp'] +
                  power_totals['def'] * coeffs['def'] +
