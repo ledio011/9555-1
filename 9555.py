@@ -4400,11 +4400,9 @@ def exp_send_push(state, tag, data, exclude=None):
     run_map_id = exp_run_map_id(state)
     for cid in exp_member_ids(state):
         conn, ch = ALL_CONNECTIONS.get(cid, (None, None))
-        if state.get('stage_kind') == 'equipment':
-            # Equipment scenes create monsters only after the local scene has
-            # finished loading.  A teammate who has not sent map_ready yet
-            # must receive the current wave/barrier state when their scene is
-            # ready, instead of having early AOI packets discarded by Unity.
+        if state.get('stage_kind') == 'equipment' or (
+                state.get('team_id') and state.get('ready_connections') is not None):
+            # Team members must finish loading before receiving stage events.
             if state.get('ready_connections', {}).get(cid) != id(conn):
                 continue
         if cid not in excluded and conn is not None and ch is not None and str(ch.get('map_id')) == run_map_id:
@@ -4425,7 +4423,7 @@ def exp_online_members(state, alive=False):
     run_map_id = exp_run_map_id(state)
     for cid in exp_member_ids(state):
         conn, ch = ALL_CONNECTIONS.get(cid, (None, None))
-        if (state.get('stage_kind') == 'equipment'
+        if ((state.get('stage_kind') == 'equipment' or state.get('team_id'))
                 and state.get('ready_connections', {}).get(cid) != id(conn)):
             continue
         if conn is not None and ch is not None and str(ch.get('map_id')) == run_map_id and (not alive or ch.get('hp', 0) > 0):
@@ -8313,11 +8311,19 @@ def spawn_equipment_stage_map(conn, map_id, char, map_ready=False, force=False):
         is_new_ready = previous_connection != id(conn)
         ready_connections[char_id] = id(conn)
         char.pop('_equipment_stage_waiting_ready', None)
-        # CopySceneData.ExistTime is the playable arena limit.  Team Ready can
-        # precede Unity's load by several seconds, so start that limit only when
-        # the first participant reports map_ready.  Keep it fixed after that so
-        # late teammates and reconnecting clients rejoin the same run deadline.
+        # A team run starts only after every member has finished loading; no
+        # player's arena time is spent waiting for a slower teammate.
         if not state.get('timer_started'):
+            all_ready = True
+            for member_id in exp_member_ids(state):
+                member_conn, member_char = ALL_CONNECTIONS.get(member_id, (None, None))
+                if (member_conn is None or member_char is None
+                        or str(member_char.get('map_id')) != str(map_id)
+                        or ready_connections.get(member_id) != id(member_conn)):
+                    all_ready = False
+                    break
+            if not all_ready:
+                return True
             started_at = int(time.time())
             copy_cfg = COPY_SCENE_CONFIG.get(copy_id, {})
             duration = max(1, int(copy_cfg.get('exist_time') or 900))
@@ -9978,6 +9984,95 @@ def update_npc_aoi(conn, map_id, picked_char):
     if any(len(tdata.get('path') or []) >= 2 for tdata in tracked.values()):
         _ensure_liberty_npc_patrol_worker(conn, picked_char, conn_key)
 
+def spawn_exp_team_stage_map(conn, map_id, char):
+    """Start team EXP stage time and combat only after every member is map-ready."""
+    state = char.get('exp_stage_state') if char else None
+    char_id = int(char.get('id', 0)) if char else 0
+    copy_id = str(state.get('copy_id') or '') if isinstance(state, dict) else ''
+    if (not state or not state.get('team_id')
+            or state.get('stage_kind') != 'team_exp'
+            or exp_run_map_id(state) != str(map_id)
+            or char_id not in exp_member_ids(state)):
+        return False
+
+    state.setdefault('char_refs', {})[char_id] = char
+    ready_connections = state.setdefault('ready_connections', {})
+    run_lock = state.setdefault('_kill_lock', threading.RLock())
+    with run_lock:
+        previous_connection = ready_connections.get(char_id)
+        is_new_ready = previous_connection != id(conn)
+        ready_connections[char_id] = id(conn)
+        all_ready = True
+        for member_id in exp_member_ids(state):
+            member_conn, member_char = ALL_CONNECTIONS.get(member_id, (None, None))
+            if (member_conn is None or member_char is None
+                    or str(member_char.get('map_id')) != str(map_id)
+                    or ready_connections.get(member_id) != id(member_conn)):
+                all_ready = False
+                break
+
+        if not state.get('timer_started'):
+            if not all_ready:
+                return True
+            now = int(time.time())
+            duration = max(1, int(COPY_SCENE_CONFIG.get(copy_id, {}).get('exist_time') or 600))
+            state['start_time'] = now
+            state['end_time'] = now + duration
+            state['group_start_time'] = now
+            state['timer_started'] = True
+            state['defer_start'] = False
+
+        spawned_now = False
+        if not state.get('wave_started'):
+            state['wave_started'] = True
+            spawned_now = True
+
+            def create_npc(nid, name, x, z, heading):
+                inst_id, attr = build_npc_attr_sproto(nid, name, x, z, heading)
+                if inst_id:
+                    NPC_INSTANCE_MAP[inst_id] = str(map_id)
+                    state.setdefault('monster_pos', {})[inst_id] = [x / 100.0, z / 100.0]
+                    state.setdefault('monster_heading', {})[inst_id] = int(heading)
+                    state.setdefault('spawned_npcs', set()).add(inst_id)
+                    exp_send_push(state, 509, encode_sproto([(0, attr)]))
+                return inst_id
+
+            spawn_exp_stage_subwave_internal(
+                conn, lambda tag, data: exp_send_push(state, tag, data),
+                char, state, DAILY_EXP_CONFIG[copy_id], create_npc)
+
+        if spawned_now:
+            exp_send_push(state, 629, encode_sproto([(0, state['end_time']), (1, 2)]))
+            _send_exp_tag683(lambda tag, data: exp_send_push(state, tag, data),
+                             state, DAILY_EXP_CONFIG[copy_id])
+        else:
+            send_rpc_push_safe(conn, 629, encode_sproto([(0, state['end_time']), (1, 2)]))
+            _send_exp_tag683(lambda tag, data: send_rpc_push_safe(conn, tag, data),
+                             state, DAILY_EXP_CONFIG[copy_id])
+        if is_new_ready and not spawned_now and state.get('wave_started'):
+            for inst_id in list(state.get('active_monsters', [])):
+                if inst_id in DEAD_NPC_SET or int(NPC_HP_MAP.get(inst_id, 0)) <= 0:
+                    continue
+                nid = NPC_INST_MAP.get(inst_id)
+                pos = state.get('monster_pos', {}).get(inst_id)
+                if not nid or pos is None:
+                    continue
+                npc_cfg = NPC_CONFIG.get(str(nid), {})
+                _inst_id, attr = build_npc_attr_sproto(
+                    nid, npc_cfg.get('name', f"Monster_{nid}"),
+                    int(round(pos[0] * 100)), int(round(pos[1] * 100)),
+                    int(state.get('monster_heading', {}).get(inst_id, 0)),
+                    existing_inst_id=inst_id)
+                NPC_INSTANCE_MAP[inst_id] = str(map_id)
+                send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
+                sync_npc_attrs_rpc(conn, inst_id, get_npc_attr(nid), NPC_HP_MAP.get(inst_id, 0))
+
+        if not state.get('runtime_started'):
+            start_exp_stage_runtime(conn, char, state)
+    sync_exp_team_aoi(char)
+    return True
+
+
 def spawn_map_npcs(conn, map_id, picked_char=None):
     map_str = str(map_id)
     if (is_cash_stage_map(map_str) and picked_char
@@ -10068,6 +10163,10 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             # EXP scenes use ordered DailyExpData waves. Static map rows must
             # not be mixed into the run or they create uncounted extra enemies.
             print(f"[EXP STAGE] no active copy config for physical map={map_str}; suppress static spawn")
+            return
+        if state and state.get('stage_kind') == 'team_exp':
+            # Team transitions are not playable time. MSG 100 starts the
+            # timer and first wave after the full party finishes loading.
             return
         if state is None and picked_char.get('_exp_leave_timer'):
             # A finished run can reconnect during its short results/exit delay.
@@ -13946,6 +14045,12 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
                 # The new map load must receive its live wave after MSG 100.
                 with equipment_state.setdefault('_kill_lock', threading.RLock()):
                     equipment_state.setdefault('ready_connections', {}).pop(
+                        int(picked_char.get('id', 0)), None)
+        if is_exp_map(target_map_id):
+            exp_state = picked_char.get('exp_stage_state')
+            if exp_state and exp_state.get('stage_kind') == 'team_exp':
+                with exp_state.setdefault('_kill_lock', threading.RLock()):
+                    exp_state.setdefault('ready_connections', {}).pop(
                         int(picked_char.get('id', 0)), None)
         spawn_map_npcs(conn, target_map_id, picked_char)
         if is_exp_map(target_map_id):
@@ -18356,12 +18461,14 @@ def client_handler(conn, addr):
                     if is_exp_map(mid):
                         exp_state = picked_char.get('exp_stage_state')
                         if exp_state:
-                            # Issue 57: Change type from 0 to 2 so CountDownTimeLogic auto-closes at 00:00:00
-                            exp_send_push(exp_state, 629, encode_sproto([(0, exp_state['end_time']), (1, 2)]))
-                            # Send TAG 683 with raw kill counts for client UI
-                            exp_cfg_for_ready = DAILY_EXP_CONFIG.get(exp_state['copy_id'], {})
-                            _send_exp_tag683(lambda tag, data: exp_send_push(exp_state, tag, data), exp_state, exp_cfg_for_ready)
-                            print(f"[EXP STAGE] map_ready sent 629 & 683 updates for copy={mid}")
+                            if exp_state.get('stage_kind') == 'team_exp':
+                                spawn_exp_team_stage_map(conn, mid, picked_char)
+                            else:
+                                # Keep the existing solo-copy timer protocol.
+                                exp_send_push(exp_state, 629, encode_sproto([(0, exp_state['end_time']), (1, 2)]))
+                                exp_cfg_for_ready = DAILY_EXP_CONFIG.get(exp_state['copy_id'], {})
+                                _send_exp_tag683(lambda tag, data: exp_send_push(exp_state, tag, data), exp_state, exp_cfg_for_ready)
+                                print(f"[EXP STAGE] map_ready sent 629 & 683 updates for copy={mid}")
                     elif is_equipment_copy_map(mid):
                         equipment_state = picked_char.get('equipment_stage_state')
                         if (equipment_state and equipment_state.get('stage_kind') == 'equipment'
@@ -23627,16 +23734,15 @@ def client_handler(conn, addr):
                                     leader=(int(x) == leader_id))
                                 for x in ids)
                         if valid:
-                            if copy_id in DAILY_EXP_CONFIG:
-                                # EXP-stage party entry is gated on the
-                                # leader's attempts only. Teammates may ready
-                                # at zero and do not spend an attempt.
-                                leader=ALL_CONNECTIONS.get(int(team.get('leader_id',0)),(None,None))[1]
-                                valid=bool(leader and copy_attempts_remaining(leader,copy_id,cfg)>0)
-                            else:
-                                # Keep the existing equipment-stage attempt
-                                # policy unchanged.
-                                valid=all(copy_attempts_remaining(ALL_CONNECTIONS[x][1],copy_id,cfg)>0 for x in ids)
+                            # The client gates team entry on the leader's
+                            # CopyRestNum. Members can confirm at zero attempts;
+                            # only the leader's daily attempt is consumed.
+                            leader = ALL_CONNECTIONS.get(
+                                int(team.get('leader_id', 0)), (None, None))[1]
+                            valid = bool(
+                                leader
+                                and copy_attempts_remaining(leader, copy_id, cfg) > 0
+                            )
                         if valid:
                             session_id=next_exp_run_id()
                             team['pending_run']={'session':session_id,'copy_id':copy_id,'ready':{x:False for x in ids}}
@@ -25600,10 +25706,14 @@ def client_handler(conn, addr):
 def team_join_member(team, char):
     cid=int(char.get('id',0))
     if not team or team.get('active_run') or team.get('pending_run') or len(team.get('members',[]))>=4 or cid in team.get('members',[]): return False
-    is_leader = cid == int(team.get('leader_id', 0))
     goal_id = str(team.get('goal_id') or '')
-    if goal_id in DAILY_EXP_CONFIG:
-        if not team_copy_level_allowed(goal_id, char.get('level', 1), leader=is_leader): return False
+    if is_team_battle_copy(goal_id):
+        minimum = max(
+            int(COPY_SCENE_CONFIG.get(goal_id, {}).get('min_level', 1)),
+            int(team.get('min_level', 1)))
+        # Team entry checks the stage minimum, not its recommended max. Keep
+        # the roster's minimum, but allow a higher-level invited teammate.
+        if int(char.get('level', 1)) < minimum: return False
     elif not int(team.get('min_level',1))<=int(char.get('level',1))<=int(team.get('max_level',80)):
         return False
     if not is_character_available_for_team(char) or (CHAR_TEAM.get(cid) not in (None, int(team.get('id', 0)))): return False
@@ -25616,32 +25726,32 @@ def team_goal_level_bounds(copy_id, min_level=1, max_level=80):
     copy_id = str(copy_id or '')
     if copy_id in DAILY_EXP_CONFIG:
         cfg = COPY_SCENE_CONFIG.get(copy_id, {})
-        minimum = max(1, int(cfg.get('min_level', min_level)))
+        minimum = max(int(cfg.get('min_level', 1)),
+                      min(80, max(1, int(min_level))))
         # TeamLineRoot uses these advertised limits to enable the Join button.
         # EXP leaders are checked against the stage band separately; members
         # can be above its max, up to the game's overall level cap.
         return minimum, max(minimum, 80)
     if is_team_battle_copy(copy_id):
         cfg = COPY_SCENE_CONFIG.get(copy_id, {})
-        minimum = max(1, int(cfg.get('min_level', min_level)))
-        maximum = max(minimum, int(cfg.get('max_level', max_level)))
-        return minimum, maximum
+        stage_min = max(1, int(cfg.get('min_level', min_level)))
+        stage_max = max(stage_min, int(cfg.get('max_level', max_level)))
+        minimum = max(stage_min, min(stage_max, int(min_level)))
+        maximum = max(stage_min, min(stage_max, int(max_level)))
+        return minimum, max(minimum, maximum)
     minimum = max(1, int(min_level))
     return minimum, max(minimum, int(max_level))
 
 def team_copy_level_allowed(copy_id, level, leader=False):
-    """Apply the APK's EXP-team rule: stage-band leader, minimum-only members."""
+    """Match Team.EnterMultiCopyAction: team participants need the stage minimum."""
     copy_id = str(copy_id or '')
     cfg = COPY_SCENE_CONFIG.get(copy_id, {})
     try:
         level = int(level)
         minimum = max(1, int(cfg.get('min_level', 1)))
-        maximum = max(minimum, int(cfg.get('max_level', 80)))
     except (TypeError, ValueError):
         return False
-    if copy_id in DAILY_EXP_CONFIG:
-        return level >= minimum and (not leader or level <= maximum)
-    return minimum <= level <= maximum
+    return level >= minimum
 
 def team_remove_member(team, char_id):
     cid=int(char_id)
@@ -25678,10 +25788,14 @@ def queue_team_match(team, goal_id, goal_type):
         if len(combined)>max_members:
             queue.remove(other_id); continue
         players=[]; valid=True
+        join_minimum = max(
+            int(cfg.get('min_level', 1)), int(team.get('min_level', 1)))
         for member_id in combined:
             member=ALL_CONNECTIONS.get(int(member_id),(None,None))[1]
             is_leader = int(member_id) == int(team.get('leader_id', 0))
-            if member is None or not team_copy_level_allowed(copy_id, member.get('level', 1), leader=is_leader):
+            if (member is None
+                    or not team_copy_level_allowed(copy_id, member.get('level', 1), leader=is_leader)
+                    or int(member.get('level', 1)) < join_minimum):
                 valid=False; break
             players.append((int(member_id),member))
         if not valid:
@@ -25813,51 +25927,85 @@ def detach_exp_team_member(team, member_id):
     if team and team.get('members'): send_team_update(team['id'])
     save_chars(all_accounts_chars)
 def start_team_exp_run(team, copy_id):
-    copy_id=str(copy_id); cfg=COPY_SCENE_CONFIG.get(copy_id)
-    ids=list(team.get('members',[]))
-    pending=team.get('pending_run') if team else None
-    if (not pending or str(pending.get('copy_id'))!=copy_id or str(team.get('goal_id'))!=copy_id
-            or not pending.get('starting') or set(pending.get('ready',{}))!=set(ids)
-            or not all(pending.get('ready',{}).values())): return False
-    if not cfg or copy_id not in DAILY_EXP_CONFIG or len(ids)<max(2,int(cfg.get('min_member',2))) or len(ids)>int(cfg.get('max_member',4)): return False
-    players=[]
-    for cid in ids:
-        conn,ch=ALL_CONNECTIONS.get(cid,(None,None))
-        if conn is None or ch is None: return False
-        is_leader = int(cid) == int(team.get('leader_id', 0))
-        if not is_character_available_for_team(ch) or not team_copy_level_allowed(
-                copy_id, ch.get('level', 1), leader=is_leader): return False
-        if is_leader and copy_attempts_remaining(ch,copy_id,cfg)<=0: return False
-        players.append((cid,conn,ch))
-    leader=next((ch for cid,_conn,ch in players if int(cid)==int(team.get('leader_id',0))),None)
-    if leader is None: return False
-    for cid,conn,ch in players:
-        if ch.get('pre_copy_pos') is None:
-            ch['pre_copy_pos']=list(ch.get('pos',[29860,100,-17005,0])); ch['pre_copy_map']=str(ch.get('map_id','11'))
-        daily=ensure_daily_copy_state(ch)
-        remaining=copy_attempts_remaining(ch,copy_id,cfg)
-        if int(cid) == int(team.get('leader_id', 0)):
-            daily['remaining'][copy_id]=max(0,remaining-1)
-        ch['active_copy_id']=copy_id; ch['exp_members']=ids; ch['exp_team_id']=int(team['id']); ch['exp_defer_start']=True
-        ch['hp']=get_character_stats(ch)['hp_max']; sync_char_attrs_rpc(conn,ch)
-        send_push_to_char(cid,555,sync_copy_scenes(ch))
-        # Mission 1019 uses Target=105, not a specific level bracket map ID.
-        advance_missions(ch,lambda tag,data,who=cid:send_push_to_char(who,tag,data),'dungeon',target_id='105')
-    # Instance IDs are monotonic; retain dead IDs so delayed duplicate damage
-    # packets from another active run cannot revive/count an old monster.
+    copy_id = str(copy_id)
+    cfg = COPY_SCENE_CONFIG.get(copy_id)
+    ids = list(team.get('members', [])) if team else []
+    pending = team.get('pending_run') if team else None
+    if (not pending or str(pending.get('copy_id')) != copy_id
+            or str(team.get('goal_id')) != copy_id or not pending.get('starting')
+            or set(pending.get('ready', {})) != set(ids)
+            or not all(pending.get('ready', {}).values())):
+        return False
+    if (not cfg or copy_id not in DAILY_EXP_CONFIG
+            or len(ids) < max(2, int(cfg.get('min_member', 2)))
+            or len(ids) > int(cfg.get('max_member', 4))):
+        return False
+
+    players = []
+    leader_id = int(team.get('leader_id', 0))
+    for member_id in ids:
+        conn, char = ALL_CONNECTIONS.get(int(member_id), (None, None))
+        if conn is None or char is None or not is_character_available_for_team(char):
+            return False
+        if not team_copy_level_allowed(copy_id, char.get('level', 1),
+                                       leader=int(member_id) == leader_id):
+            return False
+        players.append((int(member_id), conn, char))
+    leader = next((char for member_id, _conn, char in players
+                   if member_id == leader_id), None)
+    if leader is None:
+        return False
+    leader_remaining = copy_attempts_remaining(leader, copy_id, cfg)
+    if leader_remaining <= 0:
+        return False
+
+    state = {
+        'stage_kind': 'team_exp', 'copy_id': copy_id, 'map_id': copy_id,
+        'team_id': int(team['id']), 'members': list(ids), 'owner_id': leader_id,
+        'char_refs': {member_id: char for member_id, _conn, char in players},
+        'cur_group': 1, 'cur_wave': 1, 'subwave': 1,
+        'wave_kills': 0, 'total_kills': 0, 'deaths': 0,
+        'start_time': 0, 'end_time': 0, 'group_start_time': 0,
+        'active_monsters': [], 'monster_pos': {}, 'monster_heading': {},
+        'ai_active': True, 'runtime_started': False, 'timer_started': False,
+        'wave_started': False, 'run_initialized': True, 'defer_start': True,
+        'kill_tracker': [], 'killed_npcs': [], 'spawned_npcs': set(),
+        'ready_connections': {}, 'player_auth_pos': {},
+        'player_auth_move_at': {}, '_kill_lock': threading.RLock(),
+    }
+
+    daily = ensure_daily_copy_state(leader)
+    daily['remaining'][copy_id] = max(0, leader_remaining - 1)
+    for member_id, conn, char in players:
+        if char.get('pre_copy_pos') is None:
+            char['pre_copy_pos'] = list(char.get('pos', [29860, 100, -17005, 0]))
+            char['pre_copy_map'] = str(char.get('map_id', '11'))
+        char['active_copy_id'] = copy_id
+        char['exp_members'] = ids
+        char['exp_team_id'] = int(team['id'])
+        char['exp_defer_start'] = True
+        char['exp_stage_state'] = state
+        char['hp'] = get_character_stats(char)['hp_max']
+        state['player_auth_pos'][member_id] = list(char.get('pos', [0, 100, 0, 0]))
+        state['player_auth_move_at'][member_id] = time.monotonic()
+        sync_char_attrs_rpc(conn, char)
+        send_push_to_char(member_id, 555, sync_copy_scenes(char))
+        advance_missions(
+            char, lambda tag, data, who=member_id: send_push_to_char(who, tag, data),
+            'dungeon', target_id='105')
+
+    team['active_run'] = state
+    team['pending_run'] = None
+    ready_timer = team.pop('_ready_timer', None)
+    if ready_timer:
+        ready_timer.cancel()
     save_chars(all_accounts_chars)
-    for cid,conn,ch in players:
-        start_map_transition(conn,ch,copy_id,lambda tag,data,who=cid:send_push_to_char(who,tag,data))
-    owner=ALL_CONNECTIONS.get(int(team['leader_id']),(None,players[0][2]))[1] or players[0][2]
-    state=owner.get('exp_stage_state')
-    if not state or str(state.get('copy_id'))!=copy_id: return False
-    state['team_id']=int(team['id']); state['members']=ids; state['owner_id']=int(team['leader_id']); state['defer_start']=False
-    for cid,conn,ch in players:
-        ch['exp_stage_state']=state; ch['exp_team_id']=int(team['id']); ch['exp_defer_start']=False
-        state.setdefault('char_refs',{})[cid]=ch
-    team['active_run']=state; team['pending_run']=None
-    _send_exp_tag683(lambda tag,data:exp_send_push(state,tag,data),state,DAILY_EXP_CONFIG[copy_id])
-    start_exp_stage_runtime(players[0][1],owner,state); send_team_update(team['id']); save_chars(all_accounts_chars)
+    for member_id, conn, char in players:
+        start_map_transition(
+            conn, char, copy_id,
+            lambda tag, data, who=member_id: send_push_to_char(who, tag, data))
+    send_team_update(team['id'])
+    save_chars(all_accounts_chars)
     return True
 
 def start_team_equipment_run(team, copy_id):
@@ -25879,17 +26027,20 @@ def start_team_equipment_run(team, copy_id):
         return False
 
     players = []
+    leader_id = int(team.get('leader_id', 0))
     for cid in ids:
         member_conn, member = ALL_CONNECTIONS.get(int(cid), (None, None))
         if (member_conn is None or member is None
                 or not is_character_available_for_team(member)
-                or not int(cfg.get('min_level', 1)) <= int(member.get('level', 1)) <= int(cfg.get('max_level', 80))
-                or copy_attempts_remaining(member, copy_id, cfg) <= 0):
+                or int(member.get('level', 1)) < int(cfg.get('min_level', 1))):
             return False
         players.append((int(cid), member_conn, member))
     owner = next((member for cid, _conn, member in players
-                  if int(cid) == int(team.get('leader_id', 0))), None)
+                  if int(cid) == leader_id), None)
     if owner is None:
+        return False
+    leader_remaining = copy_attempts_remaining(owner, copy_id, cfg)
+    if leader_remaining <= 0:
         return False
 
     now = int(time.time())
@@ -25918,8 +26069,8 @@ def start_team_equipment_run(team, copy_id):
             member['pre_copy_pos'] = list(member.get('pos', [29860, 100, -17005, 0]))
             member['pre_copy_map'] = str(member.get('map_id', '11'))
         daily = ensure_daily_copy_state(member)
-        remaining = copy_attempts_remaining(member, copy_id, cfg)
-        daily.setdefault('remaining', {})[copy_id] = max(0, remaining - 1)
+        if cid == leader_id:
+            daily.setdefault('remaining', {})[copy_id] = max(0, leader_remaining - 1)
         member['active_copy_id'] = copy_id
         member['equipment_team_id'] = int(team['id'])
         member['equipment_stage_state'] = state
