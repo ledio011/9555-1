@@ -23054,19 +23054,17 @@ def client_handler(conn, addr):
                         revive_cost = max(1, int(offer.get('cost', 1)))
                         revive_item_id = str(offer.get('item_id') or '9011')
                         if is_inplace:
-                            inventory = picked_char.get('inventory', [])
-                            revive_stack = next((item for item in inventory
-                                                 if str(item.get('id')) == revive_item_id), None)
-                            if revive_stack is None or int(revive_stack.get('amount', 1)) < revive_cost:
+                            with get_character_transaction_lock(picked_char):
+                                consumed = consume_backpack_item(
+                                    picked_char, revive_item_id, revive_cost,
+                                    send_rpc_push, 2
+                                )
+                            if not consumed:
+                                print(f"[RELIFE] insufficient revive item player={picked_char.get('id')} item={revive_item_id} cost={revive_cost}")
                                 if session is not None:
                                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                                     conn.sendall(struct.pack('>H', len(pf)) + pf)
                                 continue
-                            revive_stack['amount'] = int(revive_stack.get('amount', 1)) - revive_cost
-                            if revive_stack['amount'] <= 0:
-                                inventory.remove(revive_stack)
-                            picked_char['inventory'] = inventory
-                            sync_all_backpacks(picked_char, send_rpc_push)
 
                         # The client labels this free action from TAG 618's
                         # rebirth type: type 0 returns to the main city; type 1
@@ -23171,17 +23169,17 @@ def client_handler(conn, addr):
                     revive_cost = max(1, int(get_relife_config(exp_state_check.get('deaths', 1)).get('use_count', 1)))
                     revive_item_id = '9202'
                     if is_inplace:
-                        inventory = picked_char.get('inventory', [])
-                        revive_stack = next((item for item in inventory if str(item.get('id')) == revive_item_id), None)
-                        if revive_stack is None or int(revive_stack.get('amount', 1)) < revive_cost:
+                        with get_character_transaction_lock(picked_char):
+                            consumed = consume_backpack_item(
+                                picked_char, revive_item_id, revive_cost,
+                                send_rpc_push, 2
+                            )
+                        if not consumed:
+                            print(f"[RELIFE] insufficient revive item player={picked_char.get('id')} item={revive_item_id} cost={revive_cost}")
                             if session is not None:
                                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                                 conn.sendall(struct.pack('>H', len(pf)) + pf)
                             continue
-                        revive_stack['amount'] = int(revive_stack.get('amount', 1)) - revive_cost
-                        if revive_stack['amount'] <= 0: inventory.remove(revive_stack)
-                        picked_char['inventory'] = inventory
-                        sync_all_backpacks(picked_char, send_rpc_push)
 
                     p_stats = get_character_stats(picked_char)
                     picked_char['hp'] = p_stats['hp_max']
