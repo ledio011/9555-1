@@ -1956,7 +1956,7 @@ try:
                     EQUIP_CONFIG[eid] = {
                         'name': parts[2],
                         'lv': int(parts[3]) if parts[3].isdigit() else 0,
-                        'class': int(parts[4]) if parts[4].isdigit() else 1,
+                        'class': int(parts[4]) if parts[4].isdigit() else 0,
                         'job': int(parts[6]) if parts[6].lstrip('-').isdigit() else -1,
                         'position': int(parts[7]) if parts[7].isdigit() else 0,
                         'base_stat': int(parts[8]) if parts[8].isdigit() else 0,
@@ -11212,7 +11212,9 @@ def resolve_equipment_pack_rewards(item_id, package_count=1, character=None):
             if (int(equip_cfg.get('position', -1)) not in range(1, 6)
                     or int(equip_cfg.get('class', 0)) not in allowed_classes
                     or int(equip_cfg.get('job', -1)) != profession
-                    or int(ITEM_CONFIG.get(str(equip_id), {}).get('type', -1)) != 2):
+                    or int(ITEM_CONFIG.get(str(equip_id), {}).get('type', -1)) != 2
+                    or int(ITEM_CONFIG.get(str(equip_id), {}).get('subtype', -1))
+                    != int(equip_cfg.get('position', -1))):
                 continue
             quality = int(ITEM_CONFIG.get(str(equip_id), {}).get('quality', 0))
             candidates.append((str(equip_id), quality, 1))
