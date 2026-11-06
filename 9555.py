@@ -12983,6 +12983,120 @@ def build_mail_update(mi):
         (11, mi.get('expireday', 7))
     ])
 
+FREE_DIAMONDS_CAMPAIGN_KEY = "free-diamonds-2026-11"
+FREE_DIAMONDS_CAMPAIGN_MARKER = "free_diamonds_campaign_mail"
+FREE_DIAMONDS_CAMPAIGN_LOCK = threading.RLock()
+
+
+def ensure_free_diamonds_campaign_mail(character, save=True):
+    """Queue the one-time 1,000-diamond system mail for a character."""
+    if not isinstance(character, dict):
+        return False
+    with FREE_DIAMONDS_CAMPAIGN_LOCK:
+        with get_character_transaction_lock(character):
+            if character.get(FREE_DIAMONDS_CAMPAIGN_MARKER) == FREE_DIAMONDS_CAMPAIGN_KEY:
+                return False
+
+            missing = object()
+            old_mails = character.get("mails", missing)
+            old_marker = character.get(FREE_DIAMONDS_CAMPAIGN_MARKER, missing)
+            mails = old_mails if isinstance(old_mails, list) else []
+            existing = next((
+                mail for mail in mails
+                if isinstance(mail, dict)
+                and mail.get("freeDiamondsCampaignKey") == FREE_DIAMONDS_CAMPAIGN_KEY
+            ), None)
+
+            if existing:
+                character[FREE_DIAMONDS_CAMPAIGN_MARKER] = FREE_DIAMONDS_CAMPAIGN_KEY
+            else:
+                now = int(time.time())
+                mail_entry = {
+                    "mailId": next_mail_id(),
+                    "sendertype": 0,
+                    "title": "Free Diamonds",
+                    "senderTime": now,
+                    "receiveId": character.get("id", 0),
+                    "readTime": 0,
+                    "context": "Thank you for playing Auto Theft Gangsters! Enjoy 1,000 free diamonds.",
+                    "mailState": 0,
+                    "sortTime": now,
+                    "items": [{
+                        "itemId": "1003", "count": 1000,
+                        "quality": 0, "count2": 0
+                    }],
+                    "expireday": 7,
+                    "freeDiamondsCampaignKey": FREE_DIAMONDS_CAMPAIGN_KEY
+                }
+                character["mails"] = list(mails) + [mail_entry]
+                character[FREE_DIAMONDS_CAMPAIGN_MARKER] = FREE_DIAMONDS_CAMPAIGN_KEY
+
+            if save and not save_chars(all_accounts_chars):
+                if old_mails is missing:
+                    character.pop("mails", None)
+                else:
+                    character["mails"] = old_mails
+                if old_marker is missing:
+                    character.pop(FREE_DIAMONDS_CAMPAIGN_MARKER, None)
+                else:
+                    character[FREE_DIAMONDS_CAMPAIGN_MARKER] = old_marker
+                print(f"[MAIL] Free Diamonds save failed char={character.get('id')}")
+                return False
+            return not bool(existing)
+
+
+def deliver_free_diamonds_campaign_to_all_characters():
+    """Persist the campaign mail for every saved character, online or offline."""
+    missing = object()
+    changed = []
+    seen = set()
+    total = 0
+    delivered = 0
+
+    for area_chars in all_accounts_chars.values():
+        if not isinstance(area_chars, dict):
+            continue
+        for char_list in area_chars.values():
+            if not isinstance(char_list, list):
+                continue
+            for character in char_list:
+                if not isinstance(character, dict):
+                    continue
+                char_id = str(character.get("id", "") or "").strip()
+                identity = ("id", char_id) if char_id else ("object", id(character))
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                total += 1
+
+                old_mails = character.get("mails", missing)
+                old_marker = character.get(FREE_DIAMONDS_CAMPAIGN_MARKER, missing)
+                added = ensure_free_diamonds_campaign_mail(character, save=False)
+                marker_changed = (
+                    character.get(FREE_DIAMONDS_CAMPAIGN_MARKER, missing) != old_marker
+                )
+                if added:
+                    delivered += 1
+                if added or marker_changed:
+                    changed.append((character, old_mails, old_marker))
+
+    if changed and not save_chars(all_accounts_chars):
+        for character, old_mails, old_marker in changed:
+            if old_mails is missing:
+                character.pop("mails", None)
+            else:
+                character["mails"] = old_mails
+            if old_marker is missing:
+                character.pop(FREE_DIAMONDS_CAMPAIGN_MARKER, None)
+            else:
+                character[FREE_DIAMONDS_CAMPAIGN_MARKER] = old_marker
+        print("[MAIL] Free Diamonds campaign save failed; deliveries rolled back")
+        return 0
+
+    print(f"[MAIL] Free Diamonds campaign delivered={delivered} characters={total}")
+    return delivered
+
+
 def claim_mail_reward_entries(picked_char, mail_entries, all_chars, conn, send_rpc_push):
     """Persist mail state and attachments before acknowledging a claim to the client."""
     rewards = []
@@ -17320,6 +17434,7 @@ def client_handler(conn, addr):
 
                     # 538: syn_friend_info - sync friend list on login
                     init_social_data(picked_char)
+                    ensure_free_diamonds_campaign_mail(picked_char)
                     for fi in picked_char.get('friends', []):
                         # The login sync uses tag 538, which inserts/updates
                         # one Friend row at a time. Hydrate it from current
@@ -25214,6 +25329,7 @@ def start_solo_equipment_run(conn, char, copy_id, use_time_item, send_rpc_push):
     return True
 
 def start_server():
+    deliver_free_diamonds_campaign_to_all_characters()
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     # Do not enable SO_REUSEPORT: this server's game state is process-local,
