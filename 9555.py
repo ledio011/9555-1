@@ -10291,8 +10291,11 @@ def update_gotham_npc_aoi(conn, char):
         clear_gotham_npc_aoi(conn)
         return
     try:
-        radius_cm = max(0, int(MAP_CONFIG.get(GOTHAM_MAP_ID, {}).get("radius", 0) or 0)) * 100
-        if radius_cm <= 0:
+        # MapInfoData.radius and NPC positions are both stored in centi-units.
+        # The client converts positions to world units, but the AOI comparison
+        # is performed on raw server coordinates, so do not scale the radius.
+        radius_units = max(0, int(MAP_CONFIG.get(GOTHAM_MAP_ID, {}).get("radius", 0) or 0))
+        if radius_units <= 0:
             raise ValueError("MapInfoData radius is missing")
         player_pos = char.get("pos") or default_map_spawn_position(GOTHAM_MAP_ID)
         px, pz = int(player_pos[0]), int(player_pos[2])
@@ -10300,7 +10303,7 @@ def update_gotham_npc_aoi(conn, char):
         print(f"[GOTHAM AOI] invalid player/map visibility data char={char.get('id')}: {exc}")
         return
 
-    radius_sq = radius_cm * radius_cm
+    radius_sq = radius_units * radius_units
     tracked = GOTHAM_AOI_TRACK.setdefault(conn_key, {})
     visible_slots = set()
     for spec in gotham_shared_npc_specs():
