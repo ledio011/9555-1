@@ -7772,7 +7772,7 @@ def tower_finish_run(char, run_id, won, conn=None, send_rpc_push=None):
             previous_rank_floor = max(0, int(char.get("tower_rank_floor", 0) or 0))
             if floor_id + 1 > previous_rank_floor:
                 char["tower_rank_floor"] = floor_id + 1
-                char["tower_rank_reached_at"] = now
+                char["tower_rank_reached_at"] = time.time()
         run["status"] = "won" if won else "failed"
         run["pending_result"] = {
             "win": bool(won), "floor_id": floor_id,
@@ -8095,7 +8095,7 @@ def tower_claim_wipeout(char, conn, send_rpc_push, request_id):
         previous_rank_floor = max(0, int(char.get("tower_rank_floor", 0) or 0))
         if target_floor + 1 > previous_rank_floor:
             char["tower_rank_floor"] = target_floor + 1
-            char["tower_rank_reached_at"] = int(time.time())
+            char["tower_rank_reached_at"] = time.time()
         state["wipe_out_state"] = 0
         state["wipe_time"] = 0
         char.pop("tower_wipe_start_floor", None)
@@ -12404,7 +12404,11 @@ def _rank_character_sort_items(sort_type):
                 score = int(get_character_stats(character).get('power', 0) or 0)
             elif sort_type == 2:
                 score = int(character.get('level', 1) or 1)
-                tie_breaker = int(character.get('level_rank_reached_at', 0) or 0)
+                tie_breaker = float(
+                    character.get('level_rank_reached_at')
+                    or character.get('createtime')
+                    or character.get('id', 0)
+                )
             elif sort_type == 5:
                 score_value = character.get('tower_rank_floor')
                 if score_value is None:
@@ -12415,18 +12419,22 @@ def _rank_character_sort_items(sort_type):
                 # RankItemLogic adds one when displaying the score; the saved
                 # tower_rank_floor is already one-based.
                 score = max(0, min(80, rank_floor) - 1)
-                tie_breaker = int(character.get('tower_rank_reached_at', 0) or 0)
+                tie_breaker = float(
+                    character.get('tower_rank_reached_at')
+                    or character.get('createtime')
+                    or character.get('id', 0)
+                )
             elif sort_type == 8:
                 scores = character.get('sex_mini_scores', {})
-                score_value = (
-                    scores.get(SEX_MINI_GAME_ID, scores.get(int(SEX_MINI_GAME_ID)))
-                    if isinstance(scores, dict) else None
-                )
-                if score_value is None:
-                    score_value = character.get('climax_night_score', character.get('sex_rank_score'))
-                if score_value is None:
-                    continue
-                score = max(0, int(score_value))
+                score_candidates = []
+                if isinstance(scores, dict):
+                    for key in (SEX_MINI_GAME_ID, int(SEX_MINI_GAME_ID)):
+                        if key in scores:
+                            score_candidates.append(int(scores[key] or 0))
+                for key in ('climax_night_score', 'sex_rank_score'):
+                    if character.get(key) is not None:
+                        score_candidates.append(int(character[key] or 0))
+                score = max(score_candidates, default=0)
                 if score <= 0:
                     continue
             else:
@@ -12570,7 +12578,7 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None,
             if rd and picked_char['exp'] >= rd['exp']:
                 picked_char['exp'] -= rd['exp']
                 picked_char['level'] = lv + 1
-                picked_char['level_rank_reached_at'] = int(time.time())
+                picked_char['level_rank_reached_at'] = time.time()
                 leveled_up = True
                 new_stats = get_character_stats(picked_char)
                 picked_char['hp'] = new_stats['hp_max']
@@ -12633,7 +12641,7 @@ def give_mission_rewards(picked_char, mid):
             if picked_char['exp'] >= req_data['exp']:
                 picked_char['exp'] -= req_data['exp']
                 picked_char['level'] = lv + 1
-                picked_char['level_rank_reached_at'] = int(time.time())
+                picked_char['level_rank_reached_at'] = time.time()
                 leveled_up = True
                 # Level Up: Fully Restore HP
                 new_stats = get_character_stats(picked_char)
@@ -23509,15 +23517,20 @@ def client_handler(conn, addr):
                                 scores = {}
                                 picked_char['sex_mini_scores'] = scores
                             previous_score = max(0, int(
-                                scores.get(SEX_MINI_GAME_ID, 0) or 0
+                                scores.get(SEX_MINI_GAME_ID, 0)
+                                or picked_char.get('climax_night_score', 0)
+                                or 0
                             ))
                             if reported_score > previous_score:
                                 scores[SEX_MINI_GAME_ID] = reported_score
+                                picked_char['climax_night_score'] = reported_score
                                 if not save_chars(all_accounts_chars):
                                     if previous_score:
                                         scores[SEX_MINI_GAME_ID] = previous_score
+                                        picked_char['climax_night_score'] = previous_score
                                     else:
                                         scores.pop(SEX_MINI_GAME_ID, None)
+                                        picked_char.pop('climax_night_score', None)
                                     print(f"[CLIMAX RANK] score save failed player={picked_char.get('id')}")
                     if session is not None:
                         send_rpc_response(session)
