@@ -7187,6 +7187,47 @@ def build_npc_attr_sproto(nid, name, x, z, o, existing_inst_id=None, player_leve
     return inst_id, attr
 
 
+def resync_live_npc_instance(conn, char, inst_id, expected_npcid):
+    """Recreate a client-lost NPC using its authoritative, remaining HP."""
+    try:
+        inst_id = int(inst_id)
+        char_id = int(char.get("id", 0) or 0)
+        map_id = str(char.get("map_id", ""))
+    except (TypeError, ValueError, AttributeError):
+        return False
+    if not is_current_character_connection(conn, char):
+        return False
+    server_npcid = NPC_INST_MAP.get(inst_id)
+    if (server_npcid is None
+            or not npc_data_id_matches_report(server_npcid, expected_npcid)
+            or str(NPC_INSTANCE_MAP.get(inst_id, "")) != map_id):
+        return False
+
+    with npc_hp_lock(inst_id):
+        try:
+            remaining_hp = int(NPC_HP_MAP.get(inst_id, 0))
+            attr = NPC_ATTR_MAP.get(inst_id)
+            if remaining_hp <= 0 or not attr:
+                return False
+            attr_fields = decode_sproto(attr)
+            if not attr_fields:
+                return False
+            attr_fields[2] = remaining_hp
+            attr = encode_sproto(sorted(attr_fields.items()))
+            NPC_ATTR_MAP[inst_id] = attr
+            DEAD_NPC_SET.discard(inst_id)
+        except (TypeError, ValueError, struct.error):
+            return False
+
+    if not send_rpc_push_safe(conn, 506, encode_sproto([(0, inst_id)])):
+        return False
+    if not send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
+        return False
+    print(f"[NPC RESYNC] player={char_id} map={map_id} inst={inst_id} "
+          f"npc={server_npcid} hp={remaining_hp}/{decode_sproto(attr).get(3, 0)}")
+    return True
+
+
 def is_tower_map(map_id):
     return str(map_id) in TOWER_MAP_TO_FLOOR
 
@@ -7312,6 +7353,97 @@ def tower_info_response(char, send_rpc_push):
     ]))
 
 
+def tower_send_pending_reward_claim(char, send_rpc_push):
+    claim = char.get("tower_pending_reward_claim")
+    if not isinstance(claim, dict):
+        return False
+    items = [
+        encode_sproto([(0, item_id), (1, amount), (3, quality)])
+        for item_id, quality, amount in claim.get("items", [])
+    ]
+    payload = encode_sproto([
+        (0, int(claim.get("type", 0))),
+        (1, int(claim.get("id", 0))),
+        (2, items),
+        (3, tower_info_payload(char)),
+        (4, tower_special_reward_payload(char))
+    ])
+    if send_rpc_push(625, payload) is False:
+        print(f"[TOWER] reward response pending player={char.get('id')} "
+              f"type={claim.get('type')} id={claim.get('id')}")
+        return False
+    char.pop("tower_pending_reward_claim", None)
+    save_chars(all_accounts_chars)
+    return True
+
+
+def tower_queue_reward_claim(char, reward_type, request_id, rewards, send_rpc_push):
+    char["tower_pending_reward_claim"] = {
+        "type": int(reward_type),
+        "id": int(request_id),
+        "items": [[str(item_id), int(quality), int(amount)]
+                  for item_id, quality, amount in rewards]
+    }
+    save_chars(all_accounts_chars)
+    return tower_send_pending_reward_claim(char, send_rpc_push)
+
+
+def grant_tower_rewards(char, rewards, conn=None, send_rpc_push=None):
+    """Grant tower resources directly and mail item overflow instead of blocking progression."""
+    if not rewards:
+        return False
+    if can_add_reward_list_to_inventory(char, rewards):
+        grant_item_rewards(char, rewards, conn, send_rpc_push, save=False)
+        return True
+
+    mail_items = []
+    resource_rewards = []
+    for item_id, quality, amount in rewards:
+        item_id = str(item_id)
+        try:
+            amount = int(amount)
+            quality = int(quality)
+        except (TypeError, ValueError):
+            return False
+        if amount <= 0:
+            return False
+        if item_id in DIRECT_REWARD_RESOURCE_IDS:
+            resource_rewards.append((item_id, quality, amount))
+        elif item_id in ITEM_CONFIG:
+            mail_items.append({
+                "itemId": item_id,
+                "count": amount,
+                "quality": quality
+            })
+        else:
+            return False
+
+    if mail_items:
+        mail_id = next_mail_id()
+        mail = {
+            "mailId": mail_id,
+            "sendertype": 0,
+            "title": "Challenge Tower Rewards",
+            "senderTime": int(time.time()),
+            "receiveId": int(char.get("id", 0) or 0),
+            "readTime": 0,
+            "context": "Your Challenge Tower items were sent here because your backpack is full.",
+            "mailState": 0,
+            "sortTime": int(time.time()),
+            "items": mail_items,
+            "expireday": 7
+        }
+        char.setdefault("mails", []).append(mail)
+        if conn and send_rpc_push:
+            send_rpc_push(531, build_mail_update(mail))
+    if resource_rewards:
+        grant_item_rewards(char, resource_rewards, conn, send_rpc_push, save=False)
+    if mail_items:
+        print(f"[TOWER] reward overflow mailed player={char.get('id')} "
+              f"items={len(mail_items)}")
+    return True
+
+
 def tower_reward_list(floor_ids, use_special=False, prof=0):
     rewards = {}
     for floor_id in floor_ids:
@@ -7435,7 +7567,8 @@ def tower_finish_run(char, run_id, won, conn=None, send_rpc_push=None):
         if not config:
             won = False
         rewards = tower_reward_list([floor_id]) if won else []
-        if won and (not rewards or not can_add_reward_list_to_inventory(char, rewards)):
+        if won and (not rewards or not grant_tower_rewards(
+                char, rewards, conn, send_rpc_push)):
             print(f"[TOWER] reward validation failed player={char_id} floor={floor_id}")
             won = False
             rewards = []
@@ -7450,7 +7583,6 @@ def tower_finish_run(char, run_id, won, conn=None, send_rpc_push=None):
             state["times"] = 1
             char["tower_rank_floor"] = max(
                 int(char.get("tower_rank_floor", 0) or 0), floor_id + 1)
-            grant_item_rewards(char, rewards, conn, send_rpc_push, save=False)
         run["status"] = "won" if won else "failed"
         run["pending_result"] = {
             "win": bool(won), "floor_id": floor_id,
@@ -7732,11 +7864,10 @@ def tower_claim_wipeout(char, conn, send_rpc_push, request_id):
         # the saved server range is authoritative.
         floor_ids = list(range(start_floor, target_floor + 1))
         rewards = tower_reward_list(floor_ids)
-        if not rewards or not can_add_reward_list_to_inventory(char, rewards):
+        if not rewards or not grant_tower_rewards(char, rewards, conn, send_rpc_push):
             print(f"[TOWER] wipeout rewards invalid/full player={char_id} floors={floor_ids}")
             return False
 
-        grant_item_rewards(char, rewards, conn, send_rpc_push, save=False)
         state["floor"] = max(state["floor"], target_floor)
         state["cur_floor"] = min(target_floor + 1, max_floor + 1)
         state["times"] = 1
@@ -7751,12 +7882,7 @@ def tower_claim_wipeout(char, conn, send_rpc_push, request_id):
         char.pop("tower_wipe_target_floor", None)
         _tower_cancel_timer(TOWER_WIPE_TIMERS, char_id)
         save_chars(all_accounts_chars)
-        items = [encode_sproto([(0, item_id), (1, amount), (3, quality)])
-                 for item_id, quality, amount in rewards]
-        send_rpc_push(625, encode_sproto([
-            (0, 0), (1, int(request_id)), (2, items),
-            (3, tower_info_payload(char)), (4, tower_special_reward_payload(char))
-        ]))
+        tower_queue_reward_claim(char, 0, request_id, rewards, send_rpc_push)
         print(f"[TOWER] wipeout rewards claimed player={char_id} "
               f"range={start_floor}-{target_floor} next_floor={state['cur_floor']}")
         return True
@@ -8900,6 +9026,8 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
     # Keep stage progress in its existing batch/result flow to avoid double
     # crediting the same instance.
     current_map = str(picked_char.get('map_id', ''))
+    if is_tower_map(current_map) and inst_id:
+        tower_npc_killed(picked_char, inst_id, conn, send_rpc_push)
     if valid_kill and not is_exp_map(current_map) and not is_equipment_copy_map(current_map):
         advance_missions(picked_char, send_rpc_push, 'kill', target_id=npcid)
 
@@ -8963,11 +9091,6 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                 member_push(638, popup)
         else:
             grant_item_rewards(picked_char, kill_rewards, conn, send_rpc_push, save=False)
-
-    if is_tower_map(picked_char.get('map_id')) and inst_id:
-        tower_npc_killed(picked_char, inst_id, conn, send_rpc_push)
-
-
 
 def start_exp_stage_runtime(conn, owner, state):
     if not state or state.get('runtime_started') or state.get('defer_start'): return
@@ -12982,120 +13105,6 @@ def build_mail_update(mi):
         (10, items_dict if items_dict else None),
         (11, mi.get('expireday', 7))
     ])
-
-FREE_DIAMONDS_CAMPAIGN_KEY = "free-diamonds-2026-11"
-FREE_DIAMONDS_CAMPAIGN_MARKER = "free_diamonds_campaign_mail"
-FREE_DIAMONDS_CAMPAIGN_LOCK = threading.RLock()
-
-
-def ensure_free_diamonds_campaign_mail(character, save=True):
-    """Queue the one-time 1,000-diamond system mail for a character."""
-    if not isinstance(character, dict):
-        return False
-    with FREE_DIAMONDS_CAMPAIGN_LOCK:
-        with get_character_transaction_lock(character):
-            if character.get(FREE_DIAMONDS_CAMPAIGN_MARKER) == FREE_DIAMONDS_CAMPAIGN_KEY:
-                return False
-
-            missing = object()
-            old_mails = character.get("mails", missing)
-            old_marker = character.get(FREE_DIAMONDS_CAMPAIGN_MARKER, missing)
-            mails = old_mails if isinstance(old_mails, list) else []
-            existing = next((
-                mail for mail in mails
-                if isinstance(mail, dict)
-                and mail.get("freeDiamondsCampaignKey") == FREE_DIAMONDS_CAMPAIGN_KEY
-            ), None)
-
-            if existing:
-                character[FREE_DIAMONDS_CAMPAIGN_MARKER] = FREE_DIAMONDS_CAMPAIGN_KEY
-            else:
-                now = int(time.time())
-                mail_entry = {
-                    "mailId": next_mail_id(),
-                    "sendertype": 0,
-                    "title": "Free Diamonds",
-                    "senderTime": now,
-                    "receiveId": character.get("id", 0),
-                    "readTime": 0,
-                    "context": "Thank you for playing Auto Theft Gangsters! Enjoy 1,000 free diamonds.",
-                    "mailState": 0,
-                    "sortTime": now,
-                    "items": [{
-                        "itemId": "1003", "count": 1000,
-                        "quality": 0, "count2": 0
-                    }],
-                    "expireday": 7,
-                    "freeDiamondsCampaignKey": FREE_DIAMONDS_CAMPAIGN_KEY
-                }
-                character["mails"] = list(mails) + [mail_entry]
-                character[FREE_DIAMONDS_CAMPAIGN_MARKER] = FREE_DIAMONDS_CAMPAIGN_KEY
-
-            if save and not save_chars(all_accounts_chars):
-                if old_mails is missing:
-                    character.pop("mails", None)
-                else:
-                    character["mails"] = old_mails
-                if old_marker is missing:
-                    character.pop(FREE_DIAMONDS_CAMPAIGN_MARKER, None)
-                else:
-                    character[FREE_DIAMONDS_CAMPAIGN_MARKER] = old_marker
-                print(f"[MAIL] Free Diamonds save failed char={character.get('id')}")
-                return False
-            return not bool(existing)
-
-
-def deliver_free_diamonds_campaign_to_all_characters():
-    """Persist the campaign mail for every saved character, online or offline."""
-    missing = object()
-    changed = []
-    seen = set()
-    total = 0
-    delivered = 0
-
-    for area_chars in all_accounts_chars.values():
-        if not isinstance(area_chars, dict):
-            continue
-        for char_list in area_chars.values():
-            if not isinstance(char_list, list):
-                continue
-            for character in char_list:
-                if not isinstance(character, dict):
-                    continue
-                char_id = str(character.get("id", "") or "").strip()
-                identity = ("id", char_id) if char_id else ("object", id(character))
-                if identity in seen:
-                    continue
-                seen.add(identity)
-                total += 1
-
-                old_mails = character.get("mails", missing)
-                old_marker = character.get(FREE_DIAMONDS_CAMPAIGN_MARKER, missing)
-                added = ensure_free_diamonds_campaign_mail(character, save=False)
-                marker_changed = (
-                    character.get(FREE_DIAMONDS_CAMPAIGN_MARKER, missing) != old_marker
-                )
-                if added:
-                    delivered += 1
-                if added or marker_changed:
-                    changed.append((character, old_mails, old_marker))
-
-    if changed and not save_chars(all_accounts_chars):
-        for character, old_mails, old_marker in changed:
-            if old_mails is missing:
-                character.pop("mails", None)
-            else:
-                character["mails"] = old_mails
-            if old_marker is missing:
-                character.pop(FREE_DIAMONDS_CAMPAIGN_MARKER, None)
-            else:
-                character[FREE_DIAMONDS_CAMPAIGN_MARKER] = old_marker
-        print("[MAIL] Free Diamonds campaign save failed; deliveries rolled back")
-        return 0
-
-    print(f"[MAIL] Free Diamonds campaign delivered={delivered} characters={total}")
-    return delivered
-
 
 def claim_mail_reward_entries(picked_char, mail_entries, all_chars, conn, send_rpc_push):
     """Persist mail state and attachments before acknowledging a claim to the client."""
@@ -17434,7 +17443,6 @@ def client_handler(conn, addr):
 
                     # 538: syn_friend_info - sync friend list on login
                     init_social_data(picked_char)
-                    ensure_free_diamonds_campaign_mail(picked_char)
                     for fi in picked_char.get('friends', []):
                         # The login sync uses tag 538, which inserts/updates
                         # one Friend row at a time. Hydrate it from current
@@ -21005,6 +21013,9 @@ def client_handler(conn, addr):
                             npc_died = exp_npc_died if is_stage_combat else world_npc_died
                             if npc_died:
                                 print(f"[{stage_label} MSG111] NPC DEAD target_id={target_id} target_nid={target_nid} hp={NPC_HP_MAP[target_id]}")
+                                if is_tower:
+                                    tower_npc_killed(
+                                        picked_char, target_id, conn, send_rpc_push)
 
                                 if city_capture_id:
                                     # City vehicles keep their destroyed body in
@@ -21149,7 +21160,8 @@ def client_handler(conn, addr):
                         ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                         conn.sendall(struct.pack(">H", len(pf)) + pf)
                     continue
-                if picked_char and is_tower_map(picked_char.get('map_id', '')):
+                if (picked_char and is_tower_map(picked_char.get('map_id', ''))
+                        and msg != 127):
                     print(f"[TOWER DEATH] ignored client death report inst_id={inst_id} player={picked_char.get('id')}")
                     if session is not None:
                         ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -21199,6 +21211,8 @@ def client_handler(conn, addr):
                                         and int(NPC_HP_MAP.get(inst_id, 1)) <= 0)
 
                 if not report_valid:
+                    if picked_char and msg == 127 and inst_id and npcid:
+                        resync_live_npc_instance(conn, picked_char, inst_id, npcid)
                     print(f"[NPC DEATH SECURITY] rejected client report msg={msg} inst_id={inst_id} npc={npcid} map={cur_map} type={die_type}")
                     if session is not None:
                         ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -23421,6 +23435,7 @@ def client_handler(conn, addr):
                                 _tower_schedule_wipeout(picked_char.get("id", 0), state["wipe_time"])
                     tower_info_response(picked_char, send_rpc_push)
                     tower_send_pending_result(picked_char, send_rpc_push)
+                    tower_send_pending_reward_claim(picked_char, send_rpc_push)
                     print(f"[TOWER] info sent player={picked_char.get('id')} "
                           f"floor={state['floor']} cur_floor={state['cur_floor']} "
                           f"wipe_state={state['wipe_out_state']}")
@@ -23447,19 +23462,12 @@ def client_handler(conn, addr):
                                 if (floor_id >= 0 and config and rewards
                                         and floor_id <= state["floor"]
                                         and floor_id not in claimed
-                                        and can_add_reward_list_to_inventory(picked_char, rewards)):
-                                    grant_item_rewards(
-                                        picked_char, rewards, conn, send_rpc_push, save=False)
+                                        and grant_tower_rewards(
+                                            picked_char, rewards, conn, send_rpc_push)):
                                     state["claimed_special"].append(floor_id)
                                     save_chars(all_accounts_chars)
-                                    send_rpc_push(625, encode_sproto([
-                                        (0, 1), (1, floor_id),
-                                        (2, [encode_sproto([
-                                            (0, item_id), (1, amount), (3, quality)
-                                        ]) for item_id, quality, amount in rewards]),
-                                        (3, tower_info_payload(picked_char)),
-                                        (4, tower_special_reward_payload(picked_char))
-                                    ]))
+                                    tower_queue_reward_claim(
+                                        picked_char, 1, floor_id, rewards, send_rpc_push)
                                 else:
                                     print(f"[TOWER] special claim rejected player={picked_char.get('id')} floor={floor_id}")
                     else:
@@ -25329,7 +25337,6 @@ def start_solo_equipment_run(conn, char, copy_id, use_time_item, send_rpc_push):
     return True
 
 def start_server():
-    deliver_free_diamonds_campaign_to_all_characters()
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     # Do not enable SO_REUSEPORT: this server's game state is process-local,
