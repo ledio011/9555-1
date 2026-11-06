@@ -56,6 +56,9 @@ GOTHAM_SHARED_NPC_SLOTS = {}
 GOTHAM_SHARED_NPC_BY_INSTANCE = {}
 GOTHAM_NPC_LOCK = threading.RLock()
 GOTHAM_ACTIVITY_CONFIG = {}
+GOTHAM_AOI_TRACK = {}  # connection identity -> {shared slot: current instance ID}
+GOTHAM_AI_TASK = None
+GOTHAM_AI_LOCK = threading.Lock()
 ESCORT_ACTIVITY_CONFIG = {}
 GOTHAM_ESCORT_NPC_OWNER = {} # instance ID -> character ID
 TOWER_NPC_OWNER = {} # inst_id -> character ID for private climbing-tower NPCs
@@ -560,6 +563,7 @@ try:
                         'type': int(parts[4]) if parts[4].isdigit() else 0,
                         'width': int(parts[6]) if parts[6].isdigit() else 0,
                         'height': int(parts[7]) if parts[7].isdigit() else 0,
+                        'radius': int(parts[12]) if len(parts) > 12 and parts[12].isdigit() else 0,
                         'birth': parts[8],
                         'relife_pos': parts[9] if len(parts) > 9 else '',
                         'teleport_pos': parts[10] if len(parts) > 10 else "",
@@ -9448,6 +9452,24 @@ def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid, grant_reward
     )
 
 
+def gotham_boss_rank_mail(slot):
+    if slot.get("rank_mail_settled"):
+        return
+    slot["rank_mail_settled"] = True
+    activity_key = str(slot.get("slot", "").split(":")[-1])
+    boss_cfg = GOTHAM_ACTIVITY_CONFIG.get(activity_key, {})
+    drop_ids = sorted({
+        str(row.get("drop_id", "") or "")
+        for row in boss_cfg.get("rank_drops", [])
+        if row.get("drop_id")
+    })
+    missing = [drop_id for drop_id in drop_ids
+               if not SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(drop_id)]
+    print(f"[GOTHAM BOSS REWARD DISABLED] activity={activity_key} "
+          f"drop_ids={drop_ids} missing_reward_rows={missing}; "
+          "the client defines no authoritative rank settlement or mail handler")
+
+
 def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, grant_rewards=True):
     if not picked_char: return
 
@@ -9531,6 +9553,17 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                     _send_exp_tag683(exp_push, exp_state, exp_cfg)
                 else:
                     finish_exp_stage(conn, exp_push, picked_char, exp_state, win=True)
+
+    try:
+        gotham_inst_id = int(inst_id)
+    except (TypeError, ValueError):
+        gotham_inst_id = 0
+    if (current_map == GOTHAM_MAP_ID
+            and gotham_inst_id in GOTHAM_SHARED_NPC_BY_INSTANCE):
+        slot_key = GOTHAM_SHARED_NPC_BY_INSTANCE.get(gotham_inst_id)
+        slot = GOTHAM_SHARED_NPC_SLOTS.get(slot_key, {})
+        if valid_kill and grant_rewards and slot.get("is_boss"):
+            gotham_boss_rank_mail(slot)
 
     if inst_id and not (
             str(NPC_INSTANCE_MAP.get(inst_id, "")) == GOTHAM_MAP_ID
@@ -10243,6 +10276,312 @@ def gotham_broadcast(tag, data, exclude_char_id=None):
             send_rpc_push_safe(peer_conn, tag, data)
 
 
+def clear_gotham_npc_aoi(conn, send_remove=False):
+    tracked = GOTHAM_AOI_TRACK.pop(id(conn), {})
+    if send_remove:
+        for inst_id in tracked.values():
+            send_rpc_push_safe(conn, 506, encode_sproto([(0, int(inst_id))]))
+
+
+def update_gotham_npc_aoi(conn, char):
+    if not conn or not char:
+        return
+    conn_key = id(conn)
+    if str(char.get("map_id", "")) != GOTHAM_MAP_ID:
+        clear_gotham_npc_aoi(conn)
+        return
+    try:
+        radius_cm = max(0, int(MAP_CONFIG.get(GOTHAM_MAP_ID, {}).get("radius", 0) or 0)) * 100
+        if radius_cm <= 0:
+            raise ValueError("MapInfoData radius is missing")
+        player_pos = char.get("pos") or default_map_spawn_position(GOTHAM_MAP_ID)
+        px, pz = int(player_pos[0]), int(player_pos[2])
+    except (TypeError, ValueError, IndexError) as exc:
+        print(f"[GOTHAM AOI] invalid player/map visibility data char={char.get('id')}: {exc}")
+        return
+
+    radius_sq = radius_cm * radius_cm
+    tracked = GOTHAM_AOI_TRACK.setdefault(conn_key, {})
+    visible_slots = set()
+    for spec in gotham_shared_npc_specs():
+        slot_key = str(spec["slot"])
+        slot = GOTHAM_SHARED_NPC_SLOTS.get(slot_key)
+        if slot is None:
+            nx, nz = int(spec["x"]), int(spec["z"])
+            inst_id = None
+        else:
+            inst_id = slot.get("inst_id")
+            position = slot.get("position") or (spec["x"], spec["z"])
+            nx, nz = int(position[0]), int(position[1])
+        dx, dz = px - nx, pz - nz
+        if dx * dx + dz * dz > radius_sq:
+            continue
+        visible_slots.add(slot_key)
+        if inst_id is None:
+            inst_id, attr = gotham_shared_npc_for_spawn(spec)
+            if inst_id is None or attr is None:
+                continue
+        else:
+            cfg = NPC_CONFIG.get(str(spec["nid"]), {"name": f"NPC_{spec['nid']}"})
+            inst_id, attr = build_npc_attr_sproto(
+                spec["nid"], cfg.get("name", f"NPC_{spec['nid']}"),
+                nx, nz, int(slot.get("heading", spec.get("o", 0))),
+                existing_inst_id=inst_id)
+        if attr is None:
+            continue
+        previous_inst = tracked.get(slot_key)
+        if previous_inst == inst_id:
+            continue
+        if previous_inst is not None:
+            send_rpc_push_safe(conn, 506, encode_sproto([(0, int(previous_inst))]))
+        if send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
+            tracked[slot_key] = int(inst_id)
+            sync_npc_attrs_rpc(conn, inst_id, get_npc_attr(spec["nid"]),
+                               NPC_HP_MAP.get(inst_id, 0))
+
+    for slot_key, inst_id in list(tracked.items()):
+        if slot_key not in visible_slots or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0:
+            send_rpc_push_safe(conn, 506, encode_sproto([(0, int(inst_id))]))
+            tracked.pop(slot_key, None)
+
+
+def gotham_npc_visible_connections(slot_key, inst_id):
+    visible = []
+    for conn_key, tracked in list(GOTHAM_AOI_TRACK.items()):
+        if int(tracked.get(slot_key, 0) or 0) != int(inst_id):
+            continue
+        entry = next(((conn, char) for conn, char in ALL_CONNECTIONS.values()
+                      if conn and id(conn) == conn_key), None)
+        if entry and str(entry[1].get("map_id", "")) == GOTHAM_MAP_ID:
+            visible.append(entry)
+    return visible
+
+
+def _gotham_npc_skills(npc_cfg, attack_distance):
+    skills = []
+    for skill_id in re.split(r"[;,]", str(npc_cfg.get("skill_group") or "")):
+        skill_id = skill_id.strip()
+        if not skill_id or skill_id not in SKILL_CONFIG:
+            continue
+        skill_range, _area, _param1, _param2 = _guild_boss_skill_range(
+            skill_id, attack_distance)
+        skills.append((skill_id, skill_range))
+    return skills
+
+
+def _gotham_send_npc_move(slot_key, inst_id, from_x, from_z, to_x, to_z, heading):
+    dx, dz = int(to_x) - int(from_x), int(to_z) - int(from_z)
+    pos_data = encode_sproto([
+        (0, int(to_x)), (1, 0), (2, int(to_z)), (3, int(heading))
+    ])
+    movement_data = encode_sproto([(0, pos_data)])
+    character_data = encode_sproto([(0, int(inst_id)), (1, movement_data), (2, True)])
+    payload = encode_sproto([(0, character_data)])
+    for peer_conn, _peer_char in gotham_npc_visible_connections(slot_key, inst_id):
+        send_rpc_push_safe(peer_conn, 507, payload)
+
+
+def _gotham_npc_move_toward(slot, inst_id, target_x, target_z, speed, now):
+    with GOTHAM_NPC_LOCK:
+        if slot.get("inst_id") != int(inst_id) or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0:
+            return
+        current_x, current_z = slot.get("position", (slot["x"], slot["z"]))
+        dx, dz = float(target_x) - current_x, float(target_z) - current_z
+        distance = math.hypot(dx, dz)
+        if distance <= 0.01:
+            return
+        step = min(max(0.1, float(speed)) * 0.2, distance)
+        next_x = int(round(current_x + dx / distance * step * 100.0))
+        next_z = int(round(current_z + dz / distance * step * 100.0))
+        heading = int(round(math.degrees(math.atan2(dx, dz)) * 100)) % 36000
+        slot["position"] = (next_x, next_z)
+        slot["heading"] = heading
+        slot["last_move_at"] = now
+    _gotham_send_npc_move(slot["slot"], inst_id, current_x, current_z,
+                          next_x, next_z, heading)
+
+
+def _gotham_npc_ai_tick():
+    if not GOTHAM_AI_LOCK.acquire(False):
+        return True
+    try:
+        now = time.time()
+        players = []
+        for char_id, (conn, char) in list(ALL_CONNECTIONS.items()):
+            if not conn or not char or str(char.get("map_id", "")) != GOTHAM_MAP_ID:
+                continue
+            if int(char.get("hp", 0) or 0) <= 0 or not is_current_character_connection(conn, char):
+                continue
+            pos = char.get("pos") or default_map_spawn_position(GOTHAM_MAP_ID)
+            players.append((int(char_id), conn, char, int(pos[0]), int(pos[2])))
+
+        with GOTHAM_NPC_LOCK:
+            slots = [dict(slot) for slot in GOTHAM_SHARED_NPC_SLOTS.values()
+                     if slot.get("inst_id") is not None]
+        for snapshot in slots:
+            slot_key = snapshot["slot"]
+            inst_id = int(snapshot["inst_id"])
+            if inst_id in DEAD_NPC_SET or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0:
+                continue
+            npc_id = str(snapshot["nid"])
+            npc_cfg = NPC_CONFIG.get(npc_id, {})
+            ai_cfg = AI_DATA_CONFIG.get(str(npc_cfg.get("ai_data_id") or ""))
+            if not ai_cfg:
+                continue
+            skills = _gotham_npc_skills(npc_cfg, max(
+                0.5, (int(ai_cfg.get("around_min_distance", 100) or 100)
+                      + int(ai_cfg.get("around_max_distance", 200) or 200)) / 200.0))
+            if not skills:
+                continue
+            search_cm = max(0, int(npc_cfg.get("search_radius", 0) or 0))
+            configured_lock = int(ai_cfg.get("lock_distance", 0) or 0)
+            lock_cm = search_cm if configured_lock < 0 else configured_lock
+            if search_cm > 0:
+                lock_cm = min(lock_cm, search_cm)
+            lock_distance = max(0.5, lock_cm / 100.0)
+            return_distance = max(lock_distance, int(ai_cfg.get("return_distance", 0) or 0) / 100.0)
+            speed = max(0.1, float(npc_cfg.get("move_speed", 50) or 50) / 10.0)
+            mx_cm, mz_cm = snapshot.get("position") or (snapshot["x"], snapshot["z"])
+            mx, mz = float(mx_cm) / 100.0, float(mz_cm) / 100.0
+            target = None
+            prior_target = int(snapshot.get("target_id", 0) or 0)
+            if prior_target:
+                target = next((p for p in players if p[0] == prior_target), None)
+                if target and math.hypot((target[3] / 100.0) - mx,
+                                         (target[4] / 100.0) - mz) > return_distance:
+                    target = None
+                    with GOTHAM_NPC_LOCK:
+                        if GOTHAM_SHARED_NPC_SLOTS.get(slot_key, {}).get("inst_id") == inst_id:
+                            GOTHAM_SHARED_NPC_SLOTS[slot_key]["target_id"] = 0
+            if target is None:
+                possible = [
+                    (math.hypot((p[3] / 100.0) - mx, (p[4] / 100.0) - mz), p)
+                    for p in players
+                ]
+                possible = [entry for entry in possible if entry[0] <= lock_distance]
+                if possible:
+                    target = min(possible, key=lambda entry: entry[0])[1]
+                    with GOTHAM_NPC_LOCK:
+                        if GOTHAM_SHARED_NPC_SLOTS.get(slot_key, {}).get("inst_id") == inst_id:
+                            GOTHAM_SHARED_NPC_SLOTS[slot_key]["target_id"] = target[0]
+
+            if target is None:
+                dx = mx_cm - int(snapshot["x"])
+                dz = mz_cm - int(snapshot["z"])
+                distance_from_home = math.hypot(dx, dz) / 100.0
+                if distance_from_home > return_distance:
+                    _gotham_npc_move_toward(
+                        GOTHAM_SHARED_NPC_SLOTS[slot_key], inst_id,
+                        int(snapshot["x"]), int(snapshot["z"]), speed, now)
+                    continue
+                patrol_type = int(ai_cfg.get("patrol_type", 0) or 0)
+                patrol_distance = min(
+                    max(0, int(ai_cfg.get("patrol_distance", 0) or 0)) / 100.0,
+                    max(0, int(npc_cfg.get("patrol_radius", 0) or 0)) / 100.0)
+                if patrol_type and patrol_distance > 0:
+                    live_slot = GOTHAM_SHARED_NPC_SLOTS.get(slot_key, {})
+                    patrol_target = live_slot.get("patrol_target")
+                    if not patrol_target and now >= float(live_slot.get("patrol_next_at", 0) or 0):
+                        angle = random.uniform(0, math.tau)
+                        radius = random.uniform(patrol_distance * 0.35, patrol_distance)
+                        patrol_target = (
+                            int(snapshot["x"] + math.cos(angle) * radius * 100),
+                            int(snapshot["z"] + math.sin(angle) * radius * 100))
+                        with GOTHAM_NPC_LOCK:
+                            live_slot["patrol_target"] = patrol_target
+                    if patrol_target:
+                        if math.hypot(patrol_target[0] - mx_cm, patrol_target[1] - mz_cm) <= 60:
+                            with GOTHAM_NPC_LOCK:
+                                live_slot["patrol_target"] = None
+                                live_slot["patrol_next_at"] = now + max(
+                                    0.3, int(ai_cfg.get("wait_time", 300) or 300) / 1000.0)
+                        else:
+                            _gotham_npc_move_toward(
+                                live_slot, inst_id, patrol_target[0], patrol_target[1], speed, now)
+                continue
+
+            target_id, target_conn, target_char, px_cm, pz_cm = target
+            dx, dz = px_cm / 100.0 - mx, pz_cm / 100.0 - mz
+            distance = math.hypot(dx, dz)
+            ready_at = float(snapshot.get("next_attack_at", 0) or 0)
+            ready_skills = [
+                (skill_id, skill_range) for skill_id, skill_range in skills
+                if distance <= skill_range
+                and float(snapshot.get("skill_ready_at", {}).get(skill_id, 0) or 0) <= now
+            ]
+            if not ready_skills:
+                max_range = max(skill_range for _skill_id, skill_range in skills)
+                if distance > max_range:
+                    _gotham_npc_move_toward(
+                        GOTHAM_SHARED_NPC_SLOTS[slot_key], inst_id,
+                        px_cm - int(dx / distance * max_range * 100),
+                        pz_cm - int(dz / distance * max_range * 100), speed, now)
+                continue
+            if ready_at > now:
+                continue
+
+            top_priority = max(int(SKILL_CONFIG[sid].get("priority", 0) or 0)
+                               for sid, _range in ready_skills)
+            skill_id = random.choice([
+                sid for sid, _range in ready_skills
+                if int(SKILL_CONFIG[sid].get("priority", 0) or 0) == top_priority])
+            skill_cfg = SKILL_CONFIG[skill_id]
+            cooldown = max(0, int(skill_cfg.get("cooldown_ms", 0) or 0)) / 1000.0
+            min_cd = max(0, int(ai_cfg.get("skill_cd_min", 1000) or 1000))
+            max_cd = max(min_cd, int(ai_cfg.get("skill_cd_max", 3000) or 3000))
+            with GOTHAM_NPC_LOCK:
+                live_slot = GOTHAM_SHARED_NPC_SLOTS.get(slot_key, {})
+                if live_slot.get("inst_id") != inst_id:
+                    continue
+                live_slot.setdefault("skill_ready_at", {})[skill_id] = now + cooldown
+                live_slot["next_attack_at"] = now + random.uniform(min_cd, max_cd) / 1000.0
+
+            damage, hit, critical = get_combat_damage(
+                get_npc_attr(npc_id), get_character_stats(target_char), skill_id, 0,
+                effinfo_id=str(skill_cfg.get("eff0") or "10000"), attacker_is_npc=True)
+            if not hit or damage <= 0:
+                continue
+            with get_character_transaction_lock(target_char):
+                if int(target_char.get("hp", 0) or 0) <= 0:
+                    continue
+                actual_damage = min(int(target_char["hp"]), int(damage))
+                target_char["hp"] -= actual_damage
+            effect_id = str(skill_cfg.get("eff0") or "10000")
+            attack_data = encode_sproto([
+                (0, inst_id), (1, target_id), (2, skill_id),
+                (3, [encode_sproto([(0, target_id), (1, actual_damage)])])
+            ])
+            damage_data = encode_sproto([(0, [encode_sproto([
+                (0, target_id), (1, actual_damage), (2, skill_id),
+                (3, effect_id), (4, critical)
+            ])])])
+            for peer_conn, _peer_char in gotham_npc_visible_connections(slot_key, inst_id):
+                send_rpc_push_safe(peer_conn, 508, attack_data)
+                send_rpc_push_safe(peer_conn, 511, damage_data)
+            sync_char_attrs_rpc(target_conn, target_char)
+            save_chars(all_accounts_chars)
+            if int(target_char.get("hp", 0) or 0) <= 0 and supports_normal_relife(GOTHAM_MAP_ID):
+                death_count = int(target_char.get("death_count", 0) or 0) + 1
+                target_char["death_count"] = death_count
+                relife_cfg = get_relife_config(death_count)
+                offer = remember_relife_offer(
+                    target_char, 1, relife_cfg.get("use_count", 1), "9011")
+                send_rpc_push_safe(target_conn, 618, offer)
+                save_chars(all_accounts_chars)
+    except Exception as exc:
+        print(f"[GOTHAM AI] tick failed: {exc}")
+    finally:
+        GOTHAM_AI_LOCK.release()
+    return True
+
+
+def start_gotham_npc_runtime():
+    global GOTHAM_AI_TASK
+    if GOTHAM_AI_TASK is not None and GOTHAM_AI_TASK.is_alive():
+        return
+    GOTHAM_AI_TASK = RepeatingTask(0.2, _gotham_npc_ai_tick).start()
+
+
 def gotham_create_shared_npc(slot, spec):
     nid = str(spec["nid"])
     cfg = NPC_CONFIG.get(nid, {"name": f"NPC_{nid}"})
@@ -10253,7 +10592,14 @@ def gotham_create_shared_npc(slot, spec):
     slot.update({
         "inst_id": inst_id,
         "respawn_at": 0,
+        "position": (int(spec["x"]), int(spec["z"])),
+        "heading": int(spec.get("o", 0)),
         "damage": {},
+        "target_id": 0,
+        "next_attack_at": 0,
+        "skill_ready_at": {},
+        "patrol_target": None,
+        "patrol_next_at": time.time(),
     })
     GOTHAM_SHARED_NPC_BY_INSTANCE[inst_id] = slot["slot"]
     return inst_id, attr
@@ -10278,9 +10624,10 @@ def gotham_shared_npc_for_spawn(spec):
                 alive = False
             if alive:
                 cfg = NPC_CONFIG.get(str(slot["nid"]), {"name": f"NPC_{slot['nid']}"})
+                position = slot.get("position") or (slot["x"], slot["z"])
                 return build_npc_attr_sproto(
                     slot["nid"], cfg.get("name", f"NPC_{slot['nid']}"),
-                    int(slot["x"]), int(slot["z"]), int(slot.get("o", 0)),
+                    int(position[0]), int(position[1]), int(slot.get("heading", slot.get("o", 0))),
                     existing_inst_id=inst_id)
         respawn_at = float(slot.get("respawn_at", 0) or 0)
         if respawn_at > now:
@@ -10315,6 +10662,7 @@ def gotham_mark_shared_npc_dead(inst_id):
         NPC_INST_MAP.pop(inst_id, None)
         NPC_INSTANCE_MAP.pop(inst_id, None)
         NPC_ATTR_MAP.pop(inst_id, None)
+        DEAD_NPC_SET.discard(inst_id)
     if delay >= 0:
         timer = threading.Timer(
             max(0.1, respawn_at - time.time()),
@@ -10334,21 +10682,14 @@ def gotham_respawn_shared_npc(slot_key, expected_respawn_at):
             return
         spec = dict(slot)
         inst_id, attr = gotham_create_shared_npc(slot, spec)
-    stats = get_npc_attr(slot["nid"])
-    create_data = encode_sproto([(0, attr)])
-    for _char_id, (peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
+    for peer_conn, peer_char in list(ALL_CONNECTIONS.values()):
         if peer_conn and peer_char and str(peer_char.get("map_id", "")) == GOTHAM_MAP_ID:
-            send_rpc_push_safe(peer_conn, 509, create_data)
-            sync_npc_attrs_rpc(peer_conn, inst_id, stats, NPC_HP_MAP[inst_id])
+            update_gotham_npc_aoi(peer_conn, peer_char)
 
 
-def spawn_gotham_map_npcs(conn):
-    for spec in gotham_shared_npc_specs():
-        inst_id, attr = gotham_shared_npc_for_spawn(spec)
-        if inst_id is None or attr is None:
-            continue
-        send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
-        sync_npc_attrs_rpc(conn, inst_id, get_npc_attr(spec["nid"]), NPC_HP_MAP[inst_id])
+def spawn_gotham_map_npcs(conn, char):
+    start_gotham_npc_runtime()
+    update_gotham_npc_aoi(conn, char)
 
 
 def spawn_gotham_escort_npc(conn, char):
@@ -10623,6 +10964,12 @@ def spawn_exp_team_stage_map(conn, map_id, char, force=False):
 
 def spawn_map_npcs(conn, map_id, picked_char=None):
     map_str = str(map_id)
+    if map_str != GOTHAM_MAP_ID:
+        clear_gotham_npc_aoi(conn)
+    elif picked_char:
+        spawn_gotham_map_npcs(conn, picked_char)
+        spawn_gotham_escort_npc(conn, picked_char)
+        return
     if (is_cash_stage_map(map_str) and picked_char
             and not picked_char.get('_cash_stage_map_ready', False)):
         return
@@ -10791,11 +11138,6 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         # Sending TAG 509 duplicates those client-owned actors and leaves a
         # second server copy alive after the client reports the local death.
         debug_log(f"[NPC SPAWN] client-owned MonsterData simulation map={map_str}; suppress server duplicates")
-        return
-    if map_str == GOTHAM_MAP_ID:
-        spawn_gotham_map_npcs(conn)
-        if picked_char:
-            spawn_gotham_escort_npc(conn, picked_char)
         return
     if map_str != "11" and (map_str in STATIC_NPC_DATA or map_str in MONSTER_DATA):
         if map_str in STATIC_NPC_DATA:
@@ -19621,6 +19963,13 @@ def client_handler(conn, addr):
                         if int(time.time()) - last_aoi_update >= 2:
                             update_npc_aoi(conn, move_map, picked_char)
                             picked_char['_last_npc_aoi_update'] = int(time.time())
+                    elif str(move_map) == GOTHAM_MAP_ID:
+                        now_mono = time.monotonic()
+                        last_aoi_update = float(
+                            picked_char.get('_last_gotham_npc_aoi_update', 0) or 0)
+                        if now_mono - last_aoi_update >= 1.0:
+                            update_gotham_npc_aoi(conn, picked_char)
+                            picked_char['_last_gotham_npc_aoi_update'] = now_mono
                 elif p_raw and picked_char and (is_exp_move_map or is_equipment_move_map):
                     stage_label = 'EQUIP' if is_equipment_move_map else 'EXP'
                     print(f"[{stage_label} MOVE] rejected downed/nonparticipant/stale player={picked_char.get('id')} map={picked_char.get('map_id')}")
@@ -22630,7 +22979,6 @@ def client_handler(conn, addr):
                                     if (cur_map == GOTHAM_MAP_ID
                                             and target_id in GOTHAM_SHARED_NPC_BY_INSTANCE):
                                         gotham_broadcast(506, remove_data)
-                                        gotham_mark_shared_npc_dead(target_id)
                                     else:
                                         send_rpc_push(506, remove_data)
                                 else:
@@ -22711,6 +23059,9 @@ def client_handler(conn, addr):
                                         on_equipment_npc_killed(exp_state_hit, target_id, target_nid)
                                     else:
                                         on_npc_killed(conn, send_rpc_push, picked_char, target_id, target_nid)
+                                        if (cur_map == GOTHAM_MAP_ID
+                                                and target_id in GOTHAM_SHARED_NPC_BY_INSTANCE):
+                                            gotham_mark_shared_npc_dead(target_id)
 
                     if session is not None:
                         ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -26537,6 +26888,7 @@ def client_handler(conn, addr):
                 del NPC_SPAWNED_MAPS[conn_id]
             # Clean up AOI-tracked Liberty City NPCs on disconnect
             conn_aoi_key = id(conn)
+            clear_gotham_npc_aoi(conn)
             tracked_aoi = NPC_AOI_TRACK.pop(conn_aoi_key, {})
             for inst_id_aoi in tracked_aoi:
                 NPC_HP_MAP.pop(inst_id_aoi, None)
