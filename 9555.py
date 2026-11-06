@@ -10149,7 +10149,8 @@ def _equipment_slot_for_item(item, bucket):
         slot = int(EQUIP_CONFIG.get(item_id, {}).get('position', -1))
     except (TypeError, ValueError):
         slot = -1
-    limit = 4 if bucket == 'equipped_fashion' else 6
+    limit = (4 if bucket == 'equipped_fashion' else
+             5 if bucket == 'equipped_badges' else 6)
     return slot if 0 <= slot < limit else None
 
 def _collapse_equipped_slot_duplicates(output):
@@ -10173,8 +10174,8 @@ def _collapse_equipped_slot_duplicates(output):
         output[bag_bucket].extend(item for item in items
                                   if _equipment_slot_for_item(item, equipped_bucket) is not None
                                   and id(item) not in kept_ids)
-        output[equipped_bucket] = unassigned + [latest_by_slot[slot]
-                                                for slot in sorted(latest_by_slot)]
+        output[bag_bucket].extend(unassigned)
+        output[equipped_bucket] = [latest_by_slot[slot] for slot in sorted(latest_by_slot)]
 
 def _normalise_backpack_item(item, next_index):
     if not isinstance(item, dict):
