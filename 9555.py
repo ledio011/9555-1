@@ -7228,6 +7228,45 @@ def resync_live_npc_instance(conn, char, inst_id, expected_npcid):
     return True
 
 
+def resync_tower_npc_if_alive(conn, char, inst_id):
+    try:
+        inst_id = int(inst_id)
+        char_id = int(char.get("id", 0) or 0)
+    except (TypeError, ValueError, AttributeError):
+        return False
+    run = char.get("tower_run")
+    if (not is_current_character_connection(conn, char)
+            or not isinstance(run, dict)
+            or run.get("status") != "running"
+            or TOWER_NPC_OWNER.get(inst_id) != char_id
+            or inst_id not in run.get("active_npcs", [])
+            or str(NPC_INSTANCE_MAP.get(inst_id, "")) != str(char.get("map_id", ""))):
+        return False
+
+    with npc_hp_lock(inst_id):
+        try:
+            remaining_hp = max(0, int(NPC_HP_MAP.get(inst_id, 0)))
+            attr = NPC_ATTR_MAP.get(inst_id)
+            if remaining_hp <= 0 or not attr:
+                return False
+            attr_fields = decode_sproto(attr)
+            if not attr_fields:
+                return False
+            attr_fields[2] = remaining_hp
+            attr = encode_sproto(sorted(attr_fields.items()))
+            NPC_ATTR_MAP[inst_id] = attr
+        except (TypeError, ValueError, struct.error):
+            return False
+
+    if not send_rpc_push_safe(conn, 506, encode_sproto([(0, inst_id)])):
+        return False
+    if not send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
+        return False
+    print(f"[TOWER NPC RESYNC] player={char_id} inst={inst_id} "
+          f"hp={remaining_hp}/{decode_sproto(attr).get(3, 0)}")
+    return True
+
+
 def is_tower_map(map_id):
     return str(map_id) in TOWER_MAP_TO_FLOOR
 
@@ -7513,7 +7552,7 @@ def tower_run_result_payload(run, result_state):
         (4, 1 if result_state.get("win") else 0),
         (5, [encode_sproto([(0, item_id), (1, amount), (3, quality)])
              for item_id, quality, amount in rewards]),
-        (6, floor_id)
+        (7, floor_id)
     ])
 
 
@@ -20942,10 +20981,19 @@ def client_handler(conn, addr):
                                         sat_type=npc_damage_sat_type(target_nid), forced_hit=True,
                                         forced_crit=is_cri, max_variance=True
                                     )
+                                    tower_damage_tolerance = (
+                                        math.ceil(max_dmg * 1.15) if is_tower else max_dmg + 2
+                                    )
                                     if (not can_hit or (is_cri and not possible_crit)
-                                            or client_dmg > max_dmg + 2):
+                                            or client_dmg > tower_damage_tolerance):
                                         print(f"[COMBAT SECURITY] rejected out-of-range NPC damage target={target_id} damage={client_dmg} max={max_dmg}")
+                                        if (is_tower and client_dmg > 0
+                                                and client_dmg >= int(NPC_HP_MAP.get(target_id, 0) or 0)):
+                                            resync_tower_npc_if_alive(conn, picked_char, target_id)
                                         continue
+                                    if is_tower and client_dmg > max_dmg + 2:
+                                        print(f"[TOWER HIT] accepted client-calculated damage within tolerance "
+                                              f"target={target_id} damage={client_dmg} server_max={max_dmg}")
                                     server_dmg = actual_dmg = client_dmg
                                     hit = True
                                     calc_cri = is_cri
@@ -23552,22 +23600,31 @@ def client_handler(conn, addr):
                         with get_character_transaction_lock(picked_char):
                             state = ensure_tower_state(picked_char)
                             run = picked_char.get("tower_run")
+                            active_run_in_tower = (
+                                isinstance(run, dict)
+                                and run.get("status") == "running"
+                                and is_tower_map(picked_char.get("map_id"))
+                            )
                             if (state["cur_floor"] != 0 and state["times"] > 0
                                     and state["wipe_out_state"] != 1
-                                    and not is_tower_map(picked_char.get("map_id"))
-                                    and not (isinstance(run, dict) and run.get("status") == "running")):
+                                    and not active_run_in_tower):
+                                if isinstance(run, dict) and run.get("status") == "running":
+                                    clear_tower_npcs(picked_char, conn, send_rpc_push)
+                                    run["status"] = "abandoned"
+                                    run["pending_result"] = None
+                                    if (str(picked_char.get("active_copy_id") or "")
+                                            == str(run.get("map_id") or "")):
+                                        picked_char["active_copy_id"] = None
                                 state["cur_floor"] = 0
                                 state["times"] = 0
-                                state["wipe_out_state"] = 0
-                                state["wipe_time"] = 0
-                                picked_char.pop("tower_wipe_start_floor", None)
-                                picked_char.pop("tower_wipe_target_floor", None)
-                                _tower_cancel_timer(TOWER_WIPE_TIMERS, picked_char.get("id", 0))
                                 save_chars(all_accounts_chars)
                                 reset = True
+                            print(f"[TOWER RESET] player={picked_char.get('id')} "
+                                  f"accepted={reset} cur_floor={state['cur_floor']} "
+                                  f"times={state['times']} wipe_state={state['wipe_out_state']} "
+                                  f"map={picked_char.get('map_id')} run="
+                                  f"{run.get('status') if isinstance(run, dict) else None}")
                     send_rpc_push(626, encode_sproto([(0, reset)]))
-                    if reset:
-                        tower_info_response(picked_char, send_rpc_push)
                     send_rpc_response(session)
 
                 elif msg == 242 and picked_char: # request_slot_info
