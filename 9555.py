@@ -7353,6 +7353,11 @@ def tower_info_response(char, send_rpc_push):
     ]))
 
 
+def tower_send_claim_state(char, send_rpc_push):
+    send_rpc_push(607, encode_sproto([(0, tower_info_payload(char))]))
+    tower_info_response(char, send_rpc_push)
+
+
 def tower_send_reward_claim_response(char, claim, send_rpc_push):
     items = [
         encode_sproto([(0, item_id), (1, amount), (3, quality)])
@@ -23478,6 +23483,8 @@ def client_handler(conn, addr):
                         if reward_type == 0:
                             claimed = tower_claim_wipeout(
                                 picked_char, conn, send_rpc_push, reward_id)
+                            if claimed:
+                                tower_send_claim_state(picked_char, send_rpc_push)
                             print(f"[TOWER REWARD RESULT] player={picked_char.get('id')} "
                                   f"type=0 id={reward_id} accepted={claimed}")
                         elif reward_type == 1:
@@ -23490,6 +23497,8 @@ def client_handler(conn, addr):
                                 if floor_id in claimed:
                                     replayed = tower_replay_reward_claim(
                                         picked_char, 1, floor_id, send_rpc_push)
+                                    if replayed:
+                                        tower_send_claim_state(picked_char, send_rpc_push)
                                     print(f"[TOWER] special claim replayed player={picked_char.get('id')} "
                                           f"floor={floor_id} sent={replayed}")
                                 else:
@@ -23505,6 +23514,8 @@ def client_handler(conn, addr):
                                         save_chars(all_accounts_chars)
                                         sent = tower_queue_reward_claim(
                                             picked_char, 1, floor_id, rewards, send_rpc_push)
+                                        if sent:
+                                            tower_send_claim_state(picked_char, send_rpc_push)
                                         print(f"[TOWER] special reward claimed player={picked_char.get('id')} "
                                               f"floor={floor_id} sent={sent}")
                                     else:
