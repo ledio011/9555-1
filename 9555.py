@@ -5264,8 +5264,6 @@ def get_character_stats(c):
     ][prof    ]
     extra_combat_weights = {
         1008: 5, 1009: 5, 1012: 5, 1013: 5,
-        2001: 5, 2002: 5, 2003: 5, 2004: 5,
-        2005: 5, 2006: 5, 2007: 5,
         2008: 5, 2009: 5, 2012: 5, 2013: 5
     }
     extra_combat_power = 0
@@ -5381,8 +5379,6 @@ def get_character_stats(c):
                 add_item_attribute(attribute_id, value)
                 add_extra_combat_power(attribute_id, value)
 
-    power_totals = totals.copy()
-
     # Percentage bonuses are additive and are applied once to the complete
     # level + equipment totals, matching the client's 1/10000 percentage scale.
     for field, bonus in percent_totals.items():
@@ -5391,15 +5387,15 @@ def get_character_stats(c):
     atk, hp_max, df = totals['atk'], totals['hp_max'], totals['def']
     hit, eva, cri, res = totals['hit'], totals['eva'], totals['cri'], totals['res']
 
-    # Preserve flat equipment/title/refine stat contributions while avoiding
-    # a second aggregate multiplication for percentage attributes.
-    raw_power = (power_totals['atk'] * coeffs['atk'] +
-                 power_totals['hp_max'] * coeffs['hp'] +
-                 power_totals['def'] * coeffs['def'] +
-                 power_totals['hit'] * coeffs['hit'] +
-                 power_totals['eva'] * coeffs['eva'] +
-                 power_totals['cri'] * coeffs['cri'] +
-                 power_totals['res'] * coeffs['res'] +
+    # Percentage attributes already affect the aggregate stats above; don't
+    # also count their item-only combat score in extra_combat_power.
+    raw_power = (atk * coeffs['atk'] +
+                 hp_max * coeffs['hp'] +
+                 df * coeffs['def'] +
+                 hit * coeffs['hit'] +
+                 eva * coeffs['eva'] +
+                 cri * coeffs['cri'] +
+                 res * coeffs['res'] +
                  extra_combat_power)
     power = int(raw_power)
 
