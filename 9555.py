@@ -12400,15 +12400,21 @@ def _rank_character_sort_items(sort_type):
     for character in _rank_pvp_all_characters():
         try:
             tie_breaker = 0
+            progress_tiebreaker = 0
+            created_at = float(character.get('createtime', 0) or 0)
             if sort_type == 1:
                 score = int(get_character_stats(character).get('power', 0) or 0)
             elif sort_type == 2:
                 score = int(character.get('level', 1) or 1)
-                tie_breaker = float(
-                    character.get('level_rank_reached_at')
-                    or character.get('createtime')
-                    or character.get('id', 0)
-                )
+                reached_at = character.get('level_rank_reached_at')
+                if reached_at is not None:
+                    tie_breaker = float(reached_at)
+                else:
+                    # Existing level-cap records predate reach-time tracking.
+                    # Retained EXP is the best persisted estimate of who
+                    # reached the cap earlier; character creation breaks ties.
+                    tie_breaker = 0
+                    progress_tiebreaker = -max(0, int(character.get('exp', 0) or 0))
             elif sort_type == 5:
                 score_value = character.get('tower_rank_floor')
                 if score_value is None:
@@ -12419,11 +12425,20 @@ def _rank_character_sort_items(sort_type):
                 # RankItemLogic adds one when displaying the score; the saved
                 # tower_rank_floor is already one-based.
                 score = max(0, min(80, rank_floor) - 1)
-                tie_breaker = float(
-                    character.get('tower_rank_reached_at')
-                    or character.get('createtime')
-                    or character.get('id', 0)
-                )
+                reached_at = character.get('tower_rank_reached_at')
+                if reached_at is not None:
+                    tie_breaker = float(reached_at)
+                else:
+                    # Legacy records have no historical floor timestamp.
+                    # Lower accumulated clear time is the persisted proxy for
+                    # reaching the same floor sooner.
+                    tower_state = character.get('tower_state', {})
+                    clear_time = (
+                        tower_state.get('sum_time', 0)
+                        if isinstance(tower_state, dict) else 0
+                    )
+                    tie_breaker = 0
+                    progress_tiebreaker = max(0, int(clear_time or 0))
             elif sort_type == 8:
                 scores = character.get('sex_mini_scores', {})
                 score_candidates = []
@@ -12442,10 +12457,14 @@ def _rank_character_sort_items(sort_type):
             char_id = int(character.get('id', 0) or 0)
         except (TypeError, ValueError, AttributeError):
             continue
-        ranked.append((score, tie_breaker, char_id, character))
-    ranked.sort(key=lambda row: (-row[0], row[1] if row[1] > 0 else float('inf'), row[2]))
+        ranked.append((
+            score, tie_breaker, progress_tiebreaker, created_at, char_id, character
+        ))
+    ranked.sort(key=lambda row: (
+        -row[0], row[1], row[2], row[3], row[4]
+    ))
     rows = []
-    for score, _tie_breaker, char_id, character in ranked[:50]:
+    for score, _tie_breaker, _progress_tiebreaker, _created_at, char_id, character in ranked[:50]:
         rows.append(encode_sproto([
             (0, char_id), (1, score << 32),
             (2, str(character.get('name', 'Hero'))),
