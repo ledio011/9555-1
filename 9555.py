@@ -10031,6 +10031,15 @@ def item_backpack_type(item_id):
         return 3
     return 2
 
+def equipped_bucket_for_item(item):
+    """Return the equipment pack matching the item's client ItemData.Type."""
+    item_type = int(ITEM_CONFIG.get(str(item.get('id', '')), {}).get('type', -1))
+    return {
+        2: 'equipped_equip',
+        6: 'equipped_badges',
+        16: 'equipped_fashion'
+    }.get(item_type)
+
 def roll_equip_random_attributes(item):
     """Roll the APK's configured weapon-skill or equipment-stat affix pool."""
     item_id = str(item.get('id', item.get('itemId', '')))
@@ -10243,17 +10252,22 @@ def ensure_backpack_state(picked_char):
                 next_index += 1
             seen_ids.add(index_id)
             if source_bucket in ('equipped_equip', 'equipped_badges', 'equipped_fashion'):
-                output[source_bucket].append(item)
+                equipped_bucket = equipped_bucket_for_item(item)
+                if equipped_bucket:
+                    if equipped_bucket == 'equipped_badges':
+                        item.setdefault('parm', [0] * 8)
+                    output[equipped_bucket].append(item)
+                else:
+                    target = BACKPACKS[item_backpack_type(item['id'])][0]
+                    output[target].append(item)
             else:
                 container_type = item_backpack_type(item['id'])
                 if _is_legacy_equipped_item(item):
-                    item_type = int(ITEM_CONFIG.get(str(item['id']), {}).get('type', -1))
-                    equipped_bucket = {2: 'equipped_equip', 6: 'equipped_badges',
-                                       16: 'equipped_fashion'}.get(item_type)
+                    equipped_bucket = equipped_bucket_for_item(item)
                     if equipped_bucket:
                         for flag in ('equipped', 'is_equipped', 'isEquipped', 'worn', 'isWorn'):
                             item.pop(flag, None)
-                        if item_type == 6:
+                        if equipped_bucket == 'equipped_badges':
                             item.setdefault('parm', [0] * 8)
                         output[equipped_bucket].append(item)
                         continue
