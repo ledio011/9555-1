@@ -7673,19 +7673,36 @@ def start_tower_floor(conn, char, floor_id, send_rpc_push, continuation=False):
     tower_unlock_level = int(FUNCTION_DATA.get("4003", {}).get("condition", 17) or 17)
     if not is_current_character_connection(conn, char):
         reject_reason = "stale_connection"
-    elif (floor_id > max(state["floor"], state["cur_floor"])
-          and not continuation):
-        reject_reason = "locked_floor"
-    elif int(char.get("level", 1) or 1) < tower_unlock_level:
-        reject_reason = "feature_level_requirement"
-    elif int(char.get("level", 1) or 1) < int((config or {}).get("limit_level", 1)):
-        reject_reason = "level_requirement"
-    elif not tower_floor_is_valid(floor_id):
-        reject_reason = "invalid_floor_data"
-    elif state["wipe_out_state"] != 0:
-        reject_reason = "wipeout_active"
-    elif is_tower_map(char.get("map_id")) and not continuation:
-        reject_reason = "already_in_tower"
+    else:
+        requested_floor_id = floor_id
+        wipeout_claimed = False
+        if not continuation and state["wipe_out_state"] == 2:
+            request_id = int(char.get("tower_wipe_target_floor", state["floor"]) or 0)
+            if tower_claim_wipeout(char, conn, send_rpc_push, request_id):
+                wipeout_claimed = True
+                state = ensure_tower_state(char)
+                floor_id = max(floor_id, state["cur_floor"])
+                config = TOWER_CONFIG.get(floor_id)
+            else:
+                reject_reason = "wipeout_reward_claim_failed"
+        if reject_reason is None:
+            state = ensure_tower_state(char)
+            if (floor_id > max(state["floor"], state["cur_floor"])
+                    and not continuation):
+                reject_reason = "locked_floor"
+            elif int(char.get("level", 1) or 1) < tower_unlock_level:
+                reject_reason = "feature_level_requirement"
+            elif int(char.get("level", 1) or 1) < int((config or {}).get("limit_level", 1)):
+                reject_reason = "level_requirement"
+            elif not tower_floor_is_valid(floor_id):
+                reject_reason = "invalid_floor_data"
+            elif state["wipe_out_state"] != 0:
+                reject_reason = "wipeout_active"
+            elif is_tower_map(char.get("map_id")) and not continuation:
+                reject_reason = "already_in_tower"
+        if wipeout_claimed:
+            print(f"[TOWER] completed wipeout settled before start player={char_id} "
+                  f"requested_floor={requested_floor_id} next_floor={state['cur_floor']}")
     if reject_reason:
         print(f"[TOWER] entry rejected player={char_id} floor={floor_id} "
               f"reason={reject_reason} map={char.get('map_id')} "
