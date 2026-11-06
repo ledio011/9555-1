@@ -7222,7 +7222,7 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
     # Client: GetRandom() returns 0-99, then /1000 + 0.95 = 0.95 to 1.049
     rand_var = 1.049 if max_variance else random.randint(0, 99) / 1000.0 + 0.95
 
-    skill_sexd = eff_cfg['adds'].get(3003, 0) / 10000.0
+    skill_sexd = 0.0 if attacker_is_npc else eff_cfg['adds'].get(3003, 0) / 10000.0
     exd_factor = 1.0 + (attacker_stats['exd'] - defender_stats['exr']) / 10000.0 + skill_sexd
 
     final_dmg = crit_mult * base_dmg * rand_var * (1.0 - def_red) * exd_factor
@@ -7232,6 +7232,66 @@ def get_combat_damage(attacker_stats, defender_stats, skill_id, skill_lv, is_are
 
     # Client uses Mathf.CeilToInt(num5) - use ceiling, not truncation
     return int(math.ceil(max(1, final_dmg))), True, is_cri
+
+
+def validate_tower_npc_attack_damage(conn, char, effinfo_id, client_damage):
+    """Validate Tag 128 damage against active Tower NPC skills, preserving the client roll."""
+    try:
+        char_id = int(char.get("id", 0) or 0)
+        map_id = str(char.get("map_id", ""))
+        client_damage = int(client_damage)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    run = char.get("tower_run")
+    try:
+        run_owner_id = int(run.get("owner_id", 0) or 0) if isinstance(run, dict) else 0
+    except (TypeError, ValueError):
+        return None
+    if (client_damage < 0 or not effinfo_id
+            or not isinstance(run, dict)
+            or run.get("status") != "running"
+            or str(run.get("map_id")) != map_id
+            or run_owner_id != char_id
+            or not is_current_character_connection(conn, char)):
+        return None
+
+    player_stats = get_character_stats(char)
+    player_level = max(1, int(char.get("level", 1) or 1))
+    for raw_inst_id in run.get("active_npcs", []):
+        try:
+            inst_id = int(raw_inst_id)
+        except (TypeError, ValueError):
+            continue
+        try:
+            npc_hp = int(NPC_HP_MAP.get(inst_id, 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if (TOWER_NPC_OWNER.get(inst_id) != char_id
+                or TOWER_NPC_SPAWN_INDEX.get(inst_id) is None
+                or str(NPC_INSTANCE_MAP.get(inst_id, "")) != map_id
+                or npc_hp <= 0):
+            continue
+
+        npc_id = str(NPC_INST_MAP.get(inst_id, ""))
+        npc_cfg = NPC_CONFIG.get(npc_id)
+        if not npc_cfg:
+            continue
+        npc_stats = get_npc_attr(npc_id, player_level)
+        for skill_id in str(npc_cfg.get("skill_group", "")).split(";"):
+            skill_id = skill_id.strip()
+            skill_cfg = SKILL_CONFIG.get(skill_id)
+            if not skill_cfg or effinfo_id not in {
+                    str(skill_cfg.get(key) or "")
+                    for key in ("eff0", "eff1", "eff2")}:
+                continue
+            max_damage, can_hit, _ = get_combat_damage(
+                npc_stats, player_stats, skill_id, 0, effinfo_id=effinfo_id,
+                forced_hit=True, forced_crit=True, max_variance=True,
+                attacker_is_npc=True)
+            if can_hit and client_damage <= max_damage + 2:
+                return client_damage
+    return None
+
 
 def build_npc_attr_sproto(nid, name, x, z, o, existing_inst_id=None, player_level=1):
     """Build NPC attribute sproto for TAG 509 (npc_create).
@@ -20400,7 +20460,7 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg == 128: # local_character_attack (Boss counter-attack)
+            elif msg == 128: # local_character_attack (client-reported enemy hit)
                 target_id = get_val_int(body, 0)
                 client_dmg = get_val_int(body, 1)
                 effinfo_id = body.get(2, b"").decode('utf-8') if isinstance(body.get(2), bytes) else str(body.get(2, ''))
@@ -20411,6 +20471,7 @@ def client_handler(conn, addr):
 
                 current_map = str(picked_char.get('map_id', '')) if picked_char else ''
                 guild_boss_id = _guild_boss_map_id(current_map) if picked_char else None
+                is_tower = bool(picked_char and is_tower_map(current_map))
                 if picked_char and (is_exp_map(current_map) or is_equipment_copy_map(current_map)):
                     # Copy monsters are calculated by the server AI from
                     # the active wave. This client-local NPC report carries no
@@ -20555,13 +20616,29 @@ def client_handler(conn, addr):
 
                             print(f"[RANK PVP COUNTER] player={picked_char.get('id')} opponent={rank_opponent.get('id') if rank_opponent else 0} skill={opponent_skill_id or '-'} eff={effinfo_id} client_damage={client_dmg} accepted_damage={server_dmg}")
 
+                    elif is_tower:
+                        # Tag 128 omits the source NPC ID, so resolve the hit
+                        # from this run's active NPCs, configured skills, and stats.
+                        validated_damage = validate_tower_npc_attack_damage(
+                            conn, picked_char, effinfo_id, client_dmg)
+                        if validated_damage is None:
+                            server_dmg = 0
+                            print(f"[TOWER NPC ATTACK] rejected player={picked_char.get('id')} "
+                                  f"damage={client_dmg} eff={effinfo_id}")
+                        else:
+                            server_dmg = validated_damage
+                            print(f"[TOWER NPC ATTACK] player={picked_char.get('id')} "
+                                  f"client_damage={client_dmg} accepted_damage={server_dmg} "
+                                  f"eff={effinfo_id}")
+
                     # For non-arena Tag 128, the attacker is a local NPC/zombie in a single-copy scene.
                     # The client sends Tag 128 with characterId = player's ServerId (the target),
                     # not the attacker's ID. Without knowing which NPC attacked, the server cannot
                     # look up the correct attacker stats for exact server-authoritative calculation.
                     # However, we should NOT trust client_dmg directly as it allows damage manipulation.
                     # Use a reasonable default NPC attacker stats for server-authoritative calculation.
-                    if not is_area and not is_rank_pvp and not guild_boss_id and picked_char:
+                    if (not is_area and not is_rank_pvp and not guild_boss_id
+                            and not is_tower and picked_char):
                         # Use a generic NPC attacker with basic stats for non-arena single-copy scenes
                         # The original game trusted client-authoritative damage, but server-side validation
                         # prevents extreme manipulation while still allowing the attack to deal damage.
