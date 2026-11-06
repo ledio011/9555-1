@@ -5358,6 +5358,52 @@ def get_character_stats(c):
         add_item_attribute(set_attribute_id, set_attribute_value)
         break
 
+    # Guild skills are shared by accepted guild members. GuildSkillData's
+    # current-level row supplies the same attribute/value pair shown by the
+    # client; candidates and stale character guild IDs receive no bonus.
+    try:
+        guild_id = int(_guild_id_for_character(c))
+    except (TypeError, ValueError):
+        guild_id = 0
+    guild = GUILD_STATES.get(str(guild_id)) if guild_id > 0 else None
+    guild_member = _guild_member_id(guild, c.get('id', 0)) if guild else None
+    if guild_member and int(guild_member.get('job', 3)) != 4:
+        guild_skill_levels = guild.get('skills') or {}
+        for skill_type, rows in GUILD_SKILL_DATA.items():
+            try:
+                skill_level = max(0, int(guild_skill_levels.get(str(skill_type), 0)))
+            except (TypeError, ValueError):
+                continue
+            if skill_level <= 0:
+                continue
+            skill_row = next(
+                (row for row in rows if int(row.get('level', 0)) == skill_level),
+                None
+            )
+            if not skill_row:
+                continue
+            attribute_id = skill_row.get('parm1', 0)
+            value = skill_row.get('parm2', 0)
+            add_item_attribute(attribute_id, value)
+            add_extra_combat_power(attribute_id, value)
+
+        # Activated Guild Star nodes grant both configured attributes to every
+        # accepted member; candidates do not receive the guild-wide bonuses.
+        guild_stars = guild.get('stars') or {}
+        if isinstance(guild_stars, dict):
+            for star_id, star_cfg in GUILD_STAR_DATA.items():
+                try:
+                    is_active = int(guild_stars.get(star_id, 0) or 0) == 1
+                except (TypeError, ValueError):
+                    is_active = False
+                if not is_active:
+                    continue
+                for attribute_key, value_key in (('status1', 'value1'), ('status2', 'value2')):
+                    attribute_id = star_cfg.get(attribute_key, 0)
+                    value = star_cfg.get(value_key, 0)
+                    add_item_attribute(attribute_id, value)
+                    add_extra_combat_power(attribute_id, value)
+
     # The APK displays TitleData bonuses in Chara > Title. Apply the owned
     # title's configured attributes through the same percentage/stat path as
     # equipment and badges so the panel, combat values, and power stay aligned.
@@ -14143,9 +14189,13 @@ def _guild_refresh_members(guild, send_rpc_push=None, include_info=True):
         if connection is None or char is None:
             continue
         try:
+            sync_char_attrs_rpc(connection, char)
+        except Exception as exc:
+            debug_log(f"[GUILD] attribute sync failed player={cid}: {exc}")
+        try:
             broadcast_aoi_attribute(char)
-        except Exception:
-            pass
+        except Exception as exc:
+            debug_log(f"[GUILD] AOI attribute sync failed player={cid}: {exc}")
         if include_info:
             payload = _guild_info_response(char, guild)
             send_rpc_push_safe(connection, 563, payload)
@@ -15815,7 +15865,6 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
                 (2, _guild_donate_records(char, guild))
             ]))
             send_rpc_push(563, _guild_info_response(char, guild))
-            sync_char_attrs_rpc(conn, char)
             _guild_refresh_members(guild)
             if _guild_champion_id() != champion_id_before:
                 _guild_sync_champion_id()
@@ -16322,8 +16371,7 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
                     save_chars(all_accounts_chars)
                     success = True
         if success:
-            sync_char_attrs_rpc(conn, char)
-            send_rpc_push(563, _guild_info_response(char, guild))
+            _guild_refresh_members(guild)
         send_rpc_push(672, encode_sproto([(0, _guild_star_map(guild))]))
 
     elif msg == 295:  # req_guild_battle_state
