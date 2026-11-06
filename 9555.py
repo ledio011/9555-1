@@ -7271,6 +7271,28 @@ def is_tower_map(map_id):
     return str(map_id) in TOWER_MAP_TO_FLOOR
 
 
+def settle_tower_exit(char, conn=None, send_rpc_push=None):
+    """Keep a cleared floor's progress when leaving instead of continuing."""
+    run = char.get("tower_run") if isinstance(char, dict) else None
+    if not isinstance(run, dict) or run.get("status") != "won":
+        return False
+    floor_id = int(run.get("floor_id", -1))
+    if floor_id < 0:
+        return False
+    state = ensure_tower_state(char)
+    max_floor_count = max(TOWER_CONFIG.keys(), default=-1) + 1
+    state["floor"] = max(int(state["floor"]), floor_id)
+    state["cur_floor"] = min(max(int(state["cur_floor"]), floor_id + 1), max_floor_count)
+    state["times"] = max(1, int(state["times"]))
+    run["status"] = "complete"
+    run["pending_result"] = None
+    clear_tower_npcs(char, conn, send_rpc_push)
+    save_chars(all_accounts_chars)
+    print(f"[TOWER] exit after cleared floor player={char.get('id')} "
+          f"floor={floor_id} next_floor={state['cur_floor']}")
+    return True
+
+
 def clear_tower_npcs(char, conn=None, send_rpc_push=None):
     if not isinstance(char, dict):
         return
@@ -13321,7 +13343,9 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
     target_map_id = str(target_map_id) or '11'
     if is_tower_map(src_map) and not is_tower_map(target_map_id):
         tower_run = picked_char.get('tower_run')
-        if isinstance(tower_run, dict) and tower_run.get('status') == 'running':
+        if isinstance(tower_run, dict) and tower_run.get('status') == 'won':
+            settle_tower_exit(picked_char, conn, send_rpc_push)
+        elif isinstance(tower_run, dict) and tower_run.get('status') == 'running':
             tower_run['status'] = 'failed'
             tower_run['pending_result'] = None
             clear_tower_npcs(picked_char, conn, send_rpc_push)
@@ -17624,6 +17648,37 @@ def client_handler(conn, addr):
 
                     # TAG 503: enter_map
                     mid = str(picked_char.get('map_id') or '11')
+                    tower_run = picked_char.get('tower_run')
+                    interrupted_tower = (
+                        isinstance(tower_run, dict)
+                        and tower_run.get('status') == 'running'
+                        and is_tower_map(tower_run.get('map_id'))
+                    )
+                    if is_tower_map(mid) or interrupted_tower:
+                        if isinstance(tower_run, dict) and tower_run.get('status') == 'won':
+                            settle_tower_exit(picked_char)
+                        elif interrupted_tower:
+                            clear_tower_npcs(picked_char)
+                            tower_run['status'] = 'abandoned'
+                            tower_run['pending_result'] = None
+                        if is_tower_map(mid):
+                            return_map = str(picked_char.get('pre_copy_map') or '109')
+                            if return_map not in MAP_CONFIG or is_tower_map(return_map):
+                                return_map = '109' if '109' in MAP_CONFIG else '11'
+                            return_pos = picked_char.get('pre_copy_pos')
+                            picked_char['map_id'] = return_map
+                            picked_char['pos'] = (
+                                list(return_pos)
+                                if isinstance(return_pos, list) and len(return_pos) >= 3
+                                else [0, 0, 0, 0]
+                            )
+                            picked_char['active_copy_id'] = None
+                            picked_char.pop('pre_copy_pos', None)
+                            picked_char.pop('pre_copy_map', None)
+                            mid = return_map
+                        save_chars(all_accounts_chars)
+                        print(f"[TOWER RECOVERY] player={char_id} "
+                              f"returned_to_map={mid} interrupted_run={interrupted_tower}")
                     saved_guild_boss = _guild_boss_map_id(mid)
                     if saved_guild_boss:
                         saved_guild_id = _guild_id_for_character(picked_char)
