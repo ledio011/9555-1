@@ -8422,7 +8422,8 @@ def equipment_stage_result_items(copy_id, character):
         quality = int(ITEM_CONFIG.get(preview_id, {}).get('quality', 0))
         for equip_id, equip_cfg in EQUIP_CONFIG.items():
             equip_id = str(equip_id)
-            if (int(equip_cfg.get('class', 0)) != tier
+            if (not valid_package_reward_item(equip_id)
+                    or int(equip_cfg.get('class', 0)) != tier
                     or not 1 <= int(equip_cfg.get('position', -1)) < 6
                     or int(ITEM_CONFIG.get(equip_id, {}).get('type', -1)) != 2
                     or int(ITEM_CONFIG.get(equip_id, {}).get('level', 1)) > int(character.get('level', 1) if character else 1)):
@@ -10853,7 +10854,13 @@ def slot_reward_list(slot_id):
         if not item_cfg:
             return []
         try:
-            item_type = int(item_cfg.get('type', -1))
+            try:
+                try:
+                    item_type = int(item_cfg.get('type', -1))
+                except (TypeError, ValueError):
+                    return False
+            except (TypeError, ValueError):
+                return False
             function_value = int(item_cfg.get('function', 0) or 0)
         except (TypeError, ValueError):
             return []
@@ -11170,6 +11177,7 @@ def resolve_item_package_rewards(item_id, package_count=1, character=None):
             if int(badge_cfg.get('level', -1)) == expected_level
             and (badge_type is None or int(badge_cfg.get('badge_type', -1)) == badge_type)
             and str(badge_id) in ITEM_CONFIG
+            and int(ITEM_CONFIG[str(badge_id)].get('type', -1)) == 6
         ]
         if not candidates:
             return []
@@ -11185,8 +11193,42 @@ def resolve_item_package_rewards(item_id, package_count=1, character=None):
     rewards = ITEM_PACKAGE_FIXED_REWARDS.get(function_id)
     if rewards is None:
         rewards = SHOW_REWARD_CONFIG.get(function_id, [])
-    return [(str(reward[0]), int(reward[1]), int(reward[2]) * package_count)
-            for reward in rewards if len(reward) >= 3 and str(reward[0])]
+    resolved = [(str(reward[0]), int(reward[1]), int(reward[2]) * package_count)
+                for reward in rewards if len(reward) >= 3 and str(reward[0])]
+    if any(not valid_package_reward_item(reward_id)
+           for reward_id, _quality, _count in resolved):
+        print(f"[PACKAGE] rejected invalid configured reward item package={item_id}")
+        return []
+    return resolved
+
+def valid_package_reward_item(item_id):
+    """Reject UI-only and malformed equipment entries from every package path."""
+    item_id = str(item_id)
+    item_cfg = ITEM_CONFIG.get(item_id)
+    if not item_cfg:
+        return False
+    item_type = int(item_cfg.get('type', -1))
+    if item_type == 13:
+        return False
+    if item_type == 6:
+        return item_id in BADGE_CONFIG
+    if item_type not in (2, 16):
+        return True
+
+    equip_cfg = EQUIP_CONFIG.get(item_id)
+    if not equip_cfg:
+        return False
+    try:
+        position = int(equip_cfg.get('position', -1))
+        if not (0 <= position <= (5 if item_type == 2 else 3)
+                and int(item_cfg.get('subtype', -1)) == position):
+            return False
+        if item_type == 16:
+            return True
+        equip_class = int(equip_cfg.get('class', 0))
+        return 1 <= equip_class <= 8
+    except (TypeError, ValueError):
+        return False
 
 def resolve_equipment_pack_rewards(item_id, package_count=1, character=None):
     """Roll profession/tier equipment packs using ItemData and EquipData."""
@@ -11209,12 +11251,11 @@ def resolve_equipment_pack_rewards(item_id, package_count=1, character=None):
     candidates = []
     for equip_id, equip_cfg in EQUIP_CONFIG.items():
         try:
-            if (int(equip_cfg.get('position', -1)) not in range(1, 6)
+            if (not valid_package_reward_item(equip_id)
+                    or int(equip_cfg.get('position', -1)) not in range(1, 6)
                     or int(equip_cfg.get('class', 0)) not in allowed_classes
                     or int(equip_cfg.get('job', -1)) != profession
-                    or int(ITEM_CONFIG.get(str(equip_id), {}).get('type', -1)) != 2
-                    or int(ITEM_CONFIG.get(str(equip_id), {}).get('subtype', -1))
-                    != int(equip_cfg.get('position', -1))):
+                    or int(ITEM_CONFIG.get(str(equip_id), {}).get('type', -1)) != 2):
                 continue
             quality = int(ITEM_CONFIG.get(str(equip_id), {}).get('quality', 0))
             candidates.append((str(equip_id), quality, 1))
@@ -11248,7 +11289,8 @@ def resolve_weapon_pack_rewards(item_id, character, package_count=1):
     candidates = []
     for equip_id, equip_cfg in EQUIP_CONFIG.items():
         try:
-            if (int(equip_cfg.get('position', -1)) != 0
+            if (not valid_package_reward_item(equip_id)
+                    or int(equip_cfg.get('position', -1)) != 0
                     or int(equip_cfg.get('class', 0)) not in allowed_classes
                     or int(ITEM_CONFIG.get(str(equip_id), {}).get('type', -1)) != 2):
                 continue
@@ -20014,9 +20056,11 @@ def client_handler(conn, addr):
                                         rewards = resolve_item_package_rewards(
                                             package_id, package_count, picked_char)
                                     valid_rewards = bool(rewards) and all(
-                                        item_id in ITEM_CONFIG and amount > 0
+                                        valid_package_reward_item(item_id) and amount > 0
                                         for item_id, _quality, amount in rewards
                                     )
+                                    if rewards and not valid_rewards:
+                                        failure_reason = 'package contains invalid configured reward item'
                                     reward_totals = {}
                                     for item_id, quality, amount in rewards:
                                         reward_totals[(item_id, quality)] = reward_totals.get((item_id, quality), 0) + amount
