@@ -3908,7 +3908,7 @@ def street_race_return_point(char):
     return_map = str(char.get('pre_copy_map') or '11')
     if street_race_config_for_map(return_map):
         return_map = '11'
-    return_pos = char.get('pre_copy_pos') or [29860, 100, -17005, 0]
+    return_pos = char.get('pre_copy_pos') or default_map_spawn_position(return_map)
     return return_map, list(return_pos)
 
 
@@ -3942,17 +3942,7 @@ def street_race_start_position(map_id):
                 route_start = STREET_RACE_START_POSITIONS.get(str(copy_id))
                 if route_start:
                     return list(route_start)
-
-    birth = str(MAP_CONFIG.get(str(map_id), {}).get('birth') or '')
-    parts = birth.split('#')
-    if len(parts) < 3:
-        return None
-    try:
-        x, y, z = int(parts[0]), int(parts[1]), int(parts[2])
-        heading = int(parts[3]) if len(parts) > 3 else 0
-    except (TypeError, ValueError):
-        return None
-    return [x, y if y else 100, z, heading]
+    return configured_map_birth_position(map_id)
 
 def update_street_race_checkpoint_progress(char, move_body, car_pos):
     """Record ordered checkpoints reached by the APK's player-car move packets."""
@@ -4353,7 +4343,8 @@ def validate_exp_skill_hit(char, state, target_id, skill_id, requested_effinfo_i
         print(f"[EXP HIT] rejected effect={effinfo_id!r} for skill={skill_id}")
         return None
 
-    player_pos = state.get('player_auth_pos', {}).get(int(char.get('id', 0)), char.get('pos', [0, 100, 0, 0]))
+    player_pos = state.get('player_auth_pos', {}).get(
+        int(char.get('id', 0)), char.get('pos') or default_map_spawn_position(char.get('map_id')))
     monster_pos = state.get('monster_pos', {}).get(int(target_id))
     if (not isinstance(player_pos, (list, tuple)) or len(player_pos) < 3
             or not isinstance(monster_pos, (list, tuple)) or len(monster_pos) < 2):
@@ -4578,7 +4569,7 @@ def reconcile_exp_stage_login(char):
                 # character location can lag behind it. Resume at the stage's
                 # known safe spawn point so monsters and player share a map.
                 char['map_id'] = run_map_id
-                char['pos'] = [0, 100, 0, 0]
+                char['pos'] = default_map_spawn_position(run_map_id)
                 char['active_copy_id'] = copy_id
                 print(f"[EXP RECOVERY] resumed live run copy={copy_id} player={char_id}")
                 return True
@@ -4636,7 +4627,7 @@ def reconcile_equipment_stage_login(char):
                 # the member to the same bracket/map instead of creating a new run.
                 saved_pos = state.get('player_auth_pos', {}).get(char_id)
                 char['map_id'] = run_map_id
-                char['pos'] = list(saved_pos or [0, 100, 0, 0])
+                char['pos'] = list(saved_pos or default_map_spawn_position(run_map_id))
                 print(f"[EQUIP STAGE] reconnect restored copy={copy_id} player={char_id}")
                 return True
             return False
@@ -4882,19 +4873,67 @@ def pending_relife_offer_is_valid(offer, map_id):
     except (TypeError, ValueError):
         return False
 
+def map_config_position_list(map_id, field_name):
+    """Parse the client's packed x/y/z/heading positions for a map."""
+    cfg = MAP_CONFIG.get(str(map_id), {})
+    raw = str(cfg.get(field_name) or '')
+    try:
+        values = [int(value) for value in raw.split('#') if value != '']
+    except (TypeError, ValueError):
+        return []
+    positions = [
+        values[index:index + 4]
+        for index in range(0, len(values) - 3, 4)
+    ]
+    if not positions and field_name in ('birth', 'relife_pos') and len(values) >= 3:
+        positions.append(values[:3] + [0])
+    return positions
+
+
+def configured_map_birth_position(map_id):
+    """Return the first birth position, matching MapInfoData.BirthPosVector3."""
+    positions = map_config_position_list(map_id, 'birth')
+    return list(positions[0]) if positions else None
+
+
+def default_map_spawn_position(map_id):
+    """Return a map's configured spawn, falling back only to the city spawn."""
+    position = configured_map_birth_position(map_id)
+    if position is None:
+        position = configured_map_birth_position('101')
+    return list(position) if position is not None else [0, 0, 0, 0]
+
+
+def is_legacy_map_spawn_position(map_id, position):
+    """Identify exact spawn coordinates emitted by the server's old fallback logic."""
+    try:
+        current = [int(value) for value in position[:3]]
+    except (TypeError, ValueError):
+        return False
+    if current == [29860, 100, -17005]:
+        return True
+
+    birth = configured_map_birth_position(map_id)
+    if (birth and current[0] == birth[0] and current[2] == birth[2]
+            and current[1] != birth[1] and current[1] in (100, 200)):
+        return True
+
+    map_id = str(map_id)
+    for (_source_map, target_map), (px, py, pz) in MAP_CONNECT_DATA.items():
+        if str(target_map) != map_id:
+            continue
+        portal_pos = [int(px * 100), int(py * 100), int(pz * 100)]
+        if map_id in ('101', '105'):
+            portal_pos[1] = 200
+        if current == portal_pos and (birth is None or current != birth[:3]):
+            return True
+    return False
+
+
 def configured_map_relife_position(map_id):
     """Return the first client-configured revive point, or the map birth point."""
-    cfg = MAP_CONFIG.get(str(map_id), {})
-    for raw in (cfg.get('relife_pos'), cfg.get('birth')):
-        values = str(raw or '').split('#')
-        if len(values) < 3:
-            continue
-        try:
-            y = int(values[1])
-            return [int(values[0]), y if y != 0 else 100, int(values[2]), int(values[3]) if len(values) > 3 else 0]
-        except (TypeError, ValueError):
-            continue
-    return [29860, 100, -17005, 0]
+    positions = map_config_position_list(map_id, 'relife_pos')
+    return list(positions[0]) if positions else configured_map_birth_position(map_id)
 
 def _random_attr_field(entry, field_tag, field_name):
     if not isinstance(entry, dict):
@@ -6881,7 +6920,7 @@ def get_full_char(c):
     prop = encode_sproto([(13, get_currency_balance(c, 0)), (14, get_currency_balance(c, 1)),
                           (15, get_currency_balance(c, 2)), (16, get_currency_balance(c, 3)),
                           (17, get_currency_balance(c, 4)), (18, get_currency_balance(c, 5))])
-    pos = c.get('pos', [29860, 100, -17005, 0])
+    pos = c.get('pos') or default_map_spawn_position(c.get('map_id'))
     mv = get_movement(pos[0], pos[1], pos[2], pos[3])
 
     attr_run = encode_sproto(character_attribute_fields(stats))
@@ -8005,7 +8044,7 @@ def start_tower_floor(conn, char, floor_id, send_rpc_push, continuation=False):
     player_stats = get_character_stats(char)
     char["hp"] = int(player_stats.get("hp_max", char.get("hp", 1)) or 1)
     if not continuation:
-        char["pre_copy_pos"] = list(char.get("pos", [0, 100, 0, 0]))
+        char["pre_copy_pos"] = list(char.get("pos") or default_map_spawn_position(char.get("map_id")))
         char["pre_copy_map"] = str(char.get("map_id") or "11")
     save_chars(all_accounts_chars)
     if continuation:
@@ -8349,7 +8388,8 @@ def spawn_equipment_stage_map(conn, map_id, char, map_ready=False, force=False):
     # The team is assigned before its map transition, so its first cached
     # position is still the lobby position.  The position sent by the map
     # transition becomes authoritative when the client reports map_ready.
-    state.setdefault('player_auth_pos', {})[char_id] = list(char.get('pos', [0, 100, 0, 0]))
+    state.setdefault('player_auth_pos', {})[char_id] = list(
+        char.get('pos') or default_map_spawn_position(char.get('map_id')))
     state.setdefault('player_auth_move_at', {}).setdefault(char_id, time.monotonic())
     char['active_copy_id'] = copy_id
     char['equipment_team_id'] = int(state.get('team_id') or 0)
@@ -8719,7 +8759,8 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
     # CopySceneData exist_time timer ends the full run.
 
     player_pos = exp_state.get('player_auth_pos', {}).get(
-        int(picked_char.get('id', 0)), picked_char.get('pos', [0, 100, 0, 0]))
+        int(picked_char.get('id', 0)),
+        picked_char.get('pos') or default_map_spawn_position(picked_char.get('map_id')))
     px = player_pos[0] / 100.0
     pz = player_pos[2] / 100.0
     player_stats = get_character_stats(picked_char)
@@ -8803,11 +8844,12 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
             live_targets = exp_online_members(exp_state, alive=True)
             if not live_targets: continue
             _tid, target_conn, target_char = min(live_targets, key=lambda item: (
-                                                                                        exp_state.get('player_auth_pos', {}).get(int(item[0]), item[2].get('pos', [0,100,0,0]))[0] / 100.0 - m_pos[0]) ** 2 + (
-                                                                                        exp_state.get('player_auth_pos', {}).get(int(item[0]), item[2].get('pos', [0,100,0,0]))[2] / 100.0 - m_pos[1]) ** 2)
+                                                                                        exp_state.get('player_auth_pos', {}).get(int(item[0]), item[2].get('pos') or default_map_spawn_position(item[2].get('map_id')))[0] / 100.0 - m_pos[0]) ** 2 + (
+                                                                                        exp_state.get('player_auth_pos', {}).get(int(item[0]), item[2].get('pos') or default_map_spawn_position(item[2].get('map_id')))[2] / 100.0 - m_pos[1]) ** 2)
             conn_for_sync = target_conn; picked_char = target_char
             target_pos = exp_state.get('player_auth_pos', {}).get(
-                int(picked_char.get('id', 0)), picked_char.get('pos', [0, 100, 0, 0]))
+                int(picked_char.get('id', 0)),
+                picked_char.get('pos') or default_map_spawn_position(picked_char.get('map_id')))
             px = target_pos[0] / 100.0; pz = target_pos[2] / 100.0
             player_stats = get_character_stats(picked_char)
         mx, mz = m_pos[0], m_pos[1]
@@ -10274,7 +10316,8 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             picked_char['exp_stage_state']=state
         state.setdefault('char_refs',{})[int(picked_char.get('id',0))]=picked_char
         state.setdefault('player_auth_pos', {}).setdefault(
-            int(picked_char.get('id', 0)), list(picked_char.get('pos', [0, 100, 0, 0])))
+            int(picked_char.get('id', 0)),
+            list(picked_char.get('pos') or default_map_spawn_position(picked_char.get('map_id'))))
         state.setdefault('player_auth_move_at', {}).setdefault(int(picked_char.get('id', 0)), time.monotonic())
         def push(tag,data): exp_send_push(state,tag,data)
         push(629,encode_sproto([(0,state['end_time']),(1,2)])); _send_exp_tag683(push,state,cfg)
@@ -11800,19 +11843,7 @@ def clear_cash_stage_npcs(char_id):
 
 
 def cash_stage_spawn_position(map_id):
-    map_cfg = MAP_CONFIG.get(str(map_id or ''))
-    birth = str(map_cfg.get('birth') or '') if isinstance(map_cfg, dict) else ''
-    parts = birth.split('#')
-    if len(parts) < 3:
-        return None
-    try:
-        x_coord, y_coord, z_coord = map(int, parts[:3])
-        return [
-            x_coord, 100 if y_coord == 0 else y_coord, z_coord,
-            int(parts[3]) if len(parts) > 3 else 0
-        ]
-    except ValueError:
-        return None
+    return configured_map_birth_position(map_id)
 
 
 def recover_cash_stage_login(char):
@@ -11862,7 +11893,7 @@ def recover_cash_stage_login(char):
         return_map = '11' if '11' in MAP_CONFIG else next(iter(MAP_CONFIG), '11')
     return_pos = char.get('pre_copy_pos')
     if not isinstance(return_pos, list) or len(return_pos) < 3:
-        return_pos = [29860, 100, -17005, 0]
+        return_pos = default_map_spawn_position(return_map)
     timer = char.pop('_cash_stage_timer', None)
     if timer is not None:
         timer.cancel()
@@ -12132,7 +12163,8 @@ def start_cash_stage_run(conn, char, copy_id, cfg, use_time_item, send_rpc_push)
             )
         duration = max(1, int(cfg.get('exist_time') or 300))
         if char.get('pre_copy_pos') is None:
-            char['pre_copy_pos'] = list(char.get('pos', [29860, 100, -17005, 0]))
+            char['pre_copy_pos'] = list(
+                char.get('pos') or default_map_spawn_position(char.get('map_id')))
             char['pre_copy_map'] = str(char.get('map_id', '11'))
         char['active_copy_id'] = copy_id
         char['_cash_stage_map_ready'] = False
@@ -12696,7 +12728,7 @@ def _rank_pvp_character_look(character):
     """Create the exact character_look layout used by opponent cards."""
     ensure_backpack_state(character)
     stats = get_character_stats(character)
-    pos = list(character.get("pos") or [0, 100, 0, 0])
+    pos = list(character.get("pos") or default_map_spawn_position(character.get("map_id")))
     if len(pos) < 4:
         pos.extend([0] * (4 - len(pos)))
     equip_map = {int(item["index_id"]): _gameitem_sproto(item)
@@ -13524,7 +13556,7 @@ def init_character_fields(c):
         'completed_side_missions': [],
         'last_main_mission_id': "-1",
         'inventory': [],
-        'pos': [29860, 100, -17005, 0],
+        'pos': default_map_spawn_position('11'),
         'map_id': "11",
         'pk_mode': 0,
         'tutorial': 0,
@@ -13990,6 +14022,15 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
 
     src_map = str(picked_char.get('map_id') or '11')
     target_map_id = str(target_map_id) or '11'
+    if (override_pos is None
+            and (target_map_id not in MAP_CONFIG
+                 or configured_map_birth_position(target_map_id) is None)):
+        fallback_pos = configured_map_birth_position('101')
+        if fallback_pos is not None:
+            print(f"[MAP SPAWN] no configured birth position for map={target_map_id}; "
+                  f"redirecting to map=101 pos={fallback_pos}")
+            target_map_id = '101'
+            override_pos = fallback_pos
     if (isinstance(picked_char.get('cash_stage_state'), dict)
             or is_cash_stage_copy(picked_char.get('active_copy_id'))
             or is_cash_stage_map(src_map) or is_cash_stage_map(target_map_id)):
@@ -14024,62 +14065,22 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
     picked_char['map_id'] = target_map_id
     if target_map_id == '101' and int(picked_char.get('level', 1)) >= int(CITY_DANCE_CONFIG.get('101', {}).get('UnlockLevel', 8) or 8):
         ensure_dance_runtime(picked_char)
-    scene_name = "Unknown"
+    scene_name = MAP_CONFIG.get(target_map_id, {}).get('scene', "Unknown")
 
     # Update position
     landing_pos = override_pos
     if not landing_pos and street_race_config_for_map(target_map_id):
         landing_pos = street_race_start_position(target_map_id)
         if landing_pos:
-            scene_name = MAP_CONFIG.get(target_map_id, {}).get('scene', scene_name)
             print(f"[STREET RACE] route start map={target_map_id} pos={landing_pos}")
-    if not landing_pos and target_map_id == "502":
-        # Lord Battle: Restore verified MapInfo coordinates (Y=120)
-        landing_pos = [-400, 120, 0, 9000]
-        print(f"[TELEPORT] Lord Battle Map 502 start pos={landing_pos}")
+    if not landing_pos:
+        landing_pos = configured_map_birth_position(target_map_id)
 
-    # 1. Try teleport portal heuristic
-    if not landing_pos and (src_map, target_map_id) in MAP_CONNECT_DATA:
-        px, py, pz = MAP_CONNECT_DATA[(src_map, target_map_id)]
-        # Liberty City height fix: ensure player is above NavMesh
-        y_coord = int(py * 100)
-        if target_map_id == "101" or target_map_id == "105":
-            y_coord = 200
-        landing_pos = [int(px * 100), y_coord, int(pz * 100), 0]
-        print(f"[TELEPORT] Transition {src_map} -> {target_map_id} using portal heuristic: {landing_pos}")
-
-    # 2. Fallback to birth pos
-    if not landing_pos and target_map_id in MAP_CONFIG:
-        birth = MAP_CONFIG[target_map_id]['birth']
-        scene_name = MAP_CONFIG[target_map_id]['scene']
-        if birth:
-            parts = birth.split('#')
-            if len(parts) >= 3:
-                # Fix: If height is 0, set it to a safe level
-                y_coord = int(parts[1])
-                if target_map_id == "101" or target_map_id == "105":
-                    y_coord = 200 # Safe height above floor
-                elif y_coord == 0:
-                    y_coord = 100
-
-                x_coord = int(parts[0])
-                z_coord = int(parts[2])
-                # Fix: Exp stage maps have birth=0#0#0#0 in MapInfoData, use a position
-                # near the center of all monster spawn areas so the player is in the battle zone
-                # MonsterData 2231-2294 positions: X ranges -970 to 1090, Z ranges -1137 to 1088
-                # Center ≈ (0, 0) in world units. Spawn slightly offset toward first wave.
-                if target_map_id in ["223", "224", "225", "226", "227", "228", "229"]:
-                    x_coord = 0     # Center of monster spawn area
-                    z_coord = 0     # Center of monster spawn area
-                    y_coord = 100
-
-                landing_pos = [x_coord, y_coord, z_coord, int(parts[3]) if len(parts) > 3 else 0]
-                print(f"[TELEPORT] Spawn fix map={target_map_id} pos={landing_pos}")
-
-    if landing_pos:
-        picked_char['pos'] = landing_pos
+    if landing_pos is not None:
+        picked_char['pos'] = list(landing_pos)
+        print(f"[MAP SPAWN] map={target_map_id} pos={picked_char['pos']}")
     else:
-        print(f"[MAP CONFIG MISSING] map_id={target_map_id}")
+        print(f"[MAP SPAWN] no configured spawn available map={target_map_id}")
 
     if target_map_id == "101":
         print(
@@ -17129,7 +17130,8 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
                 if boss_map_id:
                     # Save pre-copy position for return after boss fight
                     if char.get('pre_copy_pos') is None:
-                        char['pre_copy_pos'] = list(char.get('pos', [0, 100, 0, 0]))
+                        char['pre_copy_pos'] = list(
+                            char.get('pos') or default_map_spawn_position(char.get('map_id')))
                         char['pre_copy_map'] = str(char.get('map_id', '11'))
                     char['active_copy_id'] = boss_map_id
                     char.pop('_guild_boss_exit_key', None)
@@ -18172,7 +18174,7 @@ def client_handler(conn, addr):
                                 picked_char['street_race_result_recorded'] = False
                                 picked_char['pos'] = (street_race_start_position(current_map_id)
                                                       or picked_char.get('pos')
-                                                      or [29860, 100, -17005, 0])
+                                                      or default_map_spawn_position(current_map_id))
                         else:
                             # The client has no saved race-car/checkpoint restore path.
                             # A full character login must return an unfinished run to
@@ -18436,31 +18438,38 @@ def client_handler(conn, addr):
                     if mid == 'None':
                         mid = '11'
                         picked_char['map_id'] = '11'
-                    scene_name = "Unknown"
+                    birth_pos = configured_map_birth_position(mid)
+                    if birth_pos is None:
+                        birth_pos = configured_map_birth_position('101')
+                        if birth_pos is not None:
+                            print(f"[LOGIN SPAWN FIX] no configured birth position map={mid}; "
+                                  f"returning player={char_id} to map=101")
+                            mid = '101'
+                            picked_char['map_id'] = mid
+                            picked_char['pos'] = list(birth_pos)
                     if mid in MAP_CONFIG:
                         scene_name = MAP_CONFIG[mid]['scene']
                     else:
                         print(f"[MAP CONFIG MISSING] map_id={mid}")
 
-                    # Validate spawn position - fall back to birth position if invalid
                     current_pos = picked_char.get('pos')
-                    pos_valid = (isinstance(current_pos, list)
+                    pos_valid = (isinstance(current_pos, (list, tuple))
                                  and len(current_pos) >= 3
-                                 and not (current_pos[0] == 0 and current_pos[1] == 0 and current_pos[2] == 0))
-                    if not pos_valid and mid in MAP_CONFIG:
-                        birth = MAP_CONFIG[mid].get('birth')
-                        if birth:
-                            parts = birth.split('#')
-                            if len(parts) >= 3:
-                                x_coord = int(parts[0])
-                                y_coord = int(parts[1])
-                                z_coord = int(parts[2])
-                                # Fix height for maps with known NavMesh issues
-                                if mid in ("101", "105") or y_coord == 0:
-                                    y_coord = 200 if mid in ("101", "105") else 100
-                                o_coord = int(parts[3]) if len(parts) > 3 else 0
-                                picked_char['pos'] = [x_coord, y_coord, z_coord, o_coord]
-                                print(f"[LOGIN SPAWN FIX] map={mid} pos={picked_char['pos']}")
+                                 and all(isinstance(value, (int, float)) for value in current_pos[:3]))
+                    pos_is_zero = bool(pos_valid and all(value == 0 for value in current_pos[:3]))
+                    configured_birth_is_zero = bool(
+                        birth_pos is not None and all(value == 0 for value in birth_pos[:3])
+                    )
+                    legacy_spawn_pos = bool(
+                        pos_valid and is_legacy_map_spawn_position(mid, current_pos)
+                    )
+                    if (not pos_valid or legacy_spawn_pos
+                            or (pos_is_zero and not configured_birth_is_zero)):
+                        if birth_pos is not None:
+                            picked_char['pos'] = list(birth_pos)
+                            print(f"[LOGIN SPAWN FIX] map={mid} pos={picked_char['pos']}")
+                    elif len(current_pos) < 4:
+                        picked_char['pos'] = list(current_pos[:3]) + [0]
 
                     debug_log("[DEBUG] BEFORE MAP ENTER")
                     try:
@@ -18807,7 +18816,9 @@ def client_handler(conn, addr):
                             if stage_pos:
                                 picked_char['pos'] = list(stage_pos)
                             start_map_transition(conn, picked_char, char_map, send_rpc_push,
-                                                 override_pos=list(picked_char.get('pos') or [0, 100, 0, 0]))
+                                                 override_pos=list(
+                                                     picked_char.get('pos')
+                                                     or default_map_spawn_position(char_map)))
                         else:
                             spawn_equipment_stage_map(
                                 conn, char_map, picked_char, map_ready=True, force=True)
@@ -18839,7 +18850,8 @@ def client_handler(conn, addr):
                             start_map_transition(
                                 conn, picked_char, char_map, send_rpc_push,
                                 override_pos=list(
-                                    picked_char.get('pos') or [0, 100, 0, 0]))
+                                    picked_char.get('pos')
+                                    or default_map_spawn_position(char_map)))
                         else:
                             spawn_exp_team_stage_map(
                                 conn, char_map, picked_char, force=True)
@@ -18862,7 +18874,10 @@ def client_handler(conn, addr):
                                     picked_char['pos'] = start_pos
                             start_map_transition(
                                 conn, picked_char, char_map, send_rpc_push,
-                                override_pos=list(picked_char.get('pos') or [0, 100, 0, 0])
+                                override_pos=list(
+                                    picked_char.get('pos')
+                                    or default_map_spawn_position(char_map)
+                                )
                             )
                         else:
                             picked_char['_cash_stage_map_ready'] = True
@@ -18924,7 +18939,8 @@ def client_handler(conn, addr):
                             # The saved server map is authoritative after a leave,
                             # stale client scene, or half-finished transition.
                             if not active_race and transition_override_pos is None:
-                                transition_override_pos = list(picked_char.get('pos') or [29860, 100, -17005, 0])
+                                transition_override_pos = list(
+                                    picked_char.get('pos') or default_map_spawn_position(char_map))
                             start_map_transition(conn, picked_char, char_map, send_rpc_push,
                                                  override_pos=transition_override_pos)
                             if active_race:
@@ -18962,6 +18978,28 @@ def client_handler(conn, addr):
                     restored_team = get_team_for_char(reconnect_char_id)
                     if restored_team:
                         send_team_update(restored_team['id'])
+                if session is not None:
+                    ph = encode_sproto([(1, session)])
+                    pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 251: # enter_teleport_point
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    current_map = str(picked_char.get('map_id', ''))
+                    map_cfg = MAP_CONFIG.get(current_map, {})
+                    positions = map_config_position_list(current_map, 'relife_pos')
+                    point_index = get_val_int(body, 3, -1)
+                    if (str(map_cfg.get('teleport_pos') or '').strip()
+                            and int(picked_char.get('hp', 0)) > 0
+                            and 0 <= point_index < len(positions)):
+                        picked_char['pos'] = list(positions[point_index])
+                        broadcast_aoi_move(picked_char)
+                        save_chars(all_accounts_chars)
+                        print(f"[MAP TELEPORT] player={picked_char.get('id')} map={current_map} "
+                              f"point={point_index} pos={picked_char['pos']}")
+                    else:
+                        print(f"[MAP TELEPORT] rejected player={picked_char.get('id')} "
+                              f"map={current_map} point={point_index}")
                 if session is not None:
                     ph = encode_sproto([(1, session)])
                     pf = sproto_pack(ph + encode_sproto([]))
@@ -22060,7 +22098,7 @@ def client_handler(conn, addr):
                                         encode_sproto([(0, "1001"), (1, cash_kill), (3, 0)])
                                     ])]))
                                     # Spawn drop item on the ground
-                                    player_pos = picked_char.get('pos', [0, 100, 0, 0])
+                                    player_pos = picked_char.get('pos') or default_map_spawn_position(picked_char.get('map_id'))
                                     drop_x = player_pos[0] + random.randint(-500, 500)
                                     drop_z = player_pos[2] + random.randint(-500, 500)
                                     drop_inst_id = int(time.time() * 1000) % 1000000000
@@ -22264,7 +22302,7 @@ def client_handler(conn, addr):
                                 # Map 11's client-local enemy flow also shows
                                 # a cash pickup in-world. Other maps keep their
                                 # existing direct reward path.
-                                player_pos_m11 = picked_char.get('pos', [0, 100, 0, 0])
+                                player_pos_m11 = picked_char.get('pos') or default_map_spawn_position('11')
                                 drop_x_m11 = player_pos_m11[0] + random.randint(-500, 500)
                                 drop_z_m11 = player_pos_m11[2] + random.randint(-500, 500)
                                 drop_inst_id_m11 = next_global_inst_id()
@@ -22468,7 +22506,9 @@ def client_handler(conn, addr):
                         else:
                             state["times"] = max(0, int(state.get("times", 0)) - 1)
                             picked_char["pre_arena_map"] = str(picked_char.get("map_id") or "11")
-                            picked_char["pre_arena_pos"] = list(picked_char.get("pos") or [29860, 100, -17005, 0])
+                            picked_char["pre_arena_pos"] = list(
+                                picked_char.get("pos")
+                                or default_map_spawn_position(picked_char.get("map_id")))
                             picked_char["hp"] = int(get_character_stats(picked_char).get("hp_max", 1))
                             match_id = f"{picked_char.get('id')}:{int(time.time()*1000)}:{random.randint(1,999999)}"
                             picked_char["_rank_pvp_match"] = {
@@ -22626,11 +22666,11 @@ def client_handler(conn, addr):
                         # coin drop at the last server-synced car position.
                         player_pos = picked_char.get('pos')
                         if not isinstance(player_pos, (list, tuple)) or len(player_pos) < 3:
-                            player_pos = street_race_start_position(race_map) or [0, 100, 0, 0]
+                            player_pos = street_race_start_position(race_map) or default_map_spawn_position(race_map)
                         try:
                             drop_x, drop_z = int(player_pos[0]), int(player_pos[2])
                         except (TypeError, ValueError):
-                            fallback_pos = street_race_start_position(race_map) or [0, 100, 0, 0]
+                            fallback_pos = street_race_start_position(race_map) or default_map_spawn_position(race_map)
                             drop_x, drop_z = int(fallback_pos[0]), int(fallback_pos[2])
                         drop_item = encode_sproto([(0, "1001"), (1, cash_drop), (3, 0)])
                         send_rpc_push(527, encode_sproto([
@@ -22734,7 +22774,9 @@ def client_handler(conn, addr):
                                 picked_char['hp'] = player_stats_entry['hp_max']
                                 sync_char_attrs_rpc(conn, picked_char)
                                 if picked_char.get('pre_copy_pos') is None:
-                                    picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                                    picked_char['pre_copy_pos'] = list(
+                                        picked_char.get('pos')
+                                        or default_map_spawn_position(picked_char.get('map_id')))
                                     picked_char['pre_copy_map'] = str(picked_char.get('map_id', '11'))
                                 state = ensure_daily_copy_state(picked_char)
                                 if remaining > 0: state['remaining'][copy_id] = remaining - 1
@@ -22819,7 +22861,9 @@ def client_handler(conn, addr):
 
                             if remaining > 0 or extra_item_used:
                                 if picked_char.get('pre_copy_pos') is None:
-                                    picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                                    picked_char['pre_copy_pos'] = list(
+                                        picked_char.get('pos')
+                                        or default_map_spawn_position(picked_char.get('map_id')))
                                     picked_char['pre_copy_map'] = str(picked_char.get('map_id', '11'))
                                 state = ensure_daily_copy_state(picked_char)
                                 if remaining > 0:
@@ -22851,7 +22895,9 @@ def client_handler(conn, addr):
                 elif picked_char and msg != 276 and copy_id not in DAILY_EXP_CONFIG:
                     # Save current map and position before entering any copy scene
                     if picked_char.get('pre_copy_pos') is None:
-                        picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                        picked_char['pre_copy_pos'] = list(
+                            picked_char.get('pos')
+                            or default_map_spawn_position(picked_char.get('map_id')))
                         picked_char['pre_copy_map'] = str(picked_char.get('map_id', '11'))
                     picked_char['active_copy_id'] = copy_id
                     advance_missions(picked_char, send_rpc_push, 'dungeon', target_id=copy_id)
@@ -23066,7 +23112,7 @@ def client_handler(conn, addr):
                         # revives at this map's configured RelifePos.
                         if not is_inplace and int(offer.get('type', 1)) == 0:
                             target_map = '101'
-                            pos = configured_map_relife_position(target_map)
+                            pos = configured_map_birth_position(target_map)
                             stats = get_character_stats(picked_char)
                             picked_char['hp'] = stats['hp_max']
                             picked_char['pos'] = pos
@@ -23080,7 +23126,7 @@ def client_handler(conn, addr):
                         else:
                             stats = get_character_stats(picked_char)
                             picked_char['hp'] = stats['hp_max']
-                            pos = (list(picked_char.get('pos') or [0, 100, 0, 0]) if is_inplace
+                            pos = (list(picked_char.get('pos') or default_map_spawn_position(current_map)) if is_inplace
                                    else configured_map_relife_position(current_map))
                             picked_char['pos'] = pos
                             picked_char.pop('_pending_relife', None)
@@ -23176,14 +23222,14 @@ def client_handler(conn, addr):
                     sync_char_attrs_rpc(conn, picked_char)
 
                     # Determine revive position based on isInplace
-                    pos = picked_char.get('pos', [0, 100, 0, 0])
+                    pos = list(picked_char.get('pos') or [0, 0, 0, 0])
+                    if len(pos) < 4:
+                        pos.append(0)
                     if not is_inplace:
-                        # Return to city - use birth position of current map or default city
                         mid = str(picked_char.get('map_id', '11'))
-                        if mid in MAP_CONFIG and MAP_CONFIG[mid].get('birth'):
-                            birth = MAP_CONFIG[mid]['birth'].split('#')
-                            if len(birth) >= 3:
-                                pos = [int(birth[0]), int(birth[1]) if int(birth[1]) > 0 else 100, int(birth[2]), int(birth[3]) if len(birth) > 3 else 0]
+                        birth_pos = configured_map_birth_position(mid)
+                        if birth_pos is not None:
+                            pos = birth_pos
 
                     picked_char['pos'] = pos
 
@@ -23338,7 +23384,8 @@ def client_handler(conn, addr):
                                 picked_char['street_race_last_move_at'] = start_time
                                 picked_char['street_race_last_car_pos'] = (
                                         street_race_start_position(current_map)
-                                        or list(picked_char.get('pos') or [0, 100, 0, 0]))
+                                        or list(picked_char.get('pos')
+                                                or default_map_spawn_position(current_map)))
                                 picked_char['street_race_movement_valid'] = True
                             duration = int(cfg.get('exist_time') or 900)
                             elapsed_s = max(0, int(time.monotonic() - float(picked_char['street_race_started_at'])))
@@ -23461,7 +23508,9 @@ def client_handler(conn, addr):
                         else:
                             # Save current map and position before entering a copy scene.
                             if picked_char.get('pre_copy_pos') is None:
-                                picked_char['pre_copy_pos'] = list(picked_char.get('pos', [29860, 100, -17005, 0]))
+                                picked_char['pre_copy_pos'] = list(
+                                    picked_char.get('pos')
+                                    or default_map_spawn_position(picked_char.get('map_id')))
                                 picked_char['pre_copy_map'] = str(picked_char.get('map_id', '11'))
                             picked_char['active_copy_id'] = mid
                         start_map_transition(conn, picked_char, mid, send_rpc_push)
@@ -26218,7 +26267,8 @@ def start_team_exp_run(team, copy_id):
         if remaining > 0:
             ensure_daily_copy_state(char)['remaining'][copy_id] = remaining - 1
         if char.get('pre_copy_pos') is None:
-            char['pre_copy_pos'] = list(char.get('pos', [29860, 100, -17005, 0]))
+            char['pre_copy_pos'] = list(
+                char.get('pos') or default_map_spawn_position(char.get('map_id')))
             char['pre_copy_map'] = str(char.get('map_id', '11'))
         char['active_copy_id'] = copy_id
         char['exp_members'] = ids
@@ -26226,7 +26276,8 @@ def start_team_exp_run(team, copy_id):
         char['exp_defer_start'] = True
         char['exp_stage_state'] = state
         char['hp'] = get_character_stats(char)['hp_max']
-        state['player_auth_pos'][member_id] = list(char.get('pos', [0, 100, 0, 0]))
+        state['player_auth_pos'][member_id] = list(
+            char.get('pos') or default_map_spawn_position(char.get('map_id')))
         state['player_auth_move_at'][member_id] = time.monotonic()
         sync_char_attrs_rpc(conn, char)
         send_push_to_char(member_id, 555, sync_copy_scenes(char))
@@ -26316,7 +26367,8 @@ def start_team_equipment_run(team, copy_id):
     }
     for cid, member_conn, member in players:
         if member.get('pre_copy_pos') is None:
-            member['pre_copy_pos'] = list(member.get('pos', [29860, 100, -17005, 0]))
+            member['pre_copy_pos'] = list(
+                member.get('pos') or default_map_spawn_position(member.get('map_id')))
             member['pre_copy_map'] = str(member.get('map_id', '11'))
         remaining = member_attempts[cid]
         if remaining > 0:
@@ -26326,7 +26378,8 @@ def start_team_equipment_run(team, copy_id):
         member['equipment_stage_state'] = state
         member['team_goal_copy'] = copy_id
         member['hp'] = get_character_stats(member)['hp_max']
-        state['player_auth_pos'][cid] = list(member.get('pos', [0, 100, 0, 0]))
+        state['player_auth_pos'][cid] = list(
+            member.get('pos') or default_map_spawn_position(member.get('map_id')))
         state['player_auth_move_at'][cid] = time.monotonic()
         sync_char_attrs_rpc(member_conn, member)
         send_push_to_char(cid, 555, sync_copy_scenes(member))
@@ -26423,7 +26476,8 @@ def start_solo_equipment_run(conn, char, copy_id, use_time_item, send_rpc_push):
     }
 
     if char.get('pre_copy_pos') is None:
-        char['pre_copy_pos'] = list(char.get('pos', [29860, 100, -17005, 0]))
+        char['pre_copy_pos'] = list(
+            char.get('pos') or default_map_spawn_position(char.get('map_id')))
         char['pre_copy_map'] = current_map
     daily = ensure_daily_copy_state(char)
     if remaining > 0:
@@ -26434,7 +26488,8 @@ def start_solo_equipment_run(conn, char, copy_id, use_time_item, send_rpc_push):
     char.pop('equipment_team_id', None)
     char['equipment_stage_state'] = state
     char['hp'] = get_character_stats(char)['hp_max']
-    state['player_auth_pos'][char_id] = list(char.get('pos', [0, 100, 0, 0]))
+    state['player_auth_pos'][char_id] = list(
+        char.get('pos') or default_map_spawn_position(char.get('map_id')))
     state['player_auth_move_at'][char_id] = time.monotonic()
     sync_char_attrs_rpc(conn, char)
     send_rpc_push(555, sync_copy_scenes(char))
