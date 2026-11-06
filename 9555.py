@@ -4249,6 +4249,14 @@ def send_exp_result_to_char(char, result):
 def exp_member_ids(state):
     return list(dict.fromkeys(int(cid) for cid in (state.get('members') or [state.get('owner_id')]) if cid is not None))
 
+def exp_reward_eligible(state, member_id):
+    if not state:
+        return True
+    eligible = state.get('reward_eligible_members')
+    return eligible is None or int(member_id) in {
+        int(cid) for cid in eligible
+    }
+
 def is_current_character_connection(conn, char):
     """Reject state-changing requests from a superseded character socket."""
     if not conn or not char:
@@ -8476,16 +8484,20 @@ def finish_equipment_stage(state, win):
         grade = sum(bool(grade_flag & bit) for bit in (1, 2, 4))
         show_reward_id = str(cfg.get('show_reward_id') or cfg.get('drop_id') or '')
         stage_exp = max(0, int(SHOW_REWARD_BASE_CONFIG.get(show_reward_id, {}).get('exp', 0)))
+        reward_eligible = {
+            int(member_id) for member_id in state.get('reward_eligible_members', [])
+        }
         for cid, member_conn, char in exp_participant_chars(state):
             if not char:
                 continue
             push = lambda tag, data, member_id=cid: send_push_to_char(member_id, tag, data)
-            rewards = equipment_stage_result_items(copy_id, char) if win else []
+            eligible = int(cid) in reward_eligible
+            rewards = equipment_stage_result_items(copy_id, char) if win and eligible else []
             item_payloads = [
                 encode_sproto([(0, iid), (1, count), (3, quality)])
                 for iid, quality, count in rewards
             ]
-            if win:
+            if win and eligible:
                 if rewards:
                     grant_item_rewards(char, rewards, member_conn, push, save=False)
                 daily = ensure_daily_copy_state(char)
@@ -8613,7 +8625,10 @@ def flush_exp_kill_tracker(exp_state, conn, picked_char, send_rpc_push):
     if not exp_state:
         return
     kill_tracker = list(exp_state.get('kill_tracker', []))
-    mission_chars = exp_participant_chars(exp_state) if exp_state.get('team_id') else []
+    mission_chars = [
+        participant for participant in exp_participant_chars(exp_state)
+        if exp_reward_eligible(exp_state, participant[0])
+    ] if exp_state.get('team_id') else []
     if not exp_state.get('team_id') and picked_char:
         mission_chars = [(int(picked_char.get('id', 0)), conn, picked_char)]
     for member_id, member_conn, member_char in mission_chars:
@@ -9048,17 +9063,24 @@ def finish_exp_team_stage(conn, push, owner, state, win):
     members=exp_participant_chars(state)
     if state.get('team_id'):
         for cid,_member_conn,_char in members: broadcast_aoi_remove(cid, copy_id)
+    reward_eligible = {
+        int(member_id) for member_id in state.get('reward_eligible_members', [])
+    }
     for cid,member_conn,char in members:
-        amount=int(get_exp_stage_full_reward(char.get('level',1))*ratio*(1 if win else 0.5)); cash=int(amount*0.1)
+        eligible = int(cid) in reward_eligible
+        amount = (int(get_exp_stage_full_reward(char.get('level', 1))
+                      * ratio * (1 if win else 0.5)) if eligible else 0)
+        cash=int(amount*0.1)
         send=lambda tag,data,who=cid:send_push_to_char(who,tag,data)
         if amount or cash:grant_item_rewards(char,[("2001",0,amount),("1001",0,cash)],member_conn or conn,send,save=False)
-        items=[encode_sproto([(0,'2001'),(1,amount),(3,0)]),encode_sproto([(0,'1001'),(1,cash),(3,0)])]
+        items=([encode_sproto([(0,'2001'),(1,amount),(3,0)]),
+                encode_sproto([(0,'1001'),(1,cash),(3,0)])] if eligible else [])
         result=encode_sproto([(0,subtype),(1,copy_id),(2,bool(win)),(3,flag),(4,grade),(5,items)])
         if member_conn and str(char.get('map_id')) == exp_run_map_id(state):
             send_exp_result_to_char(char,result)
         else:
             char['pending_exp_result']=result.hex()
-        if win:
+        if win and eligible:
             advance_missions(char,send,'dungeon',target_id='105');advance_missions(char,send,'level')
         char.pop('_skip_mission_save',None)
     save_chars(all_accounts_chars)
@@ -9366,21 +9388,32 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
         exp_state.get('attack_cd', {}).pop(inst_id, None) if exp_state else None
 
     if valid_kill and grant_rewards:
-        npc_stats = get_npc_attr(
-            npcid, picked_char.get('level', 1) if is_tower_map(picked_char.get('map_id')) else 1)
-        npc_lv = npc_stats.get('lv', 1)
-        char_lv = picked_char.get('level', 1)
-
-        exp_kill, cash_kill = calculate_npc_kill_rewards(char_lv, npc_lv)
-        kill_rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
         if exp_state and exp_state.get('team_id'):
-            popup = encode_sproto([(0, [encode_sproto([(0, '2001'), (1, exp_kill), (3, 0)]), encode_sproto([(0, '1001'), (1, cash_kill), (3, 0)])])])
+            npc_lv = get_npc_attr(npcid, 1).get('lv', 1)
             for member_id, member_conn, member_char in exp_participant_chars(exp_state):
+                if not exp_reward_eligible(exp_state, member_id):
+                    continue
+                member_exp, member_cash = calculate_npc_kill_rewards(
+                    member_char.get('level', 1), npc_lv)
+                member_rewards = [
+                    ("2001", 0, member_exp), ("1001", 0, member_cash)
+                ]
+                member_popup = encode_sproto([(0, [
+                    encode_sproto([(0, '2001'), (1, member_exp), (3, 0)]),
+                    encode_sproto([(0, '1001'), (1, member_cash), (3, 0)])
+                ])])
                 member_push = lambda tag, data, cid=member_id: send_push_to_char(cid, tag, data)
-                grant_item_rewards(member_char, kill_rewards, member_conn, member_push, save=False)
-                member_push(638, popup)
+                grant_item_rewards(member_char, member_rewards, member_conn, member_push, save=False)
+                member_push(638, member_popup)
         else:
-            grant_item_rewards(picked_char, kill_rewards, conn, send_rpc_push, save=False)
+            npc_stats = get_npc_attr(
+                npcid, picked_char.get('level', 1)
+                if is_tower_map(picked_char.get('map_id')) else 1)
+            exp_kill, cash_kill = calculate_npc_kill_rewards(
+                picked_char.get('level', 1), npc_stats.get('lv', 1))
+            grant_item_rewards(
+                picked_char, [("2001", 0, exp_kill), ("1001", 0, cash_kill)],
+                conn, send_rpc_push, save=False)
 
 def start_exp_stage_runtime(conn, owner, state):
     if not state or state.get('runtime_started') or state.get('defer_start'): return
@@ -9984,7 +10017,7 @@ def update_npc_aoi(conn, map_id, picked_char):
     if any(len(tdata.get('path') or []) >= 2 for tdata in tracked.values()):
         _ensure_liberty_npc_patrol_worker(conn, picked_char, conn_key)
 
-def spawn_exp_team_stage_map(conn, map_id, char):
+def spawn_exp_team_stage_map(conn, map_id, char, force=False):
     """Start team EXP stage time and combat only after every member is map-ready."""
     state = char.get('exp_stage_state') if char else None
     char_id = int(char.get('id', 0)) if char else 0
@@ -10049,7 +10082,7 @@ def spawn_exp_team_stage_map(conn, map_id, char):
             send_rpc_push_safe(conn, 629, encode_sproto([(0, state['end_time']), (1, 2)]))
             _send_exp_tag683(lambda tag, data: send_rpc_push_safe(conn, tag, data),
                              state, DAILY_EXP_CONFIG[copy_id])
-        if is_new_ready and not spawned_now and state.get('wave_started'):
+        if (is_new_ready or force) and not spawned_now and state.get('wave_started'):
             for inst_id in list(state.get('active_monsters', [])):
                 if inst_id in DEAD_NPC_SET or int(NPC_HP_MAP.get(inst_id, 0)) <= 0:
                     continue
@@ -18617,6 +18650,7 @@ def client_handler(conn, addr):
                     all_accounts_chars, cur_areaId, acc_id)
                                        if int(c.get('id', 0)) == reconnect_char_id), None)
                 if reconnect_char:
+                    reconcile_exp_stage_login(reconnect_char)
                     reconcile_equipment_stage_login(reconnect_char)
                     char_map = str(reconnect_char.get('map_id') or '11')
                     active_copy_id = str(reconnect_char.get('active_copy_id') or '')
@@ -18633,6 +18667,13 @@ def client_handler(conn, addr):
                         and is_equipment_copy_id(equipment_run.get('copy_id'))
                         and exp_run_map_id(equipment_run) == char_map
                         and reconnect_char_id in exp_member_ids(equipment_run))
+                    exp_run = reconnect_char.get('exp_stage_state')
+                    exp_reconnect = bool(
+                        exp_run and exp_run.get('stage_kind') == 'team_exp'
+                        and exp_run.get('team_id')
+                        and is_exp_map(exp_run_map_id(exp_run))
+                        and exp_run_map_id(exp_run) == char_map
+                        and reconnect_char_id in exp_member_ids(exp_run))
                     terminal_result_at_entrance = bool(
                         active_cfg.get('subtype') == 7
                         and reconnect_char.get('street_race_result_recorded')
@@ -18685,10 +18726,25 @@ def client_handler(conn, addr):
                             except (TypeError, ValueError):
                                 picked_char.pop('pending_exp_result', None)
                                 save_chars(all_accounts_chars)
-                        stage_team = TEAM_STATES.get(int(equipment_run.get('team_id') or 0))
-                        if stage_team:
-                            send_team_update(stage_team['id'])
                         print(f"[EQUIP STAGE] reconnect restored copy={active_copy_id} "
+                              f"player={reconnect_char_id} type={reconnect_type} map={char_map}")
+                    elif exp_reconnect:
+                        if reconnect_type == 1 or requested_map != char_map:
+                            stage_pos = exp_run.get('player_auth_pos', {}).get(
+                                reconnect_char_id)
+                            if stage_pos:
+                                picked_char['pos'] = list(stage_pos)
+                            start_map_transition(
+                                conn, picked_char, char_map, send_rpc_push,
+                                override_pos=list(
+                                    picked_char.get('pos') or [0, 100, 0, 0]))
+                        else:
+                            spawn_exp_team_stage_map(
+                                conn, char_map, picked_char, force=True)
+                            sync_exp_team_aoi(picked_char)
+                        send_rpc_push(555, sync_copy_scenes(picked_char))
+                        send_rpc_push(519, sync_mission_data(picked_char))
+                        print(f"[EXP STAGE] reconnect restored copy={active_copy_id} "
                               f"player={reconnect_char_id} type={reconnect_type} map={char_map}")
                     elif cash_stage_reconnect:
                         cash_stage_reloading = reconnect_type == 1 or requested_map != char_map
@@ -18801,6 +18857,9 @@ def client_handler(conn, addr):
                         picked_char.pop('_street_race_return_reconnect', None)
                         save_chars(all_accounts_chars)
                         print(f"[STREET RACE] rebound reconnect id={reconnect_char_id} type={reconnect_type} requested_map={requested_map} server_map={picked_char.get('map_id')}")
+                    restored_team = get_team_for_char(reconnect_char_id)
+                    if restored_team:
+                        send_team_update(restored_team['id'])
                 if session is not None:
                     ph = encode_sproto([(1, session)])
                     pf = sproto_pack(ph + encode_sproto([]))
@@ -23633,16 +23692,25 @@ def client_handler(conn, addr):
                             team.setdefault('pending_apps',{})[cid]=picked_char
                             sent=send_push_to_char(team['leader_id'],572,encode_sproto([(0,team_member_blob(picked_char,tid))]))
                             print(f"[TEAM] join application team={tid} member={cid} leader_notified={sent}")
-                        elif not team.get('verify') and team_join_member(team,picked_char):
+                        elif not team.get('verify') and team_join_member(
+                                team, picked_char, enforce_level_bounds=True):
                             send_team_update(tid)
                             print(f"[TEAM] open join accepted team={tid} member={cid}")
                 elif picked_char and msg==162:
                     applicant=get_val_int(body,0); agree=get_val_int(body,1,0)==1
                     team=get_team_for_char(cid)
                     if team and team.get('leader_id')==cid:
-                        ch=team.get('pending_apps',{}).pop(applicant,None)
-                        if ch is not None:
-                            joined=bool(agree and team_join_member(team,ch))
+                        pending_app=team.get('pending_apps',{}).pop(applicant,None)
+                        applicant_conn, applicant_char = ALL_CONNECTIONS.get(
+                            applicant, (None, None))
+                        if pending_app is not None:
+                            joined=bool(
+                                agree and applicant_conn and applicant_char
+                                and is_current_character_connection(
+                                    applicant_conn, applicant_char)
+                                and team_join_member(
+                                    team, applicant_char,
+                                    enforce_level_bounds=True))
                             send_push_to_char(applicant,576,encode_sproto([(0,int(team['id'])),(1,1 if joined else 0)]))
                             if joined: send_team_update(team['id'])
                 elif picked_char and msg==163:
@@ -25682,6 +25750,10 @@ def client_handler(conn, addr):
                     equipment_state = picked_char.get('equipment_stage_state')
                     if isinstance(equipment_state, dict):
                         equipment_state.get('ready_connections', {}).pop(char_id, None)
+                    exp_state = picked_char.get('exp_stage_state')
+                    if (isinstance(exp_state, dict)
+                            and exp_state.get('stage_kind') == 'team_exp'):
+                        exp_state.get('ready_connections', {}).pop(char_id, None)
                     guild_id = _guild_id_for_character(picked_char)
                     guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
                     guild_member = _guild_member_id(guild, char_id) if guild else None
@@ -25703,17 +25775,21 @@ def client_handler(conn, addr):
         print(f"[-] Client disconnected: {addr}")
 
 
-def team_join_member(team, char):
+def team_join_member(team, char, enforce_level_bounds=False):
     cid=int(char.get('id',0))
     if not team or team.get('active_run') or team.get('pending_run') or len(team.get('members',[]))>=4 or cid in team.get('members',[]): return False
     goal_id = str(team.get('goal_id') or '')
     if is_team_battle_copy(goal_id):
-        minimum = max(
-            int(COPY_SCENE_CONFIG.get(goal_id, {}).get('min_level', 1)),
-            int(team.get('min_level', 1)))
+        level = int(char.get('level', 1))
+        minimum = int(COPY_SCENE_CONFIG.get(goal_id, {}).get('min_level', 1))
+        if enforce_level_bounds:
+            minimum = max(minimum, int(team.get('min_level', 1)))
         # Team entry checks the stage minimum, not its recommended max. Keep
-        # the roster's minimum, but allow a higher-level invited teammate.
-        if int(char.get('level', 1)) < minimum: return False
+        # the leader's direct invitations independent of the advertised range.
+        if level < minimum: return False
+        if (enforce_level_bounds
+                and level > int(team.get('max_level', 80))):
+            return False
     elif not int(team.get('min_level',1))<=int(char.get('level',1))<=int(team.get('max_level',80)):
         return False
     if not is_character_available_for_team(char) or (CHAR_TEAM.get(cid) not in (None, int(team.get('id', 0)))): return False
@@ -25958,6 +26034,14 @@ def start_team_exp_run(team, copy_id):
     leader_remaining = copy_attempts_remaining(leader, copy_id, cfg)
     if leader_remaining <= 0:
         return False
+    member_attempts = {
+        member_id: copy_attempts_remaining(char, copy_id, cfg)
+        for member_id, _conn, char in players
+    }
+    reward_eligible_members = [
+        member_id for member_id, remaining in member_attempts.items()
+        if remaining > 0
+    ]
 
     state = {
         'stage_kind': 'team_exp', 'copy_id': copy_id, 'map_id': copy_id,
@@ -25969,14 +26053,16 @@ def start_team_exp_run(team, copy_id):
         'active_monsters': [], 'monster_pos': {}, 'monster_heading': {},
         'ai_active': True, 'runtime_started': False, 'timer_started': False,
         'wave_started': False, 'run_initialized': True, 'defer_start': True,
+        'reward_eligible_members': reward_eligible_members,
         'kill_tracker': [], 'killed_npcs': [], 'spawned_npcs': set(),
         'ready_connections': {}, 'player_auth_pos': {},
         'player_auth_move_at': {}, '_kill_lock': threading.RLock(),
     }
 
-    daily = ensure_daily_copy_state(leader)
-    daily['remaining'][copy_id] = max(0, leader_remaining - 1)
     for member_id, conn, char in players:
+        remaining = member_attempts[member_id]
+        if remaining > 0:
+            ensure_daily_copy_state(char)['remaining'][copy_id] = remaining - 1
         if char.get('pre_copy_pos') is None:
             char['pre_copy_pos'] = list(char.get('pos', [29860, 100, -17005, 0]))
             char['pre_copy_map'] = str(char.get('map_id', '11'))
@@ -25990,9 +26076,10 @@ def start_team_exp_run(team, copy_id):
         state['player_auth_move_at'][member_id] = time.monotonic()
         sync_char_attrs_rpc(conn, char)
         send_push_to_char(member_id, 555, sync_copy_scenes(char))
-        advance_missions(
-            char, lambda tag, data, who=member_id: send_push_to_char(who, tag, data),
-            'dungeon', target_id='105')
+        if member_id in reward_eligible_members:
+            advance_missions(
+                char, lambda tag, data, who=member_id: send_push_to_char(who, tag, data),
+                'dungeon', target_id='105')
 
     team['active_run'] = state
     team['pending_run'] = None
@@ -26042,6 +26129,14 @@ def start_team_equipment_run(team, copy_id):
     leader_remaining = copy_attempts_remaining(owner, copy_id, cfg)
     if leader_remaining <= 0:
         return False
+    member_attempts = {
+        cid: copy_attempts_remaining(member, copy_id, cfg)
+        for cid, _member_conn, member in players
+    }
+    reward_eligible_members = [
+        cid for cid, remaining in member_attempts.items()
+        if remaining > 0
+    ]
 
     now = int(time.time())
     duration = max(1, int(cfg.get('exist_time') or 900))
@@ -26062,15 +26157,16 @@ def start_team_equipment_run(team, copy_id):
         'ready_connections': {},
         'ai_active': True, 'runtime_started': False, 'timer_started': False,
         'wave_started': False,
+        'reward_eligible_members': reward_eligible_members,
         '_kill_lock': threading.RLock(),
     }
     for cid, member_conn, member in players:
         if member.get('pre_copy_pos') is None:
             member['pre_copy_pos'] = list(member.get('pos', [29860, 100, -17005, 0]))
             member['pre_copy_map'] = str(member.get('map_id', '11'))
-        daily = ensure_daily_copy_state(member)
-        if cid == leader_id:
-            daily.setdefault('remaining', {})[copy_id] = max(0, leader_remaining - 1)
+        remaining = member_attempts[cid]
+        if remaining > 0:
+            ensure_daily_copy_state(member).setdefault('remaining', {})[copy_id] = remaining - 1
         member['active_copy_id'] = copy_id
         member['equipment_team_id'] = int(team['id'])
         member['equipment_stage_state'] = state
