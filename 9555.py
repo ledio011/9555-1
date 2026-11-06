@@ -5024,10 +5024,11 @@ def get_game_item_quality(item, equip_cfg):
 
     quality_rows = QUALITY_CONFIG.get(str(equip_cfg.get('quality_id', '')), [])
     random_attrs = item.get('random_attri')
-    if not quality_rows or not isinstance(random_attrs, dict) or not random_attrs:
+    if not quality_rows:
         return item_quality
     score = 0
-    for roll in random_attrs.values():
+    random_rolls = random_attrs.values() if isinstance(random_attrs, dict) else ()
+    for roll in random_rolls:
         try:
             roll_quality = int(_random_attr_field(roll, 3, 'quality'))
         except (TypeError, ValueError):
@@ -5139,7 +5140,8 @@ def equipment_enhance_levels(character):
             old_level = max(0, int(item.get('level', 0)))
         except (TypeError, ValueError):
             old_level = 0
-        levels[slot] = max(levels.get(slot, 0), old_level)
+        if slot not in levels:
+            levels[slot] = old_level
 
     character['equip_enhance_levels'] = {str(slot): level for slot, level in levels.items()}
     return levels
@@ -5255,8 +5257,8 @@ def get_character_stats(c):
         'cri': cri, 'res': res, 'exd': ld['exd'][prof], 'exr': ld['exr'][prof],
         'crd': ld['crd'][prof], 'crr': ld['crr'][prof], 'rec': 0, 'mov': 500
     }
-    # Percentage attributes affect runtime combat stats, but combat power
-    # counts their configured item score rather than scaling the whole stat.
+    # Primary percentage attributes contribute to power through their adjusted
+    # combat stats; secondary percentages use the client's per-item score weights.
     coeffs = [
         {"atk":16, "hp":1, "def":11, "hit":2, "eva":5.5, "cri":10, "res":10},
         {"atk":20, "hp":1, "def":12, "hit":1, "eva":6, "cri":5, "res":10},
@@ -5309,7 +5311,8 @@ def get_character_stats(c):
                 if attribute_id:
                     add_item_attribute(attribute_id, value)
                     add_extra_combat_power(attribute_id, value)
-            if not is_fashion and int(item_cfg.get('type', -1)) == 2:
+            if (not is_fashion and int(item_cfg.get('type', -1)) == 2
+                    and equipment_subtype(item) != 0):
                 random_attrs = item.get('random_attri')
                 if isinstance(random_attrs, dict):
                     for roll in random_attrs.values():
