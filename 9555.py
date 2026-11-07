@@ -60,6 +60,7 @@ GOTHAM_ACTIVITY_CONFIG = {}
 GOTHAM_AOI_TRACK = {}  # connection identity -> {shared slot: current instance ID}
 GOTHAM_AI_TASK = None
 GOTHAM_AI_LOCK = threading.Lock()
+PVP_KILL_STREAK_LOCK = threading.RLock()
 ESCORT_ACTIVITY_CONFIG = {}
 GOTHAM_ESCORT_NPC_OWNER = {} # instance ID -> character ID
 TOWER_NPC_OWNER = {} # inst_id -> character ID for private climbing-tower NPCs
@@ -4887,8 +4888,9 @@ def remember_relife_offer(char, rebirth_type, cost, item_id='9011', killer=None)
     """Bind a one-shot revive prompt to the character and map that died."""
     if not isinstance(char, dict):
         return encode_sproto([(0, int(rebirth_type)), (1, max(1, int(cost))), (2, str(item_id))])
-    char['pvp_kill_streak'] = 0
-    char['pvp_kill_streak_map'] = ''
+    with PVP_KILL_STREAK_LOCK:
+        char['pvp_kill_streak'] = 0
+        char['pvp_kill_streak_map'] = ''
     offer = {
         'map_id': str(char.get('map_id', '')),
         'type': int(rebirth_type),
@@ -9550,6 +9552,10 @@ def gotham_boss_rank_mail(slot):
             f"Event Boss The Pain has been killed. {top_name} "
             "for the biggest damage in the Battle."
         )
+        if broadcast_map_notice(
+                GOTHAM_MAP_ID,
+                f"#{{101918}}*The Pain*[ffff00]{top_name}[-]"):
+            slot["congratulations_announced"] = True
         if gotham_broadcast_system_message(boss_kill_message):
             slot["congratulations_announced"] = True
 
@@ -15525,30 +15531,31 @@ def record_pvp_kill_streak(killer, victim):
     except (TypeError, ValueError):
         print(f"[PVP STREAK] skip killer={killer.get('id')} map={map_id} invalid map type")
         return
-    try:
-        previous_streak = max(0, int(killer.get("pvp_kill_streak", 0) or 0))
-    except (TypeError, ValueError):
-        previous_streak = 0
-    try:
-        victim_streak = max(0, int(victim.get("pvp_kill_streak", 0) or 0))
-    except (TypeError, ValueError):
-        victim_streak = 0
-    if str(killer.get("pvp_kill_streak_map", "")) != map_id:
-        previous_streak = 0
-    if str(victim.get("pvp_kill_streak_map", "")) != map_id:
-        victim_streak = 0
-
     # Map type 1 also covers the normal cities; only Gotham (109) is the
     # client-authored type-1 PK map. Other supported battle map types retain
     # their existing streak notices.
     pvp_map = (map_type in (15, 21, 24)
                or (map_id == GOTHAM_MAP_ID and map_type == 1))
-    streak = previous_streak + 1 if pvp_map else 0
-    killer["pvp_kill_streak"] = streak
-    killer["pvp_kill_streak_map"] = map_id if pvp_map else ""
-    victim["pvp_kill_streak"] = 0
-    victim["pvp_kill_streak_map"] = ""
-    save_chars(all_accounts_chars)
+    with PVP_KILL_STREAK_LOCK:
+        try:
+            previous_streak = max(0, int(killer.get("pvp_kill_streak", 0) or 0))
+        except (TypeError, ValueError):
+            previous_streak = 0
+        try:
+            victim_streak = max(0, int(victim.get("pvp_kill_streak", 0) or 0))
+        except (TypeError, ValueError):
+            victim_streak = 0
+        if str(killer.get("pvp_kill_streak_map", "")) != map_id:
+            previous_streak = 0
+        if str(victim.get("pvp_kill_streak_map", "")) != map_id:
+            victim_streak = 0
+
+        streak = previous_streak + 1 if pvp_map else 0
+        killer["pvp_kill_streak"] = streak
+        killer["pvp_kill_streak_map"] = map_id if pvp_map else ""
+        victim["pvp_kill_streak"] = 0
+        victim["pvp_kill_streak_map"] = ""
+        save_chars(all_accounts_chars)
 
     if not pvp_map:
         print(f"[PVP STREAK] skip killer={killer.get('id')} map={map_id} "
@@ -15574,8 +15581,15 @@ def record_pvp_kill_streak(killer, victim):
                   f"notice_key=105020 delivered={sent}")
         return
 
-    if 2 <= streak <= 6:
-        notice_key = 102068 + streak
+    pk_streak_notice_keys = {
+        2: 102070,
+        3: 102071,
+        4: 102072,
+        5: 102073,
+        6: 102074,
+    }
+    notice_key = pk_streak_notice_keys.get(streak)
+    if notice_key is not None:
         sent = broadcast_map_notice(
             map_id,
             f"#{{{notice_key}}}*{killer.get('name', 'Player')}",
