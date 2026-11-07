@@ -308,8 +308,9 @@ EQUIP_CONFIG = {} # equipId -> {name, lv, class, job, position, base_stat, base_
 EQUIP_DROP_CONFIG = {} # EquipDrop ID -> weighted random equipment attribute definitions
 WEAPON_DROP_CONFIG = {} # WeaponDrop ID -> weighted random weapon skill definitions
 GOTHAM_BOSS_WEAPON_CLASS_WEIGHTS = {
-    1: 35, 2: 25, 3: 17, 4: 10, 5: 6, 6: 4, 7: 2, 8: 1
+    1: 32, 2: 23, 3: 17, 4: 12, 5: 8, 6: 5, 7: 3, 8: 2
 }
+GOTHAM_BOSS_EXCLUDED_WEAPON_IDS = frozenset(("10407", "20407", "30407"))
 QUALITY_CONFIG = {} # QualityData ID -> ordered quality score/modulus rows
 EQUIPMENT_UPGRADE_CONFIG = {} # equipment position -> level -> profession quality coefficients
 BADGE_CONFIG = {} # badgeId -> BadgeData fields used by merge and display logic
@@ -9473,7 +9474,7 @@ def gotham_boss_reward_plan(rank):
 
 
 def gotham_boss_weapon_rewards(char, count):
-    """Roll actual profession-matched weapon items, never a weapon-pack item."""
+    """Roll eligible regular weapons across all professions, never paid BigSale skins."""
     try:
         profession = int(char.get("prof", -1))
         max_class = _max_shop_equipment_class(char, profession)
@@ -9487,10 +9488,12 @@ def gotham_boss_weapon_rewards(char, count):
         try:
             equip_class = int(equip_cfg.get("class", 0))
             quality = int(ITEM_CONFIG.get(str(equip_id), {}).get("quality", 0))
-            if (not valid_package_reward_item(equip_id)
+            weapon_type = int(equip_cfg.get("weapon_type", -1))
+            if (str(equip_id) in GOTHAM_BOSS_EXCLUDED_WEAPON_IDS
+                    or not valid_package_reward_item(equip_id)
                     or int(equip_cfg.get("position", -1)) != 0
-                    or int(equip_cfg.get("weapon_type", -1)) != profession
-                    or int(equip_cfg.get("job", -1)) not in (-1, profession)
+                    or weapon_type not in (0, 1, 2)
+                    or int(equip_cfg.get("job", -1)) not in (-1, weapon_type)
                     or int(ITEM_CONFIG.get(str(equip_id), {}).get("type", -1)) != 2
                     or equip_class < 1 or equip_class > max_class):
                 continue
@@ -9543,7 +9546,7 @@ def gotham_boss_rank_mail(slot):
         gotham_broadcast(
             529,
             encode_sproto([
-                (0, f"#{{101918}}*The Pain*{top_name}"),
+                (0, f"#{{101918}}*The Pain*Congratulations to {top_name}"),
                 (1, True),
             ]),
         )
