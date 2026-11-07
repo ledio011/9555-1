@@ -9548,7 +9548,14 @@ def gotham_boss_rank_mail(slot):
         top_char = _guild_char_by_id(top_id)
         top_name = str(top_info.get("name") or
                        (top_char or {}).get("name") or f"Player {top_id}")
-        boss_kill_message = f"#{{101918}}*The Pain*[ffff00]{top_name}[-]"
+        boss_kill_message = (
+            f"Event Boss The Pain has been killed. {top_name} "
+            "for the biggest damage in the Battle."
+        )
+        if broadcast_map_notice(
+                GOTHAM_MAP_ID,
+                f"#{{101918}}*The Pain*[ffff00]{top_name}[-]"):
+            slot["congratulations_announced"] = True
         if gotham_broadcast_system_message(boss_kill_message):
             slot["congratulations_announced"] = True
 
@@ -15496,9 +15503,9 @@ def broadcast_map_notice(map_id, text):
     return delivered
 
 
-def gotham_broadcast_system_message(text, map_id=None):
+def gotham_broadcast_chat_message(text, chat_type, map_id=None):
     message = str(text)
-    chat_item = encode_sproto([(4, message), (5, 7), (14, message)])
+    chat_item = encode_sproto([(4, message), (5, chat_type), (14, message)])
     payload = encode_sproto([(0, [chat_item])])
     recipients = 0
     delivered = 0
@@ -15514,10 +15521,18 @@ def gotham_broadcast_system_message(text, map_id=None):
             else:
                 failed += 1
     if failed or not delivered:
-        print(f"[GOTHAM SCROLL] tag=528 map={map_id or 'all'} "
+        print(f"[GOTHAM CHAT] tag=528 type={chat_type} map={map_id or 'all'} "
               f"recipients={recipients} "
               f"delivered={delivered} failed={failed}")
     return delivered
+
+
+def gotham_broadcast_system_message(text):
+    return gotham_broadcast_chat_message(text, 0)
+
+
+def gotham_broadcast_scroll_message(text, map_id):
+    return gotham_broadcast_chat_message(text, 7, map_id)
 
 
 def record_pvp_kill_streak(killer, victim):
@@ -15588,7 +15603,7 @@ def record_pvp_kill_streak(killer, victim):
     if notice_key is not None:
         notice_text = f"#{{{notice_key}}}*{killer.get('name', 'Player')}"
         if map_id == GOTHAM_MAP_ID:
-            sent = gotham_broadcast_system_message(notice_text, map_id)
+            sent = gotham_broadcast_scroll_message(notice_text, map_id)
         else:
             sent = broadcast_map_notice(map_id, notice_text)
         print(f"[PVP STREAK] killer={killer.get('id')} map={map_id} "
@@ -15599,7 +15614,7 @@ def record_pvp_kill_streak(killer, victim):
             f"{victim.get('name', 'Player')}"
         )
         if map_id == GOTHAM_MAP_ID:
-            sent = gotham_broadcast_system_message(notice_text, map_id)
+            sent = gotham_broadcast_scroll_message(notice_text, map_id)
         else:
             sent = broadcast_map_notice(map_id, notice_text)
         print(f"[PVP STREAK] ended victim={victim.get('id')} map={map_id} "
