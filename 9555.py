@@ -9546,14 +9546,10 @@ def gotham_boss_rank_mail(slot):
         top_char = _guild_char_by_id(top_id)
         top_name = str(top_info.get("name") or
                        (top_char or {}).get("name") or f"Player {top_id}")
-        boss_kill_text = (
+        boss_kill_message = (
             f"#{{101918}}*The Pain*[ffff00]{top_name}[-]"
         )
-        broadcast_map_notice(
-            GOTHAM_MAP_ID,
-            boss_kill_text,
-        )
-        gotham_broadcast_system_message(boss_kill_text)
+        gotham_broadcast_system_message(boss_kill_message)
         slot["congratulations_announced"] = True
 
     pending = False
@@ -15482,10 +15478,17 @@ def can_player_attack_player(attacker, target):
 
 def broadcast_map_notice(map_id, text):
     payload = encode_sproto([(0, str(text)), (1, True)])
+    recipients = 0
+    delivered = 0
     for peer_conn, peer_char in list(ALL_CONNECTIONS.values()):
         if (peer_conn and peer_char
-                and str(peer_char.get("map_id", "")) == str(map_id)):
-            send_rpc_push_safe(peer_conn, 529, payload)
+                and str(peer_char.get("map_id", "")) == str(map_id)
+                and is_current_character_connection(peer_conn, peer_char)):
+            recipients += 1
+            delivered += bool(send_rpc_push_safe(peer_conn, 529, payload))
+    if recipients and not delivered:
+        print(f"[NOTICE] tag=529 delivery failed map={map_id} recipients={recipients}")
+    return delivered
 
 
 def gotham_broadcast_system_message(text):
