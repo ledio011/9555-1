@@ -9546,8 +9546,10 @@ def gotham_boss_rank_mail(slot):
         top_char = _guild_char_by_id(top_id)
         top_name = str(top_info.get("name") or
                        (top_char or {}).get("name") or f"Player {top_id}")
-        boss_npc_id = str(slot.get("nid") or "")
-        if gotham_broadcast_boss_defeat(top_name, boss_npc_id):
+        boss_kill_message = (
+            f"#{{101918}}*The Pain*[ffff00]{top_name}[-]"
+        )
+        if gotham_broadcast_system_message(boss_kill_message):
             slot["congratulations_announced"] = True
 
     pending = False
@@ -15494,23 +15496,8 @@ def broadcast_map_notice(map_id, text):
     return delivered
 
 
-def gotham_broadcast_boss_defeat(player_name, boss_npc_id):
-    """Send the APK's case-18 boss message (marquee + System chat history)."""
-    player_name = str(player_name or "").strip()
-    boss_npc_id = str(boss_npc_id or "").strip()
-    if not player_name or not boss_npc_id or boss_npc_id not in NPC_CONFIG:
-        print(f"[GOTHAM BOSS CHAT] skipped invalid defeat message "
-              f"player={player_name!r} npc={boss_npc_id!r}")
-        return 0
-
-    # ret_chat_handler.case 18 resolves the boss name from stringdata[1],
-    # writes the localized result to System chat, then queues it in the
-    # scrolling broadcast UI. Do not pre-format chatInfo or send a second
-    # System item: the client performs both actions from this one item.
-    chat_item = encode_sproto([
-        (4, '#{101918}'), (5, 7), (7, [18]),
-        (8, [player_name, boss_npc_id])
-    ])
+def gotham_broadcast_system_message(text):
+    chat_item = encode_sproto([(4, str(text)), (5, 7)])
     payload = encode_sproto([(0, [chat_item])])
     recipients = 0
     delivered = 0
@@ -15524,8 +15511,8 @@ def gotham_broadcast_boss_defeat(player_name, boss_npc_id):
             else:
                 failed += 1
     if failed or not delivered:
-        print(f"[GOTHAM BOSS CHAT] case=18 tag=528 recipients={recipients} "
-              f"delivered={delivered} failed={failed} npc={boss_npc_id}")
+        print(f"[GOTHAM BOSS CHAT] tag=528 recipients={recipients} "
+              f"delivered={delivered} failed={failed}")
     return delivered
 
 
