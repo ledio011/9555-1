@@ -307,9 +307,7 @@ FUNCTION_DATA = {} # funcId -> {class, condition, is_download, first_open, unloc
 EQUIP_CONFIG = {} # equipId -> {name, lv, class, job, position, base_stat, base_val, model, ...}
 EQUIP_DROP_CONFIG = {} # EquipDrop ID -> weighted random equipment attribute definitions
 WEAPON_DROP_CONFIG = {} # WeaponDrop ID -> weighted random weapon skill definitions
-# The APK identifies 7300 as the class-1-through-8 random weapon pack but
-# supplies no class odds. Keep every class possible while making high classes rare.
-WEAPON_PACK_CLASS_WEIGHTS = {
+GOTHAM_BOSS_WEAPON_CLASS_WEIGHTS = {
     1: 35, 2: 25, 3: 17, 4: 10, 5: 6, 6: 4, 7: 2, 8: 1
 }
 QUALITY_CONFIG = {} # QualityData ID -> ordered quality score/modulus rows
@@ -9461,17 +9459,67 @@ def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid, grant_reward
     )
 
 
-def gotham_boss_rewards_for_rank(rank):
-    """Return rank-scaled client item rewards for The Pain's damage board."""
+def gotham_boss_reward_plan(rank):
+    """Return the rank-scaled enhancer and weapon counts for The Pain."""
     if rank <= 1:
-        return [("4002", 0, 3), ("7300", 0, 5)]
+        return 3, 5
     if rank <= 5:
-        return [("4002", 0, 1), ("7300", 0, 3)]
+        return 1, 3
     if rank <= 10:
-        return [("4002", 0, 1), ("7300", 0, 2)]
+        return 1, 2
     if rank <= 50:
-        return [("4002", 0, 1), ("7300", 0, 1)]
-    return [("7300", 0, 1)]
+        return 1, 1
+    return 0, 1
+
+
+def gotham_boss_weapon_rewards(char, count):
+    """Roll actual profession-matched weapon items, never a weapon-pack item."""
+    try:
+        profession = int(char.get("prof", -1))
+        max_class = _max_shop_equipment_class(char, profession)
+    except (TypeError, ValueError):
+        return None
+    if profession not in (0, 1, 2) or count < 0:
+        return None
+
+    candidates_by_class = {}
+    for equip_id, equip_cfg in EQUIP_CONFIG.items():
+        try:
+            equip_class = int(equip_cfg.get("class", 0))
+            quality = int(ITEM_CONFIG.get(str(equip_id), {}).get("quality", 0))
+            if (not valid_package_reward_item(equip_id)
+                    or int(equip_cfg.get("position", -1)) != 0
+                    or int(equip_cfg.get("weapon_type", -1)) != profession
+                    or int(equip_cfg.get("job", -1)) not in (-1, profession)
+                    or int(ITEM_CONFIG.get(str(equip_id), {}).get("type", -1)) != 2
+                    or equip_class < 1 or equip_class > max_class):
+                continue
+            drop_ids = equip_cfg.get("drop_ids") or []
+            drop_id = str(drop_ids[quality]).strip() if 0 <= quality < len(drop_ids) else ""
+            drop_cfg = WEAPON_DROP_CONFIG.get(drop_id, {})
+            if drop_cfg.get("children") or not drop_cfg.get("skills"):
+                continue
+            candidates_by_class.setdefault(equip_class, []).append(
+                (str(equip_id), quality, 1))
+        except (TypeError, ValueError, IndexError):
+            continue
+
+    available_classes = sorted(candidates_by_class)
+    if count == 0:
+        return []
+    if not available_classes:
+        return None
+    weights = [
+        GOTHAM_BOSS_WEAPON_CLASS_WEIGHTS.get(equip_class, 0)
+        for equip_class in available_classes
+    ]
+    if not any(weights):
+        return None
+    rewards = []
+    for _ in range(count):
+        equip_class = random.choices(available_classes, weights=weights, k=1)[0]
+        rewards.append(random.choice(candidates_by_class[equip_class]))
+    return rewards
 
 
 def gotham_boss_rank_mail(slot):
@@ -9495,8 +9543,7 @@ def gotham_boss_rank_mail(slot):
         gotham_broadcast(
             529,
             encode_sproto([
-                (0, f"Congratulations to {top_name} for the highest damage "
-                    f"against The Pain! Damage: {top_damage}."),
+                (0, f"#{{101918}}*The Pain*Congratulations to {top_name}"),
                 (1, True),
             ]),
         )
@@ -9504,12 +9551,19 @@ def gotham_boss_rank_mail(slot):
 
     pending = False
     for rank, (char_id, damage) in enumerate(ranked, 1):
-        rewards = gotham_boss_rewards_for_rank(rank)
         char = _guild_char_by_id(char_id)
         if not char:
             print(f"[GOTHAM BOSS REWARD PENDING] character unavailable id={char_id}")
             pending = True
             continue
+        enhancer_count, weapon_count = gotham_boss_reward_plan(rank)
+        weapon_rewards = gotham_boss_weapon_rewards(char, weapon_count)
+        if weapon_rewards is None:
+            print(f"[GOTHAM BOSS REWARD PENDING] no configured weapon rewards "
+                  f"for character={char_id} rank={rank}")
+            pending = True
+            continue
+        rewards = ([("4002", 0, enhancer_count)] if enhancer_count else []) + weapon_rewards
 
         mail_key = (
             f"gotham-boss:{slot.get('slot')}:{slot.get('inst_id')}:{char_id}:{rank}")
@@ -9548,9 +9602,9 @@ def gotham_boss_rank_mail(slot):
                 "receiveId": char_id,
                 "readTime": 0,
                 "context": (
-                    f"The Pain has been defeated. You dealt {damage} damage to "
-                    f"the boss and ranked {rank}. Congratulations on your "
-                    "contribution. Please claim your reward from this mail."
+                    f"The Pain has been defeated, you caused {damage} damage to "
+                    f"the BOSS and finally ranked {rank}.Congratulations on your "
+                    "contribution. Please get the reward from mail."
                 ),
                 "mailState": 0,
                 "sortTime": now,
@@ -12395,7 +12449,7 @@ def resolve_weapon_pack_rewards(item_id, character, package_count=1):
         allowed_classes = {equip_class for equip_class in allowed_classes
                            if equip_class <= max_class}
 
-    candidates_by_class = {}
+    candidates = []
     for equip_id, equip_cfg in EQUIP_CONFIG.items():
         try:
             equip_class = int(equip_cfg.get('class', 0))
@@ -12418,24 +12472,15 @@ def resolve_weapon_pack_rewards(item_id, character, package_count=1):
                 continue
             if not WEAPON_DROP_CONFIG[drop_id].get('skills'):
                 continue
-            candidates_by_class.setdefault(equip_class, []).append(
-                (str(equip_id), quality, weapon_type))
+            candidates.append((str(equip_id), quality, weapon_type))
         except (TypeError, ValueError, IndexError):
             continue
-    if not candidates_by_class:
+    if not candidates:
         return []
 
-    available_classes = sorted(candidates_by_class)
-    class_weights = [
-        WEAPON_PACK_CLASS_WEIGHTS.get(equip_class, 0)
-        if function_id == 74500 else 1
-        for equip_class in available_classes
-    ]
-    results = []
-    for _ in range(package_count):
-        equip_class = random.choices(available_classes, weights=class_weights, k=1)[0]
-        results.append((*random.choice(candidates_by_class[equip_class])[:2], 1))
-    return results
+    # Keep ordinary pack behavior unchanged; Gotham boss mail rolls real
+    # equipment directly using its own class weights.
+    return [(*random.choice(candidates)[:2], 1) for _ in range(package_count)]
 
 def build_mount_info(picked_char):
     """Build the exact mount map consumed by the APK garage handlers.
@@ -15437,25 +15482,42 @@ def broadcast_map_notice(map_id, text):
 
 
 def record_pvp_kill_streak(killer, victim):
+    map_id = str(killer.get("map_id", "") or "")
     try:
-        streak = max(0, int(killer.get("pvp_kill_streak", 0) or 0)) + 1
+        map_type = int(MAP_CONFIG.get(map_id, {}).get("type", -1))
     except (TypeError, ValueError):
-        streak = 1
+        return
+    try:
+        previous_streak = max(0, int(killer.get("pvp_kill_streak", 0) or 0))
+    except (TypeError, ValueError):
+        previous_streak = 0
+    try:
+        victim_streak = max(0, int(victim.get("pvp_kill_streak", 0) or 0))
+    except (TypeError, ValueError):
+        victim_streak = 0
+    if str(killer.get("pvp_kill_streak_map", "")) != map_id:
+        previous_streak = 0
+    if str(victim.get("pvp_kill_streak_map", "")) != map_id:
+        victim_streak = 0
+
+    streak = previous_streak + 1 if map_type == 24 else 0
     killer["pvp_kill_streak"] = streak
+    killer["pvp_kill_streak_map"] = map_id if map_type == 24 else ""
     victim["pvp_kill_streak"] = 0
+    victim["pvp_kill_streak_map"] = ""
     save_chars(all_accounts_chars)
 
-    labels = {
-        2: "Double Kill",
-        3: "Triple Kill",
-        4: "Quadra Kill",
-        5: "Penta Kill",
-    }
-    if streak >= 2:
-        label = labels.get(streak, f"{streak}-Kill Streak")
+    if map_type != 24:
+        return
+    if 5 <= streak <= 10:
         broadcast_map_notice(
-            killer.get("map_id", ""),
-            f"Congratulations to {killer.get('name', 'Player')} for a {label}!",
+            map_id,
+            f"#{{{105009 + streak}}}*{killer.get('name', 'Player')}",
+        )
+    if victim_streak >= 5:
+        broadcast_map_notice(
+            map_id,
+            f"#{{105020}}*{killer.get('name', 'Player')}*{victim.get('name', 'Player')}",
         )
 
 
