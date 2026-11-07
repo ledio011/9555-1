@@ -9625,7 +9625,10 @@ def gotham_boss_rank_mail(slot):
                       f"char={char_id} rank={rank}")
                 pending = True
                 continue
-        send_push_to_char(char_id, 531, build_mail_update(mail))
+        pushed = send_push_to_char(char_id, 531, build_mail_update(mail))
+        print(f"[GOTHAM BOSS REWARD MAIL] slot={slot.get('slot')} "
+              f"char={char_id} rank={rank} items={len(mail.get('items', []))} "
+              f"pushed={pushed}")
 
     if pending:
         return False
@@ -19283,6 +19286,18 @@ def client_handler(conn, addr):
                 char_id = get_val_int(body, 0)
                 picked_char = next((c for c in get_account_chars(all_accounts_chars, cur_areaId, acc_id) if c['id'] == char_id), None)
                 char_id = picked_char.get('id', 0)
+                if picked_char:
+                    with PVP_KILL_STREAK_LOCK:
+                        try:
+                            previous_streak = max(
+                                0, int(picked_char.get('pvp_kill_streak', 0) or 0))
+                        except (TypeError, ValueError):
+                            previous_streak = 0
+                        picked_char['pvp_kill_streak'] = 0
+                        picked_char['pvp_kill_streak_map'] = ''
+                    if previous_streak:
+                        print(f"[PVP STREAK] reset on character pick "
+                              f"player={char_id} previous={previous_streak}")
                 ALL_CONNECTIONS[char_id] = (conn, picked_char)  # Track online character
                 # All push paths, including timer-driven EXP/AOI pushes and
                 # this handler's synchronous sends, must serialize complete
