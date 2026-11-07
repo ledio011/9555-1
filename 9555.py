@@ -9543,7 +9543,7 @@ def gotham_boss_rank_mail(slot):
         gotham_broadcast(
             529,
             encode_sproto([
-                (0, f"#{{101918}}*The Pain*Congratulations to {top_name}"),
+                (0, f"#{{101918}}*The Pain*{top_name}"),
                 (1, True),
             ]),
         )
@@ -15500,24 +15500,39 @@ def record_pvp_kill_streak(killer, victim):
     if str(victim.get("pvp_kill_streak_map", "")) != map_id:
         victim_streak = 0
 
-    streak = previous_streak + 1 if map_type == 24 else 0
+    pvp_map = map_type in (1, 15, 21, 24)
+    streak = previous_streak + 1 if pvp_map else 0
     killer["pvp_kill_streak"] = streak
-    killer["pvp_kill_streak_map"] = map_id if map_type == 24 else ""
+    killer["pvp_kill_streak_map"] = map_id if pvp_map else ""
     victim["pvp_kill_streak"] = 0
     victim["pvp_kill_streak_map"] = ""
     save_chars(all_accounts_chars)
 
-    if map_type != 24:
+    if not pvp_map:
         return
-    if 5 <= streak <= 10:
+
+    if map_type == 24:
+        if 5 <= streak <= 10:
+            broadcast_map_notice(
+                map_id,
+                f"#{{{105009 + streak}}}*{killer.get('name', 'Player')}",
+            )
+        if victim_streak >= 5:
+            broadcast_map_notice(
+                map_id,
+                f"#{{105020}}*{killer.get('name', 'Player')}*{victim.get('name', 'Player')}",
+            )
+        return
+
+    if 2 <= streak <= 6:
         broadcast_map_notice(
             map_id,
-            f"#{{{105009 + streak}}}*{killer.get('name', 'Player')}",
+            f"#{{{102068 + streak}}}*{killer.get('name', 'Player')}",
         )
-    if victim_streak >= 5:
+    if victim_streak >= 2:
         broadcast_map_notice(
             map_id,
-            f"#{{105020}}*{killer.get('name', 'Player')}*{victim.get('name', 'Player')}",
+            f"#{{102075}}*{killer.get('name', 'Player')}*{victim.get('name', 'Player')}",
         )
 
 
