@@ -9548,14 +9548,7 @@ def gotham_boss_rank_mail(slot):
         top_char = _guild_char_by_id(top_id)
         top_name = str(top_info.get("name") or
                        (top_char or {}).get("name") or f"Player {top_id}")
-        boss_kill_message = (
-            f"Event Boss The Pain has been killed. {top_name} "
-            "for the biggest damage in the Battle."
-        )
-        if broadcast_map_notice(
-                GOTHAM_MAP_ID,
-                f"#{{101918}}*The Pain*[ffff00]{top_name}[-]"):
-            slot["congratulations_announced"] = True
+        boss_kill_message = f"#{{101918}}*The Pain*[ffff00]{top_name}[-]"
         if gotham_broadcast_system_message(boss_kill_message):
             slot["congratulations_announced"] = True
 
@@ -15503,15 +15496,17 @@ def broadcast_map_notice(map_id, text):
     return delivered
 
 
-def gotham_broadcast_system_message(text):
+def gotham_broadcast_system_message(text, map_id=None):
     message = str(text)
-    chat_item = encode_sproto([(4, message), (5, 0), (14, message)])
+    chat_item = encode_sproto([(4, message), (5, 7), (14, message)])
     payload = encode_sproto([(0, [chat_item])])
     recipients = 0
     delivered = 0
     failed = 0
     for peer_conn, peer_char in list(ALL_CONNECTIONS.values()):
         if (peer_conn and peer_char
+                and (map_id is None
+                     or str(peer_char.get("map_id", "")) == str(map_id))
                 and is_current_character_connection(peer_conn, peer_char)):
             recipients += 1
             if send_rpc_push_safe(peer_conn, 528, payload):
@@ -15519,7 +15514,8 @@ def gotham_broadcast_system_message(text):
             else:
                 failed += 1
     if failed or not delivered:
-        print(f"[GOTHAM BOSS CHAT] tag=528 recipients={recipients} "
+        print(f"[GOTHAM SCROLL] tag=528 map={map_id or 'all'} "
+              f"recipients={recipients} "
               f"delivered={delivered} failed={failed}")
     return delivered
 
@@ -15590,17 +15586,22 @@ def record_pvp_kill_streak(killer, victim):
     }
     notice_key = pk_streak_notice_keys.get(streak)
     if notice_key is not None:
-        sent = broadcast_map_notice(
-            map_id,
-            f"#{{{notice_key}}}*{killer.get('name', 'Player')}",
-        )
+        notice_text = f"#{{{notice_key}}}*{killer.get('name', 'Player')}"
+        if map_id == GOTHAM_MAP_ID:
+            sent = gotham_broadcast_system_message(notice_text, map_id)
+        else:
+            sent = broadcast_map_notice(map_id, notice_text)
         print(f"[PVP STREAK] killer={killer.get('id')} map={map_id} "
               f"streak={streak} notice_key={notice_key} delivered={sent}")
     if victim_streak >= 2:
-        sent = broadcast_map_notice(
-            map_id,
-            f"#{{102075}}*{killer.get('name', 'Player')}*{victim.get('name', 'Player')}",
+        notice_text = (
+            f"#{{102075}}*{killer.get('name', 'Player')}*"
+            f"{victim.get('name', 'Player')}"
         )
+        if map_id == GOTHAM_MAP_ID:
+            sent = gotham_broadcast_system_message(notice_text, map_id)
+        else:
+            sent = broadcast_map_notice(map_id, notice_text)
         print(f"[PVP STREAK] ended victim={victim.get('id')} map={map_id} "
               f"notice_key=102075 delivered={sent}")
 
