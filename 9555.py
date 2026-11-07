@@ -4826,6 +4826,32 @@ def send_team_update(team_id, only_ids=None):
     for cid in list(team.get('members', []) if only_ids is None else only_ids):
         send_push_to_char(cid, 518, data)
 
+def urge_team_leader(char):
+    """Deliver the APK's urge notification (682) to this member's team leader."""
+    if not char:
+        return False
+    member_id = int(char.get('id', 0))
+    team = get_team_for_char(member_id)
+    if not team or int(team.get('leader_id', 0)) == member_id:
+        return False
+
+    now = time.monotonic()
+    urge_times = team.setdefault('urge_times', {})
+    if now - float(urge_times.get(member_id, 0)) < 5:
+        return False
+    urge_times[member_id] = now
+    leader_id = int(team.get('leader_id', 0))
+    delivered = send_push_to_char(
+        leader_id, 682,
+        encode_sproto([
+            (0, str(char.get('name') or '')),
+            (1, member_id)
+        ])
+    )
+    print(f"[TEAM] leader urge player={member_id} team={team.get('id')} "
+          f"leader={leader_id} delivered={bool(delivered)}")
+    return bool(delivered)
+
 def send_team_member_update(team_id, char, force=False):
     team = TEAM_STATES.get(int(team_id))
     if not team or not char: return
@@ -25103,7 +25129,7 @@ def client_handler(conn, addr):
                 if session is not None:
                     send_rpc_response(session)
 
-            elif msg in (109, 110, 161, 162, 163, 164, 166, 213, 214, 215, 216, 217):
+            elif msg in (109, 110, 161, 162, 163, 164, 166, 213, 214, 215, 216, 217, 450):
                 cid=int(picked_char.get('id',0)) if picked_char else 0
                 if picked_char and not is_current_character_connection(conn, picked_char):
                     print(f"[TEAM] denied stale character socket player={cid} msg={msg}")
@@ -25111,7 +25137,9 @@ def client_handler(conn, addr):
                         ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                         conn.sendall(struct.pack(">H", len(pf)) + pf)
                     continue
-                if picked_char and msg==109:
+                if picked_char and msg==450:
+                    urge_team_leader(picked_char)
+                elif picked_char and msg==109:
                     target=get_val_int(body,0,-1)
                     if target==-1:
                         goal=get_val_str(body,1,''); team=get_team_for_char(cid); ok=False
