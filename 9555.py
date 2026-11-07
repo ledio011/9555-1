@@ -9548,16 +9548,12 @@ def gotham_boss_rank_mail(slot):
         top_char = _guild_char_by_id(top_id)
         top_name = str(top_info.get("name") or
                        (top_char or {}).get("name") or f"Player {top_id}")
-        boss_kill_message = (
-            f"Event Boss The Pain has been killed. {top_name} "
-            "for the biggest damage in the Battle."
-        )
-        if broadcast_map_notice(
-                GOTHAM_MAP_ID,
-                f"#{{101918}}*The Pain*[ffff00]{top_name}[-]"):
+        boss_kill_message = f"#{{101918}}*The Pain*[ffff00]{top_name}[-]"
+        delivered = gotham_broadcast_scroll_message(boss_kill_message)
+        if delivered:
             slot["congratulations_announced"] = True
-        if gotham_broadcast_system_message(boss_kill_message):
-            slot["congratulations_announced"] = True
+        print(f"[GOTHAM BOSS ANNOUNCE] slot={slot.get('slot')} "
+              f"delivered={delivered}")
 
     pending = False
     for rank, (char_id, damage) in enumerate(ranked, 1):
@@ -9725,12 +9721,25 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
         gotham_inst_id = int(inst_id)
     except (TypeError, ValueError):
         gotham_inst_id = 0
-    if (current_map == GOTHAM_MAP_ID
-            and gotham_inst_id in GOTHAM_SHARED_NPC_BY_INSTANCE):
-        slot_key = GOTHAM_SHARED_NPC_BY_INSTANCE.get(gotham_inst_id)
-        slot = GOTHAM_SHARED_NPC_SLOTS.get(slot_key, {})
+    slot_key = GOTHAM_SHARED_NPC_BY_INSTANCE.get(gotham_inst_id)
+    slot = GOTHAM_SHARED_NPC_SLOTS.get(slot_key) if slot_key else None
+    if current_map == GOTHAM_MAP_ID and slot is None:
+        slot_key, slot = next((
+            (key, candidate)
+            for key, candidate in GOTHAM_SHARED_NPC_SLOTS.items()
+            if candidate.get("is_boss")
+            and str(candidate.get("inst_id")) == str(gotham_inst_id)
+        ), (None, None))
+    if current_map == GOTHAM_MAP_ID and slot is not None:
         if valid_kill and grant_rewards and slot.get("is_boss"):
-            gotham_boss_rank_mail(slot)
+            settled = gotham_boss_rank_mail(slot)
+            print(f"[GOTHAM BOSS REWARD] slot={slot_key} "
+                  f"contributors={len(slot.get('damage', {}))} settled={settled}")
+    elif (current_map == GOTHAM_MAP_ID and valid_kill
+          and any(str(cfg.get("npc_id")) == str(npcid)
+                  for cfg in GOTHAM_ACTIVITY_CONFIG.values())):
+        print(f"[GOTHAM BOSS REWARD SKIP] missing shared slot "
+              f"inst_id={inst_id} npcid={npcid}")
 
     if inst_id and not (
             str(NPC_INSTANCE_MAP.get(inst_id, "")) == GOTHAM_MAP_ID
@@ -15531,7 +15540,7 @@ def gotham_broadcast_system_message(text):
     return gotham_broadcast_chat_message(text, 0)
 
 
-def gotham_broadcast_scroll_message(text, map_id):
+def gotham_broadcast_scroll_message(text, map_id=None):
     return gotham_broadcast_chat_message(text, 7, map_id)
 
 
