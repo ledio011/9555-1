@@ -9549,8 +9549,8 @@ def gotham_boss_rank_mail(slot):
         boss_kill_message = (
             f"#{{101918}}*The Pain*[ffff00]{top_name}[-]"
         )
-        gotham_broadcast_system_message(boss_kill_message)
-        slot["congratulations_announced"] = True
+        if gotham_broadcast_system_message(boss_kill_message):
+            slot["congratulations_announced"] = True
 
     pending = False
     for rank, (char_id, damage) in enumerate(ranked, 1):
@@ -15480,25 +15480,40 @@ def broadcast_map_notice(map_id, text):
     payload = encode_sproto([(0, str(text)), (1, True)])
     recipients = 0
     delivered = 0
+    failed = 0
     for peer_conn, peer_char in list(ALL_CONNECTIONS.values()):
         if (peer_conn and peer_char
                 and str(peer_char.get("map_id", "")) == str(map_id)
                 and is_current_character_connection(peer_conn, peer_char)):
             recipients += 1
-            delivered += bool(send_rpc_push_safe(peer_conn, 529, payload))
-    if recipients and not delivered:
-        print(f"[NOTICE] tag=529 delivery failed map={map_id} recipients={recipients}")
+            if send_rpc_push_safe(peer_conn, 529, payload):
+                delivered += 1
+            else:
+                failed += 1
+    if failed or not delivered:
+        print(f"[NOTICE] tag=529 map={map_id} recipients={recipients} "
+              f"delivered={delivered} failed={failed}")
     return delivered
 
 
 def gotham_broadcast_system_message(text):
     chat_item = encode_sproto([(4, str(text)), (5, 7)])
     payload = encode_sproto([(0, [chat_item])])
+    recipients = 0
+    delivered = 0
+    failed = 0
     for peer_conn, peer_char in list(ALL_CONNECTIONS.values()):
         if (peer_conn and peer_char
-                and str(peer_char.get("map_id", "")) == GOTHAM_MAP_ID
                 and is_current_character_connection(peer_conn, peer_char)):
-            send_rpc_push_safe(peer_conn, 528, payload)
+            recipients += 1
+            if send_rpc_push_safe(peer_conn, 528, payload):
+                delivered += 1
+            else:
+                failed += 1
+    if failed or not delivered:
+        print(f"[GOTHAM BOSS CHAT] tag=528 recipients={recipients} "
+              f"delivered={delivered} failed={failed}")
+    return delivered
 
 
 def record_pvp_kill_streak(killer, victim):
@@ -15506,6 +15521,7 @@ def record_pvp_kill_streak(killer, victim):
     try:
         map_type = int(MAP_CONFIG.get(map_id, {}).get("type", -1))
     except (TypeError, ValueError):
+        print(f"[PVP STREAK] skip killer={killer.get('id')} map={map_id} invalid map type")
         return
     try:
         previous_streak = max(0, int(killer.get("pvp_kill_streak", 0) or 0))
@@ -15520,7 +15536,11 @@ def record_pvp_kill_streak(killer, victim):
     if str(victim.get("pvp_kill_streak_map", "")) != map_id:
         victim_streak = 0
 
-    pvp_map = map_type in (1, 15, 21, 24)
+    # Map type 1 also covers the normal cities; only Gotham (109) is the
+    # client-authored type-1 PK map. Other supported battle map types retain
+    # their existing streak notices.
+    pvp_map = (map_type in (15, 21, 24)
+               or (map_id == GOTHAM_MAP_ID and map_type == 1))
     streak = previous_streak + 1 if pvp_map else 0
     killer["pvp_kill_streak"] = streak
     killer["pvp_kill_streak_map"] = map_id if pvp_map else ""
@@ -15529,31 +15549,44 @@ def record_pvp_kill_streak(killer, victim):
     save_chars(all_accounts_chars)
 
     if not pvp_map:
+        print(f"[PVP STREAK] skip killer={killer.get('id')} map={map_id} "
+              f"map_type={map_type} not a PK/battle map")
         return
+    print(f"[PVP STREAK] kill killer={killer.get('id')} victim={victim.get('id')} "
+          f"map={map_id} map_type={map_type} streak={streak} victim_streak={victim_streak}")
 
     if map_type == 24:
         if 5 <= streak <= 10:
-            broadcast_map_notice(
+            sent = broadcast_map_notice(
                 map_id,
                 f"#{{{105009 + streak}}}*{killer.get('name', 'Player')}",
             )
+            print(f"[PVP STREAK] killer={killer.get('id')} map={map_id} "
+                  f"streak={streak} notice_key={105009 + streak} delivered={sent}")
         if victim_streak >= 5:
-            broadcast_map_notice(
+            sent = broadcast_map_notice(
                 map_id,
                 f"#{{105020}}*{killer.get('name', 'Player')}*{victim.get('name', 'Player')}",
             )
+            print(f"[PVP STREAK] ended victim={victim.get('id')} map={map_id} "
+                  f"notice_key=105020 delivered={sent}")
         return
 
     if 2 <= streak <= 6:
-        broadcast_map_notice(
+        notice_key = 102068 + streak
+        sent = broadcast_map_notice(
             map_id,
-            f"#{{{102068 + streak}}}*{killer.get('name', 'Player')}",
+            f"#{{{notice_key}}}*{killer.get('name', 'Player')}",
         )
+        print(f"[PVP STREAK] killer={killer.get('id')} map={map_id} "
+              f"streak={streak} notice_key={notice_key} delivered={sent}")
     if victim_streak >= 2:
-        broadcast_map_notice(
+        sent = broadcast_map_notice(
             map_id,
             f"#{{102075}}*{killer.get('name', 'Player')}*{victim.get('name', 'Player')}",
         )
+        print(f"[PVP STREAK] ended victim={victim.get('id')} map={map_id} "
+              f"notice_key=102075 delivered={sent}")
 
 
 def _guild_member_count(guild, include_candidates=False):
