@@ -9173,20 +9173,12 @@ def spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state
         f"map={mon_group_id} target={expected_count} new={len(exp_state['active_monsters'])} monsters"
     )
 
-def get_exp_stage_full_reward(char_lv):
-    """Resolve the configured per-level EXP amount from ShowRewardData 21001-21080."""
-    try:
-        lv = max(1, min(int(char_lv), 80))
-    except (TypeError, ValueError):
-        lv = 1
-
-    reward_id = str(21000 + lv)
-    rewards = SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(reward_id, [])
-    if rewards:
-        for item_id, qual, count in rewards:
-            if item_id == "2001":
-                return count
-    return 0
+def get_exp_stage_completion_reward(copy_id):
+    """Read only the explicit completion EXP amount for the active stage."""
+    cfg = COPY_SCENE_CONFIG.get(str(copy_id), {})
+    reward_id = str(cfg.get('show_reward_id') or '')
+    reward = SHOW_REWARD_BASE_CONFIG.get(reward_id, {})
+    return max(0, int(reward.get('exp', 0)))
 
 
 def clear_exp_active_monsters(exp_state, send_rpc_push):
@@ -9234,13 +9226,14 @@ def finish_exp_team_stage(conn, push, owner, state, win):
     }
     for cid,member_conn,char in members:
         eligible = int(cid) in reward_eligible
-        amount = (int(get_exp_stage_full_reward(char.get('level', 1))
+        amount = (int(get_exp_stage_completion_reward(copy_id)
                       * ratio * (1 if win else 0.5)) if eligible else 0)
         cash=int(amount*0.1)
         send=lambda tag,data,who=cid:send_push_to_char(who,tag,data)
         if amount or cash:grant_item_rewards(char,[("2001",0,amount),("1001",0,cash)],member_conn or conn,send,save=False)
         items=([encode_sproto([(0,'2001'),(1,amount),(3,0)]),
-                encode_sproto([(0,'1001'),(1,cash),(3,0)])] if eligible else [])
+                encode_sproto([(0,'1001'),(1,cash),(3,0)])]
+               if eligible and (amount or cash) else [])
         result=encode_sproto([(0,subtype),(1,copy_id),(2,bool(win)),(3,flag),(4,grade),(5,items)])
         if member_conn and str(char.get('map_id')) == exp_run_map_id(state):
             send_exp_result_to_char(char,result)
@@ -9318,12 +9311,9 @@ def _finish_exp_stage_impl(conn, send_rpc_push, picked_char, exp_state, win=True
         ]))
         return
     copy_id = exp_state['copy_id']
-    active_reward_id = str(
-        COPY_SCENE_CONFIG.get(copy_id, {}).get('show_reward_id') or '')
-    active_reward = SHOW_REWARD_BASE_CONFIG.get(active_reward_id, {})
     # Do not use 21001-21080 here: the client labels those rows as recovery
     # rewards. Use only a quantity explicitly authored for this active stage.
-    full_exp = max(0, int(active_reward.get('exp', 0)))
+    full_exp = get_exp_stage_completion_reward(copy_id)
     exp_cfg = DAILY_EXP_CONFIG.get(copy_id, {})
     _group_target, total_max_kills = exp_stage_kill_limits(exp_state, exp_cfg)
     total_max_kills = max(1, total_max_kills)
