@@ -4902,6 +4902,16 @@ def sync_equipment_status_to_peers(char):
 def get_team_for_char(char_id):
     return TEAM_STATES.get(CHAR_TEAM.get(int(char_id)))
 
+def get_team_chat_share(char, chat_type, body):
+    """Return a team and stable signature for a leader's World/Local share card."""
+    if not char or chat_type not in (1, 2) or not (body.get(5) or body.get(6)):
+        return None, None
+    char_id = int(char.get('id', 0))
+    team = get_team_for_char(char_id)
+    if team and int(team.get('leader_id', 0)) == char_id:
+        return team, (repr(body.get(5)), repr(body.get(6)))
+    return None, None
+
 def get_relife_config(death_count):
     if RELIFE_DATA:
         for cfg in RELIFE_DATA:
@@ -24918,7 +24928,15 @@ def client_handler(conn, addr):
                 chat_text = get_val_str(body, 2, '')
                 accepted_world_chat = False
                 reject_reason = ''
-                if picked_char and chat_type == 2:
+                team_share, team_share_signature = get_team_chat_share(
+                    picked_char, chat_type, body)
+                duplicate_team_share = bool(
+                    team_share and team_share_signature in
+                    team_share.get('chat_share_signatures', set()))
+                if duplicate_team_share:
+                    print(f"[TEAM] duplicate chat share suppressed "
+                          f"team={team_share.get('id')} leader={picked_char.get('id')}")
+                elif picked_char and chat_type == 2:
                     if not chat_text or len(chat_text) > 256:
                         reject_reason = 'Message must contain 1–256 characters.'
                     elif not is_current_character_connection(conn, picked_char):
@@ -24975,6 +24993,9 @@ def client_handler(conn, addr):
                             if online_conn is not None and online_char is not None:
                                 send_rpc_push_safe(online_conn, 528, push_data)
                         print(f"[CHAT] world from={picked_char.get('name')} consumed WorldSpeak item=5026")
+                        if team_share:
+                            team_share.setdefault('chat_share_signatures', set()).add(
+                                team_share_signature)
                     elif reject_reason:
                         send_rpc_push(529, encode_sproto([(0, reject_reason), (1, True)]))
                 elif picked_char and chat_type in (1, 3, 4, 5):
@@ -25102,6 +25123,9 @@ def client_handler(conn, addr):
                                     else:
                                         send_push_to_char(recipient_id, 528, push_data)
                                 print(f"[CHAT] type={chat_type} from={sender_id} recipients={len(recipient_ids)}")
+                                if team_share:
+                                    team_share.setdefault('chat_share_signatures', set()).add(
+                                        team_share_signature)
 
                     if reject_reason:
                         send_rpc_push(529, encode_sproto([(0, reject_reason), (1, True)]))
