@@ -9174,12 +9174,7 @@ def spawn_exp_stage_subwave_internal(conn, send_rpc_push, picked_char, exp_state
     )
 
 def get_exp_stage_full_reward(char_lv):
-    """Resolve the configured per-level EXP amount from ShowRewardData 21001-21080.
-
-    These APK rows are labeled as EXP-copy recovery rewards. CopySceneData's
-    active-stage preview points at 30301 but contains no quantity, so the
-    client assets do not prove that this is the exact active-run payout.
-    """
+    """Resolve the configured per-level EXP amount from ShowRewardData 21001-21080."""
     try:
         lv = max(1, min(int(char_lv), 80))
     except (TypeError, ValueError):
@@ -9323,9 +9318,12 @@ def _finish_exp_stage_impl(conn, send_rpc_push, picked_char, exp_state, win=True
         ]))
         return
     copy_id = exp_state['copy_id']
-    char_lv = picked_char.get('level', 1) if picked_char else 1
-
-    full_exp = get_exp_stage_full_reward(char_lv)
+    active_reward_id = str(
+        COPY_SCENE_CONFIG.get(copy_id, {}).get('show_reward_id') or '')
+    active_reward = SHOW_REWARD_BASE_CONFIG.get(active_reward_id, {})
+    # Do not use 21001-21080 here: the client labels those rows as recovery
+    # rewards. Use only a quantity explicitly authored for this active stage.
+    full_exp = max(0, int(active_reward.get('exp', 0)))
     exp_cfg = DAILY_EXP_CONFIG.get(copy_id, {})
     _group_target, total_max_kills = exp_stage_kill_limits(exp_state, exp_cfg)
     total_max_kills = max(1, total_max_kills)
@@ -9334,14 +9332,16 @@ def _finish_exp_stage_impl(conn, send_rpc_push, picked_char, exp_state, win=True
     exp_reward = int(full_exp * ratio) if win else int(full_exp * ratio * 0.5)
     cash_reward = int(exp_reward * 0.1)
 
-    if picked_char:
+    if picked_char and (exp_reward or cash_reward):
         rewards = [("2001", 0, exp_reward), ("1001", 0, cash_reward)]
         grant_item_rewards(picked_char, rewards, conn, send_rpc_push, save=True)
 
-    res_items = [
-        encode_sproto([(0, "2001"), (1, exp_reward), (3, 0)]),
-        encode_sproto([(0, "1001"), (1, cash_reward), (3, 0)])
-    ]
+    res_items = []
+    if exp_reward or cash_reward:
+        res_items = [
+            encode_sproto([(0, "2001"), (1, exp_reward), (3, 0)]),
+            encode_sproto([(0, "1001"), (1, cash_reward), (3, 0)])
+        ]
 
     gradeFlag = 0
     grade = 0
@@ -27774,6 +27774,7 @@ def start_solo_equipment_run(conn, char, copy_id, use_time_item, send_rpc_push):
         'map_id': str(cfg.get('map_id') or copy_id),
         'team_id': None, 'members': [char_id], 'owner_id': char_id,
         'char_refs': {char_id: char}, 'wave_groups': list(groups),
+        'reward_eligible_members': [char_id],
         'cur_group': 1, 'wave_kills': 0, 'total_kills': 0,
         'expected_kills': sum(
             1 for row in MONSTER_DATA.get(copy_id, [])
