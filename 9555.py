@@ -22843,11 +22843,13 @@ def client_handler(conn, addr):
                                     death_count = int(target_char.get('death_count', 0)) + 1
                                     target_char['death_count'] = death_count
                                     relife_cfg = get_relife_config(death_count)
-                                    # PvP deaths return to the main city. Keep
-                                    # killer details because the client offers
-                                    # an optional Add Foe action in this dialog.
+                                    relife_type = (
+                                        0 if map_relife_type(death_map) == 2 else 1)
+                                    # Keep killer details because the client
+                                    # offers an optional Add Foe action here.
                                     relife_req = remember_relife_offer(
-                                        target_char, 0, relife_cfg.get('use_count', 1),
+                                        target_char, relife_type,
+                                        relife_cfg.get('use_count', 1),
                                         '9011', killer=picked_char)
                                     try:
                                         t_ph = encode_sproto([(0, 618)])
