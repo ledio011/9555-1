@@ -52,6 +52,7 @@ NPC_INSTANCE_MAP = {} # inst_id -> map ID, to reject cross-map forged death repo
 NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_ATTR_MAP = {} # runtime NPC payloads for reconnect replay
 GOTHAM_MAP_ID = "109"
+GOTHAM_BOSS_DEFAULT_RESPAWN_SECONDS = 2 * 60 * 60
 GOTHAM_SHARED_NPC_SLOTS = {}
 GOTHAM_SHARED_NPC_BY_INSTANCE = {}
 GOTHAM_NPC_LOCK = threading.RLock()
@@ -306,6 +307,11 @@ FUNCTION_DATA = {} # funcId -> {class, condition, is_download, first_open, unloc
 EQUIP_CONFIG = {} # equipId -> {name, lv, class, job, position, base_stat, base_val, model, ...}
 EQUIP_DROP_CONFIG = {} # EquipDrop ID -> weighted random equipment attribute definitions
 WEAPON_DROP_CONFIG = {} # WeaponDrop ID -> weighted random weapon skill definitions
+# The APK identifies 7300 as the class-1-through-8 random weapon pack but
+# supplies no class odds. Keep every class possible while making high classes rare.
+WEAPON_PACK_CLASS_WEIGHTS = {
+    1: 35, 2: 25, 3: 17, 4: 10, 5: 6, 6: 4, 7: 2, 8: 1
+}
 QUALITY_CONFIG = {} # QualityData ID -> ordered quality score/modulus rows
 EQUIPMENT_UPGRADE_CONFIG = {} # equipment position -> level -> profession quality coefficients
 BADGE_CONFIG = {} # badgeId -> BadgeData fields used by merge and display logic
@@ -1437,13 +1443,16 @@ try:
                     pos = [int(value) for value in parts[5].split("#")]
                     if len(pos) < 2:
                         continue
+                    rebirth_time = (
+                        int(parts[6]) if parts[6].strip().lstrip("-").isdigit() else 0
+                    )
                     GOTHAM_ACTIVITY_CONFIG[parts[1]] = {
                         "activity_id": parts[2],
                         "map_id": parts[3],
                         "npc_id": parts[4],
                         "x": pos[0],
                         "z": pos[1],
-                        "rebirth_time": max(0, int(parts[6])),
+                        "rebirth_time": max(0, rebirth_time),
                         "rank_drops": [
                             {"drop_id": parts[index].strip(),
                              "rank": int(parts[index + 1])}
@@ -9452,22 +9461,116 @@ def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid, grant_reward
     )
 
 
+def gotham_boss_rewards_for_rank(rank):
+    """Return rank-scaled client item rewards for The Pain's damage board."""
+    if rank <= 1:
+        return [("4002", 0, 3), ("7300", 0, 5)]
+    if rank <= 5:
+        return [("4002", 0, 1), ("7300", 0, 3)]
+    if rank <= 10:
+        return [("4002", 0, 1), ("7300", 0, 2)]
+    if rank <= 50:
+        return [("4002", 0, 1), ("7300", 0, 1)]
+    return [("7300", 0, 1)]
+
+
 def gotham_boss_rank_mail(slot):
     if slot.get("rank_mail_settled"):
-        return
+        return True
+    ranked = sorted(
+        ((int(char_id), int(info.get("damage", 0) or 0))
+         for char_id, info in slot.get("damage", {}).items()
+         if int(info.get("damage", 0) or 0) > 0),
+        key=lambda entry: (-entry[1], entry[0]))
+    if not ranked:
+        print(f"[GOTHAM BOSS REWARD] no contributors recorded slot={slot.get('slot')}")
+        return False
+
+    if not slot.get("congratulations_announced"):
+        top_id, top_damage = ranked[0]
+        top_info = slot.get("damage", {}).get(top_id, {})
+        top_char = _guild_char_by_id(top_id)
+        top_name = str(top_info.get("name") or
+                       (top_char or {}).get("name") or f"Player {top_id}")
+        gotham_broadcast(
+            529,
+            encode_sproto([
+                (0, f"Congratulations to {top_name} for the highest damage "
+                    f"against The Pain! Damage: {top_damage}."),
+                (1, True),
+            ]),
+        )
+        slot["congratulations_announced"] = True
+
+    pending = False
+    for rank, (char_id, damage) in enumerate(ranked, 1):
+        rewards = gotham_boss_rewards_for_rank(rank)
+        char = _guild_char_by_id(char_id)
+        if not char:
+            print(f"[GOTHAM BOSS REWARD PENDING] character unavailable id={char_id}")
+            pending = True
+            continue
+
+        mail_key = (
+            f"gotham-boss:{slot.get('slot')}:{slot.get('inst_id')}:{char_id}:{rank}")
+        mails = char.setdefault("mails", [])
+        mail = next((entry for entry in mails
+                     if isinstance(entry, dict)
+                     and entry.get("gothamBossRewardKey") == mail_key), None)
+        if mail is None:
+            attachments = {}
+            for item_id, quality, amount in rewards:
+                item_id, quality, amount = str(item_id), int(quality), int(amount)
+                if (amount <= 0 or (item_id not in DIRECT_REWARD_RESOURCE_IDS
+                                    and item_id not in ITEM_CONFIG)):
+                    attachments = {}
+                    print(f"[GOTHAM BOSS REWARD PENDING] invalid attachment item={item_id}")
+                    pending = True
+                    break
+                if item_id in attachments:
+                    attachments[item_id]["count"] += amount
+                else:
+                    attachments[item_id] = {
+                        "itemId": item_id,
+                        "count": amount,
+                        "quality": quality,
+                        "count2": 0,
+                    }
+            if not attachments:
+                pending = True
+                continue
+            now = int(time.time())
+            mail = {
+                "mailId": next_mail_id(),
+                "sendertype": 0,
+                "title": "Get Rewards",
+                "senderTime": now,
+                "receiveId": char_id,
+                "readTime": 0,
+                "context": (
+                    f"The Pain has been defeated. You dealt {damage} damage to "
+                    f"the boss and ranked {rank}. Congratulations on your "
+                    "contribution. Please claim your reward from this mail."
+                ),
+                "mailState": 0,
+                "sortTime": now,
+                "items": list(attachments.values()),
+                "expireday": 7,
+                "gothamBossRewardKey": mail_key,
+            }
+            mails.append(mail)
+            if not save_chars(all_accounts_chars):
+                mails.remove(mail)
+                print(f"[GOTHAM BOSS REWARD PENDING] persistence failed "
+                      f"char={char_id} rank={rank}")
+                pending = True
+                continue
+        send_push_to_char(char_id, 531, build_mail_update(mail))
+
+    if pending:
+        return False
     slot["rank_mail_settled"] = True
-    activity_key = str(slot.get("slot", "").split(":")[-1])
-    boss_cfg = GOTHAM_ACTIVITY_CONFIG.get(activity_key, {})
-    drop_ids = sorted({
-        str(row.get("drop_id", "") or "")
-        for row in boss_cfg.get("rank_drops", [])
-        if row.get("drop_id")
-    })
-    missing = [drop_id for drop_id in drop_ids
-               if not SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(drop_id)]
-    print(f"[GOTHAM BOSS REWARD DISABLED] activity={activity_key} "
-          f"drop_ids={drop_ids} missing_reward_rows={missing}; "
-          "the client defines no authoritative rank settlement or mail handler")
+    return True
 
 
 def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, grant_rewards=True):
@@ -10256,13 +10359,19 @@ def gotham_shared_npc_specs():
     for activity_key, cfg in GOTHAM_ACTIVITY_CONFIG.items():
         if str(cfg.get("map_id")) != GOTHAM_MAP_ID:
             continue
+        try:
+            boss_respawn_time = int(cfg.get("rebirth_time", 0) or 0)
+        except (TypeError, ValueError):
+            boss_respawn_time = 0
+        if boss_respawn_time <= 0:
+            boss_respawn_time = GOTHAM_BOSS_DEFAULT_RESPAWN_SECONDS
         specs.append({
             "slot": f"activity_boss:{activity_key}",
             "nid": str(cfg["npc_id"]),
             "x": int(cfg["x"]),
             "z": int(cfg["z"]),
             "o": 0,
-            "rebirth_time": int(cfg.get("rebirth_time", 0)),
+            "rebirth_time": boss_respawn_time,
             "is_boss": True,
         })
     return specs
@@ -10603,6 +10712,8 @@ def gotham_create_shared_npc(slot, spec):
         "skill_ready_at": {},
         "patrol_target": None,
         "patrol_next_at": time.time(),
+        "rank_mail_settled": False,
+        "congratulations_announced": False,
     })
     GOTHAM_SHARED_NPC_BY_INSTANCE[inst_id] = slot["slot"]
     return inst_id, attr
@@ -12284,12 +12395,13 @@ def resolve_weapon_pack_rewards(item_id, character, package_count=1):
         allowed_classes = {equip_class for equip_class in allowed_classes
                            if equip_class <= max_class}
 
-    candidates = []
+    candidates_by_class = {}
     for equip_id, equip_cfg in EQUIP_CONFIG.items():
         try:
+            equip_class = int(equip_cfg.get('class', 0))
             if (not valid_package_reward_item(equip_id)
                     or int(equip_cfg.get('position', -1)) != 0
-                    or int(equip_cfg.get('class', 0)) not in allowed_classes
+                    or equip_class not in allowed_classes
                     or int(ITEM_CONFIG.get(str(equip_id), {}).get('type', -1)) != 2):
                 continue
             weapon_type = int(equip_cfg.get('weapon_type', -1))
@@ -12306,16 +12418,24 @@ def resolve_weapon_pack_rewards(item_id, character, package_count=1):
                 continue
             if not WEAPON_DROP_CONFIG[drop_id].get('skills'):
                 continue
-            candidates.append((str(equip_id), quality, weapon_type))
+            candidates_by_class.setdefault(equip_class, []).append(
+                (str(equip_id), quality, weapon_type))
         except (TypeError, ValueError, IndexError):
             continue
-    if not candidates:
+    if not candidates_by_class:
         return []
 
-    # ItemData says 7300 spans Class 1-8, and 7301-7308 are the individual
-    # class packs. There are no separate package odds in this APK export, so
-    # each eligible EquipData weapon is one equally selectable outcome.
-    return [(*random.choice(candidates)[:2], 1) for _ in range(package_count)]
+    available_classes = sorted(candidates_by_class)
+    class_weights = [
+        WEAPON_PACK_CLASS_WEIGHTS.get(equip_class, 0)
+        if function_id == 74500 else 1
+        for equip_class in available_classes
+    ]
+    results = []
+    for _ in range(package_count):
+        equip_class = random.choices(available_classes, weights=class_weights, k=1)[0]
+        results.append((*random.choice(candidates_by_class[equip_class])[:2], 1))
+    return results
 
 def build_mount_info(picked_char):
     """Build the exact mount map consumed by the APK garage handlers.
@@ -15306,6 +15426,38 @@ def can_player_attack_player(attacker, target):
         if guild_battle:
             return True
     return not _same_player_team(attacker, target)
+
+
+def broadcast_map_notice(map_id, text):
+    payload = encode_sproto([(0, str(text)), (1, True)])
+    for peer_conn, peer_char in list(ALL_CONNECTIONS.values()):
+        if (peer_conn and peer_char
+                and str(peer_char.get("map_id", "")) == str(map_id)):
+            send_rpc_push_safe(peer_conn, 529, payload)
+
+
+def record_pvp_kill_streak(killer, victim):
+    try:
+        streak = max(0, int(killer.get("pvp_kill_streak", 0) or 0)) + 1
+    except (TypeError, ValueError):
+        streak = 1
+    killer["pvp_kill_streak"] = streak
+    victim["pvp_kill_streak"] = 0
+    save_chars(all_accounts_chars)
+
+    labels = {
+        2: "Double Kill",
+        3: "Triple Kill",
+        4: "Quadra Kill",
+        5: "Penta Kill",
+    }
+    if streak >= 2:
+        label = labels.get(streak, f"{streak}-Kill Streak")
+        broadcast_map_notice(
+            killer.get("map_id", ""),
+            f"Congratulations to {killer.get('name', 'Player')} for a {label}!",
+        )
+
 
 def _guild_member_count(guild, include_candidates=False):
     members = guild.get('members', {}) if guild else {}
@@ -22499,6 +22651,7 @@ def client_handler(conn, addr):
                             # Check if victim died
                             if old_hp > 0 and new_hp == 0:
                                 print(f"[PvP] Player {target_id} killed by {picked_char['id']}")
+                                record_pvp_kill_streak(picked_char, target_char)
                                 death_map = str(target_char.get('map_id', ''))
                                 if supports_normal_relife(death_map):
                                     death_count = int(target_char.get('death_count', 0)) + 1
