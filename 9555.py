@@ -9546,10 +9546,14 @@ def gotham_boss_rank_mail(slot):
         top_char = _guild_char_by_id(top_id)
         top_name = str(top_info.get("name") or
                        (top_char or {}).get("name") or f"Player {top_id}")
+        boss_kill_text = (
+            f"#{{101918}}*The Pain*[ffff00]{top_name}[-]"
+        )
         broadcast_map_notice(
             GOTHAM_MAP_ID,
-            f"#{{101918}}*The Pain*[ffff00]{top_name}[-]",
+            boss_kill_text,
         )
+        gotham_broadcast_system_message(boss_kill_text)
         slot["congratulations_announced"] = True
 
     pending = False
@@ -15482,6 +15486,16 @@ def broadcast_map_notice(map_id, text):
         if (peer_conn and peer_char
                 and str(peer_char.get("map_id", "")) == str(map_id)):
             send_rpc_push_safe(peer_conn, 529, payload)
+
+
+def gotham_broadcast_system_message(text):
+    chat_item = encode_sproto([(4, str(text)), (5, 7)])
+    payload = encode_sproto([(0, [chat_item])])
+    for peer_conn, peer_char in list(ALL_CONNECTIONS.values()):
+        if (peer_conn and peer_char
+                and str(peer_char.get("map_id", "")) == GOTHAM_MAP_ID
+                and is_current_character_connection(peer_conn, peer_char)):
+            send_rpc_push_safe(peer_conn, 528, payload)
 
 
 def record_pvp_kill_streak(killer, victim):
