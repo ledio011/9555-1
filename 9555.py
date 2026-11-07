@@ -4305,16 +4305,6 @@ def send_push_to_char(char_id, tag, data):
         return False
 
 
-def broadcast_server_notice(text, is_warning=True):
-    payload = encode_sproto([(0, str(text)), (1, bool(is_warning))])
-    sent = 0
-    for peer_conn, peer_char in list(ALL_CONNECTIONS.values()):
-        if (peer_conn and peer_char
-                and is_current_character_connection(peer_conn, peer_char)
-                and send_rpc_push_safe(peer_conn, 529, payload)):
-            sent += 1
-    return sent
-
 def send_exp_result_to_char(char, result):
     """Deliver an EXP result or keep it for the character's next login."""
     if not char or not result:
@@ -4897,6 +4887,8 @@ def remember_relife_offer(char, rebirth_type, cost, item_id='9011', killer=None)
     """Bind a one-shot revive prompt to the character and map that died."""
     if not isinstance(char, dict):
         return encode_sproto([(0, int(rebirth_type)), (1, max(1, int(cost))), (2, str(item_id))])
+    char['pvp_kill_streak'] = 0
+    char['pvp_kill_streak_map'] = ''
     offer = {
         'map_id': str(char.get('map_id', '')),
         'type': int(rebirth_type),
@@ -9554,13 +9546,9 @@ def gotham_boss_rank_mail(slot):
         top_char = _guild_char_by_id(top_id)
         top_name = str(top_info.get("name") or
                        (top_char or {}).get("name") or f"Player {top_id}")
-        colored_top_name = f"[ffff00]{top_name}[-]"
-        colored_boss_name = "[ffff00]The Pain[-]"
-        broadcast_server_notice(
-            f"#{{101902}}*{colored_top_name}*{colored_boss_name}"
-        )
-        gotham_broadcast_system_message(
-            f"#{{101918}}*{colored_boss_name}*{colored_top_name}"
+        broadcast_map_notice(
+            GOTHAM_MAP_ID,
+            f"#{{101918}}*The Pain*[ffff00]{top_name}[-]",
         )
         slot["congratulations_announced"] = True
 
@@ -10452,15 +10440,6 @@ def gotham_broadcast(tag, data, exclude_char_id=None):
                 and str(peer_char.get("map_id", "")) == GOTHAM_MAP_ID
                 and int(char_id) != int(exclude_char_id or 0)):
             send_rpc_push_safe(peer_conn, tag, data)
-
-
-def gotham_broadcast_system_message(text):
-    chat_item = encode_sproto([(4, str(text)), (5, 7)])
-    payload = encode_sproto([(0, [chat_item])])
-    for peer_conn, peer_char in list(ALL_CONNECTIONS.values()):
-        if (peer_conn and peer_char
-                and is_current_character_connection(peer_conn, peer_char)):
-            send_rpc_push_safe(peer_conn, 528, payload)
 
 
 def clear_gotham_npc_aoi(conn, send_remove=False):
