@@ -9547,7 +9547,8 @@ def gotham_boss_rank_mail(slot):
         top_name = str(top_info.get("name") or
                        (top_char or {}).get("name") or f"Player {top_id}")
         boss_kill_message = (
-            f"#{{101918}}*The Pain*[ffff00]{top_name}[-]"
+            f"Event Boss The Pain has been killed. {top_name} "
+            "for the biggest damage in the Battle."
         )
         if gotham_broadcast_system_message(boss_kill_message):
             slot["congratulations_announced"] = True
@@ -15497,7 +15498,8 @@ def broadcast_map_notice(map_id, text):
 
 
 def gotham_broadcast_system_message(text):
-    chat_item = encode_sproto([(4, str(text)), (5, 7)])
+    message = str(text)
+    chat_item = encode_sproto([(4, message), (5, 0), (14, message)])
     payload = encode_sproto([(0, [chat_item])])
     recipients = 0
     delivered = 0
