@@ -16765,21 +16765,20 @@ def _guild_boss_scene_chars(guild, boss_id):
             found.append((char_id, conn, char))
     return found
 
-def _guild_boss_exit_key(guild, boss_id, event_start):
-    return f"{int((guild or {}).get('id', 0) or 0)}:{boss_id}:{int(event_start or 0)}"
-
-def _guild_boss_return_char(conn, char, guild, boss_id, event_start, reason):
+def _guild_boss_return_char(conn, char, boss_id, reason):
     """Claim one boss exit so the button and timeout cannot transition twice."""
     if not conn or not char or not is_current_character_connection(conn, char):
         return False
     boss_row = GUILD_BOSS_DATA.get(str(boss_id), {})
-    if str(char.get('map_id', '')) != str(boss_row.get('map_id', '')):
-        return False
-    exit_key = _guild_boss_exit_key(guild, boss_id, event_start)
     with GUILD_BOSS_LOCK:
-        if char.get('_guild_boss_exit_key') == exit_key:
+        # Recheck under the lock: duplicate clicks are rejected after the
+        # first transition, while a failed transition can be retried in-scene.
+        if (not is_current_character_connection(conn, char)
+                or str(char.get('map_id', '')) != str(boss_row.get('map_id', ''))):
             return False
-        char['_guild_boss_exit_key'] = exit_key
+        previous_copy_state = (
+            char.get('pre_copy_pos'), char.get('pre_copy_map'),
+            char.get('active_copy_id'))
         return_map = str(char.get('pre_copy_map') or '11')
         return_pos = char.get('pre_copy_pos')
         if return_map == str(boss_row.get('map_id', '')) or _guild_boss_map_id(return_map):
@@ -16792,12 +16791,18 @@ def _guild_boss_return_char(conn, char, guild, boss_id, event_start, reason):
             char['hp'] = get_character_stats(char)['hp_max']
             char.pop('_pending_relife', None)
             sync_char_attrs_rpc(conn, char)
-        start_map_transition(
-            conn, char, return_map,
-            lambda tag, data, cid=int(char.get('id', 0)):
-                send_push_to_char(cid, tag, data),
-            override_pos=return_pos
-        )
+        try:
+            start_map_transition(
+                conn, char, return_map,
+                lambda tag, data, cid=int(char.get('id', 0)):
+                    send_push_to_char(cid, tag, data),
+                override_pos=return_pos
+            )
+        except Exception:
+            if str(char.get('map_id', '')) == str(boss_row.get('map_id', '')):
+                (char['pre_copy_pos'], char['pre_copy_map'],
+                 char['active_copy_id']) = previous_copy_state
+            raise
     print(f"[GUILD BOSS] player returned id={char.get('id')} "
           f"boss={boss_id} reason={reason} map={char.get('map_id')}")
     return True
@@ -16810,7 +16815,7 @@ def _guild_boss_auto_exit(guild_id, boss_id, event_start):
         return
     for char_id, conn, char in _guild_boss_scene_chars(guild, boss_id):
         _guild_boss_return_char(
-            conn, char, guild, boss_id, event_start, 'auto-timeout')
+            conn, char, boss_id, 'auto-timeout')
     save_chars(all_accounts_chars)
 
 def _guild_boss_start_exit_countdown(guild, boss_id, record):
@@ -18332,7 +18337,6 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
                             char.get('pos') or default_map_spawn_position(char.get('map_id')))
                         char['pre_copy_map'] = str(char.get('map_id', '11'))
                     char['active_copy_id'] = boss_map_id
-                    char.pop('_guild_boss_exit_key', None)
                     save_chars(all_accounts_chars)
                     start_map_transition(conn, char, boss_map_id, send_rpc_push)
                     print(f"[GUILD BOSS] entered player={char.get('id')} boss={boss_id} map={boss_map_id}")
@@ -26244,22 +26248,15 @@ def client_handler(conn, addr):
                     # The result UI sends the same leave request even when the
                     # boss scene no longer has an active_copy_id.
                     if in_guild_boss:
-                        if session is not None:
-                            send_rpc_response(session)
                         boss_id = _guild_boss_map_id(picked_char.get('map_id', ''))
-                        guild_id = _guild_id_for_character(picked_char)
-                        boss_guild = GUILD_STATES.get(str(guild_id)) if guild_id else None
-                        boss_record = (
-                            (boss_guild or {}).get('guild_boss_events', {}).get(str(boss_id), {})
-                        )
-                        event_start = int((boss_record or {}).get('event_start', 0) or 0)
                         if _guild_boss_return_char(
-                                conn, picked_char, boss_guild, boss_id, event_start,
-                                'manual-button'):
+                                conn, picked_char, boss_id, 'manual-button'):
                             save_chars(all_accounts_chars)
                         else:
                             print(f"[GUILD BOSS] ignored duplicate/stale exit "
                                   f"player={picked_char.get('id')} boss={boss_id}")
+                        if session is not None:
+                            send_rpc_response(session)
                         continue
 
                     if has_leave_timer:
