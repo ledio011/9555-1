@@ -252,6 +252,7 @@ SAFE_AREA_CONFIG = {} # MapAreaInfoData rows grouped by safety-area ID
 MAP_CONNECT_DATA = {} # (src_id, target_id) -> PosX, PosY, PosZ
 GUILD_CAPTURE_DATA = {} # id -> mapId (kept for existing Gang-city map routing)
 GUILD_CAPTURE_CONFIG = {} # id -> schedule metadata from GuildCaptureData
+DOMIN_CONFIG = {} # DominData ID -> client Capture configuration row
 GUILD_LEVEL_DATA = {} # guild level -> cumulative exp/max members/daily donation count
 SEX_MINI_GAME_ID = "1301"
 GUILD_DONATE_DATA = {} # donation id -> authoritative cost and reward
@@ -694,6 +695,27 @@ try:
                     except (IndexError, TypeError, ValueError):
                         continue
         debug_log(f"[GUILD CAPTURE DATA LOADED] count={len(GUILD_CAPTURE_DATA)}")
+
+    # DominData defines every Minimap Capture zone, its rewards, timer rates,
+    # entry level, and destination. Send these rows to the APK unchanged.
+    domin_path = os.path.join(text_asset_root, "DominData")
+    if os.path.exists(domin_path):
+        with open(domin_path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if parts[0] != "*" or len(parts) < 26 or not parts[1].isdigit():
+                    continue
+                try:
+                    DOMIN_CONFIG[parts[1]] = {
+                        index - 1: (
+                            int(value) if value.strip().lstrip("-").isdigit()
+                            else value.strip()
+                        )
+                        for index, value in enumerate(parts[1:26], start=1)
+                    }
+                except (IndexError, TypeError, ValueError):
+                    continue
+        debug_log(f"[DOMIN CONFIG LOADED] count={len(DOMIN_CONFIG)}")
 
     # Guild UI tables are authoritative for capacity, donations, skill cost,
     # and guild-shop inventory. Keep these separate from unrelated shop logic.
@@ -14458,7 +14480,7 @@ def _domin_capture_character_look(character):
         (15, 5)
     ]
     return encode_sproto([
-        (0, int(character.get("id", 0))),
+        (0, 0),
         (1, encode_sproto([
             (0, character.get("name", "Capture Rival")),
             (1, character.get("prof", 0))
@@ -26781,14 +26803,16 @@ def client_handler(conn, addr):
                 # Minimap Capture opponent list. Send actual player looks so
                 # the client receives their level, attributes, and equipment.
                 enemy_looks = _domin_capture_enemy_looks(picked_char) if picked_char else []
-                di_p = encode_sproto([
-                    (0, "1"),
-                    (8, 0),
-                    (9, 0)
-                ])
+                domin_rows = [
+                    encode_sproto(sorted(row.items()))
+                    for _, row in sorted(
+                        DOMIN_CONFIG.items(),
+                        key=lambda item: int(item[0]) if item[0].isdigit() else item[0]
+                    )
+                ]
 
                 resp_p = encode_sproto([
-                    (0, [di_p]),
+                    (0, domin_rows),
                     (1, enemy_looks)
                 ])
 
