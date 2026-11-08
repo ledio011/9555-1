@@ -4902,15 +4902,14 @@ def sync_equipment_status_to_peers(char):
 def get_team_for_char(char_id):
     return TEAM_STATES.get(CHAR_TEAM.get(int(char_id)))
 
-def get_team_chat_share(char, chat_type, body):
-    """Return a team and stable signature for a leader's World/Local share card."""
-    if not char or chat_type not in (1, 2) or not (body.get(5) or body.get(6)):
-        return None, None
-    char_id = int(char.get('id', 0))
-    team = get_team_for_char(char_id)
-    if team and int(team.get('leader_id', 0)) == char_id:
-        return team, (repr(body.get(5)), repr(body.get(6)))
-    return None, None
+def team_recruitment_share_for_chat(char, chat_type, text):
+    if not char or chat_type not in (1, 2):
+        return None
+    normalized_text = str(text or '').casefold()
+    if not any(marker in normalized_text for marker in (
+            'recruit:-', '招募队友', '#{100262}')):
+        return None
+    return get_team_for_char(int(char.get('id', 0)))
 
 def get_relife_config(death_count):
     if RELIFE_DATA:
@@ -24928,16 +24927,14 @@ def client_handler(conn, addr):
                 chat_text = get_val_str(body, 2, '')
                 accepted_world_chat = False
                 reject_reason = ''
-                team_share, team_share_signature = get_team_chat_share(
-                    picked_char, chat_type, body)
-                duplicate_team_share = bool(
-                    team_share and team_share_signature in
-                    team_share.get('chat_share_signatures', set()))
-                if duplicate_team_share:
-                    print(f"[TEAM] duplicate chat share suppressed "
-                          f"team={team_share.get('id')} leader={picked_char.get('id')}")
-                elif picked_char and chat_type == 2:
-                    if not chat_text or len(chat_text) > 256:
+                team_share = team_recruitment_share_for_chat(
+                    picked_char, chat_type, chat_text)
+                duplicate_team_share = bool(team_share and team_share.get('recruit_share_sent'))
+                if picked_char and chat_type == 2:
+                    if duplicate_team_share:
+                        print(f"[CHAT] suppressed duplicate team recruitment share "
+                              f"team={team_share.get('id')} player={picked_char.get('id')}")
+                    elif not chat_text or len(chat_text) > 256:
                         reject_reason = 'Message must contain 1–256 characters.'
                     elif not is_current_character_connection(conn, picked_char):
                         reject_reason = 'This character connection is no longer active.'
@@ -24992,10 +24989,9 @@ def client_handler(conn, addr):
                         for online_id, (online_conn, online_char) in list(ALL_CONNECTIONS.items()):
                             if online_conn is not None and online_char is not None:
                                 send_rpc_push_safe(online_conn, 528, push_data)
-                        print(f"[CHAT] world from={picked_char.get('name')} consumed WorldSpeak item=5026")
                         if team_share:
-                            team_share.setdefault('chat_share_signatures', set()).add(
-                                team_share_signature)
+                            team_share['recruit_share_sent'] = True
+                        print(f"[CHAT] world from={picked_char.get('name')} consumed WorldSpeak item=5026")
                     elif reject_reason:
                         send_rpc_push(529, encode_sproto([(0, reject_reason), (1, True)]))
                 elif picked_char and chat_type in (1, 3, 4, 5):
@@ -25003,7 +24999,10 @@ def client_handler(conn, addr):
                     # ret_chat response shape as World chat. The APK sends
                     # these through msg 120 and only updates its history after
                     # receiving tag 528.
-                    if not is_current_character_connection(conn, picked_char):
+                    if duplicate_team_share:
+                        print(f"[CHAT] suppressed duplicate team recruitment share "
+                              f"team={team_share.get('id')} player={picked_char.get('id')}")
+                    elif not is_current_character_connection(conn, picked_char):
                         reject_reason = 'This character connection is no longer active.'
                     elif not chat_text or len(chat_text) > 256:
                         reject_reason = 'Message must contain 1–256 characters.'
@@ -25022,7 +25021,7 @@ def client_handler(conn, addr):
                             else:
                                 picked_char['last_chat_sent_at'] = now
 
-                        if not reject_reason:
+                        if not reject_reason and not duplicate_team_share:
                             tell_id = get_val_int(body, 0, 0)
                             tell_name = get_val_str(body, 1, '')
                             recipient_ids = set()
@@ -25122,10 +25121,9 @@ def client_handler(conn, addr):
                                         send_rpc_push_safe(conn, 528, push_data)
                                     else:
                                         send_push_to_char(recipient_id, 528, push_data)
-                                print(f"[CHAT] type={chat_type} from={sender_id} recipients={len(recipient_ids)}")
                                 if team_share:
-                                    team_share.setdefault('chat_share_signatures', set()).add(
-                                        team_share_signature)
+                                    team_share['recruit_share_sent'] = True
+                                print(f"[CHAT] type={chat_type} from={sender_id} recipients={len(recipient_ids)}")
 
                     if reject_reason:
                         send_rpc_push(529, encode_sproto([(0, reject_reason), (1, True)]))
