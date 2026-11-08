@@ -14779,6 +14779,13 @@ def _domin_capture_info_payload(character):
     return roster, encode_sproto([(0, states), (1, looks)])
 
 
+def _domin_capture_result_payload(result):
+    return encode_sproto([
+        (0, result == "win"), (1, []),
+        (2, 0), (3, 0), (4, 0), (5, 0)
+    ])
+
+
 def _domin_capture_selected_enemy(fields, roster):
     """Resolve the selected Capture rival by its character ID or offered-list index."""
     if not roster:
@@ -20214,12 +20221,9 @@ def client_handler(conn, addr):
         picked_char["domin_capture_result"] = result
         picked_char["domin_capture_result_reason"] = str(reason)
         picked_char["domin_capture_result_at"] = int(time.time())
-        text = (
-            "You won the Capture challenge."
-            if result == "win"
-            else "You lost the Capture challenge."
-        )
-        send_rpc_push(529, encode_sproto([(0, text), (1, True)]))
+        result_payload = _domin_capture_result_payload(result)
+        picked_char["domin_capture_pending_result"] = result_payload.hex()
+        send_rpc_push(551, result_payload)
         if result == "win":
             _, info_payload = _domin_capture_info_payload(picked_char)
             send_rpc_push(684, info_payload)
@@ -20271,6 +20275,7 @@ def client_handler(conn, addr):
             picked_char.pop('_domin_capture_offered_enemies', None)
             picked_char.pop('domin_capture_enemy_index', None)
             picked_char.pop('_domin_capture_enemy', None)
+            picked_char.pop('domin_capture_pending_result', None)
             picked_char['boss_waiting_for_map_ready'] = False
             picked_char['pre_arena_pos'] = None
             picked_char['pre_arena_map'] = None
@@ -21184,14 +21189,16 @@ def client_handler(conn, addr):
                             if deadline <= int(time.time()):
                                 notify_domin_result("loss", "timeout")
                             elif exit_pending and picked_char.get("domin_capture_result"):
-                                result_text = (
-                                    "You won the Capture challenge."
-                                    if picked_char["domin_capture_result"] == "win"
-                                    else "You lost the Capture challenge."
+                                pending_result = picked_char.get(
+                                    "domin_capture_pending_result", ""
                                 )
-                                send_rpc_push(529, encode_sproto([
-                                    (0, result_text), (1, True)
-                                ]))
+                                if pending_result:
+                                    try:
+                                        send_rpc_push(551, bytes.fromhex(pending_result))
+                                    except ValueError:
+                                        picked_char.pop(
+                                            "domin_capture_pending_result", None
+                                        )
                             for timer_key in ('arena_timer', '_domin_capture_next_enemy_timer'):
                                 timer = picked_char.pop(timer_key, None)
                                 if timer is not None:
