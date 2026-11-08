@@ -14511,11 +14511,16 @@ def _domin_capture_npc_look(character, npc_id="1105", domin_id="1"):
         map_id=district.get("map_id", "502")
     )
     fields = decode_sproto(npc)
+    display_name = "Ash Viper" if str(npc_id) == "1105" else "Capture Rival"
+    general = decode_sproto(fields.get(1, b""))
+    general[0] = display_name.encode("utf-8")
+    visual = decode_sproto(fields.get(6, b""))
+    visual[0] = display_name.encode("utf-8")
     return encode_sproto([
         (0, int(npc_id)),
-        (1, fields.get(1, b"")),
+        (1, encode_sproto(list(general.items()))),
         (3, _domin_capture_area_attributes(domin_id)),
-        (4, fields.get(6, b""))
+        (4, encode_sproto(list(visual.items())))
     ])
 
 
@@ -14648,20 +14653,21 @@ def _domin_capture_resource_amounts(character, domin_id, now_ms=None):
 
 def _domin_capture_info_state(character, district):
     domin_id = str(district["id"])
-    owner = _domin_capture_owned_by(domin_id)
-    owned_by_player = bool(
-        character and owner
-        and numeric_id_value(owner.get("id", 0)) ==
-        numeric_id_value(character.get("id", 0))
-    )
-    progress = 100 if owned_by_player else 0
+    # These are the only runtime fields evidenced by the original server
+    # response. Sending guessed percent/ownership values makes the client
+    # interpret them as its influence/timer fields (including int overflow).
     return encode_sproto([
-        (0, domin_id), (8, progress), (9, int(owned_by_player))
+        (0, domin_id), (8, 0), (9, 0)
     ])
 
 
 def _domin_capture_enemy_roster(character):
     """Return one current owner/opponent for each open Single district."""
+    placeholder_names = {"", "hero", "playername"}
+
+    def is_displayable_player(candidate):
+        return str(candidate.get("name", "")).strip().lower() not in placeholder_names
+
     enemy_ids = []
     seen_ids = {numeric_id_value(character.get("id", 0)) or 0}
     for relation in (character or {}).get("enemies", []):
@@ -14674,34 +14680,45 @@ def _domin_capture_enemy_roster(character):
     candidates = []
     for enemy_id in enemy_ids:
         enemy = find_social_character(enemy_id)
-        if enemy is not None:
+        if enemy is not None and is_displayable_player(enemy):
             candidates.append(enemy)
 
     remaining = [
         candidate for candidate in _rank_pvp_all_characters()
-        if numeric_id_value(candidate.get("id", 0)) not in seen_ids
+        if (numeric_id_value(candidate.get("id", 0)) not in seen_ids
+            and is_displayable_player(candidate))
     ]
     remaining.sort(key=lambda candidate: int(candidate.get("id", 0)))
     candidates.extend(remaining)
 
     roster = []
+    offered_candidate_ids = set()
     for district in _domin_capture_open_districts():
         domin_id = str(district["id"])
         if domin_id == "1" and _domin_capture_story_current(character, domin_id):
             roster.append(_domin_capture_npc_descriptor("1105"))
             continue
         owner = _domin_capture_owned_by(domin_id)
-        if owner is None:
-            owner = next(iter(candidates), None)
+        if owner is character:
+            owner_kind = "owned"
+        elif owner is not None and is_displayable_player(owner):
+            owner_kind = "player"
+        else:
+            owner = next(
+                (candidate for candidate in candidates
+                 if numeric_id_value(candidate.get("id", 0)) not in offered_candidate_ids),
+                None
+            )
+            if owner is not None:
+                offered_candidate_ids.add(numeric_id_value(owner.get("id", 0)))
+                owner_kind = "player"
         if owner is None:
             roster.append(_domin_capture_npc_descriptor(
                 str(1104 + int(domin_id))
             ))
             continue
-        owner_kind = (
-            "owned" if int(owner.get("id", 0) or 0) ==
-            int(character.get("id", 0) or 0) else "player"
-        )
+        if owner_kind == "player":
+            offered_candidate_ids.add(numeric_id_value(owner.get("id", 0)))
         roster.append({
             "character_id": int(owner.get("id", 0)),
             "synthetic": False,
