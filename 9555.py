@@ -15606,6 +15606,18 @@ def broadcast_aoi_add(target_conn, target_char, sender_conn=None, sender_char=No
         return
     sync_player_aoi(target_char)
 
+def replay_map_aoi_after_reconnect(conn, char):
+    """Recreate map NPCs and nearby players after the client clears its AOI."""
+    map_id = str(char.get('map_id') or '11')
+    if map_id in PRISON_NPC_AOI_MAP_IDS:
+        update_prison_npc_aoi(conn, map_id, char)
+    else:
+        spawn_map_npcs(conn, map_id, char)
+    if (not is_single_player_map(map_id)
+            and not is_exp_map(map_id)
+            and not is_equipment_copy_map(map_id)):
+        broadcast_aoi_add(conn, char)
+
 def broadcast_aoi_remove(char_id, map_id):
     """Remove a departing player from the clients that currently see them."""
     map_id = str(map_id)
@@ -20572,6 +20584,9 @@ def client_handler(conn, addr):
                     picked_char = reconnect_char
                     ALL_CONNECTIONS[reconnect_char_id] = (conn, picked_char)
                     CONNECTION_LOCKS[reconnect_char_id] = send_lock
+                    # The client recycles NPCs and remote players on reconnect.
+                    # Force its next AOI reconciliation to send fresh player adds.
+                    PLAYER_AOI_TRACK.pop(reconnect_char_id, None)
                     if isinstance(picked_char.get('dance_runtime'), dict) and picked_char['dance_runtime'].get('running'):
                         settle_personal_dance(picked_char, stop=True)
                     _sync_friend_online_state(reconnect_char_id, 1)
@@ -20740,6 +20755,19 @@ def client_handler(conn, addr):
                         picked_char.pop('_street_race_return_reconnect', None)
                         save_chars(all_accounts_chars)
                         print(f"[STREET RACE] rebound reconnect id={reconnect_char_id} type={reconnect_type} requested_map={requested_map} server_map={picked_char.get('map_id')}")
+                    else:
+                        if reconnect_type == 1 or requested_map != char_map:
+                            # With no MainPlayer the client needs a complete
+                            # scene rebuild, including its own character.
+                            start_map_transition(
+                                conn, picked_char, char_map, send_rpc_push,
+                                override_pos=list(
+                                    picked_char.get('pos')
+                                    or default_map_spawn_position(char_map)))
+                        else:
+                            # The scene is still loaded, but NetManager has
+                            # recycled its NPCs and all remote-player objects.
+                            replay_map_aoi_after_reconnect(conn, picked_char)
                     restored_team = get_team_for_char(reconnect_char_id)
                     if restored_team:
                         send_team_update(restored_team['id'])
