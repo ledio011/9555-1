@@ -14415,8 +14415,55 @@ def _rank_pvp_character_look(character):
 
 
 def _domin_capture_character_look(character):
-    """Use the same full character_look schema as the client's opponent cards."""
-    return _rank_pvp_character_look(character)
+    """Build the nested city-player card expected by DominInfoResponse."""
+    stats = get_character_stats(character)
+    area_attributes = encode_sproto(character_attribute_other_fields(
+        character, stats, current_character_hp(character, stats), camp=1
+    ))
+    visual = get_visual(
+        character.get("name", "Hero"), character.get("prof", 0),
+        character=character
+    )
+    return encode_sproto([
+        (0, int(character.get("id", 0))),
+        (1, get_general(character)),
+        (3, area_attributes),
+        (4, visual)
+    ])
+
+
+def _domin_capture_story_current(character, domin_id):
+    mission = missions_data.get("1003", {})
+    return bool(
+        int(mission.get("class", 0) or 0) == 1
+        and str(mission.get("logic_type", "")) == "25"
+        and str(mission.get("logic_id", "")) == str(domin_id)
+        and str(mission.get("pre_id", "")) ==
+        str(character.get("last_main_mission_id", ""))
+    )
+
+
+def _domin_capture_npc_look(character, npc_id="1105"):
+    """Build a selectable Capture NPC card from the configured NPC template."""
+    npc = get_boss_char(
+        int(npc_id), str(character.get("active_domin_id") or "1"),
+        character.get("level", 1)
+    )
+    fields = decode_sproto(npc)
+    return encode_sproto([
+        (0, int(npc_id)),
+        (1, fields.get(1, b"")),
+        (3, fields.get(2, b"")),
+        (4, fields.get(6, b""))
+    ])
+
+
+def _domin_capture_npc_descriptor(npc_id="1105"):
+    return {
+        "character_id": int(npc_id),
+        "kind": "npc",
+        "npc_id": str(npc_id)
+    }
 
 
 def _domin_capture_enemy_roster(character):
@@ -14452,24 +14499,34 @@ def _domin_capture_enemy_roster(character):
             "synthetic": False
         })
 
+    if not roster:
+        roster.append(_domin_capture_npc_descriptor())
     return roster
 
 
 def _domin_capture_roster_character(owner, descriptor):
+    if descriptor.get("kind") == "npc":
+        return None
     character_id = int(descriptor.get("character_id", 0) or 0)
     rival = find_social_character(character_id)
-    if rival is None:
-        rival = copy.deepcopy(owner)
-    else:
-        rival = copy.deepcopy(rival)
-    return rival
+    if rival is None or int(rival.get("id", 0) or 0) == int(owner.get("id", 0) or 0):
+        return None
+    return copy.deepcopy(rival)
 
 
 def _domin_capture_enemy_looks(character, roster=None):
-    return [
-        _domin_capture_character_look(_domin_capture_roster_character(character, rival))
-        for rival in (roster if roster is not None else _domin_capture_enemy_roster(character))
-    ]
+    looks = []
+    for descriptor in (roster if roster is not None
+                       else _domin_capture_enemy_roster(character)):
+        if descriptor.get("kind") == "npc":
+            looks.append(_domin_capture_npc_look(
+                character, descriptor.get("npc_id", "1105")
+            ))
+            continue
+        rival = _domin_capture_roster_character(character, descriptor)
+        if rival is not None:
+            looks.append(_domin_capture_character_look(rival))
+    return looks
 
 
 def _domin_capture_selected_enemy(fields, roster):
@@ -14555,28 +14612,46 @@ def _domin_capture_spawn_enemy(conn, character, send_rpc_push):
     index = int(character.get("domin_capture_enemy_index", 0) or 0)
     roster = character.get("domin_capture_roster") or []
     inst_id = next_global_inst_id()
-    if index < len(roster):
+    if index < len(roster) and roster[index].get("kind") != "npc":
         descriptor = roster[index]
         rival = _domin_capture_roster_character(character, descriptor)
+        if rival is None:
+            debug_log(
+                f"[CAPTURE] cannot spawn missing rival player={character.get('id')} "
+                f"rival={descriptor.get('character_id')}"
+            )
+            return False
         stats = get_character_stats(rival)
-        skill_ids = list(build_skills_map(
+        skills = build_skills_map(
             rival.get("prof", 0), stats["lv"], rival.get("skill_levels", {}),
             rival.get("equipped_equip", []), rival.get("skill_positions", {})
-        ).keys())
+        )
+        skill_ids = list(skills)
+        skill_levels = {
+            str(skill_id): get_val_int(decode_sproto(skill_data), 1, 0)
+            for skill_id, skill_data in skills.items()
+        }
         payload = _domin_capture_zombie_character(rival, inst_id)
         character["_domin_capture_enemy"] = {
             "kind": "player", "character_id": int(descriptor.get("character_id", 0)),
             "synthetic": bool(descriptor.get("synthetic")),
             "prof": int(rival.get("prof", 0)), "name": str(rival.get("name", "")),
-            "stats": stats, "skill_ids": skill_ids
+            "stats": stats, "skill_ids": skill_ids, "skill_levels": skill_levels
         }
     else:
-        stats = get_npc_attr("1105", character.get("level", 1))
-        payload = get_boss_char(inst_id, "1", character.get("level", 1))
+        descriptor = roster[index] if index < len(roster) else _domin_capture_npc_descriptor()
+        npc_id = str(descriptor.get("npc_id", "1105"))
+        stats = get_npc_attr(npc_id, character.get("level", 1))
+        payload = get_boss_char(inst_id, str(character.get("active_domin_id") or "1"),
+                                character.get("level", 1))
+        skills = _domin_capture_boss_skills()
         character["_domin_capture_enemy"] = {
-            "kind": "npc", "npc_id": "1105", "stats": stats,
-            "skill_ids": ["101", "102", "103", "104", "10001", "10002",
-                          "10003", "10004", "10005", "10006"]
+            "kind": "npc", "npc_id": npc_id, "stats": stats,
+            "skill_ids": list(skills),
+            "skill_levels": {
+                str(skill_id): get_val_int(decode_sproto(skill_data), 1, 0)
+                for skill_id, skill_data in skills.items()
+            }
         }
     character["boss_inst_id"] = inst_id
     NPC_HP_MAP[inst_id] = int(stats.get("hp_max", 1))
@@ -14588,7 +14663,10 @@ def _domin_capture_spawn_enemy(conn, character, send_rpc_push):
 
     def start_capture_fight(expected_id=inst_id):
         if (str(character.get("map_id")) == "502"
+                and is_current_character_connection(conn, character)
                 and character.get("boss_inst_id") == expected_id
+                and not character.get("domin_return_scheduled")
+                and int(character.get("domin_capture_deadline", 0) or 0) > int(time.time())
                 and NPC_HP_MAP.get(expected_id, 0) > 0):
             send_rpc_push(547, encode_sproto([]))
     timer = threading.Timer(2.5, start_capture_fight)
@@ -14596,6 +14674,7 @@ def _domin_capture_spawn_enemy(conn, character, send_rpc_push):
     timer.start()
 
     debug_log(f"[CAPTURE] spawned enemy index={index} kind={character['_domin_capture_enemy']['kind']} inst={inst_id}")
+    return True
 
 
 def _domin_capture_clear_enemy_instance(inst_id):
@@ -19886,7 +19965,9 @@ def client_handler(conn, addr):
         picked_char['domin_return_restore_hp'] = restore_hp
 
         def leave_after_notice(seconds_left):
-            if not picked_char or picked_char.get('map_id') != '502':
+            if (not picked_char or picked_char.get('map_id') != '502'
+                    or not picked_char.get('domin_return_scheduled')
+                    or not is_current_character_connection(conn, picked_char)):
                 return
             if seconds_left > 0:
                 # Localization 200302: "You will leave the scene after {0} seconds".
@@ -20710,6 +20791,7 @@ def client_handler(conn, addr):
 
                         def arena_timeout():
                             if (picked_char and picked_char.get('map_id') == '502'
+                                    and is_current_character_connection(conn, picked_char)
                                     and int(picked_char.get('domin_capture_deadline', 0)) <= int(time.time())):
                                 debug_log('[CAPTURE] arena deadline reached; returning')
                                 schedule_domin_return(restore_hp=True)
@@ -20722,7 +20804,10 @@ def client_handler(conn, addr):
 
                         if (remaining > 0
                                 and picked_char.pop('boss_waiting_for_map_ready', False)):
-                            _domin_capture_spawn_enemy(conn, picked_char, send_rpc_push)
+                            if not _domin_capture_spawn_enemy(
+                                    conn, picked_char, send_rpc_push):
+                                picked_char['boss_waiting_for_map_ready'] = False
+                                schedule_domin_return(restore_hp=True)
                     send_rpc_push(519, sync_mission_data(picked_char))
                     replay_pending_cash_stage_result(picked_char)
                     if street_race_result_restore_pending:
@@ -20809,16 +20894,21 @@ def client_handler(conn, addr):
                             capture_mission and int(capture_mission.get('state', 1)) == 2
                         )
                         deadline = int(picked_char.get('domin_capture_deadline', 0) or 0)
-                        if reward_pending or deadline <= int(time.time()):
+                        exit_pending = bool(picked_char.get('domin_return_scheduled'))
+                        if reward_pending or exit_pending or deadline <= int(time.time()):
                             for timer_key in ('arena_timer', '_domin_capture_next_enemy_timer'):
                                 timer = picked_char.pop(timer_key, None)
                                 if timer is not None:
                                     timer.cancel()
+                            # A queued notice timer still holds the old socket.
+                            # Clearing this flag makes its callback a no-op;
+                            # complete the return on the newly authenticated connection.
+                            picked_char['domin_return_scheduled'] = False
                             return_map = str(picked_char.pop('pre_arena_map', None) or '11')
                             return_pos = picked_char.pop('pre_arena_pos', None)
                             _domin_capture_clear_enemy_instance(
                                 picked_char.get('boss_inst_id'))
-                            if deadline <= int(time.time()):
+                            if exit_pending or deadline <= int(time.time()):
                                 picked_char['hp'] = get_character_stats(picked_char)['hp_max']
                             picked_char['map_id'] = return_map
                             picked_char['pos'] = list(
@@ -20839,7 +20929,8 @@ def client_handler(conn, addr):
                                 conn, picked_char, return_map, send_rpc_push,
                                 override_pos=return_pos)
                             print(f"[CAPTURE] recovered player={reconnect_char_id} "
-                                  f"to map={return_map} reward_pending={reward_pending}")
+                                  f"to map={return_map} reward_pending={reward_pending} "
+                                  f"exit_pending={exit_pending}")
                         else:
                             old_boss = picked_char.get('boss_inst_id')
                             _domin_capture_clear_enemy_instance(old_boss)
@@ -23156,45 +23247,77 @@ def client_handler(conn, addr):
                         # and equipped skill set; Ash Viper uses NPC 1105.
                         enemy = picked_char.get('_domin_capture_enemy') or {}
                         boss_id = picked_char.get('boss_inst_id')
-                        if boss_id and enemy.get('stats'):
-                            player_level = picked_char.get('level', 1)
+                        active_capture_enemy = bool(
+                            current_map == "502"
+                            and is_current_character_connection(conn, picked_char)
+                            and boss_id
+                            and enemy.get('stats')
+                            and NPC_INSTANCE_MAP.get(boss_id) == "502"
+                            and NPC_HP_MAP.get(boss_id, 0) > 0
+                            and int(picked_char.get('domin_capture_deadline', 0) or 0) > int(time.time())
+                        )
+                        if active_capture_enemy:
                             boss_stats = enemy['stats']
                             player_stats = get_character_stats(picked_char)
 
                             # Only accept effect rows belonging to the active
                             # rival's actual skill map.
-                            boss_allowed_effects = set()
+                            matching_boss_skills = []
                             for boss_sid in enemy.get('skill_ids', []):
                                 bcfg = SKILL_CONFIG.get(boss_sid, {})
-                                for eff_key in ('eff0', 'eff1', 'eff2'):
-                                    eff = bcfg.get(eff_key, '')
-                                    if eff:
-                                        boss_allowed_effects.add(eff)
+                                if effinfo_id and effinfo_id in {
+                                        str(bcfg.get(eff_key) or '')
+                                        for eff_key in ('eff0', 'eff1', 'eff2')
+                                        if bcfg.get(eff_key)}:
+                                    matching_boss_skills.append(str(boss_sid))
 
-                            if effinfo_id and effinfo_id in boss_allowed_effects and effinfo_id in EFF_TO_SKILL:
-                                boss_skill_id = EFF_TO_SKILL[effinfo_id]
+                            preferred_boss_skill = str(EFF_TO_SKILL.get(effinfo_id, ''))
+                            if preferred_boss_skill in matching_boss_skills:
+                                boss_skill_id = preferred_boss_skill
+                            elif len(matching_boss_skills) == 1:
+                                boss_skill_id = matching_boss_skills[0]
                             else:
-                                # Unknown client effects fall back to a real
-                                # basic/primary skill for the current rival.
-                                boss_skill_id = next((
-                                    sid for sid in enemy.get('skill_ids', [])
-                                    if sid in ('101', '10001', '10002', '10003')
-                                ), "101")
-                                skill_cfg = SKILL_CONFIG.get(boss_skill_id, {})
-                                effinfo_id = skill_cfg.get('eff0', "10000")
+                                boss_skill_id = None
 
-                            server_dmg, hit, calc_cri = get_combat_damage(
-                                boss_stats, player_stats, boss_skill_id, 0, effinfo_id=effinfo_id, attacker_is_npc=True
-                            )
-                            if not hit:
+                            if boss_skill_id is None:
+                                boss_skill_level = 0
                                 server_dmg = 0
+                                hit = False
                                 calc_cri = False
+                                print(f"[CAPTURE ATTACK] rejected unknown rival effect "
+                                      f"player={picked_char.get('id')} "
+                                      f"kind={enemy.get('kind')} eff={effinfo_id} "
+                                      f"skills={matching_boss_skills}")
+                            else:
+                                try:
+                                    boss_skill_level = max(
+                                        0, int((enemy.get('skill_levels') or {}).get(
+                                            str(boss_skill_id), 0
+                                        ) or 0)
+                                    )
+                                except (TypeError, ValueError):
+                                    boss_skill_level = 0
+                                player_rival = enemy.get("kind") == "player"
+                                server_dmg, hit, calc_cri = get_combat_damage(
+                                    boss_stats, player_stats, boss_skill_id, boss_skill_level,
+                                    pvp_scale=1.0, effinfo_id=effinfo_id,
+                                    sat_type="satp" if player_rival else npc_damage_sat_type(
+                                        enemy.get("npc_id", "1105")
+                                    ),
+                                    is_pvp=player_rival, attacker_is_npc=not player_rival
+                                )
+                                if not hit:
+                                    server_dmg = 0
+                                    calc_cri = False
 
-                            print(f"[AREA BOSS ATTACK] server_dmg={server_dmg} cri={calc_cri} eff={effinfo_id}")
+                                print(f"[CAPTURE ATTACK] kind={enemy.get('kind')} "
+                                      f"skill={boss_skill_id} level={boss_skill_level} "
+                                      f"server_dmg={server_dmg} cri={calc_cri} eff={effinfo_id}")
                         else:
                             server_dmg = 0
                             calc_cri = False
-                            print(f"[AREA BOSS ATTACK] No boss_inst_id found, damage rejected")
+                            print(f"[CAPTURE ATTACK] rejected inactive rival player={picked_char.get('id')} "
+                                  f"target={target_id} instance={boss_id}")
                     elif is_rank_pvp:
                         # In Rank PVP the only AI opponent is the selected character
                         # cloned as OBJ_ZOMBIE_PLAYER. TAG 128 identifies the player
@@ -23837,6 +23960,20 @@ def client_handler(conn, addr):
                             target_nid = NPC_INST_MAP.get(target_id, str(target_id))
                             if not is_exp:
                                 NPC_INST_MAP[target_id] = target_nid
+                            if cur_map == "502":
+                                capture_enemy = picked_char.get('_domin_capture_enemy') or {}
+                                capture_instance = picked_char.get('boss_inst_id')
+                                if (not is_current_character_connection(conn, picked_char)
+                                        or target_id != capture_instance
+                                        or not capture_enemy.get('stats')
+                                        or NPC_INSTANCE_MAP.get(target_id) != "502"
+                                        or not str(target_nid).startswith("BOSS_CAPTURE")
+                                        or NPC_HP_MAP.get(target_id, 0) <= 0
+                                        or int(picked_char.get('domin_capture_deadline', 0) or 0)
+                                        <= int(time.time())):
+                                    print(f"[CAPTURE HIT] rejected inactive/unowned target={target_id} "
+                                          f"player={picked_char.get('id')} map={cur_map}")
+                                    continue
                             if str(target_nid) == "23101":
                                 owner_id = int(GOTHAM_ESCORT_NPC_OWNER.get(target_id, 0) or 0)
                                 active_escort = any(
@@ -24273,10 +24410,8 @@ def client_handler(conn, addr):
                                     capture_mission = missions_data.get('1003', {})
                                     capture_entry = picked_char.get(
                                         'active_missions', {}).get('1003')
-                                    capture_story_current = (
-                                        int(capture_mission.get('class', 0) or 0) == 1
-                                        and str(capture_mission.get('pre_id', '')) ==
-                                        str(picked_char.get('last_main_mission_id', ''))
+                                    capture_story_current = _domin_capture_story_current(
+                                        picked_char, did
                                     )
                                     if (not is_player_rival and capture_story_current
                                             and capture_entry
@@ -24779,6 +24914,13 @@ def client_handler(conn, addr):
                 did = field_text(body, 0, '')
                 debug_log(f"[M1003 DEBUG] RX 311 domin_id={did}")
                 if picked_char:
+                    if not is_current_character_connection(conn, picked_char):
+                        debug_log(f"[CAPTURE] rejected challenge from stale socket player={picked_char.get('id')}")
+                        if session is not None:
+                            ph = encode_sproto([(1, session)])
+                            pf = sproto_pack(ph + encode_sproto([]))
+                            conn.sendall(struct.pack(">H", len(pf)) + pf)
+                        continue
                     # This server implements Domin 1 / map 502. Do not require
                     # the player to have reached a particular main-mission
                     # chain before allowing the configured Capture challenge.
@@ -24793,11 +24935,8 @@ def client_handler(conn, addr):
                     active_missions = picked_char.setdefault('active_missions', {})
                     capture_mission = missions_data.get('1003', {})
                     existing_capture = active_missions.get('1003')
-                    capture_story_current = (
-                        int(capture_mission.get('class', 0) or 0) == 1
-                        and str(capture_mission.get('logic_id', '')) == valid_domin_id
-                        and str(capture_mission.get('pre_id', '')) ==
-                        str(picked_char.get('last_main_mission_id', ''))
+                    capture_story_current = _domin_capture_story_current(
+                        picked_char, valid_domin_id
                     )
                     if (capture_mission.get('logic_type') == 25
                             and str(capture_mission.get('logic_id', '')) == valid_domin_id
@@ -24809,6 +24948,7 @@ def client_handler(conn, addr):
                         active_missions['1003'] = {
                             'state': 1, 'parm': parm, 'accept_time': int(time.time())
                         }
+                        existing_capture = active_missions['1003']
                         save_chars(all_accounts_chars)
                         send_rpc_push(519, sync_mission_data(picked_char))
                         debug_log("[M1003 DEBUG] Activated Capture mission 1003 on challenge entry")
@@ -24828,7 +24968,18 @@ def client_handler(conn, addr):
                         '_domin_capture_offered_enemies')
                     if not isinstance(offered_roster, list):
                         offered_roster = _domin_capture_enemy_roster(picked_char)
+                    if capture_story_current:
+                        offered_roster = [_domin_capture_npc_descriptor("1105")]
+                        picked_char['_domin_capture_offered_enemies'] = offered_roster
                     selected_enemy = _domin_capture_selected_enemy(body, offered_roster)
+                    if selected_enemy is not None:
+                        if selected_enemy.get("kind") == "npc":
+                            npc_id = str(selected_enemy.get("npc_id", ""))
+                            if npc_id not in NPC_CONFIG:
+                                selected_enemy = None
+                        elif _domin_capture_roster_character(
+                                picked_char, selected_enemy) is None:
+                            selected_enemy = None
                     if not capture_story_active and selected_enemy is None:
                         debug_log(
                             f"[CAPTURE] rejected challenge without a valid selected rival "
@@ -24859,7 +25010,8 @@ def client_handler(conn, addr):
                     debug_log(
                         f"[CAPTURE] entering map=502 player={picked_char.get('id')} "
                         f"kind={'mission_boss' if capture_story_active else 'selected_rival'} "
-                        f"selected={selected_enemy.get('character_id') if selected_enemy else '1105'}"
+                        f"selected={selected_enemy.get('character_id') if selected_enemy else '1105'} "
+                        f"request_fields={body}"
                     )
                     save_chars(all_accounts_chars)
                     start_map_transition(conn, picked_char, "502", send_rpc_push)
@@ -27010,7 +27162,14 @@ def client_handler(conn, addr):
 
                 # Keep the DominData response's original wire schema. Its first
                 # list is runtime Capture state, not the DominData asset rows.
-                offered_roster = _domin_capture_enemy_roster(picked_char) if picked_char else []
+                capture_story_current = bool(
+                    picked_char and _domin_capture_story_current(picked_char, "1")
+                )
+                offered_roster = (
+                    [_domin_capture_npc_descriptor("1105")]
+                    if capture_story_current
+                    else _domin_capture_enemy_roster(picked_char) if picked_char else []
+                )
                 if picked_char:
                     picked_char['_domin_capture_offered_enemies'] = offered_roster
                     debug_log(
