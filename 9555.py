@@ -25390,7 +25390,7 @@ def client_handler(conn, addr):
                 if session is not None:
                     ph=encode_sproto([(1,session)]);pf=sproto_pack(ph+encode_sproto([]));conn.sendall(struct.pack('>H',len(pf))+pf)
 
-            elif msg in [118, 218, 145, 202, 203, 210, 225, 230, 242, 243, 244, 249, 252, 253, 254, 255, 256, 257, 258, 261, 262, 265, 266, 278, 296, 297, 313, 319, 452]:
+            elif msg in [118, 218, 145, 202, 203, 210, 225, 230, 242, 243, 244, 249, 252, 253, 254, 255, 256, 257, 258, 261, 262, 265, 266, 278, 296, 297, 313, 452]:
                 resp_data = encode_sproto([])
                 if msg == 118:
                     # Check if this is a random name request (body has field 0 = type)
