@@ -14459,7 +14459,7 @@ def _domin_capture_character_look(character):
 
 
 def _domin_capture_enemy_looks(character):
-    """Build complete character-look records for the player's real enemy list."""
+    """Build three Capture previews from real characters, filling gaps with scaled rivals."""
     enemy_ids = []
     seen_ids = {numeric_id_value(character.get("id", 0)) or 0}
     for relation in (character or {}).get("enemies", []):
@@ -14469,27 +14469,31 @@ def _domin_capture_enemy_looks(character):
         seen_ids.add(enemy_id)
         enemy_ids.append(enemy_id)
 
-    # Accounts without a social enemy list still get real character opponents.
-    if not enemy_ids:
-        candidates = [
-            candidate for candidate in _rank_pvp_all_characters()
-            if numeric_id_value(candidate.get("id", 0)) not in seen_ids
-        ]
-        candidates.sort(key=lambda candidate: int(candidate.get("id", 0)))
-        enemy_ids = [int(candidate.get("id", 0)) for candidate in candidates]
-
     looks = []
     for enemy_id in enemy_ids:
         enemy = find_social_character(enemy_id)
         if enemy is not None:
             looks.append(_domin_capture_character_look(enemy))
-    if not looks:
-        # DominData's client scene initializes its opponent view from the
-        # first character-look entry. Keep Capture usable on a fresh/solo
-        # server while still sending the full player-compatible payload.
+
+    candidates = [
+        candidate for candidate in _rank_pvp_all_characters()
+        if numeric_id_value(candidate.get("id", 0)) not in seen_ids
+    ]
+    candidates.sort(key=lambda candidate: int(candidate.get("id", 0)))
+    for candidate in candidates:
+        if len(looks) >= 3:
+            break
+        seen_ids.add(numeric_id_value(candidate.get("id", 0)))
+        looks.append(_domin_capture_character_look(candidate))
+
+    # Keep the Capture selector populated on a fresh server with fewer than
+    # three saved characters; these previews are not persisted as player data.
+    while len(looks) < 3:
         fallback = copy.deepcopy(character)
         fallback["id"] = 0
-        fallback["name"] = "Capture Rival"
+        fallback["name"] = f"Capture Rival {len(looks) + 1}"
+        fallback["level"] = normalize_player_level(character)
+        fallback["prof"] = len(looks) % 3
         looks.append(_domin_capture_character_look(fallback))
     return looks
 
@@ -24119,6 +24123,19 @@ def client_handler(conn, addr):
                                         (7, picked_char['id'])
                                     ]))
                                     picked_char['boss_inst_id'] = None
+                                    arena_timer = picked_char.pop('arena_timer', None)
+                                    if arena_timer:
+                                        arena_timer.cancel()
+                                    send_rpc_push(629, encode_sproto([
+                                        (0, int(time.time())), (1, 2)
+                                    ]))
+                                    capture_mission = picked_char.get(
+                                        'active_missions', {}).get('1003')
+                                    if not capture_mission or int(capture_mission.get('state', 1)) != 2:
+                                        # A previously completed one-time mission
+                                        # has no reward claim screen to trigger
+                                        # the normal arena return.
+                                        schedule_domin_return()
                                 else:
                                     if is_equipment:
                                         on_equipment_npc_killed(exp_state_hit, target_id, target_nid)
@@ -24582,24 +24599,34 @@ def client_handler(conn, addr):
                 did = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
                 debug_log(f"[M1003 DEBUG] RX 311 domin_id={did}")
                 if picked_char:
-                    # Validate Domin ID against active capture missions
-                    # Only allow entering the Domin territory that matches the current mission
-                    valid_domin = False
-                    valid_domin_id = None
-                    for act_m, act_mdata in picked_char.get('active_missions', {}).items():
-                        cap_cfg = missions_data.get(act_m, {})
-                        if cap_cfg.get('logic_type') == 25:
-                            # Mission 1003: logic_type 25 (capture), logic_id 1, target 1105
-                            # The Domin ID should match the logic_id from the mission
-                            mission_logic_id = cap_cfg.get('logic_id', '')
-                            if mission_logic_id == did:
-                                valid_domin = True
-                                valid_domin_id = did
-                                break
-                    # Reject if no active capture mission matches the requested Domin ID
-                    if not valid_domin:
-                        debug_log(f"[M1003 DEBUG] RX 311 rejected: no active capture mission for domin_id={did}")
-                        # Reject the request - send empty response
+                    # This server implements Domin 1 / map 502. Do not require
+                    # the player to have reached a particular main-mission
+                    # chain before allowing the configured Capture challenge.
+                    valid_domin_id = "1" if did == "1" else None
+                    if valid_domin_id is None:
+                        debug_log(f"[M1003 DEBUG] RX 311 rejected: unsupported domin_id={did}")
+                        if session is not None:
+                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                            conn.sendall(struct.pack(">H", len(pf)) + pf)
+                        continue
+
+                    active_missions = picked_char.setdefault('active_missions', {})
+                    capture_mission = missions_data.get('1003', {})
+                    existing_capture = active_missions.get('1003')
+                    if (capture_mission.get('logic_type') == 25
+                            and str(capture_mission.get('logic_id', '')) == valid_domin_id
+                            and existing_capture is None
+                            and str(picked_char.get('last_main_mission_id', '')) != '1003'):
+                        parm = [0] * 8
+                        parm[7] = int(time.time())
+                        active_missions['1003'] = {
+                            'state': 1, 'parm': parm, 'accept_time': int(time.time())
+                        }
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(519, sync_mission_data(picked_char))
+                        debug_log("[M1003 DEBUG] Activated Capture mission 1003 on challenge entry")
+                    elif existing_capture and int(existing_capture.get('state', 1)) == 2:
+                        debug_log("[M1003 DEBUG] RX 311 rejected: claim Capture mission 1003 reward first")
                         if session is not None:
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                             conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -24613,6 +24640,8 @@ def client_handler(conn, addr):
                     picked_char['pre_arena_map'] = str(picked_char.get('map_id', '11'))
                     debug_log(f"[M1003 DEBUG] Saved pre-arena pos: {picked_char['pre_arena_pos']}, map: {picked_char['pre_arena_map']}")
                     picked_char['active_domin_id'] = valid_domin_id
+                    picked_char['domin_return_scheduled'] = False
+                    picked_char.pop('domin_return_restore_hp', None)
                     start_map_transition(conn, picked_char, "502", send_rpc_push)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
