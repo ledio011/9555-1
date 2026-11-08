@@ -3443,32 +3443,9 @@ def get_boss_char(inst_id, did, player_level=1):
     pos_data = encode_sproto([(0, 400), (1, 120), (2, 0), (3, -9000)])
     mv = encode_sproto([(0, pos_data), (1, pos_data)])
 
-    # Boss uses XD profession skills for authentic arena enemy behavior.
-    # ObjZombiePlayer AI uses skills with indexPos 4-6 for auto-combat,
-    # sorted by PriorityAutoCombat descending:
-    #   110 (斗志, priority 5) -> used first
-    #   105 (旋风斩, priority 4) -> used second
-    #   106 (棒球, priority 3) -> used third
-    # Dodge (104) at indexPos 3 is available for evasion.
-    skills_map = {}
-    # Basic attack combo chain (required for combo attacks)
-    atk_skills = ["101", "102", "103"]
-    for sid in atk_skills:
-        skills_map[sid] = encode_sproto([(0, sid), (1, 0), (2, 0), (3, 1), (4, 0), (5, False)])
-    # Dodge skill at indexPos 3
-    skills_map["104"] = encode_sproto([(0, "104"), (1, 0), (2, 3), (3, 1), (4, 1), (5, False)])
-    # Active skill 1: 110 (斗志) at indexPos 4 - highest priority auto-fight
-    skills_map["110"] = encode_sproto([
-        (0, "110"), (1, 1), (2, 4), (3, 1), (4, 2), (5, False)
-    ])
-    # Active skill 2: 105 (旋风斩) at indexPos 5
-    skills_map["105"] = encode_sproto([
-        (0, "105"), (1, 1), (2, 5), (3, 1), (4, 3), (5, False)
-    ])
-    # Active skill 3: 106 (棒球) at indexPos 6
-    skills_map["106"] = encode_sproto([
-        (0, "106"), (1, 1), (2, 6), (3, 1), (4, 4), (5, False)
-    ])
+    # NPC-specific XD variants (10001-10006) carry the correct damage and
+    # priority rows; player skills 105/106/110 are not the NPC skill set.
+    skills_map = _domin_capture_boss_skills()
 
     # Runtime: attribute(6), attribute_all(7)
     attr_all = encode_sproto(npc_attribute_fields(boss_stats))
@@ -14458,8 +14435,8 @@ def _domin_capture_character_look(character):
     ])
 
 
-def _domin_capture_enemy_looks(character):
-    """Build three Capture previews from real characters, filling gaps with scaled rivals."""
+def _domin_capture_enemy_roster(character):
+    """Select three saved character rivals and pad with local AI profiles."""
     enemy_ids = []
     seen_ids = {numeric_id_value(character.get("id", 0)) or 0}
     for relation in (character or {}).get("enemies", []):
@@ -14469,11 +14446,13 @@ def _domin_capture_enemy_looks(character):
         seen_ids.add(enemy_id)
         enemy_ids.append(enemy_id)
 
-    looks = []
+    roster = []
     for enemy_id in enemy_ids:
         enemy = find_social_character(enemy_id)
         if enemy is not None:
-            looks.append(_domin_capture_character_look(enemy))
+            roster.append({"character_id": int(enemy_id), "synthetic": False})
+            if len(roster) == 3:
+                return roster
 
     candidates = [
         candidate for candidate in _rank_pvp_all_characters()
@@ -14481,21 +14460,140 @@ def _domin_capture_enemy_looks(character):
     ]
     candidates.sort(key=lambda candidate: int(candidate.get("id", 0)))
     for candidate in candidates:
-        if len(looks) >= 3:
+        if len(roster) >= 3:
             break
         seen_ids.add(numeric_id_value(candidate.get("id", 0)))
-        looks.append(_domin_capture_character_look(candidate))
+        roster.append({
+            "character_id": int(candidate.get("id", 0)),
+            "synthetic": False
+        })
 
-    # Keep the Capture selector populated on a fresh server with fewer than
-    # three saved characters; these previews are not persisted as player data.
-    while len(looks) < 3:
-        fallback = copy.deepcopy(character)
-        fallback["id"] = 0
-        fallback["name"] = f"Capture Rival {len(looks) + 1}"
-        fallback["level"] = normalize_player_level(character)
-        fallback["prof"] = len(looks) % 3
-        looks.append(_domin_capture_character_look(fallback))
-    return looks
+    while len(roster) < 3:
+        roster.append({
+            "character_id": int(character.get("id", 0)),
+            "synthetic": True,
+            "prof": len(roster) % 3,
+            "name": f"Capture Rival {len(roster) + 1}"
+        })
+    return roster
+
+
+def _domin_capture_roster_character(owner, descriptor):
+    character_id = int(descriptor.get("character_id", 0) or 0)
+    rival = find_social_character(character_id)
+    if rival is None:
+        rival = copy.deepcopy(owner)
+    else:
+        rival = copy.deepcopy(rival)
+    if descriptor.get("synthetic"):
+        rival["prof"] = int(descriptor.get("prof", 0)) % 3
+        rival["name"] = str(descriptor.get("name", "Capture Rival"))
+    return rival
+
+
+def _domin_capture_enemy_looks(character):
+    return [
+        _domin_capture_character_look(_domin_capture_roster_character(character, rival))
+        for rival in _domin_capture_enemy_roster(character)
+    ]
+
+
+def _domin_capture_zombie_character(character, inst_id):
+    """Clone a saved player profile as a locally fightable Capture zombie."""
+    stats = get_character_stats(character)
+    character["hp"] = int(stats.get("hp_max", 1))
+    packed = decode_sproto(get_full_char(character))
+    packed[0] = int(inst_id)
+    general = decode_sproto(packed.get(1, b""))
+    general[3] = "502"
+    packed[1] = encode_sproto(list(general.items()))
+    other = decode_sproto(packed.get(2, b""))
+    other[0] = int(stats.get("hp_max", 1))
+    other[2] = int(stats.get("lv", 1))
+    other[3] = int(stats.get("power", 0))
+    other[15] = 2
+    packed[2] = encode_sproto(list(other.items()))
+    packed[7] = get_movement(400, 120, 0, -9000)
+    packed[13] = get_runtime_aoi(character)
+    return encode_sproto(list(packed.items()))
+
+
+def _domin_capture_boss_skills():
+    """Use the NPC-specific XD skill variants configured in SkillData."""
+    skills = {}
+    for sid in ("101", "102", "103"):
+        skills[sid] = encode_sproto([
+            (0, sid), (1, 0), (2, 0), (3, 1), (4, 0), (5, False)
+        ])
+    skills["104"] = encode_sproto([
+        (0, "104"), (1, 0), (2, 3), (3, 1), (4, 1), (5, False)
+    ])
+    for index, sid in enumerate(("10001", "10002", "10003", "10004", "10005", "10006"), start=4):
+        if sid not in SKILL_CONFIG:
+            continue
+        skills[sid] = encode_sproto([
+            (0, sid), (1, 1), (2, index), (3, 1), (4, index - 2), (5, False)
+        ])
+    return skills
+
+
+def _domin_capture_spawn_enemy(conn, character, send_rpc_push):
+    """Spawn the active player rival, then the configured Ash Viper encounter."""
+    index = int(character.get("domin_capture_enemy_index", 0) or 0)
+    roster = character.get("domin_capture_roster") or []
+    inst_id = next_global_inst_id()
+    if index < len(roster):
+        descriptor = roster[index]
+        rival = _domin_capture_roster_character(character, descriptor)
+        stats = get_character_stats(rival)
+        skill_ids = list(build_skills_map(
+            rival.get("prof", 0), stats["lv"], rival.get("skill_levels", {}),
+            rival.get("equipped_equip", []), rival.get("skill_positions", {})
+        ).keys())
+        payload = _domin_capture_zombie_character(rival, inst_id)
+        character["_domin_capture_enemy"] = {
+            "kind": "player", "character_id": int(descriptor.get("character_id", 0)),
+            "synthetic": bool(descriptor.get("synthetic")),
+            "prof": int(rival.get("prof", 0)), "name": str(rival.get("name", "")),
+            "stats": stats, "skill_ids": skill_ids
+        }
+    else:
+        stats = get_npc_attr("1105", character.get("level", 1))
+        payload = get_boss_char(inst_id, "1", character.get("level", 1))
+        character["_domin_capture_enemy"] = {
+            "kind": "npc", "npc_id": "1105", "stats": stats,
+            "skill_ids": ["101", "102", "103", "104", "10001", "10002",
+                          "10003", "10004", "10005", "10006"]
+        }
+    character["boss_inst_id"] = inst_id
+    NPC_HP_MAP[inst_id] = int(stats.get("hp_max", 1))
+    NPC_INST_MAP[inst_id] = "BOSS_CAPTURE"
+    NPC_INSTANCE_MAP[inst_id] = "502"
+    send_rpc_push(544, encode_sproto([(0, payload)]))
+    if character["_domin_capture_enemy"]["kind"] == "npc":
+        sync_npc_attrs_rpc(conn, inst_id, stats, NPC_HP_MAP[inst_id])
+
+    def start_capture_fight(expected_id=inst_id):
+        if (str(character.get("map_id")) == "502"
+                and character.get("boss_inst_id") == expected_id
+                and NPC_HP_MAP.get(expected_id, 0) > 0):
+            send_rpc_push(547, encode_sproto([]))
+    timer = threading.Timer(2.5, start_capture_fight)
+    timer.daemon = True
+    timer.start()
+
+    debug_log(f"[CAPTURE] spawned enemy index={index} kind={character['_domin_capture_enemy']['kind']} inst={inst_id}")
+
+
+def _domin_capture_clear_enemy_instance(inst_id):
+    if inst_id is None:
+        return
+    inst_id = int(inst_id)
+    NPC_HP_MAP.pop(inst_id, None)
+    NPC_INST_MAP.pop(inst_id, None)
+    NPC_INSTANCE_MAP.pop(inst_id, None)
+    NPC_ATTR_MAP.pop(inst_id, None)
+    DEAD_NPC_SET.discard(inst_id)
 
 
 def _rank_pvp_zombie_character(character):
@@ -15891,21 +15989,11 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
 
         # BOSS SPAWN for Dominance Map 502
         if target_map_id == "502":
-            did = picked_char.get('active_domin_id', '1')
-            boss_inst_id = next_global_inst_id()
-            picked_char['boss_inst_id'] = boss_inst_id
-            picked_char['boss_pos'] = [400, 120, 0, -9000]
-
-            # Use player level for consistent boss stats
-            player_level = picked_char.get('level', 1)
-            boss_stats = get_npc_attr("1105", player_level)
-            NPC_HP_MAP[boss_inst_id] = boss_stats['hp_max']
-            NPC_INST_MAP[boss_inst_id] = "BOSS_" + did
-            NPC_INSTANCE_MAP[boss_inst_id] = "502"
-            # The APK cannot create the zombie player (or the VS panel) until
-            # map_ready.  Remember it here; MSG 100 sends the actual tag 544.
+            # Rebuild the current Capture wave only after the APK reports
+            # map_ready, so its zombie objects and timer belong to this scene.
+            picked_char['boss_inst_id'] = None
             picked_char['boss_waiting_for_map_ready'] = True
-            debug_log(f"[M1003 DEBUG] Prepared Boss did={did} inst={boss_inst_id} max_hp={boss_stats['hp_max']} (awaiting map_ready)")
+            debug_log("[CAPTURE] prepared enemy wave for map_ready")
 
     except Exception:
         print("[!] FAILED TO SEND MAP ENTER TRANSITION")
@@ -19777,8 +19865,10 @@ def client_handler(conn, addr):
         if not picked_char or picked_char.get('domin_return_scheduled'):
             return
         # Cancel the arena timeout timer so it doesn't fire after we've already exited.
-        if 'arena_timer' in picked_char:
-            picked_char['arena_timer'].cancel()
+        for timer_key in ('arena_timer', '_domin_capture_next_enemy_timer'):
+            timer = picked_char.pop(timer_key, None)
+            if timer is not None:
+                timer.cancel()
         picked_char['domin_return_scheduled'] = True
         picked_char['domin_return_restore_hp'] = restore_hp
 
@@ -19798,12 +19888,18 @@ def client_handler(conn, addr):
 
             return_map = picked_char.get('pre_arena_map', '11')
             return_pos = picked_char.get('pre_arena_pos')
+            _domin_capture_clear_enemy_instance(picked_char.get('boss_inst_id'))
             if picked_char.pop('domin_return_restore_hp', False):
                 # A map transition recreates the main player with this value.
                 # Restore only after the exit countdown, never in the arena.
                 picked_char['hp'] = get_character_stats(picked_char)['hp_max']
             picked_char['boss_inst_id'] = None
             picked_char['active_domin_id'] = None
+            picked_char['domin_capture_deadline'] = 0
+            picked_char.pop('domin_capture_roster', None)
+            picked_char.pop('domin_capture_enemy_index', None)
+            picked_char.pop('_domin_capture_enemy', None)
+            picked_char['boss_waiting_for_map_ready'] = False
             picked_char['pre_arena_pos'] = None
             picked_char['pre_arena_map'] = None
             picked_char['domin_return_scheduled'] = False
@@ -20579,48 +20675,40 @@ def client_handler(conn, addr):
                                     print(f"[RANK PVP] opponent spawned player={picked_char.get('id')} "
                                           f"opponent={opponent.get('id')} map=501")
                     elif mid == "502":
-                        # Map 502 exposes its match timer only through this APK tag.
-                        # Cancel any previous arena timer to prevent stale timers from
-                        # repeated map_ready events affecting a new arena run.
+                        # The Capture timer is an absolute deadline so a reconnect
+                        # or scene reload cannot silently grant a fresh full round.
                         if 'arena_timer' in picked_char:
                             picked_char['arena_timer'].cancel()
-                        send_rpc_push(629, encode_sproto([(0, int(time.time()) + 60), (1, 0)]))
+                        deadline = int(picked_char.get(
+                            'domin_capture_deadline', int(time.time()) + 60))
+                        picked_char['domin_capture_deadline'] = deadline
+                        remaining = deadline - int(time.time())
+                        if remaining <= 0:
+                            send_rpc_push(629, encode_sproto([
+                                (0, int(time.time())), (1, 2)
+                            ]))
+                            schedule_domin_return(restore_hp=True)
+                            remaining = 0
+                        else:
+                            send_rpc_push(629, encode_sproto([
+                                (0, deadline), (1, 0)
+                            ]))
 
                         def arena_timeout():
-                            if picked_char and picked_char.get('map_id') == '502':
-                                boss_id = picked_char.get('boss_inst_id')
-                                # Only timeout if boss is still alive (not already won/lost)
-                                if boss_id and NPC_HP_MAP.get(boss_id, 0) > 0:
-                                    debug_log('[M1003 DEBUG] Arena 60s timeout reached; returning')
-                                    schedule_domin_return(restore_hp=True)
+                            if (picked_char and picked_char.get('map_id') == '502'
+                                    and int(picked_char.get('domin_capture_deadline', 0)) <= int(time.time())):
+                                debug_log('[CAPTURE] arena deadline reached; returning')
+                                schedule_domin_return(restore_hp=True)
 
-                        t = threading.Timer(60.0, arena_timeout)
-                        t.daemon = True
-                        t.start()
-                        picked_char['arena_timer'] = t
+                        if remaining > 0:
+                            t = threading.Timer(remaining, arena_timeout)
+                            t.daemon = True
+                            t.start()
+                            picked_char['arena_timer'] = t
 
-                        boss_id = picked_char.get('boss_inst_id')
-                        if boss_id and picked_char.pop('boss_waiting_for_map_ready', False):
-                            did = picked_char.get('active_domin_id', '1')
-                            player_level = picked_char.get('level', 1)
-                            boss_stats = get_npc_attr("1105", player_level)
-                            # Tag 544 creates ObjZombiePlayer and opens the VS UI.
-                            send_rpc_push(544, encode_sproto([(0, get_boss_char(boss_id, did, player_level))]))
-                            sync_npc_attrs_rpc(conn, boss_id, boss_stats, NPC_HP_MAP.get(boss_id, boss_stats['hp_max']))
-                            debug_log(f"[M1003 DEBUG] Spawned Boss did={did} inst={boss_id} after map_ready")
-
-                            # Tag 547 closes the VS UI and activates the APK's
-                            # built-in zombie auto-fight.  Sending it immediately
-                            # makes the VS UI invisible, so keep it on screen first.
-                            def start_domin_battle(expected_boss_id=boss_id):
-                                if (picked_char.get('map_id') == '502'
-                                        and picked_char.get('boss_inst_id') == expected_boss_id
-                                        and NPC_HP_MAP.get(expected_boss_id, 0) > 0):
-                                    send_rpc_push(547, encode_sproto([]))
-                                    debug_log(f"[M1003 DEBUG] Arena started boss={expected_boss_id}; APK zombie AI enabled")
-                            arena_timer = threading.Timer(2.5, start_domin_battle)
-                            arena_timer.daemon = True
-                            arena_timer.start()
+                        if (remaining > 0
+                                and picked_char.pop('boss_waiting_for_map_ready', False)):
+                            _domin_capture_spawn_enemy(conn, picked_char, send_rpc_push)
                     send_rpc_push(519, sync_mission_data(picked_char))
                     replay_pending_cash_stage_result(picked_char)
                     if street_race_result_restore_pending:
@@ -20696,7 +20784,62 @@ def client_handler(conn, addr):
                     if isinstance(picked_char.get('dance_runtime'), dict) and picked_char['dance_runtime'].get('running'):
                         settle_personal_dance(picked_char, stop=True)
                     _sync_friend_online_state(reconnect_char_id, 1)
-                    if equipment_reconnect:
+                    if char_map == "502":
+                        next_enemy_timer = picked_char.pop(
+                            '_domin_capture_next_enemy_timer', None)
+                        if next_enemy_timer is not None:
+                            next_enemy_timer.cancel()
+                        capture_mission = picked_char.get(
+                            'active_missions', {}).get('1003')
+                        reward_pending = bool(
+                            capture_mission and int(capture_mission.get('state', 1)) == 2
+                        )
+                        deadline = int(picked_char.get('domin_capture_deadline', 0) or 0)
+                        if reward_pending or deadline <= int(time.time()):
+                            for timer_key in ('arena_timer', '_domin_capture_next_enemy_timer'):
+                                timer = picked_char.pop(timer_key, None)
+                                if timer is not None:
+                                    timer.cancel()
+                            return_map = str(picked_char.pop('pre_arena_map', None) or '11')
+                            return_pos = picked_char.pop('pre_arena_pos', None)
+                            _domin_capture_clear_enemy_instance(
+                                picked_char.get('boss_inst_id'))
+                            if deadline <= int(time.time()):
+                                picked_char['hp'] = get_character_stats(picked_char)['hp_max']
+                            picked_char['map_id'] = return_map
+                            picked_char['pos'] = list(
+                                return_pos or default_map_spawn_position(return_map))
+                            picked_char['boss_inst_id'] = None
+                            picked_char['active_domin_id'] = None
+                            picked_char['domin_capture_deadline'] = 0
+                            picked_char.pop('domin_capture_roster', None)
+                            picked_char.pop('domin_capture_enemy_index', None)
+                            picked_char.pop('_domin_capture_enemy', None)
+                            picked_char['boss_waiting_for_map_ready'] = False
+                            picked_char['domin_return_scheduled'] = False
+                            send_rpc_push(629, encode_sproto([
+                                (0, int(time.time())), (1, 2)
+                            ]))
+                            start_map_transition(
+                                conn, picked_char, return_map, send_rpc_push,
+                                override_pos=return_pos)
+                            print(f"[CAPTURE] recovered player={reconnect_char_id} "
+                                  f"to map={return_map} reward_pending={reward_pending}")
+                        else:
+                            old_boss = picked_char.get('boss_inst_id')
+                            _domin_capture_clear_enemy_instance(old_boss)
+                            picked_char['boss_inst_id'] = None
+                            picked_char['boss_waiting_for_map_ready'] = True
+                            start_map_transition(
+                                conn, picked_char, char_map, send_rpc_push,
+                                override_pos=list(
+                                    picked_char.get('pos')
+                                    or default_map_spawn_position(char_map)))
+                            print(f"[CAPTURE] rebuilt arena for reconnect player={reconnect_char_id} "
+                                  f"enemy_index={picked_char.get('domin_capture_enemy_index', 0)}")
+                        send_rpc_push(519, sync_mission_data(picked_char))
+                        save_chars(all_accounts_chars)
+                    elif equipment_reconnect:
                         if reconnect_type == 1 or requested_map != char_map:
                             stage_pos = equipment_run.get('player_auth_pos', {}).get(reconnect_char_id)
                             if stage_pos:
@@ -22985,18 +23128,20 @@ def client_handler(conn, addr):
                     is_area = (picked_char.get('map_id') == "502")
                     is_rank_pvp = (current_map == RANK_PVP_MAP_ID)
                     if is_area:
-                        # Server-authoritative boss->player damage calculation
+                        # Server-authoritative damage from the active Capture
+                        # rival. Player clones use their own saved attributes
+                        # and equipped skill set; Ash Viper uses NPC 1105.
+                        enemy = picked_char.get('_domin_capture_enemy') or {}
                         boss_id = picked_char.get('boss_inst_id')
-                        if boss_id:
+                        if boss_id and enemy.get('stats'):
                             player_level = picked_char.get('level', 1)
-                            boss_stats = get_npc_attr("1105", player_level)
+                            boss_stats = enemy['stats']
                             player_stats = get_character_stats(picked_char)
 
-                            # Use client-sent effinfo_id to determine which boss skill was used.
-                            # Only allow effects belonging to the boss's actual skill map:
-                            # 101-103 (basic attacks), 104 (dodge), 105, 106, 110 (active skills).
+                            # Only accept effect rows belonging to the active
+                            # rival's actual skill map.
                             boss_allowed_effects = set()
-                            for boss_sid in ('101', '102', '103', '104', '105', '106', '110'):
+                            for boss_sid in enemy.get('skill_ids', []):
                                 bcfg = SKILL_CONFIG.get(boss_sid, {})
                                 for eff_key in ('eff0', 'eff1', 'eff2'):
                                     eff = bcfg.get(eff_key, '')
@@ -23006,8 +23151,12 @@ def client_handler(conn, addr):
                             if effinfo_id and effinfo_id in boss_allowed_effects and effinfo_id in EFF_TO_SKILL:
                                 boss_skill_id = EFF_TO_SKILL[effinfo_id]
                             else:
-                                # Fallback: if effinfo_id not recognized or not a boss effect, use basic attack
-                                boss_skill_id = "101"
+                                # Unknown client effects fall back to a real
+                                # basic/primary skill for the current rival.
+                                boss_skill_id = next((
+                                    sid for sid in enemy.get('skill_ids', [])
+                                    if sid in ('101', '10001', '10002', '10003')
+                                ), "101")
                                 skill_cfg = SKILL_CONFIG.get(boss_skill_id, {})
                                 effinfo_id = skill_cfg.get('eff0', "10000")
 
@@ -23711,8 +23860,14 @@ def client_handler(conn, addr):
                             stage_label = 'TOWER' if is_tower else 'EQUIP' if is_equipment else 'EXP' if is_exp else 'WORLD'
                             print(f"[{stage_label} MSG111] target_id={target_id} target_nid={target_nid} map={cur_map} is_stage={is_stage_combat} client_dmg={client_dmg}")
 
-                            nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
-                            defender_stats = get_npc_attr(nid_str, picked_char.get('level', 1))
+                            capture_enemy = picked_char.get('_domin_capture_enemy') or {}
+                            if (cur_map == "502"
+                                    and target_id == picked_char.get('boss_inst_id')
+                                    and capture_enemy.get('stats')):
+                                defender_stats = capture_enemy['stats']
+                            else:
+                                nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
+                                defender_stats = get_npc_attr(nid_str, picked_char.get('level', 1))
 
                             if target_id not in NPC_HP_MAP:
                                 NPC_HP_MAP[target_id] = defender_stats['hp_max']
@@ -24086,17 +24241,19 @@ def client_handler(conn, addr):
 
                                     did = picked_char.get('active_domin_id', '1')
                                     debug_log(f"[M1003 DEBUG] Boss {target_id} killed by client dmg. Winning did={did}")
-                                    cap_target = did
-                                    for act_m, act_mdata in list(picked_char.get('active_missions', {}).items()):
-                                        cap_cfg = missions_data.get(act_m, {})
-                                        if cap_cfg.get('logic_type') == 25:
-                                            cap_target = str(cap_cfg.get('target_id', did))
-                                            break
-                                    advance_missions(picked_char, send_rpc_push, 'capture', target_id=cap_target)
+                                    capture_enemy = picked_char.get('_domin_capture_enemy') or {}
+                                    is_player_rival = capture_enemy.get('kind') == 'player'
+                                    if not is_player_rival:
+                                        cap_target = did
+                                        for act_m, act_mdata in list(picked_char.get('active_missions', {}).items()):
+                                            cap_cfg = missions_data.get(act_m, {})
+                                            if cap_cfg.get('logic_type') == 25:
+                                                cap_target = str(cap_cfg.get('target_id', did))
+                                                break
+                                        advance_missions(picked_char, send_rpc_push, 'capture', target_id=cap_target)
                                     # Grant NPC kill rewards (EXP/cash) and spawn drop for the boss
                                     player_level = picked_char.get('level', 1)
-                                    boss_stats = get_npc_attr('1105', player_level)
-                                    boss_lv = boss_stats.get('lv', 1)
+                                    boss_lv = defender_stats.get('lv', 1) if defender_stats else 1
                                     exp_kill, cash_kill = calculate_npc_kill_rewards(player_level, boss_lv)
                                     kill_rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
                                     grant_item_rewards(picked_char, kill_rewards, conn, send_rpc_push)
@@ -24122,20 +24279,41 @@ def client_handler(conn, addr):
                                         (4, drop_item),
                                         (7, picked_char['id'])
                                     ]))
+                                    _domin_capture_clear_enemy_instance(target_id)
                                     picked_char['boss_inst_id'] = None
-                                    arena_timer = picked_char.pop('arena_timer', None)
-                                    if arena_timer:
-                                        arena_timer.cancel()
-                                    send_rpc_push(629, encode_sproto([
-                                        (0, int(time.time())), (1, 2)
-                                    ]))
-                                    capture_mission = picked_char.get(
-                                        'active_missions', {}).get('1003')
-                                    if not capture_mission or int(capture_mission.get('state', 1)) != 2:
-                                        # A previously completed one-time mission
-                                        # has no reward claim screen to trigger
-                                        # the normal arena return.
-                                        schedule_domin_return()
+                                    picked_char.pop('_domin_capture_enemy', None)
+                                    if is_player_rival:
+                                        picked_char['domin_capture_enemy_index'] = (
+                                            int(picked_char.get('domin_capture_enemy_index', 0)) + 1
+                                        )
+
+                                        def spawn_next_capture_enemy(expected_map="502"):
+                                            if (picked_char.get('map_id') == expected_map
+                                                    and picked_char.get('domin_capture_deadline', 0) > int(time.time())
+                                                    and picked_char.get('boss_inst_id') is None
+                                                    and not picked_char.get('domin_return_scheduled')):
+                                                _domin_capture_spawn_enemy(conn, picked_char, send_rpc_push)
+
+                                        next_enemy_timer = threading.Timer(
+                                            1.0, spawn_next_capture_enemy)
+                                        next_enemy_timer.daemon = True
+                                        next_enemy_timer.start()
+                                        picked_char['_domin_capture_next_enemy_timer'] = next_enemy_timer
+                                        save_chars(all_accounts_chars)
+                                    else:
+                                        arena_timer = picked_char.pop('arena_timer', None)
+                                        if arena_timer:
+                                            arena_timer.cancel()
+                                        send_rpc_push(629, encode_sproto([
+                                            (0, int(time.time())), (1, 2)
+                                        ]))
+                                        capture_mission = picked_char.get(
+                                            'active_missions', {}).get('1003')
+                                        if not capture_mission or int(capture_mission.get('state', 1)) != 2:
+                                            # A previously completed one-time mission
+                                            # has no reward claim screen to trigger
+                                            # the normal arena return.
+                                            schedule_domin_return()
                                 else:
                                     if is_equipment:
                                         on_equipment_npc_killed(exp_state_hit, target_id, target_nid)
@@ -24640,8 +24818,13 @@ def client_handler(conn, addr):
                     picked_char['pre_arena_map'] = str(picked_char.get('map_id', '11'))
                     debug_log(f"[M1003 DEBUG] Saved pre-arena pos: {picked_char['pre_arena_pos']}, map: {picked_char['pre_arena_map']}")
                     picked_char['active_domin_id'] = valid_domin_id
+                    picked_char['domin_capture_roster'] = _domin_capture_enemy_roster(picked_char)
+                    picked_char['domin_capture_enemy_index'] = 0
+                    picked_char['domin_capture_deadline'] = int(time.time()) + 300
+                    picked_char.pop('_domin_capture_enemy', None)
                     picked_char['domin_return_scheduled'] = False
                     picked_char.pop('domin_return_restore_hp', None)
+                    save_chars(all_accounts_chars)
                     start_map_transition(conn, picked_char, "502", send_rpc_push)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -26913,10 +27096,12 @@ def client_handler(conn, addr):
                         active_copy_cfg and active_copy_cfg.get('subtype') == 11
                         and isinstance(picked_char.get('cash_stage_state'), dict)
                     )
+                    in_domin_arena = str(picked_char.get('map_id', '')) == '502'
                     in_rank_pvp = (str(picked_char.get('map_id', '')) == RANK_PVP_MAP_ID
                                    and isinstance(picked_char.get('_rank_pvp_match'), dict))
                     has_leave_timer = '_exp_leave_timer' in picked_char
-                    if (in_exp_stage or in_equipment_stage or in_street_race or in_cash_stage or in_rank_pvp
+                    if (in_exp_stage or in_equipment_stage or in_street_race or in_cash_stage
+                            or in_domin_arena or in_rank_pvp
                             or has_leave_timer or in_guild_boss) and not is_current_character_connection(conn, picked_char):
                         print(f"[LEAVE COPY] denied stale character socket player={picked_char.get('id')}")
                         if session is not None:
@@ -26926,7 +27111,8 @@ def client_handler(conn, addr):
                     # Fix: After exp stage win, state is already cleaned up but client still sends leave_copy_scene
                     # from the StarRewardPageRoot. Accept it gracefully — just send an ACK.
                     if (not in_copy and not in_exp_stage and not in_equipment_stage
-                            and not in_rank_pvp and not has_leave_timer and not in_guild_boss):
+                            and not in_domin_arena and not in_rank_pvp and not has_leave_timer
+                            and not in_guild_boss):
                         print(f"[LEAVE COPY] denied for player {picked_char['id']}; not in a copy scene")
                         if session is not None:
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -26947,6 +27133,38 @@ def client_handler(conn, addr):
 
                     if in_cash_stage:
                         finish_cash_stage(picked_char, False, notify=False)
+
+                    if in_domin_arena:
+                        for timer_key in ('arena_timer', '_domin_capture_next_enemy_timer'):
+                            timer = picked_char.pop(timer_key, None)
+                            if timer is not None:
+                                timer.cancel()
+                        send_rpc_push(629, encode_sproto([
+                            (0, int(time.time())), (1, 2)
+                        ]))
+                        return_map = str(picked_char.pop('pre_arena_map', None) or '11')
+                        return_pos = picked_char.pop('pre_arena_pos', None)
+                        boss_id = picked_char.get('boss_inst_id')
+                        _domin_capture_clear_enemy_instance(boss_id)
+                        picked_char['boss_inst_id'] = None
+                        picked_char['active_domin_id'] = None
+                        picked_char['domin_capture_deadline'] = 0
+                        picked_char.pop('domin_capture_roster', None)
+                        picked_char.pop('domin_capture_enemy_index', None)
+                        picked_char.pop('_domin_capture_enemy', None)
+                        picked_char['boss_waiting_for_map_ready'] = False
+                        picked_char['domin_return_scheduled'] = False
+                        picked_char['hp'] = get_character_stats(picked_char)['hp_max']
+                        start_map_transition(
+                            conn, picked_char, return_map, send_rpc_push,
+                            override_pos=return_pos
+                        )
+                        save_chars(all_accounts_chars)
+                        print(f"[CAPTURE] player left arena id={picked_char.get('id')} "
+                              f"return_map={return_map}")
+                        if session is not None:
+                            send_rpc_response(session)
+                        continue
 
                     if in_rank_pvp:
                         rank_match = picked_char.get("_rank_pvp_match")
