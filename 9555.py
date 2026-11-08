@@ -52,7 +52,41 @@ NPC_INSTANCE_MAP = {} # inst_id -> map ID, to reject cross-map forged death repo
 NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_ATTR_MAP = {} # runtime NPC payloads for reconnect replay
 GOTHAM_MAP_ID = "109"
-GOTHAM_BOSS_DEFAULT_RESPAWN_SECONDS = 2 * 60 * 60
+GOTHAM_BOSS_DEFAULT_RESPAWN_SECONDS = 3 * 60 * 60
+GOTHAM_BOSS_RESPAWN_PATH = os.path.join(SCRIPT_DIR, "gotham_boss_respawns.json")
+GOTHAM_BOSS_RESPAWN_LOCK = threading.RLock()
+def _load_gotham_boss_respawns():
+    try:
+        with open(GOTHAM_BOSS_RESPAWN_PATH, "r", encoding="utf-8") as respawn_file:
+            loaded = json.load(respawn_file)
+        if isinstance(loaded, dict):
+            return {str(key): float(value) for key, value in loaded.items()}
+    except FileNotFoundError:
+        pass
+    except (OSError, TypeError, ValueError) as respawn_error:
+        print(f"[GOTHAM BOSS] failed to load respawn state: {respawn_error}")
+    return {}
+
+def _save_gotham_boss_respawns():
+    temp_path = GOTHAM_BOSS_RESPAWN_PATH + ".tmp"
+    with GOTHAM_BOSS_RESPAWN_LOCK:
+        try:
+            with open(temp_path, "w", encoding="utf-8") as respawn_file:
+                json.dump(GOTHAM_BOSS_RESPAWNS, respawn_file)
+                respawn_file.flush()
+                os.fsync(respawn_file.fileno())
+            os.replace(temp_path, GOTHAM_BOSS_RESPAWN_PATH)
+            return True
+        except OSError as respawn_error:
+            print(f"[GOTHAM BOSS] failed to save respawn state: {respawn_error}")
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except OSError as cleanup_error:
+                print(f"[GOTHAM BOSS] failed to remove respawn temp file: {cleanup_error}")
+            return False
+
+GOTHAM_BOSS_RESPAWNS = _load_gotham_boss_respawns()
 GOTHAM_SHARED_NPC_SLOTS = {}
 GOTHAM_SHARED_NPC_BY_INSTANCE = {}
 GOTHAM_NPC_LOCK = threading.RLock()
@@ -11012,19 +11046,13 @@ def gotham_shared_npc_specs():
     for activity_key, cfg in GOTHAM_ACTIVITY_CONFIG.items():
         if str(cfg.get("map_id")) != GOTHAM_MAP_ID:
             continue
-        try:
-            boss_respawn_time = int(cfg.get("rebirth_time", 0) or 0)
-        except (TypeError, ValueError):
-            boss_respawn_time = 0
-        if boss_respawn_time <= 0:
-            boss_respawn_time = GOTHAM_BOSS_DEFAULT_RESPAWN_SECONDS
         specs.append({
             "slot": f"activity_boss:{activity_key}",
             "nid": str(cfg["npc_id"]),
             "x": int(cfg["x"]),
             "z": int(cfg["z"]),
             "o": 0,
-            "rebirth_time": boss_respawn_time,
+            "rebirth_time": GOTHAM_BOSS_DEFAULT_RESPAWN_SECONDS,
             "is_boss": True,
         })
     return specs
@@ -11369,6 +11397,10 @@ def gotham_create_shared_npc(slot, spec):
         "congratulations_announced": False,
     })
     GOTHAM_SHARED_NPC_BY_INSTANCE[inst_id] = slot["slot"]
+    if slot.get("is_boss"):
+        with GOTHAM_BOSS_RESPAWN_LOCK:
+            if GOTHAM_BOSS_RESPAWNS.pop(str(slot["slot"]), None) is not None:
+                _save_gotham_boss_respawns()
     return inst_id, attr
 
 
@@ -11380,6 +11412,13 @@ def gotham_shared_npc_for_spawn(spec):
         if slot is None:
             slot = dict(spec)
             slot["slot"] = slot_key
+            if slot.get("is_boss"):
+                with GOTHAM_BOSS_RESPAWN_LOCK:
+                    saved_respawn_at = float(GOTHAM_BOSS_RESPAWNS.get(slot_key, 0) or 0)
+                    if saved_respawn_at <= now and slot_key in GOTHAM_BOSS_RESPAWNS:
+                        GOTHAM_BOSS_RESPAWNS.pop(slot_key, None)
+                        _save_gotham_boss_respawns()
+                slot["respawn_at"] = saved_respawn_at
             GOTHAM_SHARED_NPC_SLOTS[slot_key] = slot
         if slot.get("retired"):
             return None, None
@@ -11420,10 +11459,16 @@ def gotham_mark_shared_npc_dead(inst_id):
         if not slot or int(slot.get("inst_id") or 0) != inst_id:
             return False
         delay = int(slot.get("rebirth_time", -1))
+        if slot.get("is_boss"):
+            delay = GOTHAM_BOSS_DEFAULT_RESPAWN_SECONDS
         slot["inst_id"] = None
         slot["respawn_at"] = time.time() + delay if delay >= 0 else 0
         slot["retired"] = delay < 0
         respawn_at = slot["respawn_at"]
+        if slot.get("is_boss") and delay >= 0:
+            with GOTHAM_BOSS_RESPAWN_LOCK:
+                GOTHAM_BOSS_RESPAWNS[str(slot_key)] = respawn_at
+                _save_gotham_boss_respawns()
         GOTHAM_SHARED_NPC_BY_INSTANCE.pop(inst_id, None)
         NPC_HP_MAP.pop(inst_id, None)
         NPC_INST_MAP.pop(inst_id, None)
