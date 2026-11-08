@@ -21195,7 +21195,15 @@ def client_handler(conn, addr):
                     claim_mission = False
                     with get_character_transaction_lock(picked_char):
                         m_entry = picked_char.get('active_missions', {}).get(mid)
-                        if m_entry and m_entry.get('state') == 2:
+                        m_cfg = missions_data.get(mid, {})
+                        current_main_mission = (
+                            mid != '1003'
+                            or int(m_cfg.get('class', 0) or 0) != 1
+                            or str(m_cfg.get('pre_id', '')) ==
+                            str(picked_char.get('last_main_mission_id', ''))
+                        )
+                        if (m_entry and m_entry.get('state') == 2
+                                and current_main_mission):
                             # Mark before granting: duplicate/reconnected
                             # sessions cannot both claim the same objective.
                             m_entry['state'] = 3
@@ -23988,7 +23996,9 @@ def client_handler(conn, addr):
                                         forced_crit=is_cri, max_variance=True
                                     )
                                     tower_damage_tolerance = (
-                                        math.ceil(max_dmg * 1.15) if is_tower else max_dmg + 2
+                                        math.ceil(max_dmg * 1.15) if is_tower
+                                        else math.ceil(max_dmg * 1.05) if cur_map == "502"
+                                        else max_dmg + 2
                                     )
                                     if (not can_hit or (is_cri and not possible_crit)
                                             or client_dmg > tower_damage_tolerance):
@@ -23997,8 +24007,10 @@ def client_handler(conn, addr):
                                                 and client_dmg >= int(NPC_HP_MAP.get(target_id, 0) or 0)):
                                             resync_tower_npc_if_alive(conn, picked_char, target_id)
                                         continue
-                                    if is_tower and client_dmg > max_dmg + 2:
-                                        print(f"[TOWER HIT] accepted client-calculated damage within tolerance "
+                                    if ((is_tower and client_dmg > max_dmg + 2)
+                                            or (cur_map == "502" and client_dmg > max_dmg + 2)):
+                                        label = "TOWER HIT" if is_tower else "CAPTURE HIT"
+                                        print(f"[{label}] accepted client-calculated damage within tolerance "
                                               f"target={target_id} damage={client_dmg} server_max={max_dmg}")
                                     server_dmg = actual_dmg = client_dmg
                                     hit = True
@@ -24243,7 +24255,17 @@ def client_handler(conn, addr):
                                     debug_log(f"[M1003 DEBUG] Boss {target_id} killed by client dmg. Winning did={did}")
                                     capture_enemy = picked_char.get('_domin_capture_enemy') or {}
                                     is_player_rival = capture_enemy.get('kind') == 'player'
-                                    if not is_player_rival:
+                                    capture_mission = missions_data.get('1003', {})
+                                    capture_entry = picked_char.get(
+                                        'active_missions', {}).get('1003')
+                                    capture_story_current = (
+                                        int(capture_mission.get('class', 0) or 0) == 1
+                                        and str(capture_mission.get('pre_id', '')) ==
+                                        str(picked_char.get('last_main_mission_id', ''))
+                                    )
+                                    if (not is_player_rival and capture_story_current
+                                            and capture_entry
+                                            and int(capture_entry.get('state', 0)) == 1):
                                         cap_target = did
                                         for act_m, act_mdata in list(picked_char.get('active_missions', {}).items()):
                                             cap_cfg = missions_data.get(act_m, {})
@@ -24251,34 +24273,28 @@ def client_handler(conn, addr):
                                                 cap_target = str(cap_cfg.get('target_id', did))
                                                 break
                                         advance_missions(picked_char, send_rpc_push, 'capture', target_id=cap_target)
-                                    # Grant NPC kill rewards (EXP/cash) and spawn drop for the boss
-                                    player_level = picked_char.get('level', 1)
-                                    boss_lv = defender_stats.get('lv', 1) if defender_stats else 1
-                                    exp_kill, cash_kill = calculate_npc_kill_rewards(player_level, boss_lv)
-                                    kill_rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
-                                    grant_item_rewards(picked_char, kill_rewards, conn, send_rpc_push)
-                                    send_rpc_push(638, encode_sproto([(0, [
-                                        encode_sproto([(0, "2001"), (1, exp_kill), (3, 0)]),
-                                        encode_sproto([(0, "1001"), (1, cash_kill), (3, 0)])
-                                    ])]))
-                                    # Spawn drop item on the ground
-                                    player_pos = picked_char.get('pos') or default_map_spawn_position(picked_char.get('map_id'))
-                                    drop_x = player_pos[0] + random.randint(-500, 500)
-                                    drop_z = player_pos[2] + random.randint(-500, 500)
-                                    drop_inst_id = int(time.time() * 1000) % 1000000000
-                                    drop_item = encode_sproto([
-                                        (0, "1001"),
-                                        (1, cash_kill),
-                                        (3, 0)
-                                    ])
-                                    send_rpc_push(527, encode_sproto([
-                                        (0, drop_inst_id),
-                                        (1, drop_x),
-                                        (2, drop_z),
-                                        (3, 0),
-                                        (4, drop_item),
-                                        (7, picked_char['id'])
-                                    ]))
+                                    if not is_player_rival:
+                                        # Capture rivals are opponents, not NPC reward sources.
+                                        player_level = picked_char.get('level', 1)
+                                        boss_lv = defender_stats.get('lv', 1) if defender_stats else 1
+                                        exp_kill, cash_kill = calculate_npc_kill_rewards(player_level, boss_lv)
+                                        kill_rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
+                                        grant_item_rewards(picked_char, kill_rewards, conn, send_rpc_push)
+                                        send_rpc_push(638, encode_sproto([(0, [
+                                            encode_sproto([(0, "2001"), (1, exp_kill), (3, 0)]),
+                                            encode_sproto([(0, "1001"), (1, cash_kill), (3, 0)])
+                                        ])]))
+                                        player_pos = picked_char.get('pos') or default_map_spawn_position(picked_char.get('map_id'))
+                                        drop_x = player_pos[0] + random.randint(-500, 500)
+                                        drop_z = player_pos[2] + random.randint(-500, 500)
+                                        drop_inst_id = int(time.time() * 1000) % 1000000000
+                                        drop_item = encode_sproto([
+                                            (0, "1001"), (1, cash_kill), (3, 0)
+                                        ])
+                                        send_rpc_push(527, encode_sproto([
+                                            (0, drop_inst_id), (1, drop_x), (2, drop_z),
+                                            (3, 0), (4, drop_item), (7, picked_char['id'])
+                                        ]))
                                     _domin_capture_clear_enemy_instance(target_id)
                                     picked_char['boss_inst_id'] = None
                                     picked_char.pop('_domin_capture_enemy', None)
@@ -24309,7 +24325,9 @@ def client_handler(conn, addr):
                                         ]))
                                         capture_mission = picked_char.get(
                                             'active_missions', {}).get('1003')
-                                        if not capture_mission or int(capture_mission.get('state', 1)) != 2:
+                                        if (not capture_mission
+                                                or int(capture_mission.get('state', 1)) != 2
+                                                or not capture_story_current):
                                             # A previously completed one-time mission
                                             # has no reward claim screen to trigger
                                             # the normal arena return.
@@ -24791,10 +24809,17 @@ def client_handler(conn, addr):
                     active_missions = picked_char.setdefault('active_missions', {})
                     capture_mission = missions_data.get('1003', {})
                     existing_capture = active_missions.get('1003')
+                    capture_story_current = (
+                        int(capture_mission.get('class', 0) or 0) == 1
+                        and str(capture_mission.get('logic_id', '')) == valid_domin_id
+                        and str(capture_mission.get('pre_id', '')) ==
+                        str(picked_char.get('last_main_mission_id', ''))
+                    )
                     if (capture_mission.get('logic_type') == 25
                             and str(capture_mission.get('logic_id', '')) == valid_domin_id
+                            and capture_story_current
                             and existing_capture is None
-                            and str(picked_char.get('last_main_mission_id', '')) != '1003'):
+                    ):
                         parm = [0] * 8
                         parm[7] = int(time.time())
                         active_missions['1003'] = {
@@ -24803,7 +24828,8 @@ def client_handler(conn, addr):
                         save_chars(all_accounts_chars)
                         send_rpc_push(519, sync_mission_data(picked_char))
                         debug_log("[M1003 DEBUG] Activated Capture mission 1003 on challenge entry")
-                    elif existing_capture and int(existing_capture.get('state', 1)) == 2:
+                    elif (capture_story_current and existing_capture
+                          and int(existing_capture.get('state', 1)) == 2):
                         debug_log("[M1003 DEBUG] RX 311 rejected: claim Capture mission 1003 reward first")
                         if session is not None:
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
