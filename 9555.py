@@ -14437,6 +14437,48 @@ def _rank_pvp_character_look(character):
     ])
 
 
+def _domin_capture_character_look(character):
+    """Build the client-specific character_look shape used by DominData."""
+    ensure_backpack_state(character)
+    stats = get_character_stats(character)
+    pos = list(character.get("pos") or default_map_spawn_position(character.get("map_id")))
+    if len(pos) < 4:
+        pos.extend([0] * (4 - len(pos)))
+    equip_map = {int(item["index_id"]): _gameitem_sproto(item)
+                 for item in character.get("equipped_equip", [])}
+    fashion_map = {int(item["index_id"]): _gameitem_sproto(item)
+                   for item in character.get("equipped_fashion", [])}
+    badge_map = {int(item["index_id"]): _gameitem_sproto(item)
+                 for item in character.get("equipped_badges", [])}
+    other_fields = [
+        (0, current_character_hp(character, stats)),
+        (2, stats["lv"]),
+        (3, stats["power"]),
+        (4, int(character.get("title_level", 0))),
+        (15, 5)
+    ]
+    return encode_sproto([
+        (0, int(character.get("id", 0))),
+        (1, encode_sproto([
+            (0, character.get("name", "Capture Rival")),
+            (1, character.get("prof", 0))
+        ])),
+        (2, encode_sproto(character_attribute_fields(stats))),
+        (3, encode_sproto(other_fields)),
+        (4, build_main_player_visual(character)),
+        (5, equip_map),
+        (6, fashion_map),
+        (7, badge_map),
+        (8, equipment_enhance_sproto(character)),
+        (9, get_movement(pos[0], pos[1], pos[2], pos[3])),
+        (10, build_skills_map(
+            character.get("prof", 0), stats["lv"],
+            character.get("skill_levels", {}), character.get("equipped_equip", []),
+            character.get("skill_positions", {})
+        ))
+    ])
+
+
 def _domin_capture_enemy_looks(character):
     """Build complete character-look records for the player's real enemy list."""
     enemy_ids = []
@@ -14461,7 +14503,15 @@ def _domin_capture_enemy_looks(character):
     for enemy_id in enemy_ids:
         enemy = find_social_character(enemy_id)
         if enemy is not None:
-            looks.append(_rank_pvp_character_look(enemy))
+            looks.append(_domin_capture_character_look(enemy))
+    if not looks:
+        # DominData's client scene initializes its opponent view from the
+        # first character-look entry. Keep Capture usable on a fresh/solo
+        # server while still sending the full player-compatible payload.
+        fallback = copy.deepcopy(character)
+        fallback["id"] = 0
+        fallback["name"] = "Capture Rival"
+        looks.append(_domin_capture_character_look(fallback))
     return looks
 
 
