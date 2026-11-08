@@ -3428,8 +3428,6 @@ def get_boss_char(inst_id, did, player_level=1):
     lv = boss_stats['lv']
     hp_max = boss_stats['hp_max']
     power = boss_stats['power']
-    atk = boss_stats['atk']
-    df = boss_stats['def']
 
     # Visual
     v = get_visual(name, prof)
@@ -3473,18 +3471,8 @@ def get_boss_char(inst_id, did, player_level=1):
     ])
 
     # Runtime: attribute(6), attribute_all(7)
-    attr_run = encode_sproto([(0, hp_max), (2, atk), (3, df)])
-
-    # Use boss_stats for all attributes to ensure consistency
-    attr_all_data = [
-        (0, hp_max), (2, atk), (3, df),
-        (4, boss_stats['hit']), (5, boss_stats['eva']), (6, boss_stats['cri']), (7, boss_stats['res']),
-        (8, boss_stats['exd']), (9, boss_stats['exr']), (10, boss_stats['crd']), (11, boss_stats['crr']),
-        (12, boss_stats['defa']), (13, 500), (14, 100),
-        (17, boss_stats['dgea']), (18, boss_stats['resa']), (19, boss_stats['hita']), (20, boss_stats['cria'])
-    ]
-    attr_all = encode_sproto(attr_all_data)
-    run = encode_sproto([(6, attr_run), (7, attr_all)])
+    attr_all = encode_sproto(npc_attribute_fields(boss_stats))
+    run = encode_sproto([(6, attr_all), (7, attr_all)])
 
     return encode_sproto([
         (0, inst_id),
@@ -7312,6 +7300,10 @@ def send_combat_power_gain_tip(send_rpc_push, previous_power, current_power):
     return True
 
 def get_npc_attr(nid, player_level=1):
+    try:
+        player_level = max(1, min(PLAYER_MAX_LEVEL, int(player_level)))
+    except (TypeError, ValueError):
+        player_level = 1
     cfg = NPC_CONFIG.get(str(nid))
     if not cfg:
         return {
@@ -7405,15 +7397,30 @@ def get_npc_attr(nid, player_level=1):
     raw_power = (atk * prof_coeffs['atk'] + hp * prof_coeffs['hp'] + df * prof_coeffs['def'])
     power = int(raw_power)
 
+    display_level = effective_lv if cfg.get('level', 1) == 9999 else lvl
     return {
         'hp_max': hp, 'atk': atk, 'def': df,
         'hit': hit, 'eva': eva, 'cri': cri, 'res': res,
-        'lv': lvl, 'defa': defa, 'dgea': dgea, 'resa': resa, 'hita': hita, 'cria': cria,
+        'lv': display_level, 'defa': defa, 'dgea': dgea, 'resa': resa, 'hita': hita, 'cria': cria,
         'exd': exd, 'exr': exr, 'crd': crd, 'crr': crr,
         'anti_stun': anti_stun, 'anti_knock_down': anti_knock_down, 'mov': mov,
         'power': power,
-        'satp': 0, 'satm': 0, 'satc': 0
+        'rec': 0, 'ate': 0, 'satp': 0, 'satm': 0, 'satc': 0
     }
+
+def npc_attribute_fields(stats):
+    """Encode the complete CharacterAttributeData field set for an NPC."""
+    return [
+        (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
+        (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
+        (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
+        (12, stats['defa']), (13, stats.get('mov', 500)), (14, stats.get('rec', 0)),
+        (15, stats.get('anti_stun', 0)), (16, stats.get('anti_knock_down', 0)),
+        (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria']),
+        (21, stats.get('ate', 0)), (22, stats.get('satm', 0)),
+        (23, stats.get('satc', 0)), (24, stats.get('satp', 0))
+    ]
+
 
 def npc_damage_sat_type(npc_id):
     """Match CharacterAttributeData.GetDamage: NPC FunctionType 10 uses SATC."""
@@ -7429,7 +7436,7 @@ def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
     # The dominance zombie is initially added to camp 2 by tag 544.  Omitting
     # camp here makes the APK decode it as camp 0 and move it out of
     # DominSceneManager's CampList[2], so rank_pvp_start never enables its AI.
-    attr_other_fields = [(0, hp_cur), (2, stats['lv'])]
+    attr_other_fields = [(0, hp_cur), (2, stats['lv']), (3, stats['power'])]
     if NPC_INST_MAP.get(inst_id, '').startswith('BOSS_'):
         # TAG 510 arrives immediately after TAG 544.  Preserve the title
         # assigned in get_boss_char or the APK resets it to level 0.
@@ -7437,14 +7444,7 @@ def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
     attr_oth = encode_sproto(attr_other_fields)
     # character_aoi_attribute.attribute and attribute_all are both consumed by
     # CharacterAttributeData.InitData; send the complete NPC stat set in both.
-    attr_data = [
-        (0, stats['hp_max']), (2, stats['atk']), (3, stats['def']),
-        (4, stats['hit']), (5, stats['eva']), (6, stats['cri']), (7, stats['res']),
-        (8, stats['exd']), (9, stats['exr']), (10, stats['crd']), (11, stats['crr']),
-        (12, stats['defa']), (13, stats.get('mov', 500)),
-        (15, stats.get('anti_stun', 0)), (16, stats.get('anti_knock_down', 0)),
-        (17, stats['dgea']), (18, stats['resa']), (19, stats['hita']), (20, stats['cria'])
-    ]
+    attr_data = npc_attribute_fields(stats)
     attr_base = encode_sproto(attr_data)
     attr_all = encode_sproto(attr_data)
     aoi_attr = encode_sproto([(0, inst_id), (1, attr_oth), (2, attr_base), (3, attr_all)])
@@ -14435,6 +14435,34 @@ def _rank_pvp_character_look(character):
         (9, get_movement(pos[0], pos[1], pos[2], pos[3])),
         (10, skills_map)
     ])
+
+
+def _domin_capture_enemy_looks(character):
+    """Build complete character-look records for the player's real enemy list."""
+    enemy_ids = []
+    seen_ids = {numeric_id_value(character.get("id", 0)) or 0}
+    for relation in (character or {}).get("enemies", []):
+        enemy_id = social_relation_id(relation)
+        if enemy_id is None or enemy_id in seen_ids:
+            continue
+        seen_ids.add(enemy_id)
+        enemy_ids.append(enemy_id)
+
+    # Accounts without a social enemy list still get real character opponents.
+    if not enemy_ids:
+        candidates = [
+            candidate for candidate in _rank_pvp_all_characters()
+            if numeric_id_value(candidate.get("id", 0)) not in seen_ids
+        ]
+        candidates.sort(key=lambda candidate: int(candidate.get("id", 0)))
+        enemy_ids = [int(candidate.get("id", 0)) for candidate in candidates]
+
+    looks = []
+    for enemy_id in enemy_ids:
+        enemy = find_social_character(enemy_id)
+        if enemy is not None:
+            looks.append(_rank_pvp_character_look(enemy))
+    return looks
 
 
 def _rank_pvp_zombie_character(character):
@@ -26699,39 +26727,10 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-                # DominData row 1: matchpower=6000, LevelMin=1, MapID=502
-                # The character_look (ao_p) fields are read by CitySimController
-                # to display the VS panel before entering the arena.
-                # Using DominData values: DominantMin=1200, DominantMax=2600, Lossspeed=5
-                v_p = encode_sproto([
-                    (0, "Ash Viper"),
-                    (1, "100"),
-                    (2, "XD_A_T"),
-                    (3, "XD_A_S"),
-                    (4, "XD_A_X"),
-                    (5, "XD_A_WQ"),
-                    (10, 0)
-                ])
-
-                g_p = encode_sproto([
-                    (0, "Ash Viper"),
-                    (1, 0)
-                ])
-
-                ao_p = encode_sproto([
-                    (2, 1),
-                    (3, 6000),
-                    (4, 1),
-                    (15, 5)
-                ])
-
-                cl_p = encode_sproto([
-                    (0, 0),
-                    (1, g_p),
-                    (3, ao_p),
-                    (4, v_p)
-                ])
-
+                # Ash Viper belongs to mission 1003's boss encounter, not the
+                # Minimap Capture opponent list. Send actual player looks so
+                # the client receives their level, attributes, and equipment.
+                enemy_looks = _domin_capture_enemy_looks(picked_char) if picked_char else []
                 di_p = encode_sproto([
                     (0, "1"),
                     (8, 0),
@@ -26740,7 +26739,7 @@ def client_handler(conn, addr):
 
                 resp_p = encode_sproto([
                     (0, [di_p]),
-                    (1, [cl_p])
+                    (1, enemy_looks)
                 ])
 
                 send_rpc_push(684, resp_p)
