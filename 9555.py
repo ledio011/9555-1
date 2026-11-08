@@ -98,6 +98,8 @@ TEAM_ID_COUNTER = 500000
 EXP_RUN_COUNTER = 900000
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 NPC_AOI_TRACK = {}  # connection identity -> {inst_id: {'nid': ..., 'x': ..., 'z': ...}}
+PRISON_NPC_AOI_MAP_IDS = frozenset(("1201", "1202"))
+PRISON_NPC_AOI_TRACK = {}  # connection identity -> {spawn index: instance/respawn state}
 NPC_PATROL_CONNECTIONS = {}  # connection identity -> (socket, character) with active Liberty patrols
 NPC_PATROL_WORKER = None
 NPC_PATROL_WORKER_LOCK = threading.Lock()
@@ -9664,6 +9666,9 @@ def gotham_boss_rank_mail(slot):
 def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, grant_rewards=True):
     if not picked_char: return
 
+    if inst_id:
+        record_prison_npc_death(inst_id)
+
     exp_state = picked_char.get('exp_stage_state')
     exp_push = (lambda tag, data: exp_send_push(exp_state, tag, data)) if exp_state and exp_state.get('team_id') else send_rpc_push
     exp_kill_counted = False
@@ -10440,6 +10445,113 @@ def update_npc_aoi(conn, map_id, picked_char):
     if any(len(tdata.get('path') or []) >= 2 for tdata in tracked.values()):
         _ensure_liberty_npc_patrol_worker(conn, picked_char, conn_key)
 
+
+def clear_prison_npc_aoi(conn, send_remove=False):
+    """Release per-connection prison NPC instances when leaving or disconnecting."""
+    tracked = PRISON_NPC_AOI_TRACK.pop(id(conn), {})
+    for slot in tracked.values():
+        inst_id = slot.get("inst_id")
+        if inst_id is None:
+            continue
+        inst_id = int(inst_id)
+        if send_remove:
+            send_rpc_push_safe(conn, 506, encode_sproto([(0, inst_id)]))
+        NPC_HP_MAP.pop(inst_id, None)
+        NPC_INST_MAP.pop(inst_id, None)
+        NPC_INSTANCE_MAP.pop(inst_id, None)
+        NPC_ATTR_MAP.pop(inst_id, None)
+        DEAD_NPC_SET.discard(inst_id)
+
+
+def record_prison_npc_death(inst_id):
+    """Delay a prison spawn's next AOI create by its authored rebirth time."""
+    map_id = str(NPC_INSTANCE_MAP.get(int(inst_id), ""))
+    if map_id not in PRISON_NPC_AOI_MAP_IDS:
+        return
+    now = time.monotonic()
+    for tracked in PRISON_NPC_AOI_TRACK.values():
+        for spawn_index, slot in tracked.items():
+            if int(slot.get("inst_id") or 0) != int(inst_id):
+                continue
+            entries = MONSTER_DATA.get(map_id, [])
+            if spawn_index >= len(entries):
+                slot["respawn_at"] = float("inf")
+            else:
+                try:
+                    delay = int(entries[spawn_index].get("rebirth_time", -1))
+                except (TypeError, ValueError):
+                    delay = -1
+                slot["respawn_at"] = now + delay if delay >= 0 else float("inf")
+            slot["inst_id"] = None
+            return
+
+
+def update_prison_npc_aoi(conn, map_id, picked_char):
+    """Create and remove prison enemies at the MapInfoData radius boundary."""
+    map_str = str(map_id)
+    if (map_str not in PRISON_NPC_AOI_MAP_IDS or not picked_char
+            or str(picked_char.get("map_id", "")) != map_str):
+        return
+    try:
+        pos = picked_char.get("pos") or []
+        px, pz = int(pos[0]), int(pos[2])
+        radius_cm = max(0, int(MAP_CONFIG.get(map_str, {}).get("radius", 0))) * 100
+    except (TypeError, ValueError, IndexError):
+        return
+    if radius_cm <= 0:
+        print(f"[PRISON AOI] missing configured visibility radius map={map_str}")
+        return
+
+    conn_key = id(conn)
+    tracked = PRISON_NPC_AOI_TRACK.setdefault(conn_key, {})
+    entries = MONSTER_DATA.get(map_str, [])
+    radius_sq = radius_cm * radius_cm
+    now = time.monotonic()
+
+    for index, spawn in enumerate(entries):
+        slot = tracked.setdefault(index, {"inst_id": None, "respawn_at": 0.0})
+        nx, nz = int(spawn.get("x", 0)), int(spawn.get("z", 0))
+        in_range = (px - nx) ** 2 + (pz - nz) ** 2 <= radius_sq
+        inst_id = slot.get("inst_id")
+
+        if not in_range:
+            if inst_id is not None:
+                inst_id = int(inst_id)
+                send_rpc_push_safe(conn, 506, encode_sproto([(0, inst_id)]))
+                if int(NPC_HP_MAP.get(inst_id, 0)) > 0:
+                    NPC_HP_MAP.pop(inst_id, None)
+                    NPC_INST_MAP.pop(inst_id, None)
+                    NPC_INSTANCE_MAP.pop(inst_id, None)
+                    NPC_ATTR_MAP.pop(inst_id, None)
+                    DEAD_NPC_SET.discard(inst_id)
+                slot["inst_id"] = None
+                slot["respawn_at"] = 0.0
+            continue
+
+        if inst_id is not None:
+            inst_id = int(inst_id)
+            if (str(NPC_INSTANCE_MAP.get(inst_id, "")) == map_str
+                    and NPC_INST_MAP.get(inst_id) is not None):
+                continue
+            slot["inst_id"] = None
+
+        if now < float(slot.get("respawn_at", 0.0) or 0.0):
+            continue
+        nid = str(spawn.get("nid") or "")
+        if nid not in NPC_CONFIG:
+            continue
+        npc_cfg = NPC_CONFIG[nid]
+        inst_id, attr = build_npc_attr_sproto(
+            nid, npc_cfg.get("name", f"Monster_{nid}"), nx, nz,
+            int(spawn.get("o", 0)))
+        NPC_INSTANCE_MAP[inst_id] = map_str
+        slot["inst_id"] = inst_id
+        slot["respawn_at"] = 0.0
+        send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
+        stats = get_npc_attr(nid)
+        sync_npc_attrs_rpc(conn, inst_id, stats, NPC_HP_MAP.get(inst_id, stats["hp_max"]))
+
+
 def gotham_shared_npc_specs():
     specs = []
     for kind, entries in (("static", STATIC_NPC_DATA.get(GOTHAM_MAP_ID, [])),
@@ -11179,6 +11291,9 @@ def spawn_exp_team_stage_map(conn, map_id, char, force=False):
 
 def spawn_map_npcs(conn, map_id, picked_char=None):
     map_str = str(map_id)
+    if map_str in PRISON_NPC_AOI_MAP_IDS:
+        # Prison enemies are created after map_ready and then streamed by AOI.
+        return
     if map_str != GOTHAM_MAP_ID:
         clear_gotham_npc_aoi(conn)
     elif picked_char:
@@ -15144,6 +15259,8 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
             NPC_ATTR_MAP.pop(inst_id, None)
         if tracked:
             print(f"[AOI NPC] Cleaned up {len(tracked)} tracked NPCs for conn={conn_key} leaving map 101")
+    if src_map in PRISON_NPC_AOI_MAP_IDS and src_map != target_map_id:
+        clear_prison_npc_aoi(conn, send_remove=True)
     if src_map != target_map_id: broadcast_aoi_remove(picked_char.get('id', 0), src_map)
     NPC_SPAWNED_MAPS.setdefault(id(conn), set()).discard(target_map_id)
     picked_char['map_id'] = target_map_id
@@ -19841,7 +19958,9 @@ def client_handler(conn, addr):
                                         for item in picked_char.get('inventory', [])]
                         print(f"[DOWNLOAD REWARD] post-map item bag sync "
                               f"player={picked_char.get('id')} items={item_summary}")
-                    if is_exp_map(mid):
+                    if mid in PRISON_NPC_AOI_MAP_IDS:
+                        update_prison_npc_aoi(conn, mid, picked_char)
+                    elif is_exp_map(mid):
                         exp_state = picked_char.get('exp_stage_state')
                         if exp_state:
                             if exp_state.get('stage_kind') == 'team_exp':
@@ -20316,7 +20435,14 @@ def client_handler(conn, addr):
                     # Broadcast movement to other players on the same map (TAG 507)
                     broadcast_aoi_move(picked_char)
                     # Update NPC AOI for Liberty City (map 101) — throttle to every 2 seconds
-                    if str(move_map) == '101':
+                    if move_map in PRISON_NPC_AOI_MAP_IDS:
+                        now_mono = time.monotonic()
+                        last_aoi_update = float(
+                            picked_char.get('_last_prison_npc_aoi_update', 0) or 0)
+                        if now_mono - last_aoi_update >= 1.0:
+                            update_prison_npc_aoi(conn, move_map, picked_char)
+                            picked_char['_last_prison_npc_aoi_update'] = now_mono
+                    elif str(move_map) == '101':
                         map101_move_count += 1
                         map101_last_move_at = time.monotonic()
                         if map101_move_count == 1 or (
@@ -27270,6 +27396,7 @@ def client_handler(conn, addr):
             # Clean up AOI-tracked Liberty City NPCs on disconnect
             conn_aoi_key = id(conn)
             clear_gotham_npc_aoi(conn)
+            clear_prison_npc_aoi(conn)
             tracked_aoi = NPC_AOI_TRACK.pop(conn_aoi_key, {})
             for inst_id_aoi in tracked_aoi:
                 NPC_HP_MAP.pop(inst_id_aoi, None)
