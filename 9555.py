@@ -99,7 +99,14 @@ EXP_RUN_COUNTER = 900000
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 NPC_AOI_TRACK = {}  # connection identity -> {inst_id: {'nid': ..., 'x': ..., 'z': ...}}
 PRISON_NPC_AOI_MAP_IDS = frozenset(("1201", "1202"))
-PRISON_NPC_AOI_TRACK = {}  # connection identity -> {spawn index: instance/respawn state}
+PRISON_NPC_AOI_TRACK = {}  # connection identity -> {shared spawn key: instance ID}
+PRISON_NPC_SHARED_SLOTS = {}
+PRISON_NPC_SHARED_BY_INSTANCE = {}
+PRISON_NPC_LOCK = threading.RLock()
+PRISON_NPC_AI_TASK = None
+PRISON_NPC_AI_LOCK = threading.Lock()
+PRISON_NPC_TASK_LOCK = threading.Lock()
+PRISON_NPC_DEATH_ANIMATION_SECONDS = 4.5
 NPC_PATROL_CONNECTIONS = {}  # connection identity -> (socket, character) with active Liberty patrols
 NPC_PATROL_WORKER = None
 NPC_PATROL_WORKER_LOCK = threading.Lock()
@@ -9775,8 +9782,10 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
               f"inst_id={inst_id} npcid={npcid}")
 
     if inst_id and not (
-            str(NPC_INSTANCE_MAP.get(inst_id, "")) == GOTHAM_MAP_ID
-            and int(inst_id) in GOTHAM_SHARED_NPC_BY_INSTANCE):
+            (str(NPC_INSTANCE_MAP.get(inst_id, "")) == GOTHAM_MAP_ID
+             and int(inst_id) in GOTHAM_SHARED_NPC_BY_INSTANCE)
+            or (current_map in PRISON_NPC_AOI_MAP_IDS
+                and int(inst_id) in PRISON_NPC_SHARED_BY_INSTANCE)):
         NPC_HP_MAP.pop(inst_id, None)
         NPC_INST_MAP.pop(inst_id, None)
         NPC_INSTANCE_MAP.pop(inst_id, None)
@@ -10447,109 +10456,454 @@ def update_npc_aoi(conn, map_id, picked_char):
 
 
 def clear_prison_npc_aoi(conn, send_remove=False):
-    """Release per-connection prison NPC instances when leaving or disconnecting."""
+    """Release one connection's visibility of shared prison NPC instances."""
     tracked = PRISON_NPC_AOI_TRACK.pop(id(conn), {})
-    for slot in tracked.values():
+    if send_remove:
+        for inst_id in tracked.values():
+            if inst_id is None:
+                continue
+            send_rpc_push_safe(conn, 506, encode_sproto([(0, int(inst_id))]))
+
+
+def prison_npc_specs(map_id):
+    specs = []
+    map_str = str(map_id)
+    for index, row in enumerate(MONSTER_DATA.get(map_str, [])):
+        try:
+            nid = str(row.get("nid") or "")
+            if nid not in NPC_CONFIG:
+                continue
+            specs.append({
+                "slot": f"{map_str}:{index}",
+                "map_id": map_str,
+                "spawn_index": index,
+                "nid": nid,
+                "x": int(row.get("x", 0)),
+                "z": int(row.get("z", 0)),
+                "o": int(row.get("o", 0)),
+                "rebirth_time": int(row.get("rebirth_time", -1)),
+            })
+        except (TypeError, ValueError):
+            continue
+    return specs
+
+
+def prison_create_shared_npc(slot, spec):
+    nid = str(spec["nid"])
+    cfg = NPC_CONFIG[nid]
+    inst_id, attr = build_npc_attr_sproto(
+        nid, cfg.get("name", f"Monster_{nid}"),
+        int(spec["x"]), int(spec["z"]), int(spec.get("o", 0)))
+    NPC_INSTANCE_MAP[inst_id] = str(spec["map_id"])
+    slot.update({
+        **spec,
+        "inst_id": inst_id,
+        "position": (int(spec["x"]), int(spec["z"])),
+        "heading": int(spec.get("o", 0)),
+        "dead_at": 0.0,
+        "respawn_at": 0.0,
+        "retired": False,
+        "target_id": 0,
+        "next_attack_at": 0.0,
+        "skill_ready_at": {},
+        "patrol_target": None,
+        "patrol_next_at": time.time(),
+        "last_move_at": time.time(),
+        "moving": False,
+    })
+    PRISON_NPC_SHARED_BY_INSTANCE[inst_id] = slot["slot"]
+    return inst_id, attr
+
+
+def prison_shared_npc_for_spawn(spec):
+    slot_key = str(spec["slot"])
+    with PRISON_NPC_LOCK:
+        slot = PRISON_NPC_SHARED_SLOTS.setdefault(
+            slot_key, {**spec, "inst_id": None, "respawn_at": 0.0})
         inst_id = slot.get("inst_id")
         if inst_id is None:
+            if slot.get("retired") or time.time() < float(slot.get("respawn_at", 0) or 0):
+                return None, None, slot
+            inst_id, attr = prison_create_shared_npc(slot, spec)
+            return inst_id, attr, slot
+        cfg = NPC_CONFIG[str(spec["nid"])]
+        position = slot.get("position") or (spec["x"], spec["z"])
+        inst_id, attr = build_npc_attr_sproto(
+            spec["nid"], cfg.get("name", f"Monster_{spec['nid']}"),
+            int(position[0]), int(position[1]), int(slot.get("heading", spec.get("o", 0))),
+            existing_inst_id=inst_id)
+        return inst_id, attr, slot
+
+
+def prison_npc_visible_connections(slot_key, inst_id):
+    visible = []
+    for conn_key, tracked in list(PRISON_NPC_AOI_TRACK.items()):
+        if int(tracked.get(slot_key, 0) or 0) != int(inst_id):
             continue
-        inst_id = int(inst_id)
-        if send_remove:
-            send_rpc_push_safe(conn, 506, encode_sproto([(0, inst_id)]))
-        NPC_HP_MAP.pop(inst_id, None)
-        NPC_INST_MAP.pop(inst_id, None)
-        NPC_INSTANCE_MAP.pop(inst_id, None)
-        NPC_ATTR_MAP.pop(inst_id, None)
-        DEAD_NPC_SET.discard(inst_id)
+        entry = next(((conn, char) for conn, char in ALL_CONNECTIONS.values()
+                      if conn and id(conn) == conn_key), None)
+        if (entry and str(entry[1].get("map_id", "")) in PRISON_NPC_AOI_MAP_IDS
+                and str(entry[1].get("map_id", "")) ==
+                str(PRISON_NPC_SHARED_SLOTS.get(slot_key, {}).get("map_id", ""))):
+            visible.append(entry)
+    return visible
+
+
+def _prison_npc_remove_instance(slot_key, inst_id, expected_dead_at):
+    with PRISON_NPC_LOCK:
+        slot = PRISON_NPC_SHARED_SLOTS.get(str(slot_key))
+        if (not slot or int(slot.get("inst_id") or 0) != int(inst_id)
+                or float(slot.get("dead_at", 0) or 0) != float(expected_dead_at)):
+            return
+        map_id = str(slot.get("map_id", ""))
+        slot["inst_id"] = None
+        slot["dead_at"] = 0.0
+        slot["target_id"] = 0
+        if int(slot.get("rebirth_time", -1)) < 0:
+            slot["retired"] = True
+            slot["respawn_at"] = float("inf")
+        PRISON_NPC_SHARED_BY_INSTANCE.pop(int(inst_id), None)
+        NPC_HP_MAP.pop(int(inst_id), None)
+        NPC_INST_MAP.pop(int(inst_id), None)
+        NPC_INSTANCE_MAP.pop(int(inst_id), None)
+        NPC_ATTR_MAP.pop(int(inst_id), None)
+        DEAD_NPC_SET.discard(int(inst_id))
+
+    remove_data = encode_sproto([(0, int(inst_id))])
+    for peer_conn, _peer_char in prison_npc_visible_connections(slot_key, inst_id):
+        send_rpc_push_safe(peer_conn, 506, remove_data)
+    for tracked in PRISON_NPC_AOI_TRACK.values():
+        if int(tracked.get(slot_key, 0) or 0) == int(inst_id):
+            tracked.pop(slot_key, None)
+
+    for peer_conn, peer_char in list(ALL_CONNECTIONS.values()):
+        if (peer_conn and peer_char
+                and str(peer_char.get("map_id", "")) == map_id):
+            update_prison_npc_aoi(peer_conn, map_id, peer_char)
 
 
 def record_prison_npc_death(inst_id):
-    """Delay a prison spawn's next AOI create by its authored rebirth time."""
-    map_id = str(NPC_INSTANCE_MAP.get(int(inst_id), ""))
-    if map_id not in PRISON_NPC_AOI_MAP_IDS:
-        return
-    now = time.monotonic()
-    for tracked in PRISON_NPC_AOI_TRACK.values():
-        for spawn_index, slot in tracked.items():
-            if int(slot.get("inst_id") or 0) != int(inst_id):
-                continue
-            entries = MONSTER_DATA.get(map_id, [])
-            if spawn_index >= len(entries):
-                slot["respawn_at"] = float("inf")
-            else:
-                try:
-                    delay = int(entries[spawn_index].get("rebirth_time", -1))
-                except (TypeError, ValueError):
-                    delay = -1
-                slot["respawn_at"] = now + delay if delay >= 0 else float("inf")
-            slot["inst_id"] = None
-            return
+    """Retain a shared corpse through its death animation, then honor respawn data."""
+    try:
+        inst_id = int(inst_id)
+    except (TypeError, ValueError):
+        return False
+    slot_key = PRISON_NPC_SHARED_BY_INSTANCE.get(inst_id)
+    if not slot_key:
+        return False
+    with PRISON_NPC_LOCK:
+        slot = PRISON_NPC_SHARED_SLOTS.get(slot_key)
+        if not slot or int(slot.get("inst_id") or 0) != inst_id:
+            return False
+        if float(slot.get("dead_at", 0) or 0) > 0:
+            return True
+        dead_at = time.time()
+        try:
+            rebirth_time = int(slot.get("rebirth_time", -1))
+        except (TypeError, ValueError):
+            rebirth_time = -1
+        slot["dead_at"] = dead_at
+        slot["target_id"] = 0
+        slot["moving"] = False
+        slot["respawn_at"] = (
+            dead_at + max(PRISON_NPC_DEATH_ANIMATION_SECONDS, rebirth_time)
+            if rebirth_time >= 0 else float("inf"))
+    timer = threading.Timer(
+        PRISON_NPC_DEATH_ANIMATION_SECONDS,
+        _prison_npc_remove_instance,
+        args=(slot_key, inst_id, dead_at))
+    timer.daemon = True
+    timer.start()
+    return True
 
 
 def update_prison_npc_aoi(conn, map_id, picked_char):
-    """Create and remove prison enemies at the MapInfoData radius boundary."""
+    """Track shared prison NPCs within MapInfoData.radius (centimeter coordinates)."""
     map_str = str(map_id)
-    if (map_str not in PRISON_NPC_AOI_MAP_IDS or not picked_char
+    if (map_str not in PRISON_NPC_AOI_MAP_IDS or not conn or not picked_char
             or str(picked_char.get("map_id", "")) != map_str):
         return
+    start_prison_npc_runtime()
     try:
-        pos = picked_char.get("pos") or []
+        pos = picked_char.get("pos") or default_map_spawn_position(map_str)
         px, pz = int(pos[0]), int(pos[2])
-        radius_cm = max(0, int(MAP_CONFIG.get(map_str, {}).get("radius", 0))) * 100
+        # MapInfoData and MonsterData both store centimeter coordinates. The
+        # client converts NPC positions to meters by dividing by 100.
+        radius_units = max(0, int(MAP_CONFIG.get(map_str, {}).get("radius", 0) or 0))
     except (TypeError, ValueError, IndexError):
         return
-    if radius_cm <= 0:
+    if radius_units <= 0:
         print(f"[PRISON AOI] missing configured visibility radius map={map_str}")
         return
 
-    conn_key = id(conn)
-    tracked = PRISON_NPC_AOI_TRACK.setdefault(conn_key, {})
-    entries = MONSTER_DATA.get(map_str, [])
-    radius_sq = radius_cm * radius_cm
-    now = time.monotonic()
-
-    for index, spawn in enumerate(entries):
-        slot = tracked.setdefault(index, {"inst_id": None, "respawn_at": 0.0})
-        nx, nz = int(spawn.get("x", 0)), int(spawn.get("z", 0))
-        in_range = (px - nx) ** 2 + (pz - nz) ** 2 <= radius_sq
-        inst_id = slot.get("inst_id")
-
-        if not in_range:
-            if inst_id is not None:
-                inst_id = int(inst_id)
-                send_rpc_push_safe(conn, 506, encode_sproto([(0, inst_id)]))
-                if int(NPC_HP_MAP.get(inst_id, 0)) > 0:
-                    NPC_HP_MAP.pop(inst_id, None)
-                    NPC_INST_MAP.pop(inst_id, None)
-                    NPC_INSTANCE_MAP.pop(inst_id, None)
-                    NPC_ATTR_MAP.pop(inst_id, None)
-                    DEAD_NPC_SET.discard(inst_id)
-                slot["inst_id"] = None
-                slot["respawn_at"] = 0.0
+    radius_sq = radius_units * radius_units
+    tracked = PRISON_NPC_AOI_TRACK.setdefault(id(conn), {})
+    visible_slots = set()
+    for spec in prison_npc_specs(map_str):
+        slot_key = str(spec["slot"])
+        slot = PRISON_NPC_SHARED_SLOTS.get(slot_key)
+        position = (slot.get("position") if slot else None) or (spec["x"], spec["z"])
+        dx, dz = px - int(position[0]), pz - int(position[1])
+        if dx * dx + dz * dz > radius_sq:
             continue
+        visible_slots.add(slot_key)
+        if (slot and slot.get("inst_id") is not None
+                and tracked.get(slot_key) == int(slot["inst_id"])):
+            continue
+        inst_id, attr, slot = prison_shared_npc_for_spawn(spec)
+        if inst_id is None or attr is None:
+            continue
+        previous_inst = tracked.get(slot_key)
+        if previous_inst == inst_id:
+            continue
+        if previous_inst is not None:
+            send_rpc_push_safe(conn, 506, encode_sproto([(0, int(previous_inst))]))
+        if send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
+            tracked[slot_key] = int(inst_id)
+            sync_npc_attrs_rpc(
+                conn, inst_id, get_npc_attr(spec["nid"]),
+                NPC_HP_MAP.get(inst_id, 0))
 
-        if inst_id is not None:
-            inst_id = int(inst_id)
-            if (str(NPC_INSTANCE_MAP.get(inst_id, "")) == map_str
-                    and NPC_INST_MAP.get(inst_id) is not None):
+    for slot_key, inst_id in list(tracked.items()):
+        if slot_key not in visible_slots:
+            send_rpc_push_safe(conn, 506, encode_sproto([(0, int(inst_id))]))
+            tracked.pop(slot_key, None)
+
+
+def _prison_npc_skills(npc_cfg, attack_distance):
+    skills = []
+    for skill_id in re.split(r"[;,]", str(npc_cfg.get("skill_group") or "")):
+        skill_id = skill_id.strip()
+        if not skill_id or skill_id not in SKILL_CONFIG:
+            continue
+        skill_range, _area, _param1, _param2 = _guild_boss_skill_range(
+            skill_id, attack_distance)
+        skills.append((skill_id, skill_range))
+    return skills
+
+
+def _prison_npc_broadcast_move(slot_key, inst_id, x, z, heading, stop=False):
+    pos_data = encode_sproto([(0, int(x)), (1, 0), (2, int(z)), (3, int(heading))])
+    move_data = encode_sproto([(0, pos_data), (1, pos_data)])
+    character_data = encode_sproto([(0, int(inst_id)), (1, move_data), (2, True)])
+    for peer_conn, _peer_char in prison_npc_visible_connections(slot_key, inst_id):
+        send_rpc_push_safe(peer_conn, 513 if stop else 507,
+                           encode_sproto([(0, character_data)]))
+
+
+def _prison_npc_move_toward(slot_key, inst_id, target_x, target_z, speed, now):
+    with PRISON_NPC_LOCK:
+        slot = PRISON_NPC_SHARED_SLOTS.get(str(slot_key), {})
+        if (int(slot.get("inst_id") or 0) != int(inst_id)
+                or slot.get("dead_at")
+                or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
+            return
+        current_x, current_z = slot.get("position", (slot["x"], slot["z"]))
+        dx, dz = float(target_x) - current_x, float(target_z) - current_z
+        distance = math.hypot(dx, dz)
+        if distance <= 1:
+            return
+        elapsed = min(0.5, max(0.05, now - float(slot.get("last_move_at", now) or now)))
+        step = min(max(0.1, float(speed)) * elapsed * 100.0, distance)
+        next_x = int(round(current_x + dx / distance * step))
+        next_z = int(round(current_z + dz / distance * step))
+        heading = int(round(math.degrees(math.atan2(dx, dz)) * 100)) % 36000
+        slot["position"] = (next_x, next_z)
+        slot["heading"] = heading
+        slot["last_move_at"] = now
+        slot["moving"] = True
+    _prison_npc_broadcast_move(slot_key, inst_id, next_x, next_z, heading)
+
+
+def _prison_npc_stop(slot_key, inst_id, now):
+    with PRISON_NPC_LOCK:
+        slot = PRISON_NPC_SHARED_SLOTS.get(str(slot_key), {})
+        if int(slot.get("inst_id") or 0) != int(inst_id) or not slot.get("moving"):
+            return
+        x, z = slot.get("position", (slot["x"], slot["z"]))
+        heading = int(slot.get("heading", 0) or 0)
+        slot["moving"] = False
+        slot["last_move_at"] = now
+    _prison_npc_broadcast_move(slot_key, inst_id, x, z, heading, stop=True)
+
+
+def _prison_npc_ai_tick():
+    if not PRISON_NPC_AI_LOCK.acquire(False):
+        return True
+    try:
+        now = time.time()
+        players = []
+        for char_id, (conn, char) in list(ALL_CONNECTIONS.items()):
+            if (not conn or not char
+                    or str(char.get("map_id", "")) not in PRISON_NPC_AOI_MAP_IDS
+                    or int(char.get("hp", 0) or 0) <= 0
+                    or not is_current_character_connection(conn, char)):
                 continue
-            slot["inst_id"] = None
+            try:
+                pos = char.get("pos") or default_map_spawn_position(char.get("map_id"))
+                players.append((int(char_id), conn, char, int(pos[0]), int(pos[2])))
+            except (TypeError, ValueError, IndexError):
+                continue
 
-        if now < float(slot.get("respawn_at", 0.0) or 0.0):
-            continue
-        nid = str(spawn.get("nid") or "")
-        if nid not in NPC_CONFIG:
-            continue
-        npc_cfg = NPC_CONFIG[nid]
-        inst_id, attr = build_npc_attr_sproto(
-            nid, npc_cfg.get("name", f"Monster_{nid}"), nx, nz,
-            int(spawn.get("o", 0)))
-        NPC_INSTANCE_MAP[inst_id] = map_str
-        slot["inst_id"] = inst_id
-        slot["respawn_at"] = 0.0
-        send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
-        stats = get_npc_attr(nid)
-        sync_npc_attrs_rpc(conn, inst_id, stats, NPC_HP_MAP.get(inst_id, stats["hp_max"]))
+        with PRISON_NPC_LOCK:
+            slots = [dict(slot) for slot in PRISON_NPC_SHARED_SLOTS.values()
+                     if slot.get("inst_id") is not None and not slot.get("dead_at")]
+        for snapshot in slots:
+            slot_key = str(snapshot["slot"])
+            inst_id = int(snapshot["inst_id"])
+            if (inst_id in DEAD_NPC_SET
+                    or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
+                continue
+            npc_id = str(snapshot["nid"])
+            npc_cfg = NPC_CONFIG.get(npc_id, {})
+            ai_cfg = AI_DATA_CONFIG.get(str(npc_cfg.get("ai_data_id") or ""), {})
+            search_cm = max(0, int(npc_cfg.get("search_radius", 0) or 0))
+            configured_lock = int(ai_cfg.get("lock_distance", -1) or -1)
+            lock_cm = search_cm if configured_lock < 0 else configured_lock
+            if search_cm > 0:
+                lock_cm = min(lock_cm, search_cm)
+            if lock_cm <= 0:
+                continue
+            lock_distance = lock_cm / 100.0
+            return_cm = max(
+                lock_cm, int(ai_cfg.get("return_distance", lock_cm) or lock_cm))
+            return_distance = return_cm / 100.0
+            around_min = max(0, int(ai_cfg.get("around_min_distance", 100) or 100))
+            around_max = max(around_min, int(ai_cfg.get("around_max_distance", 200) or 200))
+            attack_distance = max(0.5, (around_min + around_max) / 200.0)
+            skills = _prison_npc_skills(npc_cfg, attack_distance)
+            if not skills:
+                continue
+            speed = max(0.1, float(npc_cfg.get("move_speed", 50) or 50) / 10.0)
+            mx_cm, mz_cm = snapshot.get("position") or (snapshot["x"], snapshot["z"])
+            mx, mz = float(mx_cm) / 100.0, float(mz_cm) / 100.0
+            target = None
+            prior_target = int(snapshot.get("target_id", 0) or 0)
+            if prior_target:
+                target = next((p for p in players if p[0] == prior_target), None)
+                if target and math.hypot(target[3] / 100.0 - mx,
+                                         target[4] / 100.0 - mz) > return_distance:
+                    target = None
+                    with PRISON_NPC_LOCK:
+                        if PRISON_NPC_SHARED_SLOTS.get(slot_key, {}).get("inst_id") == inst_id:
+                            PRISON_NPC_SHARED_SLOTS[slot_key]["target_id"] = 0
+            if target is None:
+                candidates = [
+                    (math.hypot(p[3] / 100.0 - mx, p[4] / 100.0 - mz), p)
+                    for p in players
+                ]
+                candidates = [entry for entry in candidates if entry[0] <= lock_distance]
+                if candidates:
+                    target = min(candidates, key=lambda entry: entry[0])[1]
+                    with PRISON_NPC_LOCK:
+                        if PRISON_NPC_SHARED_SLOTS.get(slot_key, {}).get("inst_id") == inst_id:
+                            PRISON_NPC_SHARED_SLOTS[slot_key]["target_id"] = target[0]
+
+            if target is None:
+                home_x, home_z = int(snapshot["x"]), int(snapshot["z"])
+                if math.hypot(mx_cm - home_x, mz_cm - home_z) / 100.0 > return_distance:
+                    _prison_npc_move_toward(
+                        slot_key, inst_id, home_x, home_z, speed, now)
+                else:
+                    _prison_npc_stop(slot_key, inst_id, now)
+                continue
+
+            target_id, target_conn, target_char, px_cm, pz_cm = target
+            dx, dz = px_cm / 100.0 - mx, pz_cm / 100.0 - mz
+            distance = math.hypot(dx, dz)
+            ready_skills = [
+                (skill_id, skill_range) for skill_id, skill_range in skills
+                if distance <= skill_range
+                and float(snapshot.get("skill_ready_at", {}).get(skill_id, 0) or 0) <= now
+            ]
+            if not ready_skills:
+                max_range = max(skill_range for _skill_id, skill_range in skills)
+                if distance > max_range:
+                    _prison_npc_move_toward(
+                        slot_key, inst_id,
+                        px_cm - int(dx / distance * max_range * 100),
+                        pz_cm - int(dz / distance * max_range * 100), speed, now)
+                else:
+                    _prison_npc_stop(slot_key, inst_id, now)
+                continue
+
+            with npc_hp_lock(inst_id):
+                if (inst_id in DEAD_NPC_SET
+                        or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
+                    continue
+            if float(snapshot.get("next_attack_at", 0) or 0) > now:
+                continue
+            _prison_npc_stop(slot_key, inst_id, now)
+            top_priority = max(
+                int(SKILL_CONFIG[sid].get("priority", 0) or 0)
+                for sid, _range in ready_skills)
+            skill_id = random.choice([
+                sid for sid, _range in ready_skills
+                if int(SKILL_CONFIG[sid].get("priority", 0) or 0) == top_priority])
+            skill_cfg = SKILL_CONFIG[skill_id]
+            cooldown = max(0, int(skill_cfg.get("cooldown_ms", 0) or 0)) / 1000.0
+            min_cd = max(0, int(ai_cfg.get("skill_cd_min", 1000) or 1000))
+            max_cd = max(min_cd, int(ai_cfg.get("skill_cd_max", 3000) or 3000))
+            with PRISON_NPC_LOCK:
+                live_slot = PRISON_NPC_SHARED_SLOTS.get(slot_key, {})
+                if (int(live_slot.get("inst_id") or 0) != inst_id
+                        or live_slot.get("dead_at")):
+                    continue
+                live_slot.setdefault("skill_ready_at", {})[skill_id] = now + cooldown
+                live_slot["next_attack_at"] = now + random.uniform(min_cd, max_cd) / 1000.0
+
+            effect_id = str(skill_cfg.get("eff0") or "10000")
+            damage, hit, critical = get_combat_damage(
+                get_npc_attr(npc_id), get_character_stats(target_char), skill_id, 0,
+                effinfo_id=effect_id, attacker_is_npc=True)
+            if not hit or damage <= 0:
+                continue
+            with get_character_transaction_lock(target_char):
+                if int(target_char.get("hp", 0) or 0) <= 0:
+                    continue
+                actual_damage = min(int(target_char["hp"]), int(damage))
+                target_char["hp"] -= actual_damage
+                target_hp = int(target_char["hp"])
+            attack_data = encode_sproto([
+                (0, inst_id), (1, target_id), (2, skill_id),
+                (3, [encode_sproto([(0, target_id), (1, actual_damage)])])
+            ])
+            damage_data = encode_sproto([(0, [encode_sproto([
+                (0, target_id), (1, actual_damage), (2, skill_id),
+                (3, effect_id), (4, critical)
+            ])])])
+            for peer_conn, _peer_char in prison_npc_visible_connections(slot_key, inst_id):
+                send_rpc_push_safe(peer_conn, 508, attack_data)
+                send_rpc_push_safe(peer_conn, 511, damage_data)
+            sync_char_attrs_rpc(target_conn, target_char)
+            save_chars(all_accounts_chars)
+            if target_hp <= 0 and supports_normal_relife(str(target_char.get("map_id", ""))):
+                death_count = int(target_char.get("death_count", 0) or 0) + 1
+                target_char["death_count"] = death_count
+                relife_cfg = get_relife_config(death_count)
+                offer = remember_relife_offer(
+                    target_char, 1, relife_cfg.get("use_count", 1), "9011")
+                send_rpc_push_safe(target_conn, 618, offer)
+                save_chars(all_accounts_chars)
+
+        for peer_conn, peer_char in list(ALL_CONNECTIONS.values()):
+            if (peer_conn and peer_char
+                    and str(peer_char.get("map_id", "")) in PRISON_NPC_AOI_MAP_IDS):
+                update_prison_npc_aoi(
+                    peer_conn, str(peer_char.get("map_id", "")), peer_char)
+    except Exception as exc:
+        print(f"[PRISON NPC AI] tick failed: {exc}")
+    finally:
+        PRISON_NPC_AI_LOCK.release()
+    return True
+
+
+def start_prison_npc_runtime():
+    global PRISON_NPC_AI_TASK
+    with PRISON_NPC_TASK_LOCK:
+        if PRISON_NPC_AI_TASK is not None and PRISON_NPC_AI_TASK.is_alive():
+            return
+        PRISON_NPC_AI_TASK = RepeatingTask(0.2, _prison_npc_ai_tick).start()
 
 
 def gotham_shared_npc_specs():
@@ -23411,6 +23765,16 @@ def client_handler(conn, addr):
                                             sync_npc_attrs_rpc(
                                                 peer_conn, target_id, defender_stats,
                                                 max(0, NPC_HP_MAP.get(target_id, 0)))
+                                elif (cur_map in PRISON_NPC_AOI_MAP_IDS
+                                      and target_id in PRISON_NPC_SHARED_BY_INSTANCE):
+                                    slot_key = PRISON_NPC_SHARED_BY_INSTANCE[target_id]
+                                    visible = prison_npc_visible_connections(slot_key, target_id)
+                                    if not any(peer_conn is conn for peer_conn, _peer_char in visible):
+                                        visible.append((conn, picked_char))
+                                    for peer_conn, _peer_char in visible:
+                                        sync_npc_attrs_rpc(
+                                            peer_conn, target_id, defender_stats,
+                                            max(0, NPC_HP_MAP.get(target_id, 0)))
                                 else:
                                     sync_npc_attrs_rpc(conn, target_id, defender_stats, max(0, NPC_HP_MAP[target_id]))
                             if is_stage_combat and exp_state_hit and exp_state_hit.get('team_id'):
@@ -23432,9 +23796,20 @@ def client_handler(conn, addr):
                                 ])
                                 dmg_board = encode_sproto([(0, [dmg_entry])])
                                 attacker_id = int(picked_char.get('id', 0) or 0)
-                                for peer_id, (peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
-                                    if (int(peer_id) != attacker_id and peer_conn and peer_char
-                                            and str(peer_char.get('map_id', '')) == cur_map):
+                                if (cur_map in PRISON_NPC_AOI_MAP_IDS
+                                        and target_id in PRISON_NPC_SHARED_BY_INSTANCE):
+                                    slot_key = PRISON_NPC_SHARED_BY_INSTANCE[target_id]
+                                    peers = prison_npc_visible_connections(slot_key, target_id)
+                                else:
+                                    peers = [
+                                        (peer_conn, peer_char)
+                                        for peer_id, (peer_conn, peer_char)
+                                        in list(ALL_CONNECTIONS.items())
+                                        if int(peer_id) != attacker_id and peer_conn and peer_char
+                                        and str(peer_char.get('map_id', '')) == cur_map
+                                    ]
+                                for peer_conn, peer_char in peers:
+                                    if int(peer_char.get('id', 0) or 0) != attacker_id:
                                         send_rpc_push_safe(peer_conn, 511, dmg_board)
 
                             # Issue 213: TAG 514 (hit_action) client handler does nothing — skip sending
@@ -23474,12 +23849,16 @@ def client_handler(conn, addr):
                                     finish_cash_stage(picked_char, True)
                                 elif not is_stage_combat:
                                     # Non-EXP despawns keep their existing AOI path.
-                                    remove_data = encode_sproto([(0, target_id)])
-                                    if (cur_map == GOTHAM_MAP_ID
-                                            and target_id in GOTHAM_SHARED_NPC_BY_INSTANCE):
-                                        gotham_broadcast(506, remove_data)
+                                    if (cur_map in PRISON_NPC_AOI_MAP_IDS
+                                            and target_id in PRISON_NPC_SHARED_BY_INSTANCE):
+                                        record_prison_npc_death(target_id)
                                     else:
-                                        send_rpc_push(506, remove_data)
+                                        remove_data = encode_sproto([(0, target_id)])
+                                        if (cur_map == GOTHAM_MAP_ID
+                                                and target_id in GOTHAM_SHARED_NPC_BY_INSTANCE):
+                                            gotham_broadcast(506, remove_data)
+                                        else:
+                                            send_rpc_push(506, remove_data)
                                 else:
                                     # The APK's ObjNPC.ChangeHPVal keeps its
                                     # death animation/body for 4 seconds before
@@ -23692,7 +24071,9 @@ def client_handler(conn, addr):
                     if inst_id in DEAD_NPC_SET: is_duplicate = True
                     else: DEAD_NPC_SET.add(inst_id)
 
-                if inst_id and inst_id in NPC_HP_MAP: del NPC_HP_MAP[inst_id]
+                if (inst_id and inst_id in NPC_HP_MAP
+                        and int(inst_id) not in PRISON_NPC_SHARED_BY_INSTANCE):
+                    del NPC_HP_MAP[inst_id]
 
                 if picked_char and not is_duplicate:
                     cash_state = picked_char.get('cash_stage_state')
