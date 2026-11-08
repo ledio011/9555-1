@@ -107,6 +107,7 @@ PRISON_NPC_AI_TASK = None
 PRISON_NPC_AI_LOCK = threading.Lock()
 PRISON_NPC_TASK_LOCK = threading.Lock()
 PRISON_NPC_DEATH_ANIMATION_SECONDS = 4.5
+PLAYER_AOI_TRACK = {}  # character ID -> set of visible character IDs
 NPC_PATROL_CONNECTIONS = {}  # connection identity -> (socket, character) with active Liberty patrols
 NPC_PATROL_WORKER = None
 NPC_PATROL_WORKER_LOCK = threading.Lock()
@@ -4148,6 +4149,7 @@ def broadcast_aoi_move(char):
     move_stage = char.get('exp_stage_state') or char.get('equipment_stage_state')
     if is_single_player_map(map_id) and not (move_stage or {}).get('team_id'):
         return
+    sync_player_aoi(char)
     pos = char.get('pos', [0, 0, 0, 0])
     try:
         mv_bytes = get_movement(pos[0], pos[1], pos[2], pos[3])
@@ -4165,7 +4167,8 @@ def broadcast_aoi_move(char):
         pf_p = sproto_pack(ph_p + aoi_move)
         pkt = struct.pack(">H", len(pf_p)) + pf_p
         for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-            if ch and can_aoi_exchange(char, ch):
+            if ch and int(ch.get('id', 0) or 0) in PLAYER_AOI_TRACK.get(
+                    int(char_id or 0), set()):
                 try:
                     c_lock = CONNECTION_LOCKS.get(cid)
                     if c_lock:
@@ -4188,6 +4191,7 @@ def broadcast_aoi_stop_move(char):
     move_stage = char.get('exp_stage_state') or char.get('equipment_stage_state')
     if is_single_player_map(map_id) and not (move_stage or {}).get('team_id'):
         return
+    sync_player_aoi(char)
     pos = char.get('pos', [0, 0, 0, 0])
     try:
         mv_bytes = get_movement(pos[0], pos[1], pos[2], pos[3])
@@ -4205,7 +4209,8 @@ def broadcast_aoi_stop_move(char):
         pf_p = sproto_pack(ph_p + aoi_stop)
         pkt = struct.pack(">H", len(pf_p)) + pf_p
         for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-            if ch and can_aoi_exchange(char, ch):
+            if ch and int(ch.get('id', 0) or 0) in PLAYER_AOI_TRACK.get(
+                    int(char_id or 0), set()):
                 try:
                     c_lock = CONNECTION_LOCKS.get(cid)
                     if c_lock:
@@ -4247,7 +4252,8 @@ def broadcast_aoi_attribute(char):
         pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_attr)]))
         pkt = struct.pack(">H", len(pf_p)) + pf_p
         for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-            if ch and can_aoi_exchange(char, ch):
+            if ch and int(ch.get('id', 0) or 0) in PLAYER_AOI_TRACK.get(
+                    int(char_id or 0), set()):
                 try:
                     c_lock = CONNECTION_LOCKS.get(cid)
                     if c_lock:
@@ -4776,6 +4782,84 @@ def can_aoi_exchange(source, target):
         return bool(state and state.get('team_id') and state is target.get('equipment_stage_state'))
     return not is_single_player_map(source.get('map_id'))
 
+def player_aoi_in_view(source, target):
+    """Compare player positions against MapInfoData.radius in protocol units."""
+    if (not source or not target
+            or str(source.get('map_id') or '') != str(target.get('map_id') or '')):
+        return False
+    try:
+        radius = max(0, int(MAP_CONFIG.get(
+            str(source.get('map_id')), {}).get('radius', 0) or 0))
+        if radius == 0:
+            return True
+        source_pos = source.get('pos') or default_map_spawn_position(source.get('map_id'))
+        target_pos = target.get('pos') or default_map_spawn_position(target.get('map_id'))
+        dx = int(source_pos[0]) - int(target_pos[0])
+        dz = int(source_pos[2]) - int(target_pos[2])
+    except (TypeError, ValueError, IndexError):
+        return False
+    return dx * dx + dz * dz <= radius * radius
+
+
+def _send_player_aoi_remove(char_id, peer_id):
+    return send_push_to_char(
+        peer_id, 506, encode_sproto([(0, int(char_id))]))
+
+
+def sync_player_aoi(char):
+    """Create/remove remote players as they cross the configured view radius."""
+    if not char:
+        return
+    try:
+        char_id = int(char.get('id', 0) or 0)
+    except (TypeError, ValueError):
+        return
+    if char_id <= 0:
+        return
+    visible_ids = PLAYER_AOI_TRACK.setdefault(char_id, set())
+    for peer_id, (_peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
+        if not peer_char:
+            continue
+        try:
+            peer_char_id = int(peer_char.get('id', 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if peer_char_id <= 0 or peer_char_id == char_id:
+            continue
+        peer_visible_ids = PLAYER_AOI_TRACK.get(peer_char_id, set())
+        exchange_allowed = can_aoi_exchange(char, peer_char)
+        in_view = exchange_allowed and player_aoi_in_view(char, peer_char)
+        source_has_peer = peer_char_id in visible_ids
+        peer_has_source = char_id in peer_visible_ids
+        if in_view:
+            if not source_has_peer:
+                packet = build_aoi_add_packet(peer_char)
+                if packet and send_packet_to_char(char_id, packet):
+                    visible_ids.add(peer_char_id)
+            if not peer_has_source:
+                packet = build_aoi_add_packet(char)
+                if packet and send_packet_to_char(peer_char_id, packet):
+                    PLAYER_AOI_TRACK.setdefault(peer_char_id, set()).add(char_id)
+        else:
+            if source_has_peer:
+                _send_player_aoi_remove(peer_char_id, char_id)
+                visible_ids.discard(peer_char_id)
+            if peer_has_source:
+                _send_player_aoi_remove(char_id, peer_char_id)
+                if peer_char_id in PLAYER_AOI_TRACK:
+                    PLAYER_AOI_TRACK[peer_char_id].discard(char_id)
+
+    online_ids = {
+        int(peer_char.get('id', 0) or 0)
+        for _peer_conn, peer_char in ALL_CONNECTIONS.values()
+        if peer_char and peer_char.get('id')
+    }
+    for peer_id in list(visible_ids):
+        if peer_id not in online_ids:
+            visible_ids.discard(peer_id)
+    if not visible_ids:
+        PLAYER_AOI_TRACK.pop(char_id, None)
+
 def send_packet_to_char(char_id, packet):
     conn=ALL_CONNECTIONS.get(int(char_id),(None,None))[0]
     if conn is None: return False
@@ -4885,8 +4969,10 @@ def broadcast_aoi_visual(char):
     packet_body = encode_sproto([(0, character)])
     packet_payload = sproto_pack(encode_sproto([(0, 510)]) + packet_body)
     packet = struct.pack(">H", len(packet_payload)) + packet_payload
+    char_id = int(char.get('id', 0) or 0)
     for cid, (peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
-        if peer_char and can_aoi_exchange(char, peer_char):
+        if peer_char and int(peer_char.get('id', 0) or 0) in PLAYER_AOI_TRACK.get(
+                char_id, set()):
             try:
                 lock = CONNECTION_LOCKS.get(cid)
                 if lock:
@@ -15511,62 +15597,46 @@ def claim_mail_reward_entries(picked_char, mail_entries, all_chars, conn, send_r
     return True
 
 def broadcast_aoi_add(target_conn, target_char, sender_conn=None, sender_char=None):
-    """Broadcast aoi_add (msg 505) for a player to all other players on the same map.
-    target_conn is the socket to send TO (when called from map transition for existing players).
-    When called for the new player, target_conn is ignored and we broadcast to all others."""
+    """Reconcile nearby player AOI after a player enters or changes maps."""
     if not target_char:
         return
     target_map = str(target_char.get('map_id', '11'))
-    target_id = target_char.get('id', 0)
-    # Build character_aoi with runtime(6) included
-    pkt = build_aoi_add_packet(target_char)
-    if pkt is None:
-        return
-    # Skip player-to-player AOI on single-player maps (e.g., Map 11)
     target_stage = target_char.get('exp_stage_state') or target_char.get('equipment_stage_state')
     if is_single_player_map(target_map) and not (target_stage or {}).get('team_id'):
         return
-    # Send to all other connections that have a character on the same map
-    for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-        if ch and can_aoi_exchange(target_char, ch):
-            try:
-                c_lock = CONNECTION_LOCKS.get(cid)
-                if c_lock:
-                    with c_lock:
-                        c.sendall(pkt)
-                else:
-                    c.sendall(pkt)
-                print(f"[AOI] Broadcast aoi_add id={target_id} to {ch.get('id', 0)} map={target_map}")
-            except Exception:
-                pass
+    sync_player_aoi(target_char)
 
 def broadcast_aoi_remove(char_id, map_id):
-    """Broadcast aoi_remove (msg 506) when a player leaves a map."""
+    """Remove a departing player from the clients that currently see them."""
     map_id = str(map_id)
-    source_char = ALL_CONNECTIONS.get(int(char_id), (None, None))[1]
+    try:
+        char_id = int(char_id)
+    except (TypeError, ValueError):
+        return
+    source_char = ALL_CONNECTIONS.get(char_id, (None, None))[1]
     source_stage = ((source_char.get('exp_stage_state') or source_char.get('equipment_stage_state'))
                     if source_char else None)
     if is_single_player_map(map_id) and not (source_stage or {}).get('team_id'):
         return
-    try:
-        aoi_data = encode_sproto([(0, char_id)])
-        ph_p = encode_sproto([(0, 506)])
-        pf_p = sproto_pack(ph_p + aoi_data)
-        pkt = struct.pack(">H", len(pf_p)) + pf_p
-        for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-            if source_char and ch and can_aoi_exchange(source_char, ch):
-                try:
-                    c_lock = CONNECTION_LOCKS.get(cid)
-                    if c_lock:
-                        with c_lock:
-                            c.sendall(pkt)
-                    else:
-                        c.sendall(pkt)
-                    print(f"[AOI] Broadcast aoi_remove id={char_id} to {ch.get('id', 0)} map={map_id}")
-                except Exception:
-                    pass
-    except Exception as e:
-        print(f"[AOI] Failed to build aoi_remove for id={char_id}: {e}")
+    visible_ids = PLAYER_AOI_TRACK.pop(char_id, set())
+    for peer_id, (_peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
+        if not peer_char:
+            continue
+        try:
+            peer_char_id = int(peer_char.get('id', 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if peer_char_id == char_id:
+            continue
+        peer_visible_ids = PLAYER_AOI_TRACK.get(peer_char_id, set())
+        was_visible = char_id in peer_visible_ids or peer_char_id in visible_ids
+        if not was_visible and source_char:
+            was_visible = (
+                can_aoi_exchange(source_char, peer_char)
+                and player_aoi_in_view(source_char, peer_char))
+        if was_visible:
+            _send_player_aoi_remove(char_id, peer_char_id)
+        peer_visible_ids.discard(char_id)
 
 def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, override_pos=None):
     if picked_char and picked_char.get('hp', 0) <= 0:
@@ -15700,15 +15770,6 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         if (not is_single_player_map(target_map_id) and not is_exp_map(target_map_id)
                 and not is_equipment_copy_map(target_map_id)):
             broadcast_aoi_add(conn, picked_char)
-            # Send existing players on this map to the new player
-            for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-                if (ch and ch.get('id', 0) != picked_char.get('id', 0)
-                        and can_aoi_exchange(picked_char, ch)):
-                    # Send this existing player's aoi_add to the new player (conn)
-                    pkt_ex = build_aoi_add_packet(ch)
-                    if pkt_ex:
-                        conn.sendall(pkt_ex)
-                        print(f"[AOI] Send existing player id={ch.get('id', 0)} to new player {picked_char.get('id', 0)} map={target_map_id}")
 
         # BOSS SPAWN for Dominance Map 502
         if target_map_id == "502":
@@ -20232,14 +20293,6 @@ def client_handler(conn, addr):
                         if (not is_single_player_map(mid) and not is_exp_map(mid)
                                 and not is_equipment_copy_map(mid)):
                             broadcast_aoi_add(conn, picked_char)
-                            # Send existing players on this map to the new player
-                            for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
-                                if (ch and ch.get('id', 0) != picked_char.get('id', 0)
-                                        and can_aoi_exchange(picked_char, ch)):
-                                    pkt_ex = build_aoi_add_packet(ch)
-                                    if pkt_ex:
-                                        conn.sendall(pkt_ex)
-                                        print(f"[AOI] Initial login: Send existing player id={ch.get('id', 0)} to new player {picked_char.get('id', 0)} map={mid}")
 
                     except Exception:
                         print("[!] FAILED TO SEND INITIAL MAP ENTER")
@@ -21141,7 +21194,9 @@ def client_handler(conn, addr):
                                     # EXP map IDs are shared by independent solo
                                     # runs and squads. Keep visual skill broadcasts
                                     # inside the same live run instance.
-                                    if ch and can_aoi_exchange(picked_char, ch):
+                                    if (ch and int(ch.get('id', 0) or 0)
+                                            in PLAYER_AOI_TRACK.get(
+                                                int(attacker_id or 0), set())):
                                         try:
                                             c_lock = CONNECTION_LOCKS.get(cid)
                                             if c_lock:
@@ -22586,7 +22641,9 @@ def client_handler(conn, addr):
                 if allowed:
                     emote_payload = encode_sproto([(0, sender_id), (1, dance_id)])
                     for peer_id, (_peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
-                        if peer_char and can_aoi_exchange(picked_char, peer_char):
+                        if (peer_char and int(peer_char.get('id', 0) or 0)
+                                in PLAYER_AOI_TRACK.get(
+                                    int(picked_char.get('id', 0) or 0), set())):
                             send_push_to_char(peer_id, 657, emote_payload)
                 send_rpc_response(session)
 
@@ -25099,7 +25156,9 @@ def client_handler(conn, addr):
                             r_pkt = struct.pack(">H", len(r_pf)) + r_pf
                             for cid, (c, ch) in list(ALL_CONNECTIONS.items()):
                                 if (ch and ch.get('id', 0) != picked_char.get('id', 0)
-                                        and can_aoi_exchange(picked_char, ch)):
+                                        and int(ch.get('id', 0) or 0)
+                                        in PLAYER_AOI_TRACK.get(
+                                            int(picked_char.get('id', 0) or 0), set())):
                                     c_lock = CONNECTION_LOCKS.get(cid)
                                     if c_lock:
                                         with c_lock:
