@@ -12009,6 +12009,16 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                                 for _ in range(s['num']): send_npc_create(s['nid'], f"Quest_{s['nid']}", s['x'], s['z'], 0)
 
 def sync_mission_data(picked_char):
+    last_main = str(picked_char.get('last_main_mission_id', "-1") or "-1")
+    if last_main in ("", "None"):
+        last_main = "-1"
+    capture_cfg = missions_data.get("1003", {})
+    capture_mission = picked_char.get("active_missions", {}).get("1003")
+    if (capture_mission
+            and str(capture_cfg.get("pre_id", "")) != last_main):
+        picked_char["active_missions"].pop("1003", None)
+        save_chars(all_accounts_chars)
+
     own_missions_list = []
     for mid, mdata in picked_char.get('active_missions', {}).items():
         # Ensure parm has 8 elements and is long list
@@ -12023,9 +12033,6 @@ def sync_mission_data(picked_char):
             (3, [int(x) for x in parm])
         ])
         own_missions_list.append(m_bytes)
-
-    last_main = picked_char.get('last_main_mission_id', "-1")
-    if last_main == "" or last_main == "None": last_main = "-1"
 
     # The client interprets sidedone_mission as packed 64-bit flags, not as
     # mission IDs. CurMissionDictionary.SideMissionPreIndex is 40000, so
@@ -14461,12 +14468,18 @@ def _rank_pvp_character_look(character):
     ])
 
 
-def _domin_capture_character_look(character):
+def _domin_capture_area_attributes(domin_id):
+    district = DOMIN_CONFIG.get(str(domin_id), {})
+    return encode_sproto([
+        (2, int(district.get("id", domin_id) or 0)),
+        (3, int(district.get("match_power", 0) or 0)),
+        (4, int(district.get("level_min", 1) or 1)),
+        (15, int(district.get("loss_speed", 0) or 0))
+    ])
+
+
+def _domin_capture_character_look(character, domin_id="1"):
     """Build the nested city-player card expected by DominInfoResponse."""
-    stats = get_character_stats(character)
-    area_attributes = encode_sproto(character_attribute_other_fields(
-        character, stats, current_character_hp(character, stats), camp=1
-    ))
     visual = get_visual(
         character.get("name", "Hero"), character.get("prof", 0),
         character=character
@@ -14474,7 +14487,7 @@ def _domin_capture_character_look(character):
     return encode_sproto([
         (0, int(character.get("id", 0))),
         (1, get_general(character)),
-        (3, area_attributes),
+        (3, _domin_capture_area_attributes(domin_id)),
         (4, visual)
     ])
 
@@ -14501,7 +14514,7 @@ def _domin_capture_npc_look(character, npc_id="1105", domin_id="1"):
     return encode_sproto([
         (0, int(npc_id)),
         (1, fields.get(1, b"")),
-        (3, fields.get(2, b"")),
+        (3, _domin_capture_area_attributes(domin_id)),
         (4, fields.get(6, b""))
     ])
 
@@ -14536,6 +14549,39 @@ def _domin_capture_is_arena(map_id):
     return str(map_id or "") in _domin_capture_map_ids()
 
 
+def _domin_capture_return_location(character, domin_id=None):
+    current_map = str(character.get("map_id") or "")
+    if _domin_capture_is_arena(current_map):
+        map_id = str(character.get("pre_arena_map") or "")
+        position = character.get("pre_arena_pos")
+    else:
+        map_id = current_map
+        position = character.get("pos")
+
+    district = DOMIN_CONFIG.get(
+        str(domin_id or character.get("active_domin_id") or "1"), {}
+    )
+    fallback_map = str(district.get("accept_map_id") or "11")
+    if fallback_map not in MAP_CONFIG or _domin_capture_is_arena(fallback_map):
+        fallback_map = "11"
+    if map_id not in MAP_CONFIG or _domin_capture_is_arena(map_id):
+        map_id = fallback_map
+        position = None
+
+    valid_position = isinstance(position, (list, tuple)) and len(position) >= 4
+    if valid_position:
+        try:
+            position = [int(float(value)) for value in position[:4]]
+        except (TypeError, ValueError, OverflowError):
+            valid_position = False
+    if not valid_position:
+        position = configured_map_birth_position(map_id)
+    if position is None:
+        map_id = fallback_map
+        position = configured_map_birth_position(map_id)
+    return map_id, list(position) if position is not None else None
+
+
 def _domin_capture_owned_by(domin_id):
     domin_id = str(domin_id)
     for character in _rank_pvp_all_characters():
@@ -14550,19 +14596,68 @@ def _domin_capture_assign_owner(character, domin_id):
     if domin_id not in DOMIN_CONFIG or not DOMIN_CONFIG[domin_id].get("is_open"):
         return False
     owner_id = numeric_id_value(character.get("id", 0))
+    current_owner = _domin_capture_owned_by(domin_id)
+    if current_owner is character:
+        return False
     changed = False
+    now_ms = int(time.time() * 1000)
     for candidate in _rank_pvp_all_characters():
         owned = candidate.get("domin_capture_owned_districts", [])
         if domin_id in {str(value) for value in owned}:
             candidate["domin_capture_owned_districts"] = [
                 value for value in owned if str(value) != domin_id
             ]
+            candidate.setdefault("domin_capture_owned_since", {}).pop(domin_id, None)
+            candidate.setdefault("domin_capture_resource_claim_times", {}).pop(domin_id, None)
             changed = True
     owned = character.setdefault("domin_capture_owned_districts", [])
     if domin_id not in {str(value) for value in owned}:
         owned.append(domin_id)
         changed = True
+    character.setdefault("domin_capture_owned_since", {})[domin_id] = now_ms
+    character.setdefault("domin_capture_resource_claim_times", {}).pop(domin_id, None)
     return changed and owner_id is not None
+
+
+def _domin_capture_resource_amounts(character, domin_id, now_ms=None):
+    if not character or _domin_capture_owned_by(domin_id) is not character:
+        return []
+    district = DOMIN_CONFIG.get(str(domin_id), {})
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    owned_since = character.setdefault("domin_capture_owned_since", {})
+    since_ms = int(owned_since.setdefault(str(domin_id), now_ms) or now_ms)
+    claim_times = character.setdefault("domin_capture_resource_claim_times", {})
+    district_claims = claim_times.setdefault(str(domin_id), {})
+    rewards = []
+    for index in (1, 2):
+        item_id = str(district.get(f"resource{index}", "") or "")
+        total = max(0, int(district.get(f"resource{index}_total", 0) or 0))
+        speed_ms = max(0, int(district.get(f"resource{index}_speed_ms", 0) or 0))
+        if not item_id or total <= 0 or speed_ms <= 0:
+            continue
+        last_claim_ms = max(
+            since_ms,
+            int(district_claims.get(item_id, since_ms) or since_ms)
+        )
+        amount = min(total, max(0, now_ms - last_claim_ms) // speed_ms)
+        if amount > 0:
+            rewards.append((item_id, 0, int(amount)))
+    return rewards
+
+
+def _domin_capture_info_state(character, district):
+    domin_id = str(district["id"])
+    owner = _domin_capture_owned_by(domin_id)
+    owned_by_player = bool(
+        character and owner
+        and numeric_id_value(owner.get("id", 0)) ==
+        numeric_id_value(character.get("id", 0))
+    )
+    progress = 100 if owned_by_player else 0
+    return encode_sproto([
+        (0, domin_id), (8, progress), (9, int(owned_by_player))
+    ])
 
 
 def _domin_capture_enemy_roster(character):
@@ -14639,11 +14734,15 @@ def _domin_capture_enemy_looks(character, roster=None):
         if descriptor.get("kind") == "owned":
             rival = find_social_character(descriptor.get("character_id"))
             if rival is not None:
-                looks.append(_domin_capture_character_look(rival))
+                looks.append(_domin_capture_character_look(
+                    rival, descriptor.get("domin_id", "1")
+                ))
             continue
         rival = _domin_capture_roster_character(character, descriptor)
         if rival is not None:
-            looks.append(_domin_capture_character_look(rival))
+            looks.append(_domin_capture_character_look(
+                rival, descriptor.get("domin_id", "1")
+            ))
     return looks
 
 
@@ -14655,7 +14754,7 @@ def _domin_capture_info_payload(character):
     roster = _domin_capture_enemy_roster(character) if character else []
     looks = _domin_capture_enemy_looks(character, roster) if character else []
     states = [
-        encode_sproto([(0, str(district["id"])), (8, 0), (9, 0)])
+        _domin_capture_info_state(character, district)
         for district in districts
     ]
     if not states:
@@ -20090,8 +20189,32 @@ def client_handler(conn, addr):
             return use_guild_dance_speaker(index_id, x, z, consume_item)
         return use_personal_dance_speaker(index_id, x, z, consume_item)
 
-    def schedule_domin_return(restore_hp=False):
+    def notify_domin_result(result, reason):
+        if not picked_char or result not in ("win", "loss"):
+            return False
+        if picked_char.get("domin_capture_result"):
+            return False
+        picked_char["domin_capture_result"] = result
+        picked_char["domin_capture_result_reason"] = str(reason)
+        picked_char["domin_capture_result_at"] = int(time.time())
+        text = (
+            "You won the Capture challenge."
+            if result == "win"
+            else "You lost the Capture challenge."
+        )
+        send_rpc_push(529, encode_sproto([(0, text), (1, True)]))
+        if result == "win":
+            _, info_payload = _domin_capture_info_payload(picked_char)
+            send_rpc_push(684, info_payload)
+        save_chars(all_accounts_chars)
+        debug_log(f"[CAPTURE] result={result} reason={reason} "
+                  f"player={picked_char.get('id')}")
+        return True
+
+    def schedule_domin_return(restore_hp=False, result=None, reason=""):
         """Return after the Capture mission's APK-localized five-second exit notice."""
+        if result:
+            notify_domin_result(result, reason or result)
         if not picked_char or picked_char.get('domin_return_scheduled'):
             return
         # Cancel the arena timeout timer so it doesn't fire after we've already exited.
@@ -20118,8 +20241,7 @@ def client_handler(conn, addr):
                 timer.start()
                 return
 
-            return_map = picked_char.get('pre_arena_map', '11')
-            return_pos = picked_char.get('pre_arena_pos')
+            return_map, return_pos = _domin_capture_return_location(picked_char)
             _domin_capture_clear_enemy_instance(picked_char.get('boss_inst_id'))
             if picked_char.pop('domin_return_restore_hp', False):
                 # A map transition recreates the main player with this value.
@@ -20140,7 +20262,10 @@ def client_handler(conn, addr):
             # notify_copy_start_info handler closes the timer immediately for
             # an elapsed end_time, before the map transition begins.
             send_rpc_push(629, encode_sproto([(0, int(time.time())), (1, 2)]))
-            start_map_transition(conn, picked_char, return_map, send_rpc_push, override_pos=return_pos)
+            start_map_transition(
+                conn, picked_char, return_map, send_rpc_push,
+                override_pos=list(return_pos) if return_pos is not None else None
+            )
             debug_log('[M1003 DEBUG] Arena exit countdown finished; returned to saved city position')
 
         leave_after_notice(5)
@@ -20917,10 +21042,12 @@ def client_handler(conn, addr):
                         picked_char['domin_capture_deadline'] = deadline
                         remaining = deadline - int(time.time())
                         if remaining <= 0:
+                            notify_domin_result("loss", "timeout")
                             send_rpc_push(629, encode_sproto([
                                 (0, int(time.time())), (1, 2)
                             ]))
-                            schedule_domin_return(restore_hp=True)
+                            schedule_domin_return(
+                                restore_hp=True, result="loss", reason="timeout")
                             remaining = 0
                         else:
                             send_rpc_push(629, encode_sproto([
@@ -20932,7 +21059,8 @@ def client_handler(conn, addr):
                                     and is_current_character_connection(conn, picked_char)
                                     and int(picked_char.get('domin_capture_deadline', 0)) <= int(time.time())):
                                 debug_log('[CAPTURE] arena deadline reached; returning')
-                                schedule_domin_return(restore_hp=True)
+                                schedule_domin_return(
+                                    restore_hp=True, result="loss", reason="timeout")
 
                         if remaining > 0:
                             t = threading.Timer(remaining, arena_timeout)
@@ -20945,7 +21073,9 @@ def client_handler(conn, addr):
                             if not _domin_capture_spawn_enemy(
                                     conn, picked_char, send_rpc_push):
                                 picked_char['boss_waiting_for_map_ready'] = False
-                                schedule_domin_return(restore_hp=True)
+                                schedule_domin_return(
+                                    restore_hp=True, result="loss",
+                                    reason="opponent_spawn_failed")
                     send_rpc_push(519, sync_mission_data(picked_char))
                     replay_pending_cash_stage_result(picked_char)
                     if street_race_result_restore_pending:
@@ -21034,6 +21164,17 @@ def client_handler(conn, addr):
                         deadline = int(picked_char.get('domin_capture_deadline', 0) or 0)
                         exit_pending = bool(picked_char.get('domin_return_scheduled'))
                         if reward_pending or exit_pending or deadline <= int(time.time()):
+                            if deadline <= int(time.time()):
+                                notify_domin_result("loss", "timeout")
+                            elif exit_pending and picked_char.get("domin_capture_result"):
+                                result_text = (
+                                    "You won the Capture challenge."
+                                    if picked_char["domin_capture_result"] == "win"
+                                    else "You lost the Capture challenge."
+                                )
+                                send_rpc_push(529, encode_sproto([
+                                    (0, result_text), (1, True)
+                                ]))
                             for timer_key in ('arena_timer', '_domin_capture_next_enemy_timer'):
                                 timer = picked_char.pop(timer_key, None)
                                 if timer is not None:
@@ -21042,8 +21183,11 @@ def client_handler(conn, addr):
                             # Clearing this flag makes its callback a no-op;
                             # complete the return on the newly authenticated connection.
                             picked_char['domin_return_scheduled'] = False
-                            return_map = str(picked_char.pop('pre_arena_map', None) or '11')
-                            return_pos = picked_char.pop('pre_arena_pos', None)
+                            return_map, return_pos = _domin_capture_return_location(
+                                picked_char
+                            )
+                            picked_char.pop('pre_arena_map', None)
+                            picked_char.pop('pre_arena_pos', None)
                             _domin_capture_clear_enemy_instance(
                                 picked_char.get('boss_inst_id'))
                             if exit_pending or deadline <= int(time.time()):
@@ -23592,7 +23736,8 @@ def client_handler(conn, addr):
                                   f"result=failure_ui relife_suppressed=1")
                         elif _domin_capture_is_arena(current_map):
                             debug_log('[M1003 DEBUG] Player died in arena; scheduling loss return')
-                            schedule_domin_return(restore_hp=True)
+                            schedule_domin_return(
+                                restore_hp=True, result="loss", reason="player_defeated")
                         elif is_tower_map(current_map):
                             tower_run = picked_char.get('tower_run')
                             if isinstance(tower_run, dict):
@@ -24018,7 +24163,9 @@ def client_handler(conn, addr):
                                     finish_cash_stage(picked_char, False)
                                 if _domin_capture_is_arena(current_map):
                                     debug_log('[M1003 DEBUG] Player died in arena; scheduling loss return')
-                                    schedule_domin_return(restore_hp=True)
+                                    schedule_domin_return(
+                                        restore_hp=True, result="loss",
+                                        reason="player_defeated")
                                 elif is_tower_map(current_map):
                                     tower_run = picked_char.get('tower_run')
                                     if isinstance(tower_run, dict):
@@ -24481,9 +24628,9 @@ def client_handler(conn, addr):
                                     tower_npc_killed(
                                         picked_char, target_id, conn, send_rpc_push)
 
-                                if city_capture_id:
-                                    # City vehicles keep their destroyed body in
-                                    # the scene; HP=0 is the client lifecycle.
+                                if city_capture_id or _domin_capture_is_arena(cur_map):
+                                    # Capture opponents need their HP-zero
+                                    # lifecycle for the client's result screen.
                                     pass
                                 elif (isinstance(cash_stage_state, dict)
                                       and str(cash_stage_state.get('copy_id'))
@@ -24553,6 +24700,7 @@ def client_handler(conn, addr):
                                         picked_char, did
                                     )
                                     _domin_capture_assign_owner(picked_char, did)
+                                    notify_domin_result("win", "opponent_defeated")
                                     if (not is_player_rival and capture_story_current
                                             and capture_entry
                                             and int(capture_entry.get('state', 0)) == 1):
@@ -24573,7 +24721,8 @@ def client_handler(conn, addr):
                                         send_rpc_push(629, encode_sproto([
                                             (0, int(time.time())), (1, 2)
                                         ]))
-                                        schedule_domin_return()
+                                        schedule_domin_return(
+                                            result="win", reason="opponent_defeated")
                                         save_chars(all_accounts_chars)
                                     else:
                                         arena_timer = picked_char.pop('arena_timer', None)
@@ -24590,7 +24739,8 @@ def client_handler(conn, addr):
                                             # A previously completed one-time mission
                                             # has no reward claim screen to trigger
                                             # the normal arena return.
-                                            schedule_domin_return()
+                                            schedule_domin_return(
+                                                result="win", reason="opponent_defeated")
                                 else:
                                     if is_equipment:
                                         on_equipment_npc_killed(exp_state_hit, target_id, target_nid)
@@ -25061,6 +25211,14 @@ def client_handler(conn, addr):
                             pf = sproto_pack(ph + encode_sproto([]))
                             conn.sendall(struct.pack(">H", len(pf)) + pf)
                         continue
+                    if (_domin_capture_is_arena(picked_char.get("map_id"))
+                            or picked_char.get("domin_return_scheduled")):
+                        debug_log(f"[CAPTURE] rejected nested challenge player={picked_char.get('id')}")
+                        if session is not None:
+                            ph = encode_sproto([(1, session)])
+                            pf = sproto_pack(ph + encode_sproto([]))
+                            conn.sendall(struct.pack(">H", len(pf)) + pf)
+                        continue
                     district = DOMIN_CONFIG.get(str(did))
                     valid_domin_id = str(did) if district else None
                     if (valid_domin_id is None or not district.get("is_open")
@@ -25156,10 +25314,13 @@ def client_handler(conn, addr):
 
                     # RESET HP TO MAX FOR AREA DUEL
                     picked_char['hp'] = get_character_stats(picked_char)['hp_max']
-                    # SAVE LATEST POSITION AND MAP EXACTLY (Ensure list copy)
-                    latest_pos = picked_char.get('pos', [34611, 100, -49480, 8632])
-                    picked_char['pre_arena_pos'] = list(latest_pos)
-                    picked_char['pre_arena_map'] = str(picked_char.get('map_id', '11'))
+                    # Preserve the authoritative source map and position before
+                    # start_map_transition replaces them with the arena spawn.
+                    return_map, return_pos = _domin_capture_return_location(
+                        picked_char, valid_domin_id
+                    )
+                    picked_char['pre_arena_pos'] = return_pos
+                    picked_char['pre_arena_map'] = return_map
                     debug_log(f"[M1003 DEBUG] Saved pre-arena pos: {picked_char['pre_arena_pos']}, map: {picked_char['pre_arena_map']}")
                     picked_char['active_domin_id'] = valid_domin_id
                     picked_char['domin_capture_roster'] = [selected_enemy]
@@ -25169,6 +25330,9 @@ def client_handler(conn, addr):
                     picked_char.pop('_domin_capture_enemy', None)
                     picked_char['domin_return_scheduled'] = False
                     picked_char.pop('domin_return_restore_hp', None)
+                    picked_char.pop('domin_capture_result', None)
+                    picked_char.pop('domin_capture_result_reason', None)
+                    picked_char.pop('domin_capture_result_at', None)
                     debug_log(
                         f"[CAPTURE] entering district={valid_domin_id} map={district['map_id']} "
                         f"player={picked_char.get('id')} "
@@ -27337,6 +27501,61 @@ def client_handler(conn, addr):
                     )
                 send_rpc_push(684, resp_p)
 
+            elif msg == 312:  # receive_domin_resource
+                claimed_rewards = []
+                district_id = field_text(body, 0, '')
+                if not district_id:
+                    district_id = field_text(body, 1, '')
+                if (picked_char
+                        and is_current_character_connection(conn, picked_char)
+                        and district_id in DOMIN_CONFIG
+                        and DOMIN_CONFIG[district_id].get("is_open")
+                        and _domin_capture_owned_by(district_id) is picked_char):
+                    with get_character_transaction_lock(picked_char):
+                        reward_list = _domin_capture_resource_amounts(
+                            picked_char, district_id
+                        )
+                        if reward_list and can_add_reward_list_to_inventory(
+                                picked_char, reward_list):
+                            grant_item_rewards(
+                                picked_char, reward_list, conn, send_rpc_push,
+                                save=False
+                            )
+                            now_ms = int(time.time() * 1000)
+                            claim_times = picked_char.setdefault(
+                                "domin_capture_resource_claim_times", {}
+                            ).setdefault(district_id, {})
+                            for item_id, _quality, _amount in reward_list:
+                                claim_times[item_id] = now_ms
+                            claimed_rewards = [
+                                encode_sproto([
+                                    (0, str(item_id)), (1, int(amount)), (3, int(quality))
+                                ])
+                                for item_id, quality, amount in reward_list
+                            ]
+                            save_chars(all_accounts_chars)
+                        elif reward_list:
+                            send_rpc_push(529, encode_sproto([
+                                (0, "Make room in your inventory before receiving Capture resources."),
+                                (1, True)
+                            ]))
+                elif picked_char and district_id in DOMIN_CONFIG:
+                    debug_log(
+                        f"[CAPTURE] rejected resource claim player={picked_char.get('id')} "
+                        f"district={district_id}"
+                    )
+
+                if session is not None:
+                    ph = encode_sproto([(1, session)])
+                    pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+                if claimed_rewards:
+                    send_rpc_push(638, encode_sproto([(0, claimed_rewards)]))
+                updated_roster, info_payload = _domin_capture_info_payload(picked_char)
+                if picked_char:
+                    picked_char['_domin_capture_offered_enemies'] = updated_roster
+                send_rpc_push(684, info_payload)
+
             elif msg == 178: # update_misison_parm
                 mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
                 param_type = get_val_int(body, 1)
@@ -27501,8 +27720,11 @@ def client_handler(conn, addr):
                         send_rpc_push(629, encode_sproto([
                             (0, int(time.time())), (1, 2)
                         ]))
-                        return_map = str(picked_char.pop('pre_arena_map', None) or '11')
-                        return_pos = picked_char.pop('pre_arena_pos', None)
+                        return_map, return_pos = _domin_capture_return_location(
+                            picked_char
+                        )
+                        picked_char.pop('pre_arena_map', None)
+                        picked_char.pop('pre_arena_pos', None)
                         boss_id = picked_char.get('boss_inst_id')
                         _domin_capture_clear_enemy_instance(boss_id)
                         picked_char['boss_inst_id'] = None
