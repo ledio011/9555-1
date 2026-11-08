@@ -252,7 +252,6 @@ SAFE_AREA_CONFIG = {} # MapAreaInfoData rows grouped by safety-area ID
 MAP_CONNECT_DATA = {} # (src_id, target_id) -> PosX, PosY, PosZ
 GUILD_CAPTURE_DATA = {} # id -> mapId (kept for existing Gang-city map routing)
 GUILD_CAPTURE_CONFIG = {} # id -> schedule metadata from GuildCaptureData
-DOMIN_CONFIG = {} # DominData ID -> client Capture configuration row
 GUILD_LEVEL_DATA = {} # guild level -> cumulative exp/max members/daily donation count
 SEX_MINI_GAME_ID = "1301"
 GUILD_DONATE_DATA = {} # donation id -> authoritative cost and reward
@@ -695,27 +694,6 @@ try:
                     except (IndexError, TypeError, ValueError):
                         continue
         debug_log(f"[GUILD CAPTURE DATA LOADED] count={len(GUILD_CAPTURE_DATA)}")
-
-    # DominData defines every Minimap Capture zone, its rewards, timer rates,
-    # entry level, and destination. Send these rows to the APK unchanged.
-    domin_path = os.path.join(text_asset_root, "DominData")
-    if os.path.exists(domin_path):
-        with open(domin_path, "r", encoding="utf-8") as f:
-            for line in f:
-                parts = line.strip().split(",")
-                if parts[0] != "*" or len(parts) < 26 or not parts[1].isdigit():
-                    continue
-                try:
-                    DOMIN_CONFIG[parts[1]] = {
-                        index - 1: (
-                            int(value) if value.strip().lstrip("-").isdigit()
-                            else value.strip()
-                        )
-                        for index, value in enumerate(parts[1:26], start=1)
-                    }
-                except (IndexError, TypeError, ValueError):
-                    continue
-        debug_log(f"[DOMIN CONFIG LOADED] count={len(DOMIN_CONFIG)}")
 
     # Guild UI tables are authoritative for capacity, donations, skill cost,
     # and guild-shop inventory. Keep these separate from unrelated shop logic.
@@ -14460,44 +14438,23 @@ def _rank_pvp_character_look(character):
 
 
 def _domin_capture_character_look(character):
-    """Build the client-specific character_look shape used by DominData."""
-    ensure_backpack_state(character)
+    """Build the legacy character_look shape consumed by Capture's 684 handler."""
     stats = get_character_stats(character)
-    pos = list(character.get("pos") or default_map_spawn_position(character.get("map_id")))
-    if len(pos) < 4:
-        pos.extend([0] * (4 - len(pos)))
-    equip_map = {int(item["index_id"]): _gameitem_sproto(item)
-                 for item in character.get("equipped_equip", [])}
-    fashion_map = {int(item["index_id"]): _gameitem_sproto(item)
-                   for item in character.get("equipped_fashion", [])}
-    badge_map = {int(item["index_id"]): _gameitem_sproto(item)
-                 for item in character.get("equipped_badges", [])}
-    other_fields = [
-        (0, current_character_hp(character, stats)),
-        (2, stats["lv"]),
-        (3, stats["power"]),
-        (4, int(character.get("title_level", 0))),
-        (15, 5)
-    ]
+    visual = get_visual(character.get("name", "Capture Rival"), character.get("prof", 0),
+                        character=character)
     return encode_sproto([
         (0, 0),
         (1, encode_sproto([
             (0, character.get("name", "Capture Rival")),
             (1, character.get("prof", 0))
         ])),
-        (2, encode_sproto(character_attribute_fields(stats))),
-        (3, encode_sproto(other_fields)),
-        (4, build_main_player_visual(character)),
-        (5, equip_map),
-        (6, fashion_map),
-        (7, badge_map),
-        (8, equipment_enhance_sproto(character)),
-        (9, get_movement(pos[0], pos[1], pos[2], pos[3])),
-        (10, build_skills_map(
-            character.get("prof", 0), stats["lv"],
-            character.get("skill_levels", {}), character.get("equipped_equip", []),
-            character.get("skill_positions", {})
-        ))
+        (3, encode_sproto([
+            (2, stats["lv"]),
+            (3, stats["power"]),
+            (4, int(character.get("title_level", 0))),
+            (15, 5)
+        ])),
+        (4, visual)
     ])
 
 
@@ -26799,20 +26756,13 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-                # Ash Viper belongs to mission 1003's boss encounter, not the
-                # Minimap Capture opponent list. Send actual player looks so
-                # the client receives their level, attributes, and equipment.
+                # Keep the DominData response's original wire schema. Its first
+                # list is runtime Capture state, not the DominData asset rows.
                 enemy_looks = _domin_capture_enemy_looks(picked_char) if picked_char else []
-                domin_rows = [
-                    encode_sproto(sorted(row.items()))
-                    for _, row in sorted(
-                        DOMIN_CONFIG.items(),
-                        key=lambda item: int(item[0]) if item[0].isdigit() else item[0]
-                    )
-                ]
+                domin_state = encode_sproto([(0, "1"), (8, 0), (9, 0)])
 
                 resp_p = encode_sproto([
-                    (0, domin_rows),
+                    (0, [domin_state]),
                     (1, enemy_looks)
                 ])
 
