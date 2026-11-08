@@ -24863,6 +24863,9 @@ def client_handler(conn, addr):
                     )
                     save_chars(all_accounts_chars)
                     start_map_transition(conn, picked_char, "502", send_rpc_push)
+                    # The client counts entering Capture as daily activity
+                    # type 15; winning or losing is not required.
+                    record_daily_active_event(picked_char, 15, send_rpc_push)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
