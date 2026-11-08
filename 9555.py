@@ -14415,28 +14415,12 @@ def _rank_pvp_character_look(character):
 
 
 def _domin_capture_character_look(character):
-    """Build the legacy character_look shape consumed by Capture's 684 handler."""
-    stats = get_character_stats(character)
-    visual = get_visual(character.get("name", "Capture Rival"), character.get("prof", 0),
-                        character=character)
-    return encode_sproto([
-        (0, 0),
-        (1, encode_sproto([
-            (0, character.get("name", "Capture Rival")),
-            (1, character.get("prof", 0))
-        ])),
-        (3, encode_sproto([
-            (2, stats["lv"]),
-            (3, stats["power"]),
-            (4, int(character.get("title_level", 0))),
-            (15, 5)
-        ])),
-        (4, visual)
-    ])
+    """Use the same full character_look schema as the client's opponent cards."""
+    return _rank_pvp_character_look(character)
 
 
 def _domin_capture_enemy_roster(character):
-    """Select three saved character rivals and pad with local AI profiles."""
+    """Return selectable, persisted character rivals without fabricated profiles."""
     enemy_ids = []
     seen_ids = {numeric_id_value(character.get("id", 0)) or 0}
     for relation in (character or {}).get("enemies", []):
@@ -14468,13 +14452,6 @@ def _domin_capture_enemy_roster(character):
             "synthetic": False
         })
 
-    while len(roster) < 3:
-        roster.append({
-            "character_id": int(character.get("id", 0)),
-            "synthetic": True,
-            "prof": len(roster) % 3,
-            "name": f"Capture Rival {len(roster) + 1}"
-        })
     return roster
 
 
@@ -14485,17 +14462,53 @@ def _domin_capture_roster_character(owner, descriptor):
         rival = copy.deepcopy(owner)
     else:
         rival = copy.deepcopy(rival)
-    if descriptor.get("synthetic"):
-        rival["prof"] = int(descriptor.get("prof", 0)) % 3
-        rival["name"] = str(descriptor.get("name", "Capture Rival"))
     return rival
 
 
-def _domin_capture_enemy_looks(character):
+def _domin_capture_enemy_looks(character, roster=None):
     return [
         _domin_capture_character_look(_domin_capture_roster_character(character, rival))
-        for rival in _domin_capture_enemy_roster(character)
+        for rival in (roster if roster is not None else _domin_capture_enemy_roster(character))
     ]
+
+
+def _domin_capture_selected_enemy(fields, roster):
+    """Resolve the selected Capture rival by its character ID or offered-list index."""
+    if not roster:
+        return None
+    offered_ids = {
+        int(row.get("character_id", 0) or 0): row
+        for row in roster
+        if int(row.get("character_id", 0) or 0) > 0
+    }
+    for tag in sorted(fields):
+        if tag == 0:
+            continue
+        value = fields.get(tag)
+        candidates = []
+        if isinstance(value, int):
+            candidates.append(value)
+        elif isinstance(value, (bytes, bytearray)):
+            try:
+                decoded = value.decode("utf-8").strip()
+                if decoded.isdecimal():
+                    candidates.append(int(decoded))
+            except UnicodeDecodeError:
+                pass
+            if len(value) in (4, 8):
+                candidates.append(struct.unpack("<i" if len(value) == 4 else "<q", value)[0])
+        elif isinstance(value, str) and value.isdecimal():
+            candidates.append(int(value))
+        for candidate in candidates:
+            if candidate in offered_ids:
+                return offered_ids[candidate]
+
+    selection_index = get_val_int(fields, 1, -1)
+    if selection_index == 0:
+        return roster[0]
+    if 1 <= selection_index <= len(roster):
+        return roster[selection_index - 1]
+    return None
 
 
 def _domin_capture_zombie_character(character, inst_id):
@@ -19897,6 +19910,7 @@ def client_handler(conn, addr):
             picked_char['active_domin_id'] = None
             picked_char['domin_capture_deadline'] = 0
             picked_char.pop('domin_capture_roster', None)
+            picked_char.pop('_domin_capture_offered_enemies', None)
             picked_char.pop('domin_capture_enemy_index', None)
             picked_char.pop('_domin_capture_enemy', None)
             picked_char['boss_waiting_for_map_ready'] = False
@@ -20813,6 +20827,7 @@ def client_handler(conn, addr):
                             picked_char['active_domin_id'] = None
                             picked_char['domin_capture_deadline'] = 0
                             picked_char.pop('domin_capture_roster', None)
+                            picked_char.pop('_domin_capture_offered_enemies', None)
                             picked_char.pop('domin_capture_enemy_index', None)
                             picked_char.pop('_domin_capture_enemy', None)
                             picked_char['boss_waiting_for_map_ready'] = False
@@ -24273,48 +24288,17 @@ def client_handler(conn, addr):
                                                 cap_target = str(cap_cfg.get('target_id', did))
                                                 break
                                         advance_missions(picked_char, send_rpc_push, 'capture', target_id=cap_target)
-                                    if not is_player_rival:
-                                        # Capture rivals are opponents, not NPC reward sources.
-                                        player_level = picked_char.get('level', 1)
-                                        boss_lv = defender_stats.get('lv', 1) if defender_stats else 1
-                                        exp_kill, cash_kill = calculate_npc_kill_rewards(player_level, boss_lv)
-                                        kill_rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
-                                        grant_item_rewards(picked_char, kill_rewards, conn, send_rpc_push)
-                                        send_rpc_push(638, encode_sproto([(0, [
-                                            encode_sproto([(0, "2001"), (1, exp_kill), (3, 0)]),
-                                            encode_sproto([(0, "1001"), (1, cash_kill), (3, 0)])
-                                        ])]))
-                                        player_pos = picked_char.get('pos') or default_map_spawn_position(picked_char.get('map_id'))
-                                        drop_x = player_pos[0] + random.randint(-500, 500)
-                                        drop_z = player_pos[2] + random.randint(-500, 500)
-                                        drop_inst_id = int(time.time() * 1000) % 1000000000
-                                        drop_item = encode_sproto([
-                                            (0, "1001"), (1, cash_kill), (3, 0)
-                                        ])
-                                        send_rpc_push(527, encode_sproto([
-                                            (0, drop_inst_id), (1, drop_x), (2, drop_z),
-                                            (3, 0), (4, drop_item), (7, picked_char['id'])
-                                        ]))
                                     _domin_capture_clear_enemy_instance(target_id)
                                     picked_char['boss_inst_id'] = None
                                     picked_char.pop('_domin_capture_enemy', None)
                                     if is_player_rival:
-                                        picked_char['domin_capture_enemy_index'] = (
-                                            int(picked_char.get('domin_capture_enemy_index', 0)) + 1
-                                        )
-
-                                        def spawn_next_capture_enemy(expected_map="502"):
-                                            if (picked_char.get('map_id') == expected_map
-                                                    and picked_char.get('domin_capture_deadline', 0) > int(time.time())
-                                                    and picked_char.get('boss_inst_id') is None
-                                                    and not picked_char.get('domin_return_scheduled')):
-                                                _domin_capture_spawn_enemy(conn, picked_char, send_rpc_push)
-
-                                        next_enemy_timer = threading.Timer(
-                                            1.0, spawn_next_capture_enemy)
-                                        next_enemy_timer.daemon = True
-                                        next_enemy_timer.start()
-                                        picked_char['_domin_capture_next_enemy_timer'] = next_enemy_timer
+                                        arena_timer = picked_char.pop('arena_timer', None)
+                                        if arena_timer:
+                                            arena_timer.cancel()
+                                        send_rpc_push(629, encode_sproto([
+                                            (0, int(time.time())), (1, 2)
+                                        ]))
+                                        schedule_domin_return()
                                         save_chars(all_accounts_chars)
                                     else:
                                         arena_timer = picked_char.pop('arena_timer', None)
@@ -24792,7 +24776,7 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 311: # enter_domin_pk_scene
-                did = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
+                did = field_text(body, 0, '')
                 debug_log(f"[M1003 DEBUG] RX 311 domin_id={did}")
                 if picked_char:
                     # This server implements Domin 1 / map 502. Do not require
@@ -24836,6 +24820,25 @@ def client_handler(conn, addr):
                             conn.sendall(struct.pack(">H", len(pf)) + pf)
                         continue
 
+                    capture_story_active = bool(
+                        capture_story_current and existing_capture
+                        and int(existing_capture.get('state', 0)) == 1
+                    )
+                    offered_roster = picked_char.get(
+                        '_domin_capture_offered_enemies')
+                    if not isinstance(offered_roster, list):
+                        offered_roster = _domin_capture_enemy_roster(picked_char)
+                    selected_enemy = _domin_capture_selected_enemy(body, offered_roster)
+                    if not capture_story_active and selected_enemy is None:
+                        debug_log(
+                            f"[CAPTURE] rejected challenge without a valid selected rival "
+                            f"player={picked_char.get('id')} fields={body}"
+                        )
+                        if session is not None:
+                            ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                            conn.sendall(struct.pack(">H", len(pf)) + pf)
+                        continue
+
                     # RESET HP TO MAX FOR AREA DUEL
                     picked_char['hp'] = get_character_stats(picked_char)['hp_max']
                     # SAVE LATEST POSITION AND MAP EXACTLY (Ensure list copy)
@@ -24844,12 +24847,20 @@ def client_handler(conn, addr):
                     picked_char['pre_arena_map'] = str(picked_char.get('map_id', '11'))
                     debug_log(f"[M1003 DEBUG] Saved pre-arena pos: {picked_char['pre_arena_pos']}, map: {picked_char['pre_arena_map']}")
                     picked_char['active_domin_id'] = valid_domin_id
-                    picked_char['domin_capture_roster'] = _domin_capture_enemy_roster(picked_char)
+                    picked_char['domin_capture_roster'] = (
+                        [] if capture_story_active else [selected_enemy]
+                    )
                     picked_char['domin_capture_enemy_index'] = 0
+                    picked_char.pop('_domin_capture_offered_enemies', None)
                     picked_char['domin_capture_deadline'] = int(time.time()) + 300
                     picked_char.pop('_domin_capture_enemy', None)
                     picked_char['domin_return_scheduled'] = False
                     picked_char.pop('domin_return_restore_hp', None)
+                    debug_log(
+                        f"[CAPTURE] entering map=502 player={picked_char.get('id')} "
+                        f"kind={'mission_boss' if capture_story_active else 'selected_rival'} "
+                        f"selected={selected_enemy.get('character_id') if selected_enemy else '1105'}"
+                    )
                     save_chars(all_accounts_chars)
                     start_map_transition(conn, picked_char, "502", send_rpc_push)
                 if session is not None:
@@ -26996,7 +27007,18 @@ def client_handler(conn, addr):
 
                 # Keep the DominData response's original wire schema. Its first
                 # list is runtime Capture state, not the DominData asset rows.
-                enemy_looks = _domin_capture_enemy_looks(picked_char) if picked_char else []
+                offered_roster = _domin_capture_enemy_roster(picked_char) if picked_char else []
+                if picked_char:
+                    picked_char['_domin_capture_offered_enemies'] = offered_roster
+                    debug_log(
+                        f"[CAPTURE] offered {len(offered_roster)} rivals "
+                        f"player={picked_char.get('id')} "
+                        f"ids={[row.get('character_id') for row in offered_roster]}"
+                    )
+                enemy_looks = (
+                    _domin_capture_enemy_looks(picked_char, offered_roster)
+                    if picked_char else []
+                )
                 domin_state = encode_sproto([(0, "1"), (8, 0), (9, 0)])
 
                 resp_p = encode_sproto([
@@ -27176,6 +27198,7 @@ def client_handler(conn, addr):
                         picked_char['active_domin_id'] = None
                         picked_char['domin_capture_deadline'] = 0
                         picked_char.pop('domin_capture_roster', None)
+                        picked_char.pop('_domin_capture_offered_enemies', None)
                         picked_char.pop('domin_capture_enemy_index', None)
                         picked_char.pop('_domin_capture_enemy', None)
                         picked_char['boss_waiting_for_map_ready'] = False
