@@ -40,7 +40,7 @@ class RepeatingTask:
 
 # Verified from the shipped APK: GameDefine.PLAYER_MAX_LEVEL = 80.
 PLAYER_MAX_LEVEL = 80
-SCRIPT_DIR = os.path.dirname(os.path.abQspath(__file__))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CHAR_DB = os.path.join(SCRIPT_DIR, "characters_final.json")
 BAK_DB = CHAR_DB + ".bak"
 TMP_DB = CHAR_DB + ".tmp"
