@@ -40,7 +40,7 @@ class RepeatingTask:
 
 # Verified from the shipped APK: GameDefine.PLAYER_MAX_LEVEL = 80.
 PLAYER_MAX_LEVEL = 80
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_DIR = os.path.dirname(os.path.abQspath(__file__))
 CHAR_DB = os.path.join(SCRIPT_DIR, "characters_final.json")
 BAK_DB = CHAR_DB + ".bak"
 TMP_DB = CHAR_DB + ".tmp"
@@ -20740,6 +20740,13 @@ def client_handler(conn, addr):
                         (11, _guild_champion_id()), (12, random.randint(1, 10000)),
                         (13, 1), (14, int(time.time()))
                     ]))
+
+                    # Initialize the weekly-sign flag before the client builds the
+                    # welfare tabs; the client derives it from response 641.
+                    week_day, week_can_claim, week_complete = resolve_sign_week_state(picked_char)
+                    send_rpc_push(641, sign_week_payload(
+                        week_day, week_can_claim, week_complete
+                    ))
 
                     # The client has no separate request for this button's
                     # quota; initialize its count, limit, and reward on login.
