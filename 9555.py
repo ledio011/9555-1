@@ -14587,11 +14587,34 @@ def _domin_capture_return_location(character, domin_id=None):
     return map_id, list(position) if position is not None else None
 
 
-def _domin_capture_owned_by(domin_id):
+def _domin_capture_duration_seconds(district):
+    max_dominance = max(0, int(district.get("dominant_max", 0) or 0))
+    min_dominance = max(0, int(district.get("dominant_min", 0) or 0))
+    loss_per_minute = max(1, int(district.get("loss_speed", 0) or 0))
+    return max(
+        1,
+        ((max_dominance - min_dominance) * 60 + loss_per_minute - 1)
+        // loss_per_minute
+    )
+
+
+def _domin_capture_owned_by(domin_id, now_ms=None):
     domin_id = str(domin_id)
+    district = DOMIN_CONFIG.get(domin_id)
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
     for character in _rank_pvp_all_characters():
         owned = character.get("domin_capture_owned_districts", [])
         if domin_id in {str(value) for value in owned}:
+            owned_since_ms = int(
+                character.get("domin_capture_owned_since", {}).get(domin_id, 0) or 0
+            )
+            if district and owned_since_ms > 0:
+                expires_ms = (
+                    owned_since_ms + _domin_capture_duration_seconds(district) * 1000
+                )
+                if now_ms >= expires_ms:
+                    continue
             return character
     return None
 
@@ -14653,29 +14676,23 @@ def _domin_capture_resource_amounts(character, domin_id, now_ms=None):
 
 def _domin_capture_info_state(character, district, opponent=None, now_ms=None):
     domin_id = str(district["id"])
-    owner = _domin_capture_owned_by(domin_id)
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+    owner = _domin_capture_owned_by(domin_id, now_ms)
     owned_by_player = bool(
         character and owner
         and numeric_id_value(owner.get("id", 0)) ==
         numeric_id_value(character.get("id", 0))
     )
-    if now_ms is None:
-        now_ms = int(time.time() * 1000)
 
     owned_since = character.setdefault("domin_capture_owned_since", {}) if owned_by_player else {}
     capture_start_ms = int(owned_since.get(domin_id, now_ms) or now_ms)
     if owned_by_player:
         max_dominance = max(0, int(district.get("dominant_max", 0) or 0))
-        min_dominance = max(0, int(district.get("dominant_min", 0) or 0))
-        loss_speed = max(0, int(district.get("loss_speed", 0) or 0))
-        # DominData defines LossSpeed as dominance lost per minute.
-        loss_per_minute = max(1, loss_speed)
-        duration = max(
-            1,
-            ((max_dominance - min_dominance) * 60 + loss_per_minute - 1)
-            // loss_per_minute
+        end_time = (
+            capture_start_ms // 1000
+            + _domin_capture_duration_seconds(district)
         )
-        end_time = capture_start_ms // 1000 + duration
     else:
         max_dominance = max(0, int(district.get("dominant_max", 0) or 0))
         capture_start_ms = now_ms
@@ -14720,37 +14737,8 @@ def _domin_capture_info_state(character, district, opponent=None, now_ms=None):
 
 
 def _domin_capture_enemy_roster(character):
-    """Return one current owner/opponent for each open Single district."""
-    placeholder_names = {"", "hero", "playername"}
-
-    def is_displayable_player(candidate):
-        return str(candidate.get("name", "")).strip().lower() not in placeholder_names
-
-    enemy_ids = []
-    seen_ids = {numeric_id_value(character.get("id", 0)) or 0}
-    for relation in (character or {}).get("enemies", []):
-        enemy_id = social_relation_id(relation)
-        if enemy_id is None or enemy_id in seen_ids:
-            continue
-        seen_ids.add(enemy_id)
-        enemy_ids.append(enemy_id)
-
-    candidates = []
-    for enemy_id in enemy_ids:
-        enemy = find_social_character(enemy_id)
-        if enemy is not None and is_displayable_player(enemy):
-            candidates.append(enemy)
-
-    remaining = [
-        candidate for candidate in _rank_pvp_all_characters()
-        if (numeric_id_value(candidate.get("id", 0)) not in seen_ids
-            and is_displayable_player(candidate))
-    ]
-    remaining.sort(key=lambda candidate: int(candidate.get("id", 0)))
-    candidates.extend(remaining)
-
+    """Return the configured NPC opponent for each available Single district."""
     roster = []
-    offered_candidate_ids = set()
     for district in _domin_capture_open_districts():
         domin_id = str(district["id"])
         if domin_id == "1" and _domin_capture_story_current(character, domin_id):
@@ -14758,31 +14746,15 @@ def _domin_capture_enemy_roster(character):
             continue
         owner = _domin_capture_owned_by(domin_id)
         if owner is character:
-            owner_kind = "owned"
-        elif owner is not None and is_displayable_player(owner):
-            owner_kind = "player"
+            roster.append({
+                "character_id": int(character.get("id", 0) or 0),
+                "kind": "owned",
+                "domin_id": domin_id
+            })
         else:
-            owner = next(
-                (candidate for candidate in candidates
-                 if numeric_id_value(candidate.get("id", 0)) not in offered_candidate_ids),
-                None
-            )
-            if owner is not None:
-                offered_candidate_ids.add(numeric_id_value(owner.get("id", 0)))
-                owner_kind = "player"
-        if owner is None:
             roster.append(_domin_capture_npc_descriptor(
                 str(1104 + int(domin_id))
             ))
-            continue
-        if owner_kind == "player":
-            offered_candidate_ids.add(numeric_id_value(owner.get("id", 0)))
-        roster.append({
-            "character_id": int(owner.get("id", 0)),
-            "synthetic": False,
-            "kind": owner_kind,
-            "domin_id": domin_id
-        })
     return roster
 
 
@@ -14812,12 +14784,6 @@ def _domin_capture_enemy_looks(character, roster=None):
             seen_character_ids.add(character_id)
             continue
         if descriptor.get("kind") == "owned":
-            rival = find_social_character(descriptor.get("character_id"))
-            if rival is not None:
-                looks.append(_domin_capture_character_look(
-                    rival, descriptor.get("domin_id", "1")
-                ))
-                seen_character_ids.add(character_id)
             continue
         rival = _domin_capture_roster_character(character, descriptor)
         if rival is not None:
