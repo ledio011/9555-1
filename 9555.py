@@ -13473,7 +13473,15 @@ def _parse_iso_date(value):
 
 
 def resolve_sign_week_state(character):
-    """Compute the current 7-day login reward state and whether a reward is still claimable."""
+    """Return (day, can_claim, complete) for the current 7-day login cycle.
+
+    The client treats the tab as visible only while both conditions are true:
+    - complete == False
+    - cur_sign_state == True
+
+    Once the 7th day is actually claimed, complete must become True so the client
+    hides the tab. We must never leave a finished week flagged as incomplete.
+    """
     sign_calendar = current_sign_calendar()
     today_iso = sign_calendar['date']
     last_claimed = character.get('sign_week_claimed_date')
@@ -13510,7 +13518,7 @@ def resolve_sign_week_state(character):
 
 
 def sign_week_payload(day, can_claim, complete):
-    """Match the client reward packet: cur_sign, cur_sign_state, complete."""
+    """Match the client packet contract: cur_sign, cur_sign_state, complete."""
     return encode_sproto([
         (0, max(1, int(day or 1))),
         (1, bool(can_claim)),
@@ -27042,7 +27050,8 @@ def client_handler(conn, addr):
                             picked_char['sign_week_complete'] = (day >= 7)
                             picked_char['cash'] = picked_char.get('cash', 0) + 10000
                             save_chars(all_accounts_chars)
-                            send_rpc_push(643, sign_week_payload(day, False, picked_char.get('sign_week_complete', False)))
+                            after_complete = bool(picked_char.get('sign_week_complete', False))
+                            send_rpc_push(643, sign_week_payload(day, False, after_complete))
                             sync_all_backpacks(picked_char, send_rpc_push)
                             sync_char_attrs_rpc(conn, picked_char)
                         else:
