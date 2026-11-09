@@ -1139,10 +1139,10 @@ try:
         # Original NpcData: 百分比 (percentage-based), level empty (defaults to 1), all coefficients 10000 (100%)
         # Level 9999 signals get_npc_attr() to use the player's level for stat scaling
         # This ensures the arena boss is always challenging regardless of player level
-        '1105': {'name': '街区占领NPC', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
-        '1106': {'name': '街区占领NPC', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
-        '1107': {'name': '街区占领NPC', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
-        '1108': {'name': '街区占领NPC', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
+        '1105': {'name': 'Ash Viper', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
+        '1106': {'name': 'Lucky Ace', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
+        '1107': {'name': 'Velvet Rose', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
+        '1108': {'name': 'Iron Warden', 'model': 'XD_A_WQ;XD_A_T;XD_A_S;XD_A_X', 'level': 9999, 'type': 0, 'is_abs': False, 'skill_group': '50001', 'atk_coe': 10000, 'hp_coe': 10000, 'def_coe': 10000, 'hit_coe': 10000, 'eva_coe': 10000, 'cri_coe': 10000, 'res_coe': 10000, 'exd_coe': 0, 'exr_coe': 0, 'crd_coe': 10000, 'crr_coe': 0, 'anti_stun_coe': 0, 'anti_knock_down_coe': 0, 'defa_coe': 10000, 'dgea_coe': 10000, 'resa_coe': 10000, 'hita_coe': 10000, 'cria_coe': 10000},
         # Map 11 additional civilians (1501-1512)
         '1501': {'name': 'William', 'model': 'NPC_Nan_008', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
         '1502': {'name': 'White', 'model': 'NPC_Nan_012', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
@@ -14511,15 +14511,14 @@ def _domin_capture_npc_look(character, npc_id="1105", domin_id="1"):
         map_id=district.get("map_id", "502")
     )
     fields = decode_sproto(npc)
-    display_name = "Ash Viper" if str(npc_id) == "1105" else "Capture Rival"
     general = decode_sproto(fields.get(1, b""))
-    general[0] = display_name.encode("utf-8")
     visual = decode_sproto(fields.get(6, b""))
-    visual[0] = display_name.encode("utf-8")
+    stats = get_npc_attr(npc_id, character.get("level", 1))
     return encode_sproto([
         (0, int(npc_id)),
         (1, encode_sproto(list(general.items()))),
-        (3, _domin_capture_area_attributes(domin_id)),
+        (2, encode_sproto(npc_attribute_fields(stats))),
+        (3, fields.get(2, b"")),
         (4, encode_sproto(list(visual.items())))
     ])
 
