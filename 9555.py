@@ -1,4 +1,5 @@
 import socket, struct, copy, threading, random, json, os, time, traceback, math, re, uuid, shutil
+import datetime
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Tuple
 
@@ -13458,6 +13459,55 @@ def current_sign_calendar():
         'week_day': adjusted.tm_wday + 1,
         'month_day': adjusted.tm_mday,
     }
+
+
+def _parse_iso_date(value):
+    if not value:
+        return None
+    try:
+        if isinstance(value, datetime.date):
+            return value
+        return datetime.date.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def resolve_sign_week_state(character):
+    """Compute the current 7-day login reward state and whether a reward is still claimable."""
+    sign_calendar = current_sign_calendar()
+    today_iso = sign_calendar['date']
+    last_claimed = character.get('sign_week_claimed_date')
+    current_day = max(0, int(character.get('sign_week_day', 0) or 0))
+    complete = bool(character.get('sign_week_complete', False))
+
+    if not last_claimed:
+        return 1, True, False
+
+    if last_claimed == today_iso:
+        return max(1, current_day or 1), False, complete
+
+    last_date = _parse_iso_date(last_claimed)
+    today_date = _parse_iso_date(today_iso)
+    if last_date is None or today_date is None:
+        return 1, True, False
+
+    days_since = (today_date - last_date).days
+    if days_since <= 0:
+        return max(1, current_day or 1), False, complete
+
+    if complete and days_since >= 1:
+        character['sign_week_complete'] = False
+        character['sign_week_day'] = 0
+        return 1, True, False
+
+    if days_since == 1:
+        next_day = min(7, max(1, current_day + 1))
+        return next_day, True, False
+
+    character['sign_week_complete'] = False
+    character['sign_week_day'] = 0
+    return 1, True, False
+
 
 def ensure_daily_copy_state(picked_char):
     """Reset the APK-configured daily attempts once per calendar day at 03:00 AM."""
@@ -26969,19 +27019,18 @@ def client_handler(conn, addr):
                     send_rpc_push(686, dance_state_info_payload(picked_char))
 
                 elif msg == 253 and picked_char: # request_sign_week_info
-                    sign_calendar = current_sign_calendar()
-                    day = int(sign_calendar['week_day'])
-                    claimed = picked_char.get('sign_week_claimed_date') == sign_calendar['date']
-                    send_rpc_push(641, encode_sproto([(0, day), (1, not claimed), (2, False)]))
+                    day, can_claim, complete = resolve_sign_week_state(picked_char)
+                    send_rpc_push(641, encode_sproto([(0, day), (1, can_claim), (2, complete)]))
 
                 elif msg == 255 and picked_char: # sign_week
                     with get_character_transaction_lock(picked_char):
-                        sign_calendar = current_sign_calendar()
-                        day = int(sign_calendar['week_day'])
-                        if picked_char.get('sign_week_claimed_date') != sign_calendar['date']:
+                        day, can_claim, complete = resolve_sign_week_state(picked_char)
+                        if can_claim:
+                            sign_calendar = current_sign_calendar()
                             picked_char['sign_week_claimed_date'] = sign_calendar['date']
                             picked_char['sign_week_day'] = day
                             picked_char['sign_week_claimed'] = True
+                            picked_char['sign_week_complete'] = (day >= 7)
                             picked_char['cash'] = picked_char.get('cash', 0) + 10000
                             save_chars(all_accounts_chars)
                             send_rpc_push(643, encode_sproto([(0, day), (1, False)]))
