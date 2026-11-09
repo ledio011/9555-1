@@ -6,8 +6,11 @@ stream unchanged between the game client and a local 9555.py backend while
 observing Sproto frames. It logs only after the backend has confirmed that the
 connection successfully selected TARGET_CHAR_ID (character_pick, tag 105).
 
-Serv00 layout used in the example:
-  public/listen port :15678 -> AtgSniffer -> 127.0.0.1:11899 -> 9555.py
+Serv00 layout (keeps the login server's advertised game port unchanged):
+  client -> public :15678 -> AtgSniffer -> 127.0.0.1:14171 -> 9555.py
+
+Start the unchanged 9555.py process with PORT=14171. The sniffer owns :15678.
+No Windows hosts-file or portproxy redirect is needed.
 
 Capture protocol audited against the supplied Unity client:
   310 request_domin_info -> push 684 ret_domin_info
@@ -935,7 +938,17 @@ class ClientHandler:
 
     def run(self) -> None:
         try:
+            print(
+                f"[{utc_stamp()}] CLIENT ACCEPTED peer={self.address[0]}:{self.address[1]} "
+                f"backend={self.backend[0]}:{self.backend[1]}",
+                flush=True,
+            )
             self.backend_socket = socket.create_connection(self.backend, timeout=10)
+            print(
+                f"[{utc_stamp()}] BACKEND CONNECTED peer={self.address[0]}:{self.address[1]} "
+                f"backend={self.backend[0]}:{self.backend[1]}",
+                flush=True,
+            )
             self.backend_socket.settimeout(None)
             self.client.settimeout(None)
             for sock in (self.client, self.backend_socket):
@@ -953,8 +966,14 @@ class ClientHandler:
             t1.join()
             t2.join()
         except Exception as exc:
-            # A connection that never authenticated the target character must
-            # not create an account/session log line.
+            # Connection diagnostics are printed even before character selection,
+            # so a failed backend connect cannot look like a silent game timeout.
+            print(
+                f"[{utc_stamp()}] CONNECTION FAILED peer={self.address[0]}:{self.address[1]} "
+                f"backend={self.backend[0]}:{self.backend[1]} "
+                f"error={type(exc).__name__}: {exc}",
+                flush=True,
+            )
             if self.state.target_active:
                 self.state.log(f"[AtgSniffer] backend/relay error for target character {self.state.target_id}: {exc}")
         finally:
@@ -977,7 +996,7 @@ def parse_endpoint(value: str) -> Tuple[str, int]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only ATG Capture protocol sniffer (transparent TCP proxy)")
     parser.add_argument("--listen", default="0.0.0.0:15678", type=parse_endpoint, help="public proxy endpoint HOST:PORT")
-    parser.add_argument("--server", default="127.0.0.1:11899", type=parse_endpoint, help="local 9555.py backend HOST:PORT")
+    parser.add_argument("--server", default="127.0.0.1:14171", type=parse_endpoint, help="local 9555.py backend HOST:PORT")
     parser.add_argument("--target", type=int, default=DEFAULT_TARGET_CHAR_ID, help="only log this confirmed character ID")
     parser.add_argument("--log-file", default="AtgSniffer_capture.log", help="human-readable log file")
     parser.add_argument("--raw-log", default="AtgSniffer_packets.jsonl", help="full raw frames for the target character during Capture; use empty string to disable")
@@ -996,6 +1015,7 @@ def main() -> int:
     print("ATG CAPTURE SNIFFER - READ ONLY TCP PROXY", flush=True)
     print(f"Listen : {listen_host}:{listen_port}", flush=True)
     print(f"Backend: {backend_host}:{backend_port}", flush=True)
+    print("Routing: client-facing port stays 15678; backend must be the 9555.py listener on 14171.", flush=True)
     print(f"Filter : confirmed character_id={args.target}", flush=True)
     print(f"Text log: {os.path.abspath(args.log_file)}", flush=True)
     print(f"Raw log : {os.path.abspath(args.raw_log)}", flush=True)
