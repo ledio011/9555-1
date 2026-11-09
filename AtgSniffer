@@ -1015,7 +1015,7 @@ def main() -> int:
     print("ATG CAPTURE SNIFFER - READ ONLY TCP PROXY", flush=True)
     print(f"Listen : {listen_host}:{listen_port}", flush=True)
     print(f"Backend: {backend_host}:{backend_port}", flush=True)
-    print("Routing: client-facing port stays 15678; backend must be the 9555.py listener on 14171.", flush=True)
+    print("Ensure the login server advertises the public sniffer listen port.", flush=True)
     print(f"Filter : confirmed character_id={args.target}", flush=True)
     print(f"Text log: {os.path.abspath(args.log_file)}", flush=True)
     print(f"Raw log : {os.path.abspath(args.raw_log)}", flush=True)
