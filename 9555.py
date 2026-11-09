@@ -13509,6 +13509,15 @@ def resolve_sign_week_state(character):
     return 1, True, False
 
 
+def sign_week_payload(day, can_claim, complete):
+    """Match the client reward packet: cur_sign, cur_sign_state, complete."""
+    return encode_sproto([
+        (0, max(1, int(day or 1))),
+        (1, bool(can_claim)),
+        (2, bool(complete)),
+    ])
+
+
 def ensure_daily_copy_state(picked_char):
     """Reset the APK-configured daily attempts once per calendar day at 03:00 AM."""
     state = picked_char.setdefault('daily_copy_state', {})
@@ -27020,7 +27029,7 @@ def client_handler(conn, addr):
 
                 elif msg == 253 and picked_char: # request_sign_week_info
                     day, can_claim, complete = resolve_sign_week_state(picked_char)
-                    send_rpc_push(641, encode_sproto([(0, day), (1, can_claim), (2, complete)]))
+                    send_rpc_push(641, sign_week_payload(day, can_claim, complete))
 
                 elif msg == 255 and picked_char: # sign_week
                     with get_character_transaction_lock(picked_char):
@@ -27033,7 +27042,7 @@ def client_handler(conn, addr):
                             picked_char['sign_week_complete'] = (day >= 7)
                             picked_char['cash'] = picked_char.get('cash', 0) + 10000
                             save_chars(all_accounts_chars)
-                            send_rpc_push(643, encode_sproto([(0, day), (1, False)]))
+                            send_rpc_push(643, sign_week_payload(day, False, picked_char.get('sign_week_complete', False)))
                             sync_all_backpacks(picked_char, send_rpc_push)
                             sync_char_attrs_rpc(conn, picked_char)
                         else:
