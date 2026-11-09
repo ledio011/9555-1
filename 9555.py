@@ -14479,7 +14479,8 @@ def _domin_capture_area_attributes(domin_id):
 
 
 def _domin_capture_character_look(character, domin_id="1"):
-    """Build the nested city-player card expected by DominInfoResponse."""
+    """Build the client character card for a Capture district owner."""
+    stats = get_character_stats(character)
     visual = get_visual(
         character.get("name", "Hero"), character.get("prof", 0),
         character=character
@@ -14487,7 +14488,10 @@ def _domin_capture_character_look(character, domin_id="1"):
     return encode_sproto([
         (0, int(character.get("id", 0))),
         (1, get_general(character)),
-        (3, _domin_capture_area_attributes(domin_id)),
+        (2, encode_sproto(character_attribute_fields(stats))),
+        (3, encode_sproto(character_attribute_other_fields(
+            character, stats, current_character_hp(character, stats)
+        ))),
         (4, visual)
     ])
 
@@ -14732,7 +14736,7 @@ def _domin_capture_info_state(character, district, opponent=None, now_ms=None):
         ])
         resource_fields.append((10 + index, resource_end_time))
 
-    if owned_by_player:
+    if owner:
         server_id = numeric_id_value(owner.get("id", 0)) or 0
     elif opponent:
         server_id = int(opponent.get("character_id", opponent.get("npc_id", 0)) or 0)
@@ -14748,20 +14752,29 @@ def _domin_capture_info_state(character, district, opponent=None, now_ms=None):
 
 
 def _domin_capture_enemy_roster(character):
-    """Return the configured NPC opponent for each available Single district."""
+    """Return each district's current owner, or its configured NPC rival."""
     roster = []
+    character_id = numeric_id_value(character.get("id", 0)) if character else None
     for district in _domin_capture_open_districts():
         domin_id = str(district["id"])
         if domin_id == "1" and _domin_capture_story_current(character, domin_id):
             roster.append(_domin_capture_npc_descriptor("1105"))
             continue
         owner = _domin_capture_owned_by(domin_id)
-        if owner is character:
-            roster.append({
-                "character_id": int(character.get("id", 0) or 0),
-                "kind": "owned",
-                "domin_id": domin_id
-            })
+        if owner:
+            owner_id = numeric_id_value(owner.get("id", 0))
+            if owner_id == character_id:
+                roster.append({
+                    "character_id": owner_id,
+                    "kind": "owned",
+                    "domin_id": domin_id
+                })
+            else:
+                roster.append({
+                    "character_id": owner_id,
+                    "kind": "player",
+                    "domin_id": domin_id
+                })
         else:
             roster.append(_domin_capture_npc_descriptor(
                 str(1104 + int(domin_id))
