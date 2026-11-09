@@ -14651,13 +14651,71 @@ def _domin_capture_resource_amounts(character, domin_id, now_ms=None):
     return rewards
 
 
-def _domin_capture_info_state(character, district):
+def _domin_capture_info_state(character, district, opponent=None, now_ms=None):
     domin_id = str(district["id"])
-    # These are the only runtime fields evidenced by the original server
-    # response. Sending guessed percent/ownership values makes the client
-    # interpret them as its influence/timer fields (including int overflow).
+    owner = _domin_capture_owned_by(domin_id)
+    owned_by_player = bool(
+        character and owner
+        and numeric_id_value(owner.get("id", 0)) ==
+        numeric_id_value(character.get("id", 0))
+    )
+    if now_ms is None:
+        now_ms = int(time.time() * 1000)
+
+    owned_since = character.setdefault("domin_capture_owned_since", {}) if owned_by_player else {}
+    capture_start_ms = int(owned_since.get(domin_id, now_ms) or now_ms)
+    if owned_by_player:
+        max_dominance = max(0, int(district.get("dominant_max", 0) or 0))
+        min_dominance = max(0, int(district.get("dominant_min", 0) or 0))
+        loss_speed = max(0, int(district.get("loss_speed", 0) or 0))
+        # DominData defines LossSpeed as dominance lost per minute.
+        loss_per_minute = max(1, loss_speed)
+        duration = max(
+            1,
+            ((max_dominance - min_dominance) * 60 + loss_per_minute - 1)
+            // loss_per_minute
+        )
+        end_time = capture_start_ms // 1000 + duration
+    else:
+        max_dominance = max(0, int(district.get("dominant_max", 0) or 0))
+        capture_start_ms = now_ms
+        end_time = now_ms // 1000 + 1
+
+    resource_fields = []
+    claims = (
+        character.setdefault("domin_capture_resource_claim_times", {})
+        .setdefault(domin_id, {}) if owned_by_player else {}
+    )
+    for index in (1, 2):
+        item_id = str(district.get(f"resource{index}", "") or "")
+        total = max(0, int(district.get(f"resource{index}_total", 0) or 0))
+        speed_ms = max(0, int(district.get(f"resource{index}_speed_ms", 0) or 0))
+        resource_start_ms = max(
+            capture_start_ms,
+            int(claims.get(item_id, capture_start_ms) or capture_start_ms)
+        )
+        resource_end_time = (
+            resource_start_ms // 1000
+            + max(1, (total * speed_ms + 999) // 1000)
+        )
+        resource_fields.extend([
+            (4 + (index - 1) * 2, resource_start_ms // 1000),
+            (5 + (index - 1) * 2, 0)
+        ])
+        resource_fields.append((10 + index, resource_end_time))
+
+    if owned_by_player:
+        server_id = numeric_id_value(owner.get("id", 0)) or 0
+    elif opponent:
+        server_id = int(opponent.get("character_id", opponent.get("npc_id", 0)) or 0)
+    else:
+        server_id = 0
+
     return encode_sproto([
-        (0, domin_id), (8, 0), (9, 0)
+        (0, domin_id), (1, max_dominance),
+        (2, capture_start_ms // 1000), (3, end_time),
+        *resource_fields,
+        (8, int(owned_by_player)), (9, server_id)
     ])
 
 
@@ -14740,13 +14798,18 @@ def _domin_capture_roster_character(owner, descriptor):
 
 def _domin_capture_enemy_looks(character, roster=None):
     looks = []
+    seen_character_ids = set()
     for descriptor in (roster if roster is not None
                        else _domin_capture_enemy_roster(character)):
+        character_id = int(descriptor.get("character_id", 0) or 0)
+        if character_id and character_id in seen_character_ids:
+            continue
         if descriptor.get("kind") == "npc":
             looks.append(_domin_capture_npc_look(
                 character, descriptor.get("npc_id", "1105"),
                 descriptor.get("domin_id", "1")
             ))
+            seen_character_ids.add(character_id)
             continue
         if descriptor.get("kind") == "owned":
             rival = find_social_character(descriptor.get("character_id"))
@@ -14754,12 +14817,14 @@ def _domin_capture_enemy_looks(character, roster=None):
                 looks.append(_domin_capture_character_look(
                     rival, descriptor.get("domin_id", "1")
                 ))
+                seen_character_ids.add(character_id)
             continue
         rival = _domin_capture_roster_character(character, descriptor)
         if rival is not None:
             looks.append(_domin_capture_character_look(
                 rival, descriptor.get("domin_id", "1")
             ))
+            seen_character_ids.add(character_id)
     return looks
 
 
@@ -14770,8 +14835,15 @@ def _domin_capture_info_payload(character):
     ]
     roster = _domin_capture_enemy_roster(character) if character else []
     looks = _domin_capture_enemy_looks(character, roster) if character else []
+    opponents_by_district = {
+        str(row.get("domin_id", "")): row for row in roster
+    }
+    now_ms = int(time.time() * 1000)
     states = [
-        _domin_capture_info_state(character, district)
+        _domin_capture_info_state(
+            character, district, opponents_by_district.get(str(district["id"])),
+            now_ms
+        )
         for district in districts
     ]
     if not states:
@@ -27525,32 +27597,98 @@ def client_handler(conn, addr):
                     )
                 send_rpc_push(684, resp_p)
 
-            elif msg == 312:  # receive_domin_resource
+            elif msg == 312:  # require_domin_rewards
                 claimed_rewards = []
                 district_id = field_text(body, 0, '')
-                if not district_id:
-                    district_id = field_text(body, 1, '')
+                resource_index = get_val_int(body, 1, -1)
+                paid_claim = bool(body.get(2, False))
+                claim_error = None
                 if (picked_char
                         and is_current_character_connection(conn, picked_char)
                         and district_id in DOMIN_CONFIG
                         and DOMIN_CONFIG[district_id].get("is_open")
+                        and resource_index in (0, 1)
                         and _domin_capture_owned_by(district_id) is picked_char):
                     with get_character_transaction_lock(picked_char):
-                        reward_list = _domin_capture_resource_amounts(
-                            picked_char, district_id
+                        district = DOMIN_CONFIG[district_id]
+                        resource_number = resource_index + 1
+                        item_id = str(
+                            district.get(f"resource{resource_number}", "") or ""
                         )
+                        total = max(0, int(
+                            district.get(f"resource{resource_number}_total", 0) or 0
+                        ))
+                        speed_ms = max(0, int(
+                            district.get(f"resource{resource_number}_speed_ms", 0) or 0
+                        ))
+                        now_ms = int(time.time() * 1000)
+                        owned_since = picked_char.setdefault(
+                            "domin_capture_owned_since", {}
+                        )
+                        since_ms = int(
+                            owned_since.setdefault(district_id, now_ms) or now_ms
+                        )
+                        claim_times = picked_char.setdefault(
+                            "domin_capture_resource_claim_times", {}
+                        ).setdefault(district_id, {})
+                        last_claim_ms = max(
+                            since_ms,
+                            int(claim_times.get(item_id, since_ms) or since_ms)
+                        )
+                        available = (
+                            min(total, max(0, now_ms - last_claim_ms) // speed_ms)
+                            if speed_ms > 0 else 0
+                        )
+                        payment = 0
+                        money_type = -1
+                        if paid_claim:
+                            missing = max(0, total - available)
+                            price = max(0, int(
+                                district.get(f"resource{resource_number}_price", 0) or 0
+                            ))
+                            configured_money = str(
+                                district.get(
+                                    f"resource{resource_number}_price_type", ""
+                                )
+                            )
+                            money_type = {
+                                "1001": 0, "1002": 1, "1003": 2,
+                                "1004": 3, "2003": 4, "2004": 5
+                            }.get(configured_money, -1)
+                            if money_type < 0 and configured_money.isdecimal():
+                                candidate_type = int(configured_money)
+                                if 0 <= candidate_type < len(MONEY_FIELDS):
+                                    money_type = candidate_type
+                            payment = (missing * price + 9999) // 10000
+
+                        valid_resource = (
+                            item_id and total > 0 and speed_ms > 0
+                            and (item_id in ITEM_CONFIG
+                                 or item_id in DIRECT_REWARD_RESOURCE_IDS)
+                        )
+                        affordable = (
+                            not paid_claim
+                            or (money_type >= 0
+                                and get_currency_balance(picked_char, money_type) >= payment)
+                        )
+                        ready = paid_claim or available >= total
+                        reward_list = []
+                        if valid_resource and ready and affordable:
+                            quality = int(ITEM_CONFIG.get(item_id, {}).get("quality", 0))
+                            reward_list = [(item_id, quality, total)]
+
                         if reward_list and can_add_reward_list_to_inventory(
                                 picked_char, reward_list):
+                            if paid_claim:
+                                set_currency_balance(
+                                    picked_char, money_type,
+                                    get_currency_balance(picked_char, money_type) - payment
+                                )
                             grant_item_rewards(
                                 picked_char, reward_list, conn, send_rpc_push,
                                 save=False
                             )
-                            now_ms = int(time.time() * 1000)
-                            claim_times = picked_char.setdefault(
-                                "domin_capture_resource_claim_times", {}
-                            ).setdefault(district_id, {})
-                            for item_id, _quality, _amount in reward_list:
-                                claim_times[item_id] = now_ms
+                            claim_times[item_id] = now_ms
                             claimed_rewards = [
                                 encode_sproto([
                                     (0, str(item_id)), (1, int(amount)), (3, int(quality))
@@ -27558,17 +27696,26 @@ def client_handler(conn, addr):
                                 for item_id, quality, amount in reward_list
                             ]
                             save_chars(all_accounts_chars)
+                            if paid_claim:
+                                sync_char_attrs_rpc(conn, picked_char)
                         elif reward_list:
-                            send_rpc_push(529, encode_sproto([
-                                (0, "Make room in your inventory before receiving Capture resources."),
-                                (1, True)
-                            ]))
+                            claim_error = (
+                                "Make room in your inventory before receiving Capture resources."
+                            )
+                        elif paid_claim and valid_resource and not affordable:
+                            claim_error = "Not enough currency to receive Capture resources."
+                        elif not paid_claim and valid_resource and available < total:
+                            claim_error = "Capture resources are not ready to claim yet."
+                        elif not valid_resource:
+                            claim_error = "This Capture resource is not configured."
                 elif picked_char and district_id in DOMIN_CONFIG:
                     debug_log(
                         f"[CAPTURE] rejected resource claim player={picked_char.get('id')} "
-                        f"district={district_id}"
+                        f"district={district_id} index={resource_index}"
                     )
 
+                if claim_error:
+                    send_rpc_push(529, encode_sproto([(0, claim_error), (1, True)]))
                 if session is not None:
                     ph = encode_sproto([(1, session)])
                     pf = sproto_pack(ph + encode_sproto([]))
