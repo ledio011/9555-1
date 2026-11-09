@@ -14603,19 +14603,31 @@ def _domin_capture_owned_by(domin_id, now_ms=None):
     district = DOMIN_CONFIG.get(domin_id)
     if now_ms is None:
         now_ms = int(time.time() * 1000)
+    initialized_timer = False
     for character in _rank_pvp_all_characters():
         owned = character.get("domin_capture_owned_districts", [])
         if domin_id in {str(value) for value in owned}:
+            owned_since = character.setdefault("domin_capture_owned_since", {})
             owned_since_ms = int(
-                character.get("domin_capture_owned_since", {}).get(domin_id, 0) or 0
+                owned_since.get(domin_id, 0) or 0
             )
+            if district and owned_since_ms <= 0:
+                owned_since_ms = now_ms
+                owned_since[domin_id] = owned_since_ms
+                initialized_timer = True
             if district and owned_since_ms > 0:
                 expires_ms = (
                     owned_since_ms + _domin_capture_duration_seconds(district) * 1000
                 )
                 if now_ms >= expires_ms:
+                    if initialized_timer:
+                        save_chars(all_accounts_chars)
                     continue
+            if initialized_timer:
+                save_chars(all_accounts_chars)
             return character
+    if initialized_timer:
+        save_chars(all_accounts_chars)
     return None
 
 
@@ -14815,13 +14827,6 @@ def _domin_capture_info_payload(character):
     if not states:
         states = [encode_sproto([(0, "1"), (8, 0), (9, 0)])]
     return roster, encode_sproto([(0, states), (1, looks)])
-
-
-def _domin_capture_result_payload(result):
-    return encode_sproto([
-        (0, result == "win"), (1, []),
-        (2, 0), (3, 0), (4, 0), (5, 0)
-    ])
 
 
 def _domin_capture_selected_enemy(fields, roster):
@@ -20259,10 +20264,9 @@ def client_handler(conn, addr):
         picked_char["domin_capture_result"] = result
         picked_char["domin_capture_result_reason"] = str(reason)
         picked_char["domin_capture_result_at"] = int(time.time())
-        result_payload = _domin_capture_result_payload(result)
-        picked_char["domin_capture_pending_result"] = result_payload.hex()
-        send_rpc_push(551, result_payload)
         if result == "win":
+            # Capture has no result-screen RPC; 551 is TianTi rank-PvP and
+            # opens the unrelated arena win/loss UI. Refresh Capture state instead.
             _, info_payload = _domin_capture_info_payload(picked_char)
             send_rpc_push(684, info_payload)
         save_chars(all_accounts_chars)
@@ -20313,7 +20317,6 @@ def client_handler(conn, addr):
             picked_char.pop('_domin_capture_offered_enemies', None)
             picked_char.pop('domin_capture_enemy_index', None)
             picked_char.pop('_domin_capture_enemy', None)
-            picked_char.pop('domin_capture_pending_result', None)
             picked_char['boss_waiting_for_map_ready'] = False
             picked_char['pre_arena_pos'] = None
             picked_char['pre_arena_map'] = None
@@ -21226,17 +21229,6 @@ def client_handler(conn, addr):
                         if reward_pending or exit_pending or deadline <= int(time.time()):
                             if deadline <= int(time.time()):
                                 notify_domin_result("loss", "timeout")
-                            elif exit_pending and picked_char.get("domin_capture_result"):
-                                pending_result = picked_char.get(
-                                    "domin_capture_pending_result", ""
-                                )
-                                if pending_result:
-                                    try:
-                                        send_rpc_push(551, bytes.fromhex(pending_result))
-                                    except ValueError:
-                                        picked_char.pop(
-                                            "domin_capture_pending_result", None
-                                        )
                             for timer_key in ('arena_timer', '_domin_capture_next_enemy_timer'):
                                 timer = picked_char.pop(timer_key, None)
                                 if timer is not None:
