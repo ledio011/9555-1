@@ -13667,7 +13667,7 @@ def function_unlock_payload(character):
         funcs[fid] = encode_sproto([(0, fid), (1, func_state)])
 
     return encode_sproto([
-        (0, int(time.time())), (2, 0), (4, 10000), (9, funcs),
+        (0, int(time.time())), (2, 0), (4, 10000), (8, 0), (9, funcs),
         (11, _guild_champion_id()), (12, random.randint(1, 10000)),
         (13, 1), (14, int(time.time()))
     ])
