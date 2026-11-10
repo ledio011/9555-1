@@ -13611,18 +13611,13 @@ def unlocked_function_ids(character):
         char_level = int(character.get('level', 1) or 1)
     except (TypeError, ValueError):
         char_level = 1
-    completed_today = (
-        sign_week_has_seven_claims(character)
-        and character.get('sign_week_claimed_date') == current_sign_calendar()['date']
-    )
     if FUNCTION_DATA:
         fids = []
         for fid, finfo in FUNCTION_DATA.items():
             if finfo['class'] == 0:
                 fids.append(fid)
             elif finfo['class'] == 1 and char_level >= finfo['condition']:
-                if fid != "4014" or not completed_today:
-                    fids.append(fid)
+                fids.append(fid)
             elif finfo['class'] == 4:
                 fids.append(fid)
     else:
@@ -13630,14 +13625,8 @@ def unlocked_function_ids(character):
             "100", "107", "108", "3001", "3005", "3010", "3013", "3014",
             "3015", "3030", "4026", "4061", "4064", "4081", "4084",
         ]
-        if char_level >= 7 and not completed_today:
-            fids.append("4014")
-    if char_level >= 7 and "3005" not in fids:
-        fids.append("3005")
-    if char_level >= 7 and not completed_today and "4014" not in fids:
-        fids.append("4014")
-    if completed_today:
-        fids = [fid for fid in fids if fid != "4014"]
+        if char_level >= 7:
+            fids.extend(("3005", "4014"))
     if "105" not in fids:
         fids.append("105")
     return fids
@@ -13647,6 +13636,10 @@ def function_unlock_payload(character):
     """Build the same FunctionData unlock map for login and live level-ups."""
     player_tutorial = character.get('tutorial', 0)
     fids = unlocked_function_ids(character)
+    week_complete_today = (
+        sign_week_has_seven_claims(character)
+        and character.get('sign_week_claimed_date') == current_sign_calendar()['date']
+    )
     completed_tutorials = character.get('completed_tutorials', [])
     if not isinstance(completed_tutorials, (list, tuple, set)):
         completed_tutorials = []
@@ -13667,7 +13660,8 @@ def function_unlock_payload(character):
         funcs[fid] = encode_sproto([(0, fid), (1, func_state)])
 
     return encode_sproto([
-        (0, int(time.time())), (2, 0), (4, 10000), (8, 0), (9, funcs),
+        (0, int(time.time())), (2, 0), (4, 10000),
+        (8, 8 if week_complete_today else 0), (9, funcs),
         (11, _guild_champion_id()), (12, random.randint(1, 10000)),
         (13, 1), (14, int(time.time()))
     ])
