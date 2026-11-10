@@ -13591,6 +13591,14 @@ def sign_week_payload(day, can_claim, complete):
     ])
 
 
+def sign_week_claim_result_payload(day, can_claim):
+    """Match ret_sign_week: cur_sign and cur_sign_state."""
+    return encode_sproto([
+        (0, max(1, int(day or 1))),
+        (1, bool(can_claim)),
+    ])
+
+
 def sign_week_reward_list(character, day):
     day_config = SIGN_IN_WEEK_CONFIG.get(int(day))
     if not day_config:
@@ -13632,14 +13640,25 @@ def unlocked_function_ids(character):
     return fids
 
 
+def sign_week_push_mask(character):
+    """Preserve other saved common-data push flags while updating Lucky 7."""
+    try:
+        push_mask = int(character.get('push', 0) or 0)
+    except (TypeError, ValueError):
+        push_mask = 0
+    push_mask = max(0, push_mask) & ~8
+    completed_today = (
+        sign_week_has_seven_claims(character)
+        and character.get('sign_week_claimed_date') == current_sign_calendar()['date']
+    )
+    return push_mask | 8 if completed_today else push_mask
+
+
 def function_unlock_payload(character):
     """Build the same FunctionData unlock map for login and live level-ups."""
     player_tutorial = character.get('tutorial', 0)
     fids = unlocked_function_ids(character)
-    week_complete_today = (
-        sign_week_has_seven_claims(character)
-        and character.get('sign_week_claimed_date') == current_sign_calendar()['date']
-    )
+    push_mask = sign_week_push_mask(character)
     completed_tutorials = character.get('completed_tutorials', [])
     if not isinstance(completed_tutorials, (list, tuple, set)):
         completed_tutorials = []
@@ -13661,7 +13680,7 @@ def function_unlock_payload(character):
 
     return encode_sproto([
         (0, int(time.time())), (2, 0), (4, 10000),
-        (8, 8 if week_complete_today else 0), (9, funcs),
+        (8, 0), (9, funcs), (10, push_mask),
         (11, _guild_champion_id()), (12, random.randint(1, 10000)),
         (13, 1), (14, int(time.time()))
     ])
@@ -17035,9 +17054,12 @@ def _guild_champion_id():
     return champion_id if champion_id > 0 else -1
 
 def _guild_sync_champion_id():
-    payload = encode_sproto([(11, _guild_champion_id())])
-    for connection, _character in list(ALL_CONNECTIONS.values()):
+    for connection, character in list(ALL_CONNECTIONS.values()):
         if connection is not None:
+            push_mask = sign_week_push_mask(character or {})
+            payload = encode_sproto([
+                (10, push_mask), (11, _guild_champion_id())
+            ])
             send_rpc_push_safe(connection, 614, payload)
 
 def _guild_member_info_bytes(guild, member_id, member):
@@ -20851,7 +20873,7 @@ def client_handler(conn, addr):
                         f"can_claim={week_can_claim} complete={week_complete} "
                         f"welfare_3005={'present' if '3005' in unlock_ids else 'missing'} "
                         f"tab_4014={'present' if '4014' in unlock_ids else 'missing'} "
-                        f"push_mask={unlock_fields.get(8, 'missing')} "
+                        f"push_field10={unlock_fields.get(10, 'missing')} "
                         f"push_614={'sent' if unlock_sent else 'failed'}"
                     )
 
@@ -21176,7 +21198,7 @@ def client_handler(conn, addr):
                             f"complete={week_complete} "
                             f"welfare_3005={'present' if '3005' in unlock_ids else 'missing'} "
                             f"tab_4014={'present' if '4014' in unlock_ids else 'missing'} "
-                            f"push_mask={unlock_fields.get(8, 'missing')} "
+                            f"push_field10={unlock_fields.get(10, 'missing')} "
                             f"push_614={'sent' if unlock_sent else 'failed'} "
                             f"push_641={'sent' if state_sent else 'failed'}"
                         )
@@ -27205,7 +27227,7 @@ def client_handler(conn, addr):
                         f"day={day} can_claim={can_claim} complete={complete} "
                         f"welfare_3005={'present' if '3005' in unlock_ids else 'missing'} "
                         f"tab_4014={'present' if '4014' in unlock_ids else 'missing'} "
-                        f"push_mask={unlock_fields.get(8, 'missing')} "
+                        f"push_field10={unlock_fields.get(10, 'missing')} "
                         f"push_614={'sent' if unlock_sent else 'failed'}"
                     )
                     state_sent = send_rpc_push(
@@ -27217,9 +27239,23 @@ def client_handler(conn, addr):
                     )
 
                 elif msg == 255 and picked_char: # sign_week
+                    requested_day = get_val_int(body, 0, None)
                     with get_character_transaction_lock(picked_char):
                         day, can_claim, complete = resolve_sign_week_state(picked_char)
-                        if can_claim:
+                        if (requested_day is None
+                                or requested_day < 1
+                                or requested_day > 7
+                                or requested_day != day
+                                or not can_claim):
+                            print(
+                                f"[REWARD SECURITY] weekly sign rejected "
+                                f"player={picked_char.get('id')} requested_day={requested_day} "
+                                f"current_day={day} can_claim={can_claim}"
+                            )
+                            send_rpc_push(
+                                643, sign_week_claim_result_payload(day, can_claim)
+                            )
+                        else:
                             rewards = sign_week_reward_list(picked_char, day)
                             if not rewards:
                                 print(
@@ -27227,13 +27263,17 @@ def client_handler(conn, addr):
                                     f"day={day} profession={picked_char.get('prof')} "
                                     f"player={picked_char.get('id')}"
                                 )
-                                send_rpc_push(641, sign_week_payload(day, can_claim, complete))
+                                send_rpc_push(
+                                    643, sign_week_claim_result_payload(day, can_claim)
+                                )
                             elif not can_add_reward_list_to_inventory(picked_char, rewards):
                                 print(
                                     f"[SIGN WEEK] inventory full "
                                     f"day={day} player={picked_char.get('id')}"
                                 )
-                                send_rpc_push(641, sign_week_payload(day, can_claim, complete))
+                                send_rpc_push(
+                                    643, sign_week_claim_result_payload(day, can_claim)
+                                )
                             else:
                                 reward_snapshot = snapshot_character_reward_state(picked_char)
                                 sign_fields = (
@@ -27255,7 +27295,7 @@ def client_handler(conn, addr):
                                 if save_chars(all_accounts_chars):
                                     after_complete = bool(picked_char['sign_week_complete'])
                                     send_rpc_push(
-                                        643, sign_week_payload(day, False, after_complete)
+                                        643, sign_week_claim_result_payload(day, False)
                                     )
                                     if after_complete:
                                         send_rpc_push(
@@ -27281,10 +27321,8 @@ def client_handler(conn, addr):
                                         f"day={day} player={picked_char.get('id')}"
                                     )
                                     send_rpc_push(
-                                        641, sign_week_payload(day, can_claim, complete)
+                                        643, sign_week_claim_result_payload(day, can_claim)
                                     )
-                        else:
-                            print(f"[REWARD SECURITY] duplicate weekly sign rejected player={picked_char.get('id')}")
 
                 elif msg == 252 and picked_char: # request_sign_30_day_info
                     sign_calendar = current_sign_calendar()
