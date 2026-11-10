@@ -1765,6 +1765,7 @@ try:
                         'max_stack': int(parts[13]) if len(parts) > 13 and parts[13].isdigit() else 1,
                         'function': int(parts[14]) if len(parts) > 14 and parts[14].isdigit() else 0,
                         'funlock': parts[15] if len(parts) > 15 else '',
+                        'use_hour': int(parts[19]) if len(parts) > 19 and parts[19].lstrip('-').isdigit() else 0,
                         'flags': int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else 0,
                         'level': int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
                     }
@@ -12621,6 +12622,9 @@ def add_to_inventory(picked_char, item_id, amount, quality=None):
             'amount': stack, 'bindflag': True, 'level': 0, 'quality': quality,
             'appraise': 0, 'parm': parms, 'random_attri': {}, 'inlay': {}
         }
+        use_hour = max(0, int(cfg.get('use_hour', 0) or 0))
+        if use_hour:
+            new_item['parm'][4] = int(time.time()) + use_hour * 3600
         if container_type == 0:
             new_item['random_attri'] = roll_equip_random_attributes(new_item) or {}
         records.append(new_item)
@@ -14982,9 +14986,14 @@ def _domin_capture_enemy_roster(character):
     """Return each district's current owner, or its configured NPC rival."""
     roster = []
     character_id = numeric_id_value(character.get("id", 0)) if character else None
+    capture_mission = character.get("active_missions", {}).get("1003") if character else None
+    ash_viper_story_active = (
+        isinstance(capture_mission, dict)
+        and capture_mission.get("state") in (1, 2)
+    )
     for district in _domin_capture_open_districts():
         domin_id = str(district["id"])
-        if domin_id == "1" and _domin_capture_story_current(character, domin_id):
+        if domin_id == "1" and ash_viper_story_active:
             roster.append(_domin_capture_npc_descriptor("1105"))
             continue
         owner = _domin_capture_owned_by(domin_id)
@@ -15742,6 +15751,10 @@ def accept_mission_logic(picked_char, mid):
     except: pass
     if str(mid) == str(picked_char.get('last_main_mission_id')):
         print(f"[accept_mission_logic] FAILED: {mid} is last_main_mission_id")
+        return False
+    last_main_mission = str(picked_char.get('last_main_mission_id', '-1'))
+    if str(mid) == '1001' and last_main_mission not in ('', 'None', '-1', '0'):
+        print(f"[accept_mission_logic] FAILED: opening mission 1001 already passed")
         return False
 
     activity_accept = accept_gotham_escort_mission(picked_char, mid)
