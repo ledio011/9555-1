@@ -351,6 +351,60 @@ ITEM_PACKAGE_FIXED_REWARDS = {
 }
 DIRECT_REWARD_RESOURCE_IDS = frozenset(('1001', '1002', '1003', '1004', '2001', '2002', '2003', '2004'))
 FUNCTION_DATA = {} # funcId -> {class, condition, is_download, first_open, unlock_type, side_mission}
+SIGN_IN_WEEK_CONFIG = {} # day -> profession reward and shared reward tuples
+
+
+def load_sign_in_week_config(path):
+    """Load the seven-day rewards from the client's SignInWeekData table."""
+    config = {}
+    if not os.path.isfile(path):
+        print(f"[SIGN WEEK CONFIG] missing client table: {path}")
+        return config
+
+    profession_columns = ((2, 3, 4), (6, 7, 8), (10, 11, 12))
+    common_columns = ((14, 15, 16), (17, 18, 19), (20, 21, 22), (23, 24, 25))
+    with open(path, "r", encoding="utf-8-sig") as table_file:
+        for line_number, line in enumerate(table_file, 1):
+            parts = line.rstrip("\r\n").split(",")
+            if len(parts) < 26 or parts[0] != "*" or not parts[1].isdigit():
+                continue
+            try:
+                day = int(parts[1])
+                if day < 1 or day > 7:
+                    raise ValueError(f"day out of range: {day}")
+
+                def rewards_from(columns):
+                    rewards = []
+                    for item_column, count_column, quality_column in columns:
+                        item_id = parts[item_column].strip()
+                        if not item_id:
+                            continue
+                        count = int(parts[count_column])
+                        quality = int(parts[quality_column])
+                        if count <= 0 or quality < 0:
+                            raise ValueError(f"invalid reward for item {item_id}")
+                        rewards.append((item_id, quality, count))
+                    return rewards
+
+                if day in config:
+                    raise ValueError(f"duplicate day: {day}")
+                config[day] = {
+                    "profession_rewards": rewards_from(profession_columns),
+                    "common_rewards": rewards_from(common_columns),
+                }
+            except (IndexError, ValueError) as config_error:
+                print(
+                    f"[SIGN WEEK CONFIG] invalid row {line_number} "
+                    f"in {path}: {config_error}"
+                )
+
+    missing_days = sorted(set(range(1, 8)) - set(config))
+    if missing_days:
+        print(f"[SIGN WEEK CONFIG] missing reward days: {missing_days}")
+    else:
+        debug_log(f"[SIGN WEEK CONFIG] loaded {len(config)} reward days")
+    return config
+
 EQUIP_CONFIG = {} # equipId -> {name, lv, class, job, position, base_stat, base_val, model, ...}
 EQUIP_DROP_CONFIG = {} # EquipDrop ID -> weighted random equipment attribute definitions
 WEAPON_DROP_CONFIG = {} # WeaponDrop ID -> weighted random weapon skill definitions
@@ -2109,6 +2163,10 @@ try:
                         'side_mission': parts[13] if len(parts) > 13 else ''
                     }
         debug_log(f"[FUNCTION DATA LOADED] count={len(FUNCTION_DATA)}")
+
+    SIGN_IN_WEEK_CONFIG.update(
+        load_sign_in_week_config(os.path.join(text_asset_root, "SignInWeekData"))
+    )
 
     # Load EquipData (equipment definitions)
     equip_path = os.path.join(text_asset_root, "EquipData")
@@ -13473,19 +13531,15 @@ def _parse_iso_date(value):
 
 
 def resolve_sign_week_state(character):
-    """Return (day, can_claim, complete) for the current 7-day login cycle.
-
-    The client treats the tab as visible only while both conditions are true:
-    - complete == False
-    - cur_sign_state == True
-
-    Once the 7th day is actually claimed, complete must become True so the client
-    hides the tab. We must never leave a finished week flagged as incomplete.
-    """
+    """Return (day, can_claim, complete) for the current 7-day login cycle."""
     sign_calendar = current_sign_calendar()
     today_iso = sign_calendar['date']
     last_claimed = character.get('sign_week_claimed_date')
-    current_day = max(0, int(character.get('sign_week_day', 0) or 0))
+    try:
+        current_day = int(character.get('sign_week_day', 0) or 0)
+    except (TypeError, ValueError):
+        current_day = 0
+    current_day = max(0, min(7, current_day))
     complete = bool(character.get('sign_week_complete', False))
 
     if not last_claimed:
@@ -13523,6 +13577,70 @@ def sign_week_payload(day, can_claim, complete):
         (0, max(1, int(day or 1))),
         (1, bool(can_claim)),
         (2, bool(complete)),
+    ])
+
+
+def sign_week_reward_list(character, day):
+    day_config = SIGN_IN_WEEK_CONFIG.get(int(day))
+    if not day_config:
+        return []
+    try:
+        profession = int(character.get('prof', 0))
+    except (TypeError, ValueError):
+        return []
+    profession_rewards = day_config.get('profession_rewards', [])
+    if profession < 0 or profession >= len(profession_rewards):
+        return []
+    return [profession_rewards[profession]] + list(day_config.get('common_rewards', []))
+
+
+def function_unlock_payload(character):
+    """Build the same FunctionData unlock map for login and live level-ups."""
+    try:
+        char_level = int(character.get('level', 1) or 1)
+    except (TypeError, ValueError):
+        char_level = 1
+    player_tutorial = character.get('tutorial', 0)
+    if FUNCTION_DATA:
+        fids = []
+        for fid, finfo in FUNCTION_DATA.items():
+            if finfo['class'] == 0:
+                fids.append(fid)
+            elif finfo['class'] == 1 and char_level >= finfo['condition']:
+                fids.append(fid)
+            elif finfo['class'] == 4:
+                fids.append(fid)
+    else:
+        fids = [
+            "100", "107", "108", "3001", "3005", "3010", "3013", "3014",
+            "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084",
+        ]
+    if "105" not in fids:
+        fids.append("105")
+
+    completed_tutorials = character.get('completed_tutorials', [])
+    if not isinstance(completed_tutorials, (list, tuple, set)):
+        completed_tutorials = []
+    class4_fids = {
+        fid for fid, finfo in FUNCTION_DATA.items()
+        if finfo['class'] == 4
+    }
+    funcs = {}
+    for fid in fids:
+        if fid == "105":
+            func_state = 2
+        elif fid == "100":
+            func_state = 1 if player_tutorial == 1 else 0
+        elif fid in class4_fids:
+            func_state = 1 if fid in completed_tutorials else 0
+        else:
+            func_state = 1
+        funcs[fid] = encode_sproto([(0, fid), (1, func_state)])
+
+    return encode_sproto([
+        (0, int(time.time())), (2, 0), (4, 10000), (9, funcs),
+        (11, _guild_champion_id()), (12, random.randint(1, 10000)),
+        (13, 1), (14, int(time.time()))
     ])
 
 
@@ -15443,6 +15561,7 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None,
                 break
         # After level-up: advance level missions and sync skills
         if leveled_up and send_rpc_push:
+            send_rpc_push(614, function_unlock_payload(picked_char))
             advance_missions(picked_char, send_rpc_push, 'level')
             # Sync updated skills map after level-up (new skills may unlock)
             new_level = picked_char.get('level', 1)
@@ -16262,6 +16381,7 @@ def claim_mail_reward_entries(picked_char, mail_entries, all_chars, conn, send_r
 
     if int(picked_char.get('level', 1)) > old_level:
         new_level = picked_char.get('level', 1)
+        send_rpc_push(614, function_unlock_payload(picked_char))
         skill_map = build_skills_map(
             picked_char.get('prof', 0), new_level,
             picked_char.get('skill_levels', {}), picked_char.get('equipped_equip', []),
@@ -20690,60 +20810,13 @@ def client_handler(conn, addr):
                     # Correct Sequence: 614 -> 611 -> 540 -> 519 -> 503
 
                     # 614: sync_common_data (data-driven from FunctionData)
-                    char_level = picked_char.get('level', 1)
-                    player_tutorial = picked_char.get('tutorial', 0)
-                    if FUNCTION_DATA:
-                        fids = []
-                        for fid, finfo in FUNCTION_DATA.items():
-                            fc = finfo['class']
-                            # class 0: default open
-                            if fc == 0:
-                                fids.append(fid)
-                            elif fc == 1:
-                                # class 1: level-gated -> unlock when level >= condition
-                                if char_level >= finfo['condition']:
-                                    fids.append(fid)
-                            elif fc == 4:
-                                # class 4: tutorial record -> always include so client can track state
-                                fids.append(fid)
-                    else:
-                        # Fallback: original hardcoded list
-                        fids = ["100", "107", "108", "3001", "3010", "3013", "3014", "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084"]
-                    if "105" not in fids:
-                        fids.append("105")
-                    # Build func_info: state=1 means tutorial completed, state=0 means tutorial pending
-                    # For MAIN_MISSION (100), state depends on whether player has completed the tutorial
-                    # For class 4 tutorial records (e.g. 4083 ROB_CAR_TIP), state depends on completed_tutorials
-                    completed_tutorials = picked_char.get('completed_tutorials', [])
-                    # Build a set of class-4 function IDs for quick lookup
-                    class4_fids = set()
-                    if FUNCTION_DATA:
-                        for fid, finfo in FUNCTION_DATA.items():
-                            if finfo['class'] == 4:
-                                class4_fids.add(fid)
-                    funcs = {}
-                    for fid in fids:
-                        if fid == "105":
-                            # The client repeatedly shows the empty-potion-slot tip until state reaches its condition (2).
-                            func_state = 2
-                        elif fid == "100":
-                            # MAIN_MISSION: state=1 only if tutorial is already finished
-                            func_state = 1 if player_tutorial == 1 else 0
-                        elif fid in class4_fids:
-                            # Class 4 tutorial records: state=1 if completed, state=0 if pending
-                            func_state = 1 if fid in completed_tutorials else 0
-                        else:
-                            func_state = 1
-                        funcs[fid] = encode_sproto([(0, fid), (1, func_state)])
-                    send_rpc_push(614, encode_sproto([
-                        (0, int(time.time())), (2, 0), (4, 10000), (9, funcs),
-                        (11, _guild_champion_id()), (12, random.randint(1, 10000)),
-                        (13, 1), (14, int(time.time()))
-                    ]))
+                    send_rpc_push(614, function_unlock_payload(picked_char))
 
-                    # Initialize the weekly-sign flag before the client builds the
-                    # welfare tabs; the client derives it from response 641.
-                    week_day, week_can_claim, week_complete = resolve_sign_week_state(picked_char)
+                    # Send the current sign state with the character's initial data.
+                    with get_character_transaction_lock(picked_char):
+                        week_day, week_can_claim, week_complete = resolve_sign_week_state(
+                            picked_char
+                        )
                     send_rpc_push(641, sign_week_payload(
                         week_day, week_can_claim, week_complete
                     ))
@@ -21804,6 +21877,7 @@ def client_handler(conn, addr):
                             # cache as soon as the attribute update triggers its
                             # animation, so refresh that cache first.
                             if mission_leveled_up:
+                                send_rpc_push(614, function_unlock_payload(picked_char))
                                 send_rpc_push(644, level_package_state_payload(picked_char))
                             sync_char_attrs_rpc(conn, picked_char)               # Stats update
                             # Sync skills if leveled up from mission rewards
@@ -27043,24 +27117,69 @@ def client_handler(conn, addr):
                     send_rpc_push(686, dance_state_info_payload(picked_char))
 
                 elif msg == 253 and picked_char: # request_sign_week_info
-                    day, can_claim, complete = resolve_sign_week_state(picked_char)
+                    with get_character_transaction_lock(picked_char):
+                        day, can_claim, complete = resolve_sign_week_state(picked_char)
                     send_rpc_push(641, sign_week_payload(day, can_claim, complete))
 
                 elif msg == 255 and picked_char: # sign_week
                     with get_character_transaction_lock(picked_char):
                         day, can_claim, complete = resolve_sign_week_state(picked_char)
                         if can_claim:
-                            sign_calendar = current_sign_calendar()
-                            picked_char['sign_week_claimed_date'] = sign_calendar['date']
-                            picked_char['sign_week_day'] = day
-                            picked_char['sign_week_claimed'] = True
-                            picked_char['sign_week_complete'] = (day >= 7)
-                            picked_char['cash'] = picked_char.get('cash', 0) + 10000
-                            save_chars(all_accounts_chars)
-                            after_complete = bool(picked_char.get('sign_week_complete', False))
-                            send_rpc_push(643, sign_week_payload(day, False, after_complete))
-                            sync_all_backpacks(picked_char, send_rpc_push)
-                            sync_char_attrs_rpc(conn, picked_char)
+                            rewards = sign_week_reward_list(picked_char, day)
+                            if not rewards:
+                                print(
+                                    f"[SIGN WEEK] no configured rewards "
+                                    f"day={day} profession={picked_char.get('prof')} "
+                                    f"player={picked_char.get('id')}"
+                                )
+                                send_rpc_push(641, sign_week_payload(day, can_claim, complete))
+                            elif not can_add_reward_list_to_inventory(picked_char, rewards):
+                                print(
+                                    f"[SIGN WEEK] inventory full "
+                                    f"day={day} player={picked_char.get('id')}"
+                                )
+                                send_rpc_push(641, sign_week_payload(day, can_claim, complete))
+                            else:
+                                reward_snapshot = snapshot_character_reward_state(picked_char)
+                                sign_fields = (
+                                    'sign_week_claimed_date',
+                                    'sign_week_day',
+                                    'sign_week_claimed',
+                                    'sign_week_complete',
+                                )
+                                previous_sign_state = {
+                                    key: (key in picked_char, picked_char.get(key))
+                                    for key in sign_fields
+                                }
+                                grant_item_rewards(picked_char, rewards, save=False)
+                                sign_calendar = current_sign_calendar()
+                                picked_char['sign_week_claimed_date'] = sign_calendar['date']
+                                picked_char['sign_week_day'] = day
+                                picked_char['sign_week_claimed'] = True
+                                picked_char['sign_week_complete'] = (day >= 7)
+                                if save_chars(all_accounts_chars):
+                                    after_complete = bool(picked_char['sign_week_complete'])
+                                    send_rpc_push(
+                                        643, sign_week_payload(day, False, after_complete)
+                                    )
+                                    sync_all_backpacks(picked_char, send_rpc_push)
+                                    sync_char_attrs_rpc(conn, picked_char)
+                                else:
+                                    restore_character_reward_state(
+                                        picked_char, reward_snapshot
+                                    )
+                                    for key, (was_present, previous_value) in previous_sign_state.items():
+                                        if was_present:
+                                            picked_char[key] = previous_value
+                                        else:
+                                            picked_char.pop(key, None)
+                                    print(
+                                        f"[SIGN WEEK] persistence failed "
+                                        f"day={day} player={picked_char.get('id')}"
+                                    )
+                                    send_rpc_push(
+                                        641, sign_week_payload(day, can_claim, complete)
+                                    )
                         else:
                             print(f"[REWARD SECURITY] duplicate weekly sign rejected player={picked_char.get('id')}")
 
