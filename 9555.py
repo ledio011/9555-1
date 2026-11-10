@@ -13530,6 +13530,14 @@ def _parse_iso_date(value):
         return None
 
 
+def sign_week_has_seven_claims(character):
+    try:
+        claimed_day = int(character.get('sign_week_day', 0) or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(character.get('sign_week_complete', False)) and claimed_day >= 7
+
+
 def resolve_sign_week_state(character):
     """Return (day, can_claim, complete) for the current 7-day login cycle."""
     sign_calendar = current_sign_calendar()
@@ -13540,9 +13548,12 @@ def resolve_sign_week_state(character):
     except (TypeError, ValueError):
         current_day = 0
     current_day = max(0, min(7, current_day))
-    complete = bool(character.get('sign_week_complete', False))
+    complete = sign_week_has_seven_claims(character)
+    if character.get('sign_week_complete') and not complete:
+        character['sign_week_complete'] = False
 
     if not last_claimed:
+        character['sign_week_complete'] = False
         return 1, True, False
 
     if last_claimed == today_iso:
@@ -13601,20 +13612,27 @@ def function_unlock_payload(character):
     except (TypeError, ValueError):
         char_level = 1
     player_tutorial = character.get('tutorial', 0)
+    completed_today = (
+        sign_week_has_seven_claims(character)
+        and character.get('sign_week_claimed_date') == current_sign_calendar()['date']
+    )
     if FUNCTION_DATA:
         fids = []
         for fid, finfo in FUNCTION_DATA.items():
             if finfo['class'] == 0:
                 fids.append(fid)
             elif finfo['class'] == 1 and char_level >= finfo['condition']:
-                fids.append(fid)
+                if fid != "4014" or not completed_today:
+                    fids.append(fid)
             elif finfo['class'] == 4:
                 fids.append(fid)
     else:
         fids = [
             "100", "107", "108", "3001", "3005", "3010", "3013", "3014",
-            "3015", "3030", "4014", "4026", "4061", "4064", "4081", "4084",
+            "3015", "3030", "4026", "4061", "4064", "4081", "4084",
         ]
+        if char_level >= 7 and not completed_today:
+            fids.append("4014")
     if "105" not in fids:
         fids.append("105")
 
@@ -20050,6 +20068,7 @@ def client_handler(conn, addr):
     street_race_result_restore_pending = False
     download_bag_resynced = False
     guild_presence_announced = False
+    sign_week_post_map_sync_sent = False
     # Map 101 joystick diagnostics: log movement packets sparsely and use
     # heartbeats to show when the client is not sending any movement input.
     map101_pick_at = None
@@ -20807,16 +20826,23 @@ def client_handler(conn, addr):
 
                     save_chars(all_accounts_chars)
 
-                    # Correct Sequence: 614 -> 611 -> 540 -> 519 -> 503
-
-                    # 614: sync_common_data (data-driven from FunctionData)
-                    send_rpc_push(614, function_unlock_payload(picked_char))
-
-                    # Send the current sign state with the character's initial data.
+                    # Resolve weekly status before building the feature map so
+                    # stale completion flags cannot hide the seven-day entry.
                     with get_character_transaction_lock(picked_char):
                         week_day, week_can_claim, week_complete = resolve_sign_week_state(
                             picked_char
                         )
+
+                    # Correct Sequence: 614 -> 611 -> 540 -> 519 -> 503
+                    send_rpc_push(614, function_unlock_payload(picked_char))
+                    print(
+                        f"[SIGN WEEK SYNC] player={picked_char.get('id')} "
+                        f"level={picked_char.get('level')} day={week_day} "
+                        f"can_claim={week_can_claim} complete={week_complete} "
+                        f"tab_4014={'hidden' if week_complete else 'unlocked'}"
+                    )
+
+                    # Send the current sign state with the character's initial data.
                     send_rpc_push(641, sign_week_payload(
                         week_day, week_can_claim, week_complete
                     ))
@@ -21105,6 +21131,26 @@ def client_handler(conn, addr):
                         f"current_socket={is_current_character_connection(conn, picked_char)} "
                         f"conn_id={conn_id}"
                     )
+                    if (not sign_week_post_map_sync_sent
+                            and is_current_character_connection(conn, picked_char)):
+                        with get_character_transaction_lock(picked_char):
+                            week_day, week_can_claim, week_complete = resolve_sign_week_state(
+                                picked_char
+                            )
+                        send_rpc_push(614, function_unlock_payload(picked_char))
+                        send_rpc_push(
+                            641,
+                            sign_week_payload(
+                                week_day, week_can_claim, week_complete
+                            ),
+                        )
+                        sign_week_post_map_sync_sent = True
+                        print(
+                            f"[SIGN WEEK MAP SYNC] player={picked_char.get('id')} "
+                            f"day={week_day} can_claim={week_can_claim} "
+                            f"complete={week_complete} "
+                            f"tab_4014={'hidden' if week_complete else 'unlocked'}"
+                        )
                     if mid == "101":
                         map101_ready_at = time.monotonic()
                         map101_last_move_at = None
@@ -27119,6 +27165,11 @@ def client_handler(conn, addr):
                 elif msg == 253 and picked_char: # request_sign_week_info
                     with get_character_transaction_lock(picked_char):
                         day, can_claim, complete = resolve_sign_week_state(picked_char)
+                    send_rpc_push(614, function_unlock_payload(picked_char))
+                    print(
+                        f"[SIGN WEEK REQUEST] player={picked_char.get('id')} "
+                        f"day={day} can_claim={can_claim} complete={complete}"
+                    )
                     send_rpc_push(641, sign_week_payload(day, can_claim, complete))
 
                 elif msg == 255 and picked_char: # sign_week
@@ -27161,6 +27212,14 @@ def client_handler(conn, addr):
                                     after_complete = bool(picked_char['sign_week_complete'])
                                     send_rpc_push(
                                         643, sign_week_payload(day, False, after_complete)
+                                    )
+                                    if after_complete:
+                                        send_rpc_push(
+                                            614, function_unlock_payload(picked_char)
+                                        )
+                                    print(
+                                        f"[SIGN WEEK CLAIMED] player={picked_char.get('id')} "
+                                        f"day={day} complete={after_complete}"
                                     )
                                     sync_all_backpacks(picked_char, send_rpc_push)
                                     sync_char_attrs_rpc(conn, picked_char)
