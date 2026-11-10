@@ -13605,13 +13605,12 @@ def sign_week_reward_list(character, day):
     return [profession_rewards[profession]] + list(day_config.get('common_rewards', []))
 
 
-def function_unlock_payload(character):
-    """Build the same FunctionData unlock map for login and live level-ups."""
+def unlocked_function_ids(character):
+    """Return the function IDs advertised to this character."""
     try:
         char_level = int(character.get('level', 1) or 1)
     except (TypeError, ValueError):
         char_level = 1
-    player_tutorial = character.get('tutorial', 0)
     completed_today = (
         sign_week_has_seven_claims(character)
         and character.get('sign_week_claimed_date') == current_sign_calendar()['date']
@@ -13633,9 +13632,21 @@ def function_unlock_payload(character):
         ]
         if char_level >= 7 and not completed_today:
             fids.append("4014")
+    if char_level >= 7 and "3005" not in fids:
+        fids.append("3005")
+    if char_level >= 7 and not completed_today and "4014" not in fids:
+        fids.append("4014")
+    if completed_today:
+        fids = [fid for fid in fids if fid != "4014"]
     if "105" not in fids:
         fids.append("105")
+    return fids
 
+
+def function_unlock_payload(character):
+    """Build the same FunctionData unlock map for login and live level-ups."""
+    player_tutorial = character.get('tutorial', 0)
+    fids = unlocked_function_ids(character)
     completed_tutorials = character.get('completed_tutorials', [])
     if not isinstance(completed_tutorials, (list, tuple, set)):
         completed_tutorials = []
@@ -20834,18 +20845,30 @@ def client_handler(conn, addr):
                         )
 
                     # Correct Sequence: 614 -> 611 -> 540 -> 519 -> 503
-                    send_rpc_push(614, function_unlock_payload(picked_char))
+                    unlock_ids = unlocked_function_ids(picked_char)
+                    unlock_sent = send_rpc_push(
+                        614, function_unlock_payload(picked_char)
+                    )
                     print(
                         f"[SIGN WEEK SYNC] player={picked_char.get('id')} "
                         f"level={picked_char.get('level')} day={week_day} "
                         f"can_claim={week_can_claim} complete={week_complete} "
-                        f"tab_4014={'hidden' if week_complete else 'unlocked'}"
+                        f"welfare_3005={'present' if '3005' in unlock_ids else 'missing'} "
+                        f"tab_4014={'present' if '4014' in unlock_ids else 'missing'} "
+                        f"push_614={'sent' if unlock_sent else 'failed'}"
                     )
 
                     # Send the current sign state with the character's initial data.
-                    send_rpc_push(641, sign_week_payload(
-                        week_day, week_can_claim, week_complete
-                    ))
+                    state_sent = send_rpc_push(
+                        641,
+                        sign_week_payload(
+                            week_day, week_can_claim, week_complete
+                        ),
+                    )
+                    print(
+                        f"[SIGN WEEK STATE PUSH] player={picked_char.get('id')} "
+                        f"push_641={'sent' if state_sent else 'failed'}"
+                    )
 
                     # The client has no separate request for this button's
                     # quota; initialize its count, limit, and reward on login.
@@ -21137,8 +21160,11 @@ def client_handler(conn, addr):
                             week_day, week_can_claim, week_complete = resolve_sign_week_state(
                                 picked_char
                             )
-                        send_rpc_push(614, function_unlock_payload(picked_char))
-                        send_rpc_push(
+                        unlock_ids = unlocked_function_ids(picked_char)
+                        unlock_sent = send_rpc_push(
+                            614, function_unlock_payload(picked_char)
+                        )
+                        state_sent = send_rpc_push(
                             641,
                             sign_week_payload(
                                 week_day, week_can_claim, week_complete
@@ -21149,7 +21175,10 @@ def client_handler(conn, addr):
                             f"[SIGN WEEK MAP SYNC] player={picked_char.get('id')} "
                             f"day={week_day} can_claim={week_can_claim} "
                             f"complete={week_complete} "
-                            f"tab_4014={'hidden' if week_complete else 'unlocked'}"
+                            f"welfare_3005={'present' if '3005' in unlock_ids else 'missing'} "
+                            f"tab_4014={'present' if '4014' in unlock_ids else 'missing'} "
+                            f"push_614={'sent' if unlock_sent else 'failed'} "
+                            f"push_641={'sent' if state_sent else 'failed'}"
                         )
                     if mid == "101":
                         map101_ready_at = time.monotonic()
@@ -27165,12 +27194,24 @@ def client_handler(conn, addr):
                 elif msg == 253 and picked_char: # request_sign_week_info
                     with get_character_transaction_lock(picked_char):
                         day, can_claim, complete = resolve_sign_week_state(picked_char)
-                    send_rpc_push(614, function_unlock_payload(picked_char))
+                    unlock_ids = unlocked_function_ids(picked_char)
+                    unlock_sent = send_rpc_push(
+                        614, function_unlock_payload(picked_char)
+                    )
                     print(
                         f"[SIGN WEEK REQUEST] player={picked_char.get('id')} "
-                        f"day={day} can_claim={can_claim} complete={complete}"
+                        f"day={day} can_claim={can_claim} complete={complete} "
+                        f"welfare_3005={'present' if '3005' in unlock_ids else 'missing'} "
+                        f"tab_4014={'present' if '4014' in unlock_ids else 'missing'} "
+                        f"push_614={'sent' if unlock_sent else 'failed'}"
                     )
-                    send_rpc_push(641, sign_week_payload(day, can_claim, complete))
+                    state_sent = send_rpc_push(
+                        641, sign_week_payload(day, can_claim, complete)
+                    )
+                    print(
+                        f"[SIGN WEEK STATE PUSH] player={picked_char.get('id')} "
+                        f"push_641={'sent' if state_sent else 'failed'}"
+                    )
 
                 elif msg == 255 and picked_char: # sign_week
                     with get_character_transaction_lock(picked_char):
