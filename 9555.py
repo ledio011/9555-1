@@ -20846,8 +20846,10 @@ def client_handler(conn, addr):
 
                     # Correct Sequence: 614 -> 611 -> 540 -> 519 -> 503
                     unlock_ids = unlocked_function_ids(picked_char)
+                    unlock_payload = function_unlock_payload(picked_char)
+                    unlock_fields = decode_sproto(unlock_payload)
                     unlock_sent = send_rpc_push(
-                        614, function_unlock_payload(picked_char)
+                        614, unlock_payload
                     )
                     print(
                         f"[SIGN WEEK SYNC] player={picked_char.get('id')} "
@@ -20855,6 +20857,7 @@ def client_handler(conn, addr):
                         f"can_claim={week_can_claim} complete={week_complete} "
                         f"welfare_3005={'present' if '3005' in unlock_ids else 'missing'} "
                         f"tab_4014={'present' if '4014' in unlock_ids else 'missing'} "
+                        f"push_mask={unlock_fields.get(8, 'missing')} "
                         f"push_614={'sent' if unlock_sent else 'failed'}"
                     )
 
@@ -21161,8 +21164,10 @@ def client_handler(conn, addr):
                                 picked_char
                             )
                         unlock_ids = unlocked_function_ids(picked_char)
+                        unlock_payload = function_unlock_payload(picked_char)
+                        unlock_fields = decode_sproto(unlock_payload)
                         unlock_sent = send_rpc_push(
-                            614, function_unlock_payload(picked_char)
+                            614, unlock_payload
                         )
                         state_sent = send_rpc_push(
                             641,
@@ -21177,6 +21182,7 @@ def client_handler(conn, addr):
                             f"complete={week_complete} "
                             f"welfare_3005={'present' if '3005' in unlock_ids else 'missing'} "
                             f"tab_4014={'present' if '4014' in unlock_ids else 'missing'} "
+                            f"push_mask={unlock_fields.get(8, 'missing')} "
                             f"push_614={'sent' if unlock_sent else 'failed'} "
                             f"push_641={'sent' if state_sent else 'failed'}"
                         )
@@ -27195,14 +27201,17 @@ def client_handler(conn, addr):
                     with get_character_transaction_lock(picked_char):
                         day, can_claim, complete = resolve_sign_week_state(picked_char)
                     unlock_ids = unlocked_function_ids(picked_char)
+                    unlock_payload = function_unlock_payload(picked_char)
+                    unlock_fields = decode_sproto(unlock_payload)
                     unlock_sent = send_rpc_push(
-                        614, function_unlock_payload(picked_char)
+                        614, unlock_payload
                     )
                     print(
                         f"[SIGN WEEK REQUEST] player={picked_char.get('id')} "
                         f"day={day} can_claim={can_claim} complete={complete} "
                         f"welfare_3005={'present' if '3005' in unlock_ids else 'missing'} "
                         f"tab_4014={'present' if '4014' in unlock_ids else 'missing'} "
+                        f"push_mask={unlock_fields.get(8, 'missing')} "
                         f"push_614={'sent' if unlock_sent else 'failed'}"
                     )
                     state_sent = send_rpc_push(
