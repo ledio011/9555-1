@@ -12693,8 +12693,9 @@ def snapshot_character_reward_state(picked_char, include_mails=False):
     """Snapshot only persistent fields mutated by reward grants, not live runtime state."""
     keys = {bucket for bucket, _tag in BACKPACKS.values()}
     keys.update(MONEY_FIELDS)
-    keys.update(('next_item_index', 'exp', 'level', 'hp', 'title_exp', 'active_missions',
-                 'big_sale_purchases', 'shop_purchases'))
+    keys.update(('next_item_index', 'exp', 'level', 'hp', 'title_exp', 'level_rank_reached_at',
+                 'active_missions', 'last_main_mission_id', 'completed_side_missions',
+                 'daily_active_state', 'big_sale_purchases', 'shop_purchases'))
     if include_mails:
         keys.add('mails')
     present = {key for key in keys if key in picked_char}
@@ -14987,10 +14988,11 @@ def _domin_capture_enemy_roster(character):
     roster = []
     character_id = numeric_id_value(character.get("id", 0)) if character else None
     capture_mission = character.get("active_missions", {}).get("1003") if character else None
-    ash_viper_story_active = (
-        isinstance(capture_mission, dict)
-        and capture_mission.get("state") in (1, 2)
-    )
+    try:
+        capture_mission_state = int(capture_mission.get("state", 0))
+    except (AttributeError, TypeError, ValueError):
+        capture_mission_state = 0
+    ash_viper_story_active = capture_mission_state in (1, 2)
     for district in _domin_capture_open_districts():
         domin_id = str(district["id"])
         if domin_id == "1" and ash_viper_story_active:
@@ -21904,8 +21906,13 @@ def client_handler(conn, addr):
                 if picked_char:
                     mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
                     claim_mission = False
+                    completion_snapshot = None
                     with get_character_transaction_lock(picked_char):
                         m_entry = picked_char.get('active_missions', {}).get(mid)
+                        try:
+                            mission_state = int(m_entry.get('state', 0))
+                        except (AttributeError, TypeError, ValueError):
+                            mission_state = 0
                         m_cfg = missions_data.get(mid, {})
                         current_main_mission = (
                             mid != '1003'
@@ -21913,10 +21920,11 @@ def client_handler(conn, addr):
                             or str(m_cfg.get('pre_id', '')) ==
                             str(picked_char.get('last_main_mission_id', ''))
                         )
-                        if (m_entry and m_entry.get('state') == 2
+                        if (m_entry and mission_state == 2
                                 and current_main_mission):
                             # Mark before granting: duplicate/reconnected
                             # sessions cannot both claim the same objective.
+                            completion_snapshot = snapshot_character_reward_state(picked_char)
                             m_entry['state'] = 3
                             claim_mission = True
                     print(f"[MISSION COMPLETE REQ] mid={mid} entry_exists={m_entry is not None} state={m_entry['state'] if m_entry else 'N/A'}")
@@ -21924,7 +21932,16 @@ def client_handler(conn, addr):
                         m_cfg = missions_data.get(mid)
                         if m_cfg:
                             print(f"[MISSION CHAIN] completed={mid} last_main_before={picked_char.get('last_main_mission_id')}")
-                            exp_add, cash_add, items_add, popup_items, mission_leveled_up = give_mission_rewards(picked_char, mid)
+                            had_skip_mission_save = '_skip_mission_save' in picked_char
+                            previous_skip_mission_save = picked_char.get('_skip_mission_save')
+                            picked_char['_skip_mission_save'] = True
+                            try:
+                                exp_add, cash_add, items_add, popup_items, mission_leveled_up = give_mission_rewards(picked_char, mid)
+                            finally:
+                                if had_skip_mission_save:
+                                    picked_char['_skip_mission_save'] = previous_skip_mission_save
+                                else:
+                                    picked_char.pop('_skip_mission_save', None)
                             print(f"[MISSION REWARD] mission={mid} exp={exp_add} cash={cash_add} items={items_add}")
 
                             # Mission Chain and Unlocking logic
@@ -21956,8 +21973,24 @@ def client_handler(conn, addr):
                             if is_chained and next_mid and str(next_mid) in missions_data:
                                 next_cfg = missions_data[str(next_mid)]
                                 if next_cfg.get('logic_type') == 7:
-                                    advance_missions(picked_char, send_rpc_push, 'level')
-                            save_chars(all_accounts_chars)
+                                    had_skip_mission_save = '_skip_mission_save' in picked_char
+                                    previous_skip_mission_save = picked_char.get('_skip_mission_save')
+                                    picked_char['_skip_mission_save'] = True
+                                    try:
+                                        advance_missions(picked_char, send_rpc_push, 'level')
+                                    finally:
+                                        if had_skip_mission_save:
+                                            picked_char['_skip_mission_save'] = previous_skip_mission_save
+                                        else:
+                                            picked_char.pop('_skip_mission_save', None)
+                            if not save_chars(all_accounts_chars):
+                                restore_character_reward_state(picked_char, completion_snapshot)
+                                print(f"[MISSION COMPLETE] persistence failed; rolled back mission={mid} player={picked_char.get('id')}")
+                                if session is not None:
+                                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+                                send_rpc_push(519, sync_mission_data(picked_char))
+                                continue
                             print(f"[MISSION COMPLETE] mission_id={mid} chained={is_chained}")
 
                             # Standard completion response
@@ -27609,15 +27642,54 @@ def client_handler(conn, addr):
                                 for item_id, _quality, amount in reward_list
                             )
                             if valid_rewards and can_add_reward_list_to_inventory(picked_char, reward_list):
-                                grant_item_rewards(picked_char, reward_list, conn, send_rpc_push, save=False)
+                                reward_snapshot = snapshot_character_reward_state(picked_char)
+                                previous_level = int(picked_char.get('level', 1) or 1)
+                                previous_attributes = tuple(
+                                    picked_char.get(field, 0)
+                                    for field in (*MONEY_FIELDS, 'exp', 'level', 'hp', 'title_exp')
+                                )
+                                previous_backpacks = {
+                                    bucket: copy.deepcopy(picked_char.get(bucket, []))
+                                    for bucket, _tag in BACKPACKS.values()
+                                }
+                                grant_item_rewards(
+                                    picked_char, reward_list, conn=None,
+                                    send_rpc_push=None, save=False
+                                )
                                 state['claimed_rewards'].append(reward_id)
-                                save_chars(all_accounts_chars)
-                                reward_items = [encode_sproto([
-                                    (0, item_id), (1, amount), (3, quality)
-                                ]) for item_id, quality, amount in reward_list]
-                                claimed = True
-                                print(f"[DAILY ACTIVE] claimed player={picked_char.get('id')} id={reward_id} "
-                                      f"score={score} rewards={len(reward_items)}")
+                                if save_chars(all_accounts_chars):
+                                    current_level = int(picked_char.get('level', 1) or 1)
+                                    current_attributes = tuple(
+                                        picked_char.get(field, 0)
+                                        for field in (*MONEY_FIELDS, 'exp', 'level', 'hp', 'title_exp')
+                                    )
+                                    if current_level != previous_level:
+                                        send_rpc_push(614, function_unlock_payload(picked_char))
+                                        advance_missions(picked_char, send_rpc_push, 'level')
+                                        smap = build_skills_map(
+                                            picked_char.get('prof', 0), current_level,
+                                            picked_char.get('skill_levels', {}),
+                                            picked_char.get('equipped_equip', []),
+                                            picked_char.get('skill_positions', {})
+                                        )
+                                        send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
+                                        send_rpc_push(644, level_package_state_payload(picked_char))
+                                    if current_attributes != previous_attributes:
+                                        sync_char_attrs_rpc(conn, picked_char)
+                                    if any(
+                                        picked_char.get(bucket, []) != records
+                                        for bucket, records in previous_backpacks.items()
+                                    ):
+                                        sync_all_backpacks(picked_char, send_rpc_push)
+                                    reward_items = [encode_sproto([
+                                        (0, item_id), (1, amount), (3, quality)
+                                    ]) for item_id, quality, amount in reward_list]
+                                    claimed = True
+                                    print(f"[DAILY ACTIVE] claimed player={picked_char.get('id')} id={reward_id} "
+                                          f"score={score} rewards={len(reward_items)}")
+                                else:
+                                    restore_character_reward_state(picked_char, reward_snapshot)
+                                    failure_reason = 'character state could not be saved'
                             elif not valid_rewards:
                                 failure_reason = 'reward table is missing or invalid'
                             else:
