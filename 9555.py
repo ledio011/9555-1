@@ -1560,18 +1560,45 @@ try:
                         }
         debug_log(f"[COLOR CONFIG LOADED] colors={len(COLOR_CONFIG)}")
 
-    # Only configured PVE world-boss IDs may enter the corresponding scene.
+    # Wild Boss rows are read from the bundled client table; its protocol and
+    # gameplay values remain authoritative.
     wild_boss_path = os.path.join(text_asset_root, "WildBossData")
     if os.path.exists(wild_boss_path):
         with open(wild_boss_path, "r", encoding='utf-8') as f:
             for line in f:
                 parts = line.strip().split(",")
-                if len(parts) > 14 and parts[0] == "*" and parts[1]:
+                if len(parts) > 31 and parts[0] == "*" and parts[1].isdigit():
+                    def _wild_boss_int(index, default=0):
+                        value = parts[index].strip() if index < len(parts) else ""
+                        return int(value) if value.lstrip("-").isdigit() else default
+
                     WILD_BOSS_CONFIG[parts[1]] = {
+                        'id': parts[1],
                         'map_id': parts[2],
-                        'type': int(parts[5]) if parts[5].isdigit() else 0,
-                        'min_level': int(parts[13]) if parts[13].isdigit() else 1,
-                        'max_level': int(parts[14]) if parts[14].isdigit() else 80,
+                        'pvp': _wild_boss_int(3),
+                        'time': _wild_boss_int(4),
+                        'type': _wild_boss_int(5),
+                        'subtype': _wild_boss_int(6),
+                        'start_times': [
+                            int(value) for value in parts[7].split("#")
+                            if value.strip().isdigit()
+                        ],
+                        'limit': _wild_boss_int(8),
+                        'duration': _wild_boss_int(9),
+                        'wait_time': _wild_boss_int(10),
+                        'exist_time': _wild_boss_int(11),
+                        'max_player': _wild_boss_int(12),
+                        'min_level': _wild_boss_int(13, 1),
+                        'max_level': _wild_boss_int(14, 80),
+                        'min_hp': _wild_boss_int(15),
+                        'max_hp': _wild_boss_int(16),
+                        'single_hp': _wild_boss_int(17),
+                        'last_kill_drop_id': parts[18].strip(),
+                        'rank_drop_ids': [parts[index].strip() for index in (19, 21, 23, 25, 27)],
+                        'rank_limits': [_wild_boss_int(index) for index in (20, 22, 24, 26, 28)],
+                        'participate_drop_id': parts[29].strip(),
+                        'show_reward_id': parts[30].strip(),
+                        'boss_npc_id': parts[31].strip(),
                     }
         debug_log(f"[WILD BOSS CONFIG LOADED] count={len(WILD_BOSS_CONFIG)}")
 
@@ -3183,6 +3210,11 @@ print(f"[GUILD] loaded guilds={len(GUILD_STATES)} next_id={GUILD_ID_COUNTER}")
 GUILD_CITY_OWNER_PATH = os.path.join(SCRIPT_DIR, "guild_city.json")
 GUILD_CITY_LOCK = threading.RLock()
 GUILD_CITY_EVENT_STATE = {}
+WILD_BOSS_LOCK = threading.RLock()
+WILD_BOSS_EVENTS = {}
+WILD_BOSS_ENTRY_RESERVATIONS = {}
+WILD_BOSS_RANK_ROWS = 10
+WILD_BOSS_MISSING_REWARD_LOGGED = set()
 GUILD_BOSS_LOCK = threading.RLock()
 GUILD_BOSS_ENTRY_RESERVATIONS = {}
 GUILD_BOSS_OVERRIDE_PATH = os.path.join(SCRIPT_DIR, "guild_boss_override.json")
@@ -7721,10 +7753,12 @@ def validate_tower_npc_attack_damage(conn, char, effinfo_id, client_damage):
 
 def build_npc_attr_sproto(
         nid, name, x, z, o, existing_inst_id=None, player_level=1,
-        initial_hp=None):
+        initial_hp=None, hp_max_override=None):
     """Build NPC attribute sproto for TAG 509 (npc_create).
     Bug 1/6: Shared function to eliminate code duplication between send_npc_create and send_npc_wrapper."""
     npc_stats = get_npc_attr(nid, player_level)
+    if hp_max_override is not None:
+        npc_stats['hp_max'] = max(1, int(hp_max_override))
     hp_max = npc_stats['hp_max']
     atk = npc_stats['atk']
     df = npc_stats['def']
@@ -11970,6 +12004,11 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
     if map_str == "101" and picked_char:
         update_npc_aoi(conn, map_id, picked_char)
         _sync_guild_dance_speakers_to_char(conn, picked_char)
+        return
+    wild_boss_id = _wild_boss_map_id(map_str)
+    if wild_boss_id:
+        if picked_char:
+            _wild_boss_spawn(conn, picked_char, wild_boss_id, map_str)
         return
     boss_id = _guild_boss_map_id(map_str)
     if boss_id:
@@ -17903,6 +17942,516 @@ def _guild_boss_record(guild, boss_id, create=False, now=None):
                     events.pop(old_id, None)
     return record
 
+def _wild_boss_map_id(map_id):
+    map_id = str(map_id)
+    return next((boss_id for boss_id, row in WILD_BOSS_CONFIG.items()
+                 if str(row.get('map_id', '')) == map_id), None)
+
+
+def _wild_boss_clock(row, now=None):
+    now = int(time.time() if now is None else now)
+    start_times = [int(value) for value in row.get('start_times', [])
+                   if int(value) >= 0]
+    duration = max(0, int(row.get('duration', 0) or 0))
+    if not start_times or duration <= 0:
+        return False, 0, 0, now, 0
+    utc_day_start = now - (now % 86400)
+    for day_offset in range(3):
+        for slot, seconds in enumerate(start_times, 1):
+            event_start = utc_day_start + day_offset * 86400 + seconds
+            if event_start <= now < event_start + duration:
+                return True, slot, event_start, event_start, event_start + duration
+            if event_start > now:
+                return False, slot, event_start, event_start, event_start + duration
+    return False, 0, 0, now, now
+
+
+def _wild_boss_event(row, event_start, create=False):
+    boss_id = str(row.get('id', ''))
+    event_start = int(event_start or 0)
+    key = (boss_id, event_start)
+    with WILD_BOSS_LOCK:
+        record = WILD_BOSS_EVENTS.get(key)
+        if record or not create:
+            return record
+        npc_id = str(row.get('boss_npc_id', ''))
+        template_hp = int(get_npc_attr(npc_id).get('hp_max', 1) or 1)
+        min_hp = max(0, int(row.get('min_hp', 0) or 0))
+        max_hp = max(0, int(row.get('max_hp', 0) or 0))
+        # Use the authored minimum until the client-side scaling formula is known.
+        hp_max = min_hp or max_hp or template_hp
+        hp_max = max(1, hp_max)
+        record = {
+            'boss_id': boss_id, 'map_id': str(row.get('map_id', '')),
+            'event_start': event_start,
+            'end_time': event_start + max(1, int(row.get('duration', 1) or 1)),
+            'hp_max': hp_max, 'hp': hp_max, 'inst_id': None,
+            'damage_players': {}, 'participants': {},
+            'finished': False, 'win': False, 'last_kill_id': 0,
+            'last_kill_name': '', 'position': None, 'timer': None,
+        }
+        WILD_BOSS_EVENTS[key] = record
+        delay = max(0.0, record['end_time'] - time.time())
+        timer = threading.Timer(delay, _wild_boss_timeout, args=(key,))
+        timer.daemon = True
+        record['timer'] = timer
+        timer.start()
+        return record
+
+
+def _wild_boss_attempts(char, boss_id):
+    stamp = str(current_daily_stamp())
+    state = char.setdefault('_wild_boss_attempts', {})
+    if state.get('day') != stamp:
+        state.clear()
+        state['day'] = stamp
+        state['counts'] = {}
+    if not isinstance(state.get('counts'), dict):
+        state['counts'] = {}
+    return state['counts']
+
+
+def _wild_boss_entry_check(char, boss_id, now=None):
+    row = WILD_BOSS_CONFIG.get(str(boss_id))
+    if not row or int(row.get('type', 0) or 0) != 5:
+        return False, 'unconfigured', None, 0
+    now = int(time.time() if now is None else now)
+    active, slot, event_start, _next_start, _slot_end = _wild_boss_clock(row, now)
+    if not active:
+        return False, 'closed', row, 0
+    pvp_slot = int(row.get('time', 0) or 0)
+    if bool(int(row.get('pvp', 0) or 0)) != (slot == pvp_slot):
+        return False, 'wrong_variant', row, 0
+    level = int(char.get('level', 1) or 1)
+    if not int(row.get('min_level', 1) or 1) <= level <= int(row.get('max_level', 80) or 80):
+        return False, 'level', row, 0
+
+    char_id = int(char.get('id', 0) or 0)
+    map_id = str(row.get('map_id', ''))
+    already_inside = (
+        str(char.get('map_id', '')) == map_id
+        and str(char.get('active_copy_id', '')) == map_id
+        and str(char.get('_wild_boss_boss_id', '')) == str(boss_id)
+    )
+    record = _wild_boss_event(row, event_start)
+    if record and record.get('finished') and not already_inside:
+        return False, 'finished', row, 0
+
+    with WILD_BOSS_LOCK:
+        monotonic_now = time.monotonic()
+        for key, expiry in list(WILD_BOSS_ENTRY_RESERVATIONS.items()):
+            if expiry <= monotonic_now:
+                WILD_BOSS_ENTRY_RESERVATIONS.pop(key, None)
+        reservation_key = (str(boss_id), event_start, char_id)
+        if not already_inside:
+            counts = _wild_boss_attempts(char, boss_id)
+            if int(counts.get(str(boss_id), 0) or 0) >= max(0, int(row.get('limit', 0) or 0)):
+                return False, 'daily_limit', row, 0
+            in_scene = sum(
+                1 for peer_id, (peer_conn, peer) in list(ALL_CONNECTIONS.items())
+                if peer_id != char_id and peer_conn and peer
+                and is_current_character_connection(peer_conn, peer)
+                and str(peer.get('map_id', '')) == map_id
+                and str(peer.get('active_copy_id', '')) == map_id
+                and str(peer.get('_wild_boss_boss_id', '')) == str(boss_id)
+                and int(peer.get('_wild_boss_event_start', 0) or 0) == event_start
+            )
+            reserved = sum(
+                1 for key in WILD_BOSS_ENTRY_RESERVATIONS
+                if key[0] == str(boss_id) and key[1] == event_start and key[2] != char_id
+            )
+            max_players = max(1, int(row.get('max_player', 1) or 1))
+            if in_scene + reserved >= max_players:
+                return False, 'full', row, 0
+            WILD_BOSS_ENTRY_RESERVATIONS[reservation_key] = monotonic_now + 15.0
+    return True, '', row, event_start
+
+
+def _wild_boss_entry_commit(char, boss_id, event_start):
+    row = WILD_BOSS_CONFIG.get(str(boss_id), {})
+    char_id = int(char.get('id', 0) or 0)
+    key = (str(boss_id), int(event_start), char_id)
+    committed = False
+    with WILD_BOSS_LOCK:
+        was_reserved = WILD_BOSS_ENTRY_RESERVATIONS.pop(key, None) is not None
+        if (was_reserved
+                and str(char.get('map_id', '')) == str(row.get('map_id', ''))
+                and str(char.get('active_copy_id', '')) == str(row.get('map_id', ''))):
+            counts = _wild_boss_attempts(char, boss_id)
+            counts[str(boss_id)] = int(counts.get(str(boss_id), 0) or 0) + 1
+            char['_wild_boss_boss_id'] = str(boss_id)
+            char['_wild_boss_event_start'] = int(event_start)
+            _wild_boss_event(row, event_start, create=True)
+            committed = True
+    if committed:
+        save_chars(all_accounts_chars)
+    return committed
+
+
+def _wild_boss_entry_release(char, boss_id, event_start):
+    with WILD_BOSS_LOCK:
+        WILD_BOSS_ENTRY_RESERVATIONS.pop(
+            (str(boss_id), int(event_start or 0), int(char.get('id', 0) or 0)),
+            None)
+
+
+def _wild_boss_rank_rows(record):
+    return sorted(
+        (entry for entry in (record or {}).get('damage_players', {}).values()
+         if isinstance(entry, dict)),
+        key=lambda entry: (-int(entry.get('damage', 0) or 0),
+                           int(entry.get('id', 0) or 0))
+    )
+
+
+def _wild_boss_battle_info(char, record=None):
+    if record is None and char:
+        boss_id = str(char.get('_wild_boss_boss_id', ''))
+        event_start = int(char.get('_wild_boss_event_start', 0) or 0)
+        record = _wild_boss_event(WILD_BOSS_CONFIG.get(boss_id, {}), event_start)
+    rows = _wild_boss_rank_rows(record)
+    char_id = int((char or {}).get('id', 0) or 0)
+    own = next((entry for entry in rows if int(entry.get('id', 0) or 0) == char_id), None)
+    my_rank = next((index for index, entry in enumerate(rows, 1)
+                    if int(entry.get('id', 0) or 0) == char_id), len(rows) + 1)
+    damage_rows = [encode_sproto([
+        (0, str(entry.get('name', ''))),
+        (1, int(entry.get('damage', 0) or 0)),
+        (2, int(entry.get('id', 0) or 0))
+    ]) for entry in rows[:WILD_BOSS_RANK_ROWS]]
+    return encode_sproto([
+        (0, damage_rows), (1, my_rank),
+        (2, int((own or {}).get('damage', 0) or 0)),
+        (3, sum(int(entry.get('damage', 0) or 0) for entry in rows)),
+        (4, str((record or {}).get('last_kill_name', ''))),
+        (5, int((record or {}).get('end_time', 0) or 0))
+    ])
+
+
+def _wild_boss_activity_payload(char, now=None):
+    now = int(time.time() if now is None else now)
+    activities = {}
+    for boss_id, row in WILD_BOSS_CONFIG.items():
+        active, slot, event_start, next_start, _slot_end = _wild_boss_clock(row, now)
+        if active:
+            record = _wild_boss_event(row, event_start)
+            if record and record.get('finished'):
+                active, slot, _event_start, next_start, _slot_end = _wild_boss_clock(
+                    row, event_start + max(1, int(row.get('duration', 1) or 1)))
+        counts = _wild_boss_attempts(char, boss_id)
+        remaining = max(0, int(row.get('limit', 0) or 0)
+                        - int(counts.get(str(boss_id), 0) or 0))
+        activities[str(boss_id)] = encode_sproto([
+            (0, str(boss_id)), (1, remaining), (2, int(row.get('type', 0) or 0)),
+            (3, 1 if active else 0), (4, int(next_start)), (5, ''),
+            (6, 0), (7, now), (8, int(slot))
+        ])
+    return encode_sproto([(0, activities)])
+
+
+def _wild_boss_scene_chars(map_id):
+    result = []
+    for char_id, (conn, char) in list(ALL_CONNECTIONS.items()):
+        if (conn and char and str(char.get('map_id', '')) == str(map_id)
+                and is_current_character_connection(conn, char)):
+            result.append((int(char_id), conn, char))
+    return result
+
+
+def _wild_boss_send_result(row, record, won):
+    if not _wild_boss_rank_rows(record):
+        return
+    for char_id, conn, char in _wild_boss_scene_chars(record.get('map_id', '')):
+        if (str(char.get('_wild_boss_boss_id', '')) != str(row.get('id', ''))
+                or int(char.get('_wild_boss_event_start', 0) or 0)
+                != int(record.get('event_start', 0) or 0)):
+            continue
+        payload = encode_sproto([
+            (0, 5), (2, bool(won)), (3, []),
+            (4, _wild_boss_battle_info(char, record)),
+            (5, str(row.get('id', '')))
+        ])
+        send_rpc_push_safe(conn, 620, payload)
+
+
+def _wild_boss_remove_instance(key, inst_id, map_id):
+    with WILD_BOSS_LOCK:
+        if WILD_BOSS_EVENTS.get(key, {}).get('inst_id') != int(inst_id):
+            return
+        for _char_id, conn, _char in _wild_boss_scene_chars(map_id):
+            send_rpc_push_safe(conn, 506, encode_sproto([(0, int(inst_id))]))
+        NPC_HP_MAP.pop(int(inst_id), None)
+        NPC_INST_MAP.pop(int(inst_id), None)
+        NPC_INSTANCE_MAP.pop(int(inst_id), None)
+        NPC_ATTR_MAP.pop(int(inst_id), None)
+        DEAD_NPC_SET.discard(int(inst_id))
+        WILD_BOSS_EVENTS[key]['inst_id'] = None
+
+
+def _wild_boss_auto_exit(key):
+    row = WILD_BOSS_CONFIG.get(str(key[0]), {})
+    map_id = str(row.get('map_id', ''))
+    for _char_id, conn, char in _wild_boss_scene_chars(map_id):
+        if (str(char.get('_wild_boss_boss_id', '')) != str(key[0])
+                or int(char.get('_wild_boss_event_start', 0) or 0) != int(key[1])):
+            continue
+        return_map = str(char.get('pre_copy_map') or '101')
+        return_pos = char.get('pre_copy_pos')
+        char['_wild_boss_boss_id'] = ''
+        char['_wild_boss_event_start'] = 0
+        char['active_copy_id'] = None
+        char['pre_copy_map'] = None
+        char['pre_copy_pos'] = None
+        if not isinstance(return_pos, (list, tuple)) or len(return_pos) < 3:
+            return_pos = default_map_spawn_position(return_map)
+        start_map_transition(
+            conn, char, return_map,
+            lambda tag, data: send_rpc_push_safe(conn, tag, data),
+            override_pos=list(return_pos))
+        save_chars(all_accounts_chars)
+
+
+def _wild_boss_finish(key, won, killer_id=0):
+    with WILD_BOSS_LOCK:
+        record = WILD_BOSS_EVENTS.get(key)
+        if not record or record.get('finished'):
+            return False
+        record['finished'] = True
+        record['win'] = bool(won)
+        record['finished_at'] = int(time.time())
+        row = WILD_BOSS_CONFIG.get(str(key[0]), {})
+        requested_exit = record['finished_at'] + max(
+            0, int(row.get('wait_time', 0) or 0))
+        existence_limit = int(record.get('event_start', 0) or 0) + max(
+            1, int(row.get('exist_time', 1) or 1))
+        record['end_time'] = min(requested_exit, existence_limit)
+        rows = _wild_boss_rank_rows(record)
+        killer = next((entry for entry in rows
+                       if int(entry.get('id', 0) or 0) == int(killer_id or 0)), {})
+        record['last_kill_id'] = int(killer_id or 0)
+        record['last_kill_name'] = str(killer.get('name', ''))
+        timer = record.get('timer')
+        if timer:
+            timer.cancel()
+    row = WILD_BOSS_CONFIG.get(str(key[0]), {})
+    _wild_boss_send_result(row, record, won)
+    exit_at = int(record['end_time'])
+    for _char_id, conn, char in _wild_boss_scene_chars(record.get('map_id', '')):
+        if (str(char.get('_wild_boss_boss_id', '')) == str(key[0])
+                and int(char.get('_wild_boss_event_start', 0) or 0) == int(key[1])):
+            send_rpc_push_safe(conn, 629, encode_sproto([(0, exit_at), (1, 2)]))
+    wait = max(0, int(record['end_time']) - int(time.time()))
+    exit_timer = threading.Timer(wait, _wild_boss_auto_exit, args=(key,))
+    exit_timer.daemon = True
+    exit_timer.start()
+    inst_id = record.get('inst_id')
+    if inst_id is not None:
+        cleanup_timer = threading.Timer(
+            wait + 2, _wild_boss_remove_instance,
+            args=(key, int(inst_id), str(record.get('map_id', ''))))
+        cleanup_timer.daemon = True
+        cleanup_timer.start()
+    if not won:
+        print(f"[WILD BOSS] event expired boss={key[0]} damage_rows={len(rows)}")
+    elif not any(
+            SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(str(drop_id))
+            for drop_id in [row.get('last_kill_drop_id', ''),
+                            row.get('participate_drop_id', '')]
+                            + list(row.get('rank_drop_ids', []))):
+        print(f"[WILD BOSS REWARD BLOCKED] missing explicit item counts boss={key[0]}")
+    return True
+
+
+def _wild_boss_timeout(key):
+    _wild_boss_finish(key, False)
+
+
+def _wild_boss_spawn(conn, char, boss_id, map_id):
+    row = WILD_BOSS_CONFIG.get(str(boss_id), {})
+    event_start = int(char.get('_wild_boss_event_start', 0) or 0)
+    if not row or not event_start or str(row.get('map_id')) != str(map_id):
+        return False
+    record = _wild_boss_event(row, event_start)
+    if not record:
+        _wild_boss_auto_exit((str(boss_id), event_start))
+        return False
+    if record.get('finished'):
+        if _wild_boss_rank_rows(record):
+            send_rpc_push_safe(conn, 620, encode_sproto([
+                (0, 5), (2, bool(record.get('win'))), (3, []),
+                (4, _wild_boss_battle_info(char, record)),
+                (5, str(boss_id))
+            ]))
+        send_rpc_push_safe(conn, 629, encode_sproto([
+            (0, int(record.get('end_time', time.time()) or time.time())),
+            (1, 2)
+        ]))
+        return False
+    npc_id = str(row.get('boss_npc_id', ''))
+    placement = next((entry for entry in MONSTER_DATA.get(str(map_id), [])
+                      if str(entry.get('nid', '')) == npc_id), {})
+    x, z, heading = (int(placement.get(field, 0) or 0)
+                     for field in ('x', 'z', 'o'))
+    with WILD_BOSS_LOCK:
+        inst_id = record.get('inst_id')
+        if inst_id is None or int(inst_id) not in NPC_ATTR_MAP:
+            inst_id, _attr = build_npc_attr_sproto(
+                npc_id, NPC_CONFIG.get(npc_id, {}).get('name', 'Wild Boss'),
+                x, z, heading, initial_hp=record.get('hp'),
+                hp_max_override=record.get('hp_max'))
+            record['inst_id'] = int(inst_id)
+            record['position'] = (x / 100.0, z / 100.0)
+        hp_cur = max(0, min(int(record.get('hp', 0) or 0),
+                            int(record.get('hp_max', 1) or 1)))
+        NPC_HP_MAP[int(inst_id)] = hp_cur
+        NPC_INST_MAP[int(inst_id)] = npc_id
+        NPC_INSTANCE_MAP[int(inst_id)] = str(map_id)
+        _inst_id, attr = build_npc_attr_sproto(
+            npc_id, NPC_CONFIG.get(npc_id, {}).get('name', 'Wild Boss'),
+            x, z, heading, existing_inst_id=inst_id,
+            hp_max_override=record.get('hp_max'))
+    send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
+    stats = get_npc_attr(npc_id)
+    stats['hp_max'] = int(record.get('hp_max', stats['hp_max']))
+    sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur)
+    return True
+
+
+def _wild_boss_apply_hit(conn, char, target_id, client_dmg, skill_id,
+                         requested_effinfo_id, is_cri, client_cri_flag,
+                         client_hit_flag):
+    boss_id = str(char.get('_wild_boss_boss_id', ''))
+    row = WILD_BOSS_CONFIG.get(boss_id)
+    event_start = int(char.get('_wild_boss_event_start', 0) or 0)
+    record = _wild_boss_event(row or {}, event_start)
+    if (not row or not record or record.get('finished')
+            or not is_current_character_connection(conn, char)
+            or int(char.get('hp', 0) or 0) <= 0):
+        return False
+    inst_id = record.get('inst_id')
+    npc_id = str(row.get('boss_npc_id', ''))
+    if (inst_id is None or int(target_id) != int(inst_id)
+            or str(NPC_INST_MAP.get(int(target_id), '')) != npc_id
+            or str(NPC_INSTANCE_MAP.get(int(target_id), '')) != str(char.get('map_id', ''))):
+        return False
+    if int(client_dmg) < 0 or bool(client_cri_flag) != bool(is_cri):
+        return False
+
+    skill_id = str(skill_id)
+    skill_cfg = SKILL_CONFIG.get(skill_id)
+    if not skill_cfg:
+        return False
+    skill_levels = {str(key): value for key, value in (char.get('skill_levels') or {}).items()}
+    starter = get_character_combat_skills(char.get('prof', 0), char.get('equipped_equip', []))
+    available = set(starter.get('atk', []))
+    available.update((starter.get('dodge', ''), starter.get('starter_active', '')))
+    available.update(equipped_weapon_skill_ids(char))
+    if (skill_id not in learned_non_weapon_skill_ids(skill_levels)
+            and skill_id not in available):
+        return False
+    try:
+        skill_level = max(0, int(skill_levels.get(skill_id, 0) or 0))
+    except (TypeError, ValueError):
+        return False
+    valid_effects = {str(skill_cfg.get(field, '')) for field in ('eff0', 'eff1', 'eff2')
+                     if skill_cfg.get(field)}
+    effinfo_id = str(requested_effinfo_id or '')
+    if effinfo_id not in valid_effects:
+        return False
+
+    player_pos = char.get('pos')
+    boss_pos = record.get('position')
+    effect_cfg = EFF_CONFIG.get(effinfo_id, {})
+    params = effect_cfg.get('params', [0, 0, 0, 0, 0])
+    try:
+        param1 = abs(int(params[0] if len(params) > 0 else 0)) / 100.0
+        param2 = abs(int(params[1] if len(params) > 1 else 0)) / 100.0
+        area_type = int(effect_cfg.get('area_type', 0) or 0)
+        trace_distance = max(0, int(skill_cfg.get('trace_distance_cm', 0) or 0)) / 100.0
+        player_x, player_z = float(player_pos[0]) / 100.0, float(player_pos[2]) / 100.0
+        boss_x, boss_z = float(boss_pos[0]), float(boss_pos[1])
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return False
+    if area_type == 1:
+        effect_reach = trace_distance + param1
+    elif area_type == 2:
+        effect_reach = math.hypot(param1, param2 / 2.0)
+    elif area_type in (3, 4, 5):
+        effect_reach = param1
+    else:
+        effect_reach = trace_distance
+    if math.hypot(boss_x - player_x, boss_z - player_z) > max(trace_distance, effect_reach) + 3.0:
+        return False
+
+    attacker_stats = get_character_stats(char)
+    defender_stats = get_npc_attr(npc_id)
+    max_damage, can_hit, possible_crit = get_combat_damage(
+        attacker_stats, defender_stats, skill_id, skill_level,
+        effinfo_id=effinfo_id, sat_type='satm', forced_hit=True,
+        forced_crit=bool(is_cri), max_variance=True)
+    if (client_dmg == 0 and (client_hit_flag or is_cri)
+            or client_dmg > 0 and (not client_hit_flag or not can_hit
+                                   or client_dmg > max_damage + 2)
+            or is_cri and not possible_crit):
+        return False
+
+    with WILD_BOSS_LOCK, npc_hp_lock(int(target_id)):
+        if record.get('finished') or int(record.get('hp', 0) or 0) <= 0:
+            return False
+        actual_damage = min(int(client_dmg), int(record.get('hp', 0) or 0))
+        record['hp'] = max(0, int(record['hp']) - actual_damage)
+        NPC_HP_MAP[int(target_id)] = record['hp']
+        if actual_damage > 0:
+            char_id = str(int(char.get('id', 0) or 0))
+            player = record.setdefault('damage_players', {}).setdefault(char_id, {
+                'id': int(char.get('id', 0) or 0),
+                'name': str(char.get('name', '')),
+                'damage': 0,
+            })
+            player['name'] = str(char.get('name', player.get('name', '')))
+            player['damage'] = int(player.get('damage', 0) or 0) + actual_damage
+            record.setdefault('participants', {})[char_id] = True
+        stats = get_npc_attr(npc_id)
+        stats['hp_max'] = int(record.get('hp_max', stats['hp_max']))
+        for _peer_id, peer_conn, peer_char in _wild_boss_scene_chars(record.get('map_id', '')):
+            if (str(peer_char.get('_wild_boss_boss_id', '')) == boss_id
+                    and int(peer_char.get('_wild_boss_event_start', 0) or 0)
+                    == event_start):
+                sync_npc_attrs_rpc(peer_conn, int(target_id), stats, record['hp'])
+        if record['hp'] <= 0:
+            DEAD_NPC_SET.add(int(target_id))
+            _wild_boss_finish((boss_id, event_start), True, int(char.get('id', 0) or 0))
+    return True
+
+
+def _wild_boss_character_damage(char, effinfo_id):
+    boss_id = str(char.get('_wild_boss_boss_id', ''))
+    row = WILD_BOSS_CONFIG.get(boss_id)
+    if not row or str(char.get('map_id', '')) != str(row.get('map_id', '')):
+        return 0, False
+    record = _wild_boss_event(
+        row or {}, int(char.get('_wild_boss_event_start', 0) or 0))
+    if not row or not record or record.get('finished') or int(record.get('hp', 0) or 0) <= 0:
+        return 0, False
+    npc_id = str(row.get('boss_npc_id', ''))
+    npc_cfg = NPC_CONFIG.get(npc_id, {})
+    matched_skill = next((
+        skill_id for skill_id in str(npc_cfg.get('skill_group', '')).split(';')
+        if skill_id.strip() in SKILL_CONFIG
+        and str(effinfo_id) in {
+            str(SKILL_CONFIG[skill_id.strip()].get(field) or '')
+            for field in ('eff0', 'eff1', 'eff2')
+        }
+    ), None)
+    if not matched_skill:
+        return 0, False
+    damage, hit, critical = get_combat_damage(
+        get_npc_attr(npc_id), get_character_stats(char), matched_skill, 0,
+        effinfo_id=str(effinfo_id), sat_type=npc_damage_sat_type(npc_id),
+        attacker_is_npc=True)
+    return (damage if hit else 0), bool(critical and hit)
+
+
 def _guild_boss_map_id(map_id):
     map_id = str(map_id)
     return next((boss_id for boss_id, row in GUILD_BOSS_DATA.items()
@@ -19654,8 +20203,22 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
             fields.insert(0, (0, _guild_info_bytes(found, None)))
         send_rpc_push(586, encode_sproto(fields))
 
+    elif msg == 200:  # request_wild_boss_info
+        send_rpc_push(605, _wild_boss_activity_payload(char))
+
     elif msg == 195:  # request_guild_boss / Gang activity overview
         send_rpc_push(599, _guild_activity_response(guild, char))
+
+    elif msg == 231 and char and _wild_boss_map_id(char.get('map_id', '')):
+        boss_id = str(char.get('_wild_boss_boss_id', ''))
+        record = _wild_boss_event(
+            WILD_BOSS_CONFIG.get(boss_id, {}),
+            int(char.get('_wild_boss_event_start', 0) or 0))
+        battle_info = encode_sproto([
+            (0, _wild_boss_battle_info(char, record)),
+            (1, 1 if record else 0)
+        ])
+        send_rpc_push(627, battle_info)
 
     elif msg == 231:  # request_battle_info; Gang Boss live battle/damage ranking
         boss_id = _guild_boss_map_id(char.get('map_id', '')) if char else None
@@ -24110,6 +24673,7 @@ def client_handler(conn, addr):
 
                 current_map = str(picked_char.get('map_id', '')) if picked_char else ''
                 guild_boss_id = _guild_boss_map_id(current_map) if picked_char else None
+                wild_boss_id = _wild_boss_map_id(current_map) if picked_char else None
                 is_tower = bool(picked_char and is_tower_map(current_map))
                 if picked_char and (is_exp_map(current_map) or is_equipment_copy_map(current_map)):
                     # Copy monsters are calculated by the server AI from
@@ -24122,6 +24686,12 @@ def client_handler(conn, addr):
                     # Street Race traffic is client-side scenery. It does not
                     # damage the character or open a character-revive dialog.
                     print(f"[STREET RACE] ignored character attack report player={picked_char.get('id')} map={current_map}")
+                elif (picked_char and wild_boss_id
+                      and is_current_character_connection(conn, picked_char)
+                      and int(picked_char.get('hp', 0) or 0) > 0
+                      and target_id == int(picked_char.get('id', 0) or 0)):
+                    server_dmg, calc_cri = _wild_boss_character_damage(
+                        picked_char, effinfo_id)
                 elif picked_char and guild_boss_id:
                     # Guild Boss attacks are emitted by the configured server
                     # AI; accepting the client's local report would duplicate
@@ -24568,6 +25138,21 @@ def client_handler(conn, addr):
 
                         if _guild_boss_map_id(picked_char.get('map_id', '')):
                             _guild_boss_apply_hit(
+                                conn, picked_char, target_id, client_dmg, skill_id,
+                                requested_effinfo_id, is_cri, client_cri_flag,
+                                client_hit_flag)
+                            continue
+                        wild_boss_id = _wild_boss_map_id(picked_char.get('map_id', ''))
+                        wild_boss_record = (
+                            _wild_boss_event(
+                                WILD_BOSS_CONFIG.get(
+                                    str(picked_char.get('_wild_boss_boss_id', '')), {}),
+                                int(picked_char.get('_wild_boss_event_start', 0) or 0))
+                            if wild_boss_id else None
+                        )
+                        if (wild_boss_id and wild_boss_record
+                                and int(target_id) == int(wild_boss_record.get('inst_id') or 0)):
+                            _wild_boss_apply_hit(
                                 conn, picked_char, target_id, client_dmg, skill_id,
                                 requested_effinfo_id, is_cri, client_cri_flag,
                                 client_hit_flag)
@@ -25421,6 +26006,12 @@ def client_handler(conn, addr):
 
                 cur_map = str(picked_char.get('map_id', '11')) if picked_char else ''
                 report_valid = False
+                if picked_char and _wild_boss_map_id(cur_map):
+                    print(f"[WILD BOSS] ignored client death report player={picked_char.get('id')} inst={inst_id}")
+                    if session is not None:
+                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                        conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    continue
                 if picked_char and _guild_boss_map_id(cur_map):
                     print(f"[GUILD BOSS] ignored client death report player={picked_char.get('id')} inst={inst_id}")
                     if session is not None:
@@ -26787,6 +27378,19 @@ def client_handler(conn, addr):
                         reconcile_equipment_stage_login(picked_char)
                     current_map = str(picked_char.get('map_id', '11'))
                     boss_cfg = WILD_BOSS_CONFIG.get(mid, {}) if msg == 201 else {}
+                    wild_boss_entry_ok = True
+                    wild_boss_event_start = 0
+                    if msg == 201:
+                        wild_boss_entry_ok, entry_reason, boss_cfg, wild_boss_event_start = (
+                            _wild_boss_entry_check(picked_char, mid))
+                        if wild_boss_entry_ok:
+                            mid = str(boss_cfg.get('map_id', ''))
+                        else:
+                            print(f"[WILD BOSS] entry rejected id={body.get(0)} "
+                                  f"player={picked_char.get('id')} reason={entry_reason}")
+                            send_rpc_push(605, _wild_boss_activity_payload(picked_char))
+                    elif _wild_boss_map_id(mid):
+                        wild_boss_entry_ok = False
                     valid_guild_boss = True
                     if msg == 194:
                         configured_boss = GUILD_BOSS_DATA.get(mid)
@@ -26826,11 +27430,7 @@ def client_handler(conn, addr):
                             # enter_guild_city_scene sends GuildCaptureData.ID;
                             # resolve that capture ID to its actual MapInfoData ID.
                             mid = str(capture_map_id)
-                    valid_world_boss = (msg != 201 or (
-                            boss_cfg.get('type') == 5
-                            and str(boss_cfg.get('map_id')) == mid
-                            and int(boss_cfg.get('min_level', 1)) <= int(picked_char.get('level', 1)) <= int(boss_cfg.get('max_level', 80))
-                    ))
+                    valid_world_boss = wild_boss_entry_ok
                     if not is_current_character_connection(conn, picked_char):
                         print(f"[SCENE ENTRY] denied stale character socket player={picked_char.get('id')}")
                     elif not valid_world_boss:
@@ -26855,6 +27455,10 @@ def client_handler(conn, addr):
                                 and str(mid) != str(cash_state.get('map_id'))):
                             finish_cash_stage(picked_char, False, notify=False)
                             picked_char.pop('cash_stage_state', None)
+                        if (_wild_boss_map_id(current_map)
+                                and str(current_map) != str(mid)):
+                            picked_char['_wild_boss_boss_id'] = ''
+                            picked_char['_wild_boss_event_start'] = 0
                         if is_public_world_map(mid):
                             # Ordinary MapInfoData BIG_WORLD scenes (including
                             # DSJ_zhuCheng/101) are not copy instances. CopySceneData
@@ -26873,8 +27477,16 @@ def client_handler(conn, addr):
                             picked_char['active_copy_id'] = mid
                         start_map_transition(conn, picked_char, mid, send_rpc_push)
                         if msg == 201: # world_boss
-                            advance_missions(picked_char, send_rpc_push, 'world_boss')
-                            send_rpc_push(552, encode_sproto([(0, 1), (1, mid), (2, True)]))
+                            entered_new_event = _wild_boss_entry_commit(
+                                picked_char, str(boss_cfg.get('id', body.get(0))),
+                                wild_boss_event_start)
+                            if entered_new_event:
+                                advance_missions(picked_char, send_rpc_push, 'world_boss')
+                            send_rpc_push(605, _wild_boss_activity_payload(picked_char))
+                    if msg == 201 and not valid_world_boss:
+                        _wild_boss_entry_release(
+                            picked_char, get_val_str(body, 0, ''),
+                            wild_boss_event_start)
                 if picked_char and msg == 194:
                     _guild_boss_entry_release(picked_char, get_val_str(body, 0, ''))
                 if session is not None:
@@ -29546,7 +30158,7 @@ def client_handler(conn, addr):
                     send_rpc_response, session
                 )
 
-            elif (msg in (146, 147, 148, 149, 150, 151, 152, 153, 154,
+            elif (msg in (146, 147, 148, 149, 150, 151, 152, 153, 154, 200,
                           169, 170, 173, 174, 175, 176, 195, 212, 231, 233, 247,
                           285, 286, 287, 288, 289, 291, 293, 294, 295, 315, 318, 319, 320)
                   or (msg == 143 and get_val_int(body, 0, -1) == 3)
