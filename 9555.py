@@ -21342,12 +21342,6 @@ def client_handler(conn, addr):
                             week_day, week_can_claim, week_complete = resolve_sign_week_state(
                                 picked_char
                             )
-                        unlock_ids = unlocked_function_ids(picked_char)
-                        unlock_payload = function_unlock_payload(picked_char)
-                        unlock_fields = decode_sproto(unlock_payload)
-                        unlock_sent = send_rpc_push(
-                            614, unlock_payload
-                        )
                         state_sent = send_rpc_push(
                             641,
                             sign_week_payload(
@@ -21359,10 +21353,6 @@ def client_handler(conn, addr):
                             f"[SIGN WEEK MAP SYNC] player={picked_char.get('id')} "
                             f"day={week_day} can_claim={week_can_claim} "
                             f"complete={week_complete} "
-                            f"welfare_3005={'present' if '3005' in unlock_ids else 'missing'} "
-                            f"tab_4014={'present' if '4014' in unlock_ids else 'missing'} "
-                            f"push_field10={unlock_fields.get(10, 'missing')} "
-                            f"push_614={'sent' if unlock_sent else 'failed'} "
                             f"push_641={'sent' if state_sent else 'failed'}"
                         )
                     if mid == "101":
@@ -26845,20 +26835,16 @@ def client_handler(conn, addr):
                 # Schema: ID(0) string, state(1) long
                 func_id = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
                 func_state = get_val_int(body, 1)
-                sync_tutorial_state = False
                 if picked_char and func_id:
                     if 'completed_tutorials' not in picked_char:
                         picked_char['completed_tutorials'] = []
                     if func_id not in picked_char['completed_tutorials']:
                         picked_char['completed_tutorials'].append(func_id)
                         save_chars(all_accounts_chars)
-                        sync_tutorial_state = (func_id == "100")
                     print(f"[TUTORIAL COMPLETE] func_id={func_id} state={func_state}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
-                if sync_tutorial_state and is_current_character_connection(conn, picked_char):
-                    send_rpc_push(614, function_unlock_payload(picked_char))
 
             elif msg == 120: # chat; world chat consumes its required speaker item
                 chat_type = get_val_int(body, 3, -1)
@@ -27414,25 +27400,12 @@ def client_handler(conn, addr):
                 elif msg == 253 and picked_char: # request_sign_week_info
                     with get_character_transaction_lock(picked_char):
                         day, can_claim, complete = resolve_sign_week_state(picked_char)
-                    unlock_ids = unlocked_function_ids(picked_char)
-                    unlock_payload = function_unlock_payload(picked_char)
-                    unlock_fields = decode_sproto(unlock_payload)
-                    unlock_sent = send_rpc_push(
-                        614, unlock_payload
-                    )
-                    print(
-                        f"[SIGN WEEK REQUEST] player={picked_char.get('id')} "
-                        f"day={day} can_claim={can_claim} complete={complete} "
-                        f"welfare_3005={'present' if '3005' in unlock_ids else 'missing'} "
-                        f"tab_4014={'present' if '4014' in unlock_ids else 'missing'} "
-                        f"push_field10={unlock_fields.get(10, 'missing')} "
-                        f"push_614={'sent' if unlock_sent else 'failed'}"
-                    )
                     state_sent = send_rpc_push(
                         641, sign_week_payload(day, can_claim, complete)
                     )
                     print(
-                        f"[SIGN WEEK STATE PUSH] player={picked_char.get('id')} "
+                        f"[SIGN WEEK REQUEST] player={picked_char.get('id')} "
+                        f"day={day} can_claim={can_claim} complete={complete} "
                         f"push_641={'sent' if state_sent else 'failed'}"
                     )
 
