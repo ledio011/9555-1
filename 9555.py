@@ -12131,6 +12131,131 @@ BACKPACKS = {
     3: ('badge_inventory', 604),
     5: ('fashion_inventory', 616),
 }
+TIMED_ITEM_BUCKETS = (
+    ('inventory', 2),
+    ('equip_inventory', 0),
+    ('badge_inventory', 3),
+    ('fashion_inventory', 5),
+    ('equipped_equip', 1),
+    ('equipped_badges', 4),
+    ('equipped_fashion', 6),
+)
+
+
+def item_use_hour(item_id):
+    try:
+        return max(0, int(ITEM_CONFIG.get(str(item_id), {}).get('use_hour', 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def expire_timed_inventory_items(picked_char, now=None):
+    """Set missing client expiry timestamps and remove expired items from all packs."""
+    now = int(time.time() if now is None else now)
+    updates = []
+    changed = False
+    equipped_changed = False
+    weapon_changed = False
+    for bucket, container_type in TIMED_ITEM_BUCKETS:
+        records = picked_char.get(bucket, [])
+        if not isinstance(records, list):
+            continue
+        retained = []
+        bucket_changed = False
+        for item in records:
+            item_id = str(item.get('id', ''))
+            use_hour = item_use_hour(item_id)
+            parm = item.get('parm')
+            if not isinstance(parm, list):
+                parm = list(parm) if isinstance(parm, tuple) else []
+            if len(parm) < 8:
+                parm.extend([0] * (8 - len(parm)))
+            try:
+                expires_at = int(parm[4] or 0)
+            except (TypeError, ValueError):
+                expires_at = 0
+            if expires_at <= 0 and use_hour > 0:
+                parm[4] = now + use_hour * 3600
+                item['parm'] = parm
+                retained.append(item)
+                updates.append((container_type, item))
+                changed = True
+                continue
+            if expires_at > 0 and expires_at <= now:
+                updates.append((container_type, None, int(item.get('index_id', 0))))
+                bucket_changed = True
+                changed = True
+                if bucket.startswith('equipped_'):
+                    equipped_changed = True
+                    if bucket == 'equipped_equip' and equipment_subtype(item) == 0:
+                        weapon_changed = True
+                continue
+            item['parm'] = parm
+            retained.append(item)
+        if bucket_changed:
+            picked_char[bucket] = retained
+    return changed, updates, equipped_changed, weapon_changed
+
+
+def persist_timed_inventory_expiry(picked_char, now=None):
+    """Persist expiry migration/removals atomically before notifying the client."""
+    ensure_backpack_state(picked_char)
+    bucket_names = tuple(bucket for bucket, _ in TIMED_ITEM_BUCKETS)
+    previous = {bucket: copy.deepcopy(picked_char.get(bucket, []))
+                for bucket in bucket_names}
+    result = expire_timed_inventory_items(picked_char, now)
+    changed, _updates, _equipped_changed, _weapon_changed = result
+    if changed and not save_chars(all_accounts_chars):
+        for bucket, records in previous.items():
+            picked_char[bucket] = records
+        print(f"[ITEM EXPIRY] persistence failed player={picked_char.get('id')}")
+        return False, [], False, False
+    return result
+
+
+def _inventory_expiry_worker_tick():
+    for char_id, (conn, picked_char) in list(ALL_CONNECTIONS.items()):
+        if conn is None or picked_char is None:
+            continue
+        try:
+            with get_character_transaction_lock(picked_char):
+                if not is_current_character_connection(conn, picked_char):
+                    continue
+                changed, updates, equipped_changed, weapon_changed = (
+                    persist_timed_inventory_expiry(picked_char)
+                )
+                if not changed:
+                    continue
+                push = lambda tag, payload: send_rpc_push_safe(conn, tag, payload)
+                for update in updates:
+                    container_type, item = update[:2]
+                    if item is None:
+                        push_backpack_item_update(
+                            push, container_type, None, update[2]
+                        )
+                    else:
+                        push_backpack_item_update(push, container_type, item)
+                if equipped_changed:
+                    sync_char_attrs_rpc(conn, picked_char)
+                    sync_equipment_status_to_peers(picked_char)
+                    sync_main_player_visual(picked_char, push)
+                    if weapon_changed:
+                        skills_map = build_skills_map(
+                            picked_char.get('prof', 0),
+                            picked_char.get('level', 1),
+                            picked_char.get('skill_levels', {}),
+                            picked_char.get('equipped_equip', []),
+                            picked_char.get('skill_positions', {}),
+                        )
+                        push(540, encode_sproto([(0, skills_map), (1, False)]))
+                print(
+                    f"[ITEM EXPIRY] player={char_id} "
+                    f"updates={len(updates)} equipped_changed={equipped_changed}"
+                )
+        except Exception:
+            print(f"[ITEM EXPIRY] sweep failed player={char_id}")
+            traceback.print_exc()
+    return True
 
 def item_backpack_type(item_id):
     """Return the APK ITEM_CONTAINER_TYPE used by ItemData.GetContainerType."""
@@ -12587,13 +12712,14 @@ def add_to_inventory(picked_char, item_id, amount, quality=None):
     cfg = ITEM_CONFIG.get(item_id, {})
     quality = int(cfg.get('quality', 0) if quality is None else quality)
     max_stack = max(1, int(cfg.get('max_stack', 1)))
+    use_hour = item_use_hour(item_id)
     if container_type in (0, 5):
         max_stack = 1
     records = picked_char[bucket]
     # Preflight all stack room and free slots before changing anything. The
     # client rejects an add when its fixed 100-slot container cannot fit it.
     stack_room = 0
-    if max_stack > 1:
+    if max_stack > 1 and not use_hour:
         stack_room = sum(max(0, max_stack - int(item.get('amount', 0)))
                          for item in records if str(item.get('id')) == item_id)
     free_slots = max(0, 100 - len(records))
@@ -12601,7 +12727,7 @@ def add_to_inventory(picked_char, item_id, amount, quality=None):
     if slots_needed > free_slots:
         print(f"[BACKPACK] capacity full; skipped {remaining} of item={item_id} char={picked_char.get('id')}")
         return False
-    if max_stack > 1:
+    if max_stack > 1 and not use_hour:
         for item in records:
             if (item['id'] == item_id
                     and int(item.get('amount', 0)) < max_stack):
@@ -12610,6 +12736,7 @@ def add_to_inventory(picked_char, item_id, amount, quality=None):
                 remaining -= moved
                 if remaining <= 0:
                     return True
+    expires_at = int(time.time()) + use_hour * 3600 if use_hour else 0
     while remaining > 0 and len(records) < 100:
         stack = min(remaining, max_stack)
         parms = [0] * 8
@@ -12622,9 +12749,8 @@ def add_to_inventory(picked_char, item_id, amount, quality=None):
             'amount': stack, 'bindflag': True, 'level': 0, 'quality': quality,
             'appraise': 0, 'parm': parms, 'random_attri': {}, 'inlay': {}
         }
-        use_hour = max(0, int(cfg.get('use_hour', 0) or 0))
         if use_hour:
-            new_item['parm'][4] = int(time.time()) + use_hour * 3600
+            new_item['parm'][4] = expires_at
         if container_type == 0:
             new_item['random_attri'] = roll_equip_random_attributes(new_item) or {}
         records.append(new_item)
@@ -12648,7 +12774,7 @@ def can_add_to_inventory(picked_char, item_id, amount, quality=None, extra_free_
     if container_type in (0, 5):
         max_stack = 1
     stack_room = 0
-    if max_stack > 1:
+    if max_stack > 1 and not item_use_hour(item_id):
         stack_room = sum(max(0, max_stack - int(item.get('amount', 0)))
                          for item in records if str(item.get('id')) == item_id)
     free_slots = max(0, 100 - len(records) + max(0, int(extra_free_slots)))
@@ -12677,7 +12803,7 @@ def can_add_reward_list_to_inventory(picked_char, rewards):
             max_stack = 1
         records = picked_char[bucket]
         stack_room = 0
-        if max_stack > 1:
+        if max_stack > 1 and not item_use_hour(item_id):
             stack_room = sum(max(0, max_stack - int(item.get('amount', 0)))
                              for item in records if str(item.get('id')) == item_id)
         slots = max(0, amount - stack_room + max_stack - 1) // max_stack
@@ -20715,7 +20841,7 @@ def client_handler(conn, addr):
                 sid = get_val_int(body, 5, 1); cur_areaId = str(get_area_id(sid))
                 # sync_common_data: serverTime(0), time_offset(2), func_info(9), pvp_scale(4), seed(12), server_level(13), start_time(14)
                 resp = encode_sproto([
-                    (0, 2), (1, "1.012.017"), (2, "205"), (3, 1),
+                    (0, int(time.time())), (1, "1.012.017"), (2, "205"), (3, 1),
                     # pvp_scale = 1.0 (10000), seed = random
                     (4, 10000), (12, random.randint(1, 10000))
                 ])
@@ -20790,6 +20916,15 @@ def client_handler(conn, addr):
                         f"conn_id={conn_id}"
                     )
                     init_character_fields(picked_char)
+                    with get_character_transaction_lock(picked_char):
+                        expiry_changed, _expiry_updates, _equipped_expired, _weapon_expired = (
+                            persist_timed_inventory_expiry(picked_char)
+                        )
+                    if expiry_changed:
+                        print(
+                            f"[ITEM EXPIRY] reconciled on login "
+                            f"player={picked_char.get('id')}"
+                        )
                     picked_char['_cash_stage_map_ready'] = False
                     print(
                         f"[CHARACTER PICK READY] id={picked_char.get('id')} "
@@ -26710,16 +26845,20 @@ def client_handler(conn, addr):
                 # Schema: ID(0) string, state(1) long
                 func_id = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
                 func_state = get_val_int(body, 1)
+                sync_tutorial_state = False
                 if picked_char and func_id:
                     if 'completed_tutorials' not in picked_char:
                         picked_char['completed_tutorials'] = []
                     if func_id not in picked_char['completed_tutorials']:
                         picked_char['completed_tutorials'].append(func_id)
                         save_chars(all_accounts_chars)
+                        sync_tutorial_state = (func_id == "100")
                     print(f"[TUTORIAL COMPLETE] func_id={func_id} state={func_state}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
+                if sync_tutorial_state and is_current_character_connection(conn, picked_char):
+                    send_rpc_push(614, function_unlock_payload(picked_char))
 
             elif msg == 120: # chat; world chat consumes its required speaker item
                 chat_type = get_val_int(body, 3, -1)
@@ -29933,6 +30072,7 @@ def start_server():
     print(f"GAME SERVER 9555 READY ON PORT {PORT}")
     _restore_guild_dance_speaker_timers()
     threading.Thread(target=_guild_boss_scheduler_loop, daemon=True).start()
+    RepeatingTask(10.0, _inventory_expiry_worker_tick).start()
     while True:
         try:
             cl, ad = server.accept()
