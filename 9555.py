@@ -409,7 +409,9 @@ EQUIP_CONFIG = {} # equipId -> {name, lv, class, job, position, base_stat, base_
 EQUIP_DROP_CONFIG = {} # EquipDrop ID -> weighted random equipment attribute definitions
 WEAPON_DROP_CONFIG = {} # WeaponDrop ID -> weighted random weapon skill definitions
 GOTHAM_BOSS_WEAPON_CLASS_WEIGHTS = {
-    1: 32, 2: 23, 3: 17, 4: 12, 5: 8, 6: 5, 7: 3, 8: 2
+    1: {1: 26, 2: 25, 3: 24, 4: 11, 5: 7, 6: 4, 7: 2, 8: 1},
+    3: {1: 30, 2: 28, 3: 25, 4: 8, 5: 5, 6: 2.5, 7: 1, 8: 0.5},
+    7: {1: 34, 2: 31, 3: 25, 4: 6, 5: 2.5, 6: 1, 7: 0.4, 8: 0.1},
 }
 GOTHAM_BOSS_EXCLUDED_WEAPON_IDS = frozenset(("10407", "20407", "30407"))
 QUALITY_CONFIG = {} # QualityData ID -> ordered quality score/modulus rows
@@ -9429,6 +9431,33 @@ def get_exp_stage_completion_reward(copy_id):
     return max(0, int(reward.get('exp', 0)))
 
 
+def exp_stage_kill_experience(copy_id, player_level):
+    """Return the requested per-kill fallback; this APK has no live EXP drop quantities."""
+    fallback = {
+        '223': (800, 950),
+        '224': 1800,
+        '225': 3500,
+        '226': 6700,
+        '227': 12800,
+        '228': 24500,
+        '229': 47002,
+    }.get(str(copy_id))
+    if fallback is None:
+        return 0
+    if isinstance(fallback, int):
+        return fallback
+
+    cfg = COPY_SCENE_CONFIG.get(str(copy_id), {})
+    min_level = max(1, int(cfg.get('min_level', 6)))
+    max_level = max(min_level, int(cfg.get('max_level', 20)))
+    try:
+        level = max(min_level, min(max_level, int(player_level)))
+    except (TypeError, ValueError):
+        level = min_level
+    low, high = fallback
+    return low + (high - low) * (level - min_level) // (max_level - min_level)
+
+
 def clear_exp_active_monsters(exp_state, send_rpc_push):
     """Despawn the current wave and retire its instance IDs exactly once."""
     if not exp_state:
@@ -9476,12 +9505,11 @@ def finish_exp_team_stage(conn, push, owner, state, win):
         eligible = int(cid) in reward_eligible
         amount = (int(get_exp_stage_completion_reward(copy_id)
                       * ratio * (1 if win else 0.5)) if eligible else 0)
-        cash=int(amount*0.1)
         send=lambda tag,data,who=cid:send_push_to_char(who,tag,data)
-        if amount or cash:grant_item_rewards(char,[("2001",0,amount),("1001",0,cash)],member_conn or conn,send,save=False)
-        items=([encode_sproto([(0,'2001'),(1,amount),(3,0)]),
-                encode_sproto([(0,'1001'),(1,cash),(3,0)])]
-               if eligible and (amount or cash) else [])
+        if amount:
+            grant_item_rewards(char,[("2001",0,amount)],member_conn or conn,send,save=False)
+        items=([encode_sproto([(0,'2001'),(1,amount),(3,0)])]
+               if eligible and amount else [])
         result=encode_sproto([(0,subtype),(1,copy_id),(2,bool(win)),(3,flag),(4,grade),(5,items)])
         if member_conn and str(char.get('map_id')) == exp_run_map_id(state):
             send_exp_result_to_char(char,result)
@@ -9568,18 +9596,14 @@ def _finish_exp_stage_impl(conn, send_rpc_push, picked_char, exp_state, win=True
     ratio = min(1.0, exp_state['total_kills'] / total_max_kills) if total_max_kills > 0 else 1.0
 
     exp_reward = int(full_exp * ratio) if win else int(full_exp * ratio * 0.5)
-    cash_reward = int(exp_reward * 0.1)
 
-    if picked_char and (exp_reward or cash_reward):
-        rewards = [("2001", 0, exp_reward), ("1001", 0, cash_reward)]
+    if picked_char and exp_reward:
+        rewards = [("2001", 0, exp_reward)]
         grant_item_rewards(picked_char, rewards, conn, send_rpc_push, save=True)
 
     res_items = []
-    if exp_reward or cash_reward:
-        res_items = [
-            encode_sproto([(0, "2001"), (1, exp_reward), (3, 0)]),
-            encode_sproto([(0, "1001"), (1, cash_reward), (3, 0)])
-        ]
+    if exp_reward:
+        res_items = [encode_sproto([(0, "2001"), (1, exp_reward), (3, 0)])]
 
     gradeFlag = 0
     grade = 0
@@ -9705,26 +9729,24 @@ def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid, grant_reward
 
 def gotham_boss_reward_plan(rank):
     """Return the rank-scaled enhancer and weapon counts for The Pain."""
-    if rank <= 1:
-        return 3, 5
-    if rank <= 5:
-        return 1, 3
-    if rank <= 10:
+    if rank <= 2:
+        return 2, 3
+    if rank <= 6:
         return 1, 2
-    if rank <= 50:
-        return 1, 1
     return 0, 1
 
 
-def gotham_boss_weapon_rewards(char, count):
+def gotham_boss_weapon_rewards(char, count, rank):
     """Roll eligible regular weapons across all professions, never paid BigSale skins."""
     try:
         profession = int(char.get("prof", -1))
-        max_class = _max_shop_equipment_class(char, profession)
     except (TypeError, ValueError):
         return None
-    if profession not in (0, 1, 2) or count < 0:
+    if profession not in (0, 1, 2) or count < 0 or rank < 1:
         return None
+
+    rank_tier = 1 if rank <= 2 else 3 if rank <= 6 else 7
+    class_weights = GOTHAM_BOSS_WEAPON_CLASS_WEIGHTS[rank_tier]
 
     candidates_by_class = {}
     for equip_id, equip_cfg in EQUIP_CONFIG.items():
@@ -9738,7 +9760,7 @@ def gotham_boss_weapon_rewards(char, count):
                     or weapon_type not in (0, 1, 2)
                     or int(equip_cfg.get("job", -1)) not in (-1, weapon_type)
                     or int(ITEM_CONFIG.get(str(equip_id), {}).get("type", -1)) != 2
-                    or equip_class < 1 or equip_class > max_class):
+                    or equip_class not in class_weights):
                 continue
             drop_ids = equip_cfg.get("drop_ids") or []
             drop_id = str(drop_ids[quality]).strip() if 0 <= quality < len(drop_ids) else ""
@@ -9756,7 +9778,7 @@ def gotham_boss_weapon_rewards(char, count):
     if not available_classes:
         return None
     weights = [
-        GOTHAM_BOSS_WEAPON_CLASS_WEIGHTS.get(equip_class, 0)
+        class_weights.get(equip_class, 0)
         for equip_class in available_classes
     ]
     if not any(weights):
@@ -9801,7 +9823,7 @@ def gotham_boss_rank_mail(slot):
             pending = True
             continue
         enhancer_count, weapon_count = gotham_boss_reward_plan(rank)
-        weapon_rewards = gotham_boss_weapon_rewards(char, weapon_count)
+        weapon_rewards = gotham_boss_weapon_rewards(char, weapon_count, rank)
         if weapon_rewards is None:
             print(f"[GOTHAM BOSS REWARD PENDING] no configured weapon rewards "
                   f"for character={char_id} rank={rank}")
@@ -10000,22 +10022,28 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
 
     if valid_kill and grant_rewards:
         if exp_state and exp_state.get('team_id'):
-            npc_lv = get_npc_attr(npcid, 1).get('lv', 1)
             for member_id, member_conn, member_char in exp_participant_chars(exp_state):
-                if not exp_reward_eligible(exp_state, member_id):
+                member_exp = (
+                    exp_stage_kill_experience(
+                        exp_state.get('copy_id'), member_char.get('level', 1))
+                    if exp_reward_eligible(exp_state, member_id) else 10
+                )
+                if member_exp <= 0:
                     continue
-                member_exp, member_cash = calculate_npc_kill_rewards(
-                    member_char.get('level', 1), npc_lv)
-                member_rewards = [
-                    ("2001", 0, member_exp), ("1001", 0, member_cash)
-                ]
+                member_rewards = [("2001", 0, member_exp)]
                 member_popup = encode_sproto([(0, [
-                    encode_sproto([(0, '2001'), (1, member_exp), (3, 0)]),
-                    encode_sproto([(0, '1001'), (1, member_cash), (3, 0)])
+                    encode_sproto([(0, '2001'), (1, member_exp), (3, 0)])
                 ])])
                 member_push = lambda tag, data, cid=member_id: send_push_to_char(cid, tag, data)
                 grant_item_rewards(member_char, member_rewards, member_conn, member_push, save=False)
                 member_push(638, member_popup)
+        elif exp_state:
+            exp_kill = exp_stage_kill_experience(
+                exp_state.get('copy_id'), picked_char.get('level', 1))
+            if exp_kill > 0:
+                grant_item_rewards(
+                    picked_char, [("2001", 0, exp_kill)],
+                    conn, send_rpc_push, save=False)
         else:
             npc_stats = get_npc_attr(
                 npcid, picked_char.get('level', 1)
