@@ -20349,6 +20349,9 @@ def client_handler(conn, addr):
         result = _rank_pvp_finalize_state(picked_char, bool(win), reason)
         if not result:
             return False
+        timeout_timer = picked_char.pop("_rank_pvp_timer", None)
+        if timeout_timer is not None:
+            timeout_timer.cancel()
         # 33001/33101 are client reward references but their drop definitions
         # are absent from the supplied APK data. Grant only a verified mapping.
         reward_id = "33001" if win else "33101"
@@ -20395,6 +20398,9 @@ def client_handler(conn, addr):
             (4, int(result["best_rank"])), (5, 0)
         ])
         if show_result:
+            send_rpc_push(629, encode_sproto([
+                (0, int(time.time())), (1, 2)
+            ]))
             picked_char["rank_pvp_pending_result"] = result_data.hex()
             save_chars(all_accounts_chars)
             if is_current_character_connection(conn, picked_char):
@@ -20451,6 +20457,23 @@ def client_handler(conn, addr):
             next_timer.start()
 
 
+    def rank_pvp_timeout_if_due(expected_match_id=None):
+        match = picked_char.get("_rank_pvp_match") if picked_char else None
+        if (not isinstance(match, dict)
+                or (expected_match_id is not None
+                    and str(match.get("match_id")) != str(expected_match_id))
+                or match.get("result_recorded")
+                or not match.get("started_at")
+                or str(picked_char.get("map_id", "")) != RANK_PVP_MAP_ID):
+            return False
+        try:
+            deadline = float(match.get("deadline", 0) or 0)
+        except (TypeError, ValueError):
+            deadline = 0
+        if deadline <= 0 or time.time() < deadline:
+            return False
+        return finish_rank_pvp_match(False, "timeout", True)
+
     def rank_pvp_timeout(expected_match_id):
         match = picked_char.get("_rank_pvp_match") if picked_char else None
         if (not isinstance(match, dict)
@@ -20458,14 +20481,18 @@ def client_handler(conn, addr):
                 or match.get("result_recorded")
                 or str(picked_char.get("map_id", "")) != RANK_PVP_MAP_ID):
             return
-        deadline = int(match.get("deadline", 0) or 0)
-        if deadline and int(time.time()) < deadline:
-            timer = threading.Timer(deadline - time.time(), rank_pvp_timeout, args=(expected_match_id,))
+        try:
+            deadline = float(match.get("deadline", 0) or 0)
+        except (TypeError, ValueError):
+            deadline = 0
+        remaining = deadline - time.time()
+        if deadline > 0 and remaining > 0:
+            timer = threading.Timer(remaining, rank_pvp_timeout, args=(expected_match_id,))
             timer.daemon = True
             picked_char["_rank_pvp_timer"] = timer
             timer.start()
             return
-        finish_rank_pvp_match(False, "timeout", True)
+        rank_pvp_timeout_if_due(expected_match_id)
 
     def start_rank_pvp_after_vs(expected_match_id):
         match = picked_char.get("_rank_pvp_match") if picked_char else None
@@ -24163,6 +24190,8 @@ def client_handler(conn, addr):
                         # being hit, so resolve the attacker from this active match
                         # instead of the unrelated generic NPC 100 template.
                         rank_match = picked_char.get("_rank_pvp_match")
+                        if isinstance(rank_match, dict) and rank_match.get("started_at"):
+                            rank_pvp_timeout_if_due(str(rank_match.get("match_id")))
                         rank_opponent = None
                         valid_counter = bool(
                             is_current_character_connection(conn, picked_char)
@@ -24366,6 +24395,9 @@ def client_handler(conn, addr):
                         # only the selected opponent in the active map-501 match.
                         if str(picked_char.get("map_id", "")) == RANK_PVP_MAP_ID:
                             rank_match = picked_char.get("_rank_pvp_match")
+                            if (isinstance(rank_match, dict) and rank_match.get("started_at")
+                                    and rank_pvp_timeout_if_due(str(rank_match.get("match_id")))):
+                                continue
                             if (not is_current_character_connection(conn, picked_char)
                                     or not isinstance(rank_match, dict)
                                     or rank_match.get("result_recorded")
