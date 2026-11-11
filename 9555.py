@@ -15678,7 +15678,7 @@ def _rank_character_sort_items(sort_type):
         -row[0], row[1], row[2], row[3], row[4]
     ))
     rows = []
-    for score, _tie_breaker, _progress_tiebreaker, _created_at, char_id, character in ranked[:50]:
+    for score, _tie_breaker, _progress_tiebreaker, _created_at, char_id, character in ranked:
         rows.append(encode_sproto([
             (0, char_id), (1, score << 32),
             (2, str(character.get('name', 'Hero'))),
@@ -15689,7 +15689,7 @@ def _rank_character_sort_items(sort_type):
 
 def _rank_guild_sort_items(sort_type=6):
     rows = []
-    for guild in _guild_ranked_list()[:50]:
+    for guild in _guild_ranked_list():
         chief = _guild_char_by_id(guild.get('chief_id', 0)) or {}
         chief_name = str(chief.get('name') or guild.get('chief_name') or '')
         guild_name = str(guild.get('name', '') or '')
@@ -26384,7 +26384,7 @@ def client_handler(conn, addr):
                     race_copy_id = street_race_daily_copy_id()
                     records = street_race_rank_records(race_copy_id)
                     day_centiseconds = STREET_RACE_MAX_TIME_CS
-                    for i, row in enumerate(records[:50]):
+                    for row in records:
                         items.append(encode_sproto([
                             (0, row['id']),
                             (1, (day_centiseconds - row['elapsed']) << 32),
