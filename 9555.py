@@ -14535,7 +14535,25 @@ def _rank_pvp_ensure_world():
         missing = []
         for character in characters:
             state = character.get("rank_pvp_state")
-            if not isinstance(state, dict) or "rank_pos" not in state:
+            if not isinstance(state, dict):
+                state = {}
+                character["rank_pvp_state"] = state
+                changed = True
+            try:
+                played_matches = (
+                    max(0, int(state.get("win_count", 0)))
+                    + max(0, int(state.get("loss_count", 0)))
+                )
+            except (TypeError, ValueError):
+                played_matches = 0
+            if played_matches == 0:
+                unplayed_rank = RANK_PVP_MAX_RANK + 1
+                for key in ("rank_pos", "best_rank_pos", "pre_rank_pos"):
+                    if state.get(key) != unplayed_rank:
+                        state[key] = unplayed_rank
+                        changed = True
+                continue
+            if "rank_pos" not in state:
                 missing.append(character)
                 continue
             try:
