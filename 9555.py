@@ -18097,9 +18097,7 @@ def _wild_boss_awards_by_player(row, record):
     participant_ids = set(str(value) for value in record.get('participants', {}))
     ranked_rows = _wild_boss_rank_rows(record)
     participant_ids.update(str(entry.get('id', 0)) for entry in ranked_rows)
-    for participant_id in sorted(participant_ids, key=lambda value: int(value)):
-        add_award(participant_id, row.get('participate_drop_id'))
-
+    ranked_players = set()
     rank_drop_ids = row.get('rank_drop_ids', [])
     rank_limits = row.get('rank_limits', [])
     for rank, entry in enumerate(ranked_rows, 1):
@@ -18107,9 +18105,13 @@ def _wild_boss_awards_by_player(row, record):
             drop_id for drop_id, rank_limit in zip(rank_drop_ids, rank_limits)
             if drop_id and int(rank_limit or 0) >= rank
         ), '')
-        add_award(entry.get('id', 0), rank_selector)
-        if int(entry.get('id', 0) or 0) == int(record.get('last_kill_id', 0) or 0):
-            add_award(entry.get('id', 0), row.get('last_kill_drop_id'))
+        if rank_selector:
+            participant_id = str(int(entry.get('id', 0) or 0))
+            awards[participant_id] = [str(rank_selector)]
+            ranked_players.add(participant_id)
+    for participant_id in sorted(participant_ids, key=lambda value: int(value)):
+        if participant_id not in ranked_players:
+            add_award(participant_id, row.get('participate_drop_id'))
     return awards
 
 
