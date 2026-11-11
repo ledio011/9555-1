@@ -17984,7 +17984,7 @@ WILD_BOSS_PVP_RANK_COUNTS = [
 ]
 
 
-def _wild_boss_reward_rows(selector, record, char_id):
+def _wild_boss_reward_rows(selector, record, char_id, char):
     try:
         selector_id = int(selector)
     except (TypeError, ValueError):
@@ -18023,8 +18023,58 @@ def _wild_boss_reward_rows(selector, record, char_id):
     if armor_id not in WILD_BOSS_ARMOR_POOLS[stage]:
         armor_id = random.choice(WILD_BOSS_ARMOR_POOLS[stage])
         player_rolls[str(selector_id)] = armor_id
+
+    try:
+        profession = int(char.get('prof', char.get('profession', -1)))
+        level = int(char.get('level', 1) or 1)
+        equipment_class = int(str(armor_id)[-1])
+    except (AttributeError, TypeError, ValueError):
+        return None
+    equipment_candidates = {}
+    for equip_id, equip_cfg in EQUIP_CONFIG.items():
+        equip_id = str(equip_id)
+        item_cfg = ITEM_CONFIG.get(equip_id, {})
+        try:
+            position = int(equip_cfg.get('position', -1))
+            job = int(equip_cfg.get('job', -1))
+            if (not valid_package_reward_item(equip_id)
+                    or not 1 <= position <= 5
+                    or int(equip_cfg.get('class', 0)) != equipment_class
+                    or job not in (-1, profession)
+                    or int(item_cfg.get('type', -1)) != 2
+                    or int(item_cfg.get('level', 1)) > level):
+                continue
+            equipment_candidates[equip_id] = int(item_cfg.get('quality', 0))
+        except (TypeError, ValueError):
+            continue
+    if not equipment_candidates:
+        print(f"[WILD BOSS REWARD BLOCKED] no equipment for player={char_id} "
+              f"profession={profession} class={equipment_class}")
+        return None
+
+    equipment_rolls = record.setdefault(
+        'equipment_reward_rolls', {}).setdefault(str(int(char_id)), {})
+    cached_equipment = equipment_rolls.get(str(selector_id))
+    try:
+        cached_equipment = [
+            (str(item_id), int(quality)) for item_id, quality in cached_equipment
+        ]
+    except (TypeError, ValueError):
+        cached_equipment = []
+    if (len(cached_equipment) != armor_count
+            or any(item_id not in equipment_candidates
+                   or equipment_candidates[item_id] != quality
+                   for item_id, quality in cached_equipment)):
+        cached_equipment = [
+            (item_id, equipment_candidates[item_id])
+            for item_id in (random.choice(tuple(equipment_candidates))
+                            for _ in range(armor_count))
+        ]
+        equipment_rolls[str(selector_id)] = list(cached_equipment)
+
     rewards = [
-        (armor_id, 0, armor_count),
+        (item_id, quality, 1) for item_id, quality in cached_equipment
+    ] + [
         ('4001', 0, int(counts[0])),
         ('1002', 0, int(counts[1])),
         ('3001', 0, int(counts[2])),
@@ -18175,9 +18225,15 @@ def _wild_boss_distribute_rewards_locked(row, record, notify=True):
     if not record.get('win'):
         return delivered
     for char_id, selectors in _wild_boss_awards_by_player(row, record).items():
+        conn, char = ALL_CONNECTIONS.get(int(char_id), (None, None))
+        if not char or not is_current_character_connection(conn, char):
+            char = _guild_char_by_id(char_id)
+        if not char:
+            print(f"[WILD BOSS REWARD BLOCKED] missing character player={char_id}")
+            continue
         rewards = []
         for selector in selectors:
-            package = _wild_boss_reward_rows(selector, record, char_id)
+            package = _wild_boss_reward_rows(selector, record, char_id, char)
             if package is None:
                 rewards = None
                 break
@@ -18449,6 +18505,15 @@ def _wild_boss_scene_chars(map_id):
     return result
 
 
+def _wild_boss_result_items(rewards):
+    totals = {}
+    for item_id, quality, amount in rewards or []:
+        key = (str(item_id), int(quality))
+        totals[key] = totals.get(key, 0) + int(amount)
+    return [(item_id, quality, amount)
+            for (item_id, quality), amount in totals.items() if amount > 0]
+
+
 def _wild_boss_send_result(row, record, won):
     if not _wild_boss_rank_rows(record):
         return
@@ -18461,7 +18526,8 @@ def _wild_boss_send_result(row, record, won):
         item_list = [encode_sproto([
             (0, str(item_id)), (1, int(amount)), (3, int(quality)),
             (4, str(item_id)), (5, 0)
-        ]) for item_id, quality, amount in delivered.get(str(char_id), [])]
+        ]) for item_id, quality, amount in _wild_boss_result_items(
+            delivered.get(str(char_id), []))]
         payload = encode_sproto([
             (0, 5), (2, bool(won)), (3, item_list),
             (4, _wild_boss_battle_info(char, record)),
@@ -18576,8 +18642,8 @@ def _wild_boss_spawn(conn, char, boss_id, map_id):
             item_list = [encode_sproto([
                 (0, str(item_id)), (1, int(amount)), (3, int(quality)),
                 (4, str(item_id)), (5, 0)
-            ]) for item_id, quality, amount in delivered.get(
-                str(char.get('id', 0)), [])]
+            ]) for item_id, quality, amount in _wild_boss_result_items(
+                delivered.get(str(char.get('id', 0)), []))]
             send_rpc_push_safe(conn, 620, encode_sproto([
                 (0, 5), (2, bool(record.get('win'))), (3, item_list),
                 (4, _wild_boss_battle_info(char, record)),
