@@ -413,7 +413,8 @@ GOTHAM_BOSS_WEAPON_CLASS_WEIGHTS = {
     3: {1: 30, 2: 28, 3: 25, 4: 8, 5: 5, 6: 2.5, 7: 1, 8: 0.5},
     7: {1: 34, 2: 31, 3: 25, 4: 6, 5: 2.5, 6: 1, 7: 0.4, 8: 0.1},
 }
-GOTHAM_BOSS_EXCLUDED_WEAPON_IDS = frozenset(("10407", "20407", "30407"))
+BIG_SALE_WEAPON_IDS = frozenset(("10407", "20407", "30407"))
+GOTHAM_BOSS_EXCLUDED_WEAPON_IDS = BIG_SALE_WEAPON_IDS
 QUALITY_CONFIG = {} # QualityData ID -> ordered quality score/modulus rows
 EQUIPMENT_UPGRADE_CONFIG = {} # equipment position -> level -> profession quality coefficients
 BADGE_CONFIG = {} # badgeId -> BadgeData fields used by merge and display logic
@@ -13368,6 +13369,7 @@ def resolve_weapon_pack_rewards(item_id, character, package_count=1):
         try:
             equip_class = int(equip_cfg.get('class', 0))
             if (not valid_package_reward_item(equip_id)
+                    or str(equip_id) in BIG_SALE_WEAPON_IDS
                     or int(equip_cfg.get('position', -1)) != 0
                     or equip_class not in allowed_classes
                     or int(ITEM_CONFIG.get(str(equip_id), {}).get('type', -1)) != 2):
