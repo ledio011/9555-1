@@ -13362,12 +13362,8 @@ def resolve_weapon_pack_rewards(item_id, character, package_count=1):
         return None
     if not character or package_count < 1:
         return []
-    if function_id == 74500:
-        max_class = _max_shop_equipment_class(character)
-        allowed_classes = {equip_class for equip_class in allowed_classes
-                           if equip_class <= max_class}
 
-    candidates = []
+    candidates_by_class = {}
     for equip_id, equip_cfg in EQUIP_CONFIG.items():
         try:
             equip_class = int(equip_cfg.get('class', 0))
@@ -13390,15 +13386,25 @@ def resolve_weapon_pack_rewards(item_id, character, package_count=1):
                 continue
             if not WEAPON_DROP_CONFIG[drop_id].get('skills'):
                 continue
-            candidates.append((str(equip_id), quality, weapon_type))
+            candidates_by_class.setdefault(equip_class, []).append(
+                (str(equip_id), quality, weapon_type)
+            )
         except (TypeError, ValueError, IndexError):
             continue
-    if not candidates:
+    available_classes = sorted(candidates_by_class)
+    if not available_classes:
         return []
 
-    # Keep ordinary pack behavior unchanged; Gotham boss mail rolls real
-    # equipment directly using its own class weights.
-    return [(*random.choice(candidates)[:2], 1) for _ in range(package_count)]
+    # ItemData defines the eligible tiers but no tier weights. Roll the tier
+    # separately so duplicate EquipData rows do not skew the box's tier odds.
+    rewards = []
+    for _ in range(package_count):
+        equip_class = random.choice(available_classes)
+        equip_id, quality, _weapon_type = random.choice(
+            candidates_by_class[equip_class]
+        )
+        rewards.append((equip_id, quality, 1))
+    return rewards
 
 def build_mount_info(picked_char):
     """Build the exact mount map consumed by the APK garage handlers.
@@ -14466,6 +14472,7 @@ def street_race_rewards(level, copy_id=None):
 # ---------------------------------------------------------------------------
 RANK_PVP_LOCK = threading.RLock()
 RANK_PVP_MAX_RANK = 1000
+RANK_STANDARD_MAX_ROWS = 100
 RANK_PVP_MAX_TIMES = 10
 RANK_PVP_MAP_ID = "501"
 RANK_PVP_FIGHT_SECONDS = 60
@@ -14547,7 +14554,7 @@ def _rank_pvp_ensure_world():
             except (TypeError, ValueError):
                 played_matches = 0
             if played_matches == 0:
-                unplayed_rank = RANK_PVP_MAX_RANK + 1
+                unplayed_rank = RANK_PVP_MAX_RANK
                 for key in ("rank_pos", "best_rank_pos", "pre_rank_pos"):
                     if state.get(key) != unplayed_rank:
                         state[key] = unplayed_rank
@@ -15593,7 +15600,7 @@ def _rank_pvp_finalize_state(character, win, reason):
 
 def _rank_pvp_sort_items(sort_type=3):
     rows = []
-    for character in _rank_pvp_ranked_characters():
+    for character in _rank_pvp_ranked_characters()[:RANK_PVP_MAX_RANK]:
         state = _rank_pvp_state(character)
         stats = get_character_stats(character)
         rank_pos = int(state.get("rank_pos", RANK_PVP_MAX_RANK + 1))
@@ -15678,7 +15685,7 @@ def _rank_character_sort_items(sort_type):
         -row[0], row[1], row[2], row[3], row[4]
     ))
     rows = []
-    for score, _tie_breaker, _progress_tiebreaker, _created_at, char_id, character in ranked:
+    for score, _tie_breaker, _progress_tiebreaker, _created_at, char_id, character in ranked[:RANK_STANDARD_MAX_ROWS]:
         rows.append(encode_sproto([
             (0, char_id), (1, score << 32),
             (2, str(character.get('name', 'Hero'))),
@@ -15689,7 +15696,7 @@ def _rank_character_sort_items(sort_type):
 
 def _rank_guild_sort_items(sort_type=6):
     rows = []
-    for guild in _guild_ranked_list():
+    for guild in _guild_ranked_list()[:RANK_STANDARD_MAX_ROWS]:
         chief = _guild_char_by_id(guild.get('chief_id', 0)) or {}
         chief_name = str(chief.get('name') or guild.get('chief_name') or '')
         guild_name = str(guild.get('name', '') or '')
@@ -26384,7 +26391,7 @@ def client_handler(conn, addr):
                     race_copy_id = street_race_daily_copy_id()
                     records = street_race_rank_records(race_copy_id)
                     day_centiseconds = STREET_RACE_MAX_TIME_CS
-                    for row in records:
+                    for row in records[:RANK_STANDARD_MAX_ROWS]:
                         items.append(encode_sproto([
                             (0, row['id']),
                             (1, (day_centiseconds - row['elapsed']) << 32),
