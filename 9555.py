@@ -8829,6 +8829,8 @@ def equipment_stage_result_items(copy_id, character):
         # this client table does for its reward previews. A single material
         # item is the fallback quantity; explicit authored counts take priority.
         count = int(authored_count) if int(authored_count) > 0 else 1
+        if item_id == '3001':
+            count = 20
         rewards.append((item_id, int(item_cfg.get('quality', 0)), count))
 
     # Exp/Money are separate ShowRewardData columns only in client data versions
@@ -8911,14 +8913,19 @@ def finish_equipment_stage(state, win):
                 continue
             push = lambda tag, data, member_id=cid: send_push_to_char(member_id, tag, data)
             eligible = int(cid) in reward_eligible
-            rewards = equipment_stage_result_items(copy_id, char) if win and eligible else []
+            if win and eligible:
+                rewards = equipment_stage_result_items(copy_id, char)
+            elif win and state.get('team_id') and not eligible:
+                rewards = [('1001', 0, 1000)]
+            else:
+                rewards = []
             item_payloads = [
                 encode_sproto([(0, iid), (1, count), (3, quality)])
                 for iid, quality, count in rewards
             ]
+            if win and rewards:
+                grant_item_rewards(char, rewards, member_conn, push, save=False)
             if win and eligible:
-                if rewards:
-                    grant_item_rewards(char, rewards, member_conn, push, save=False)
                 daily = ensure_daily_copy_state(char)
                 best = daily.setdefault('best_grades', {})
                 best[copy_id] = max(int(best.get(copy_id, 0)), grade)
@@ -9458,6 +9465,17 @@ def exp_stage_kill_experience(copy_id, player_level):
     return low + (high - low) * (level - min_level) // (max_level - min_level)
 
 
+def exp_stage_result_items(state, member_id, completion_exp=0):
+    collected_exp = max(0, int(
+        state.get('collected_exp_by_member', {}).get(int(member_id), 0)))
+    displayed_exp = collected_exp + max(0, int(completion_exp))
+    if not displayed_exp:
+        return []
+    return [encode_sproto([
+        (0, "2001"), (1, displayed_exp), (3, 0)
+    ])]
+
+
 def clear_exp_active_monsters(exp_state, send_rpc_push):
     """Despawn the current wave and retire its instance IDs exactly once."""
     if not exp_state:
@@ -9508,8 +9526,7 @@ def finish_exp_team_stage(conn, push, owner, state, win):
         send=lambda tag,data,who=cid:send_push_to_char(who,tag,data)
         if amount:
             grant_item_rewards(char,[("2001",0,amount)],member_conn or conn,send,save=False)
-        items=([encode_sproto([(0,'2001'),(1,amount),(3,0)])]
-               if eligible and amount else [])
+        items = exp_stage_result_items(state, cid, amount)
         result=encode_sproto([(0,subtype),(1,copy_id),(2,bool(win)),(3,flag),(4,grade),(5,items)])
         if member_conn and str(char.get('map_id')) == exp_run_map_id(state):
             send_exp_result_to_char(char,result)
@@ -9601,9 +9618,9 @@ def _finish_exp_stage_impl(conn, send_rpc_push, picked_char, exp_state, win=True
         rewards = [("2001", 0, exp_reward)]
         grant_item_rewards(picked_char, rewards, conn, send_rpc_push, save=True)
 
-    res_items = []
-    if exp_reward:
-        res_items = [encode_sproto([(0, "2001"), (1, exp_reward), (3, 0)])]
+    res_items = exp_stage_result_items(
+        exp_state, int(picked_char.get('id', 0)) if picked_char else 0,
+        exp_reward)
 
     gradeFlag = 0
     grade = 0
@@ -9712,7 +9729,7 @@ def _finish_exp_stage_impl(conn, send_rpc_push, picked_char, exp_state, win=True
                 ])
                 send_rpc_push(618, relife_req)
 
-    print(f"[EXP STAGE] Finished copy={copy_id} win={win} total_kills={exp_state['total_kills']} exp={exp_reward} cash={cash_reward}")
+    print(f"[EXP STAGE] Finished copy={copy_id} win={win} total_kills={exp_state['total_kills']} exp={exp_reward}")
 
 def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid, grant_rewards=True):
     state = picked_char.get('exp_stage_state') if picked_char else None
@@ -10036,6 +10053,8 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                 ])])
                 member_push = lambda tag, data, cid=member_id: send_push_to_char(cid, tag, data)
                 grant_item_rewards(member_char, member_rewards, member_conn, member_push, save=False)
+                collected_exp = exp_state.setdefault('collected_exp_by_member', {})
+                collected_exp[member_id] = int(collected_exp.get(member_id, 0)) + member_exp
                 member_push(638, member_popup)
         elif exp_state:
             exp_kill = exp_stage_kill_experience(
@@ -10044,6 +10063,9 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                 grant_item_rewards(
                     picked_char, [("2001", 0, exp_kill)],
                     conn, send_rpc_push, save=False)
+                collected_exp = exp_state.setdefault('collected_exp_by_member', {})
+                char_id = int(picked_char.get('id', 0))
+                collected_exp[char_id] = int(collected_exp.get(char_id, 0)) + exp_kill
         else:
             npc_stats = get_npc_attr(
                 npcid, picked_char.get('level', 1)
@@ -14668,7 +14690,7 @@ def _rank_pvp_reward_rows(reward_id):
 
 
 def _rank_pvp_settle_daily_reward(character, conn=None, send_rpc_push=None):
-    """Mail the previous day's LadderDailyReward to ranks 1-100, once per reset."""
+    """Mail the configured daily rank reward once per reset."""
     state = _rank_pvp_state(character)
     stamp = current_daily_stamp()
     previous_stamp = str(state.get("last_settlement_stamp") or stamp)
@@ -15503,7 +15525,12 @@ def _rank_pvp_finalize_state(character, win, reason):
                 opponent_new_rank = opponent_old_rank
         new_rank = int(state.get("rank_pos", RANK_PVP_MAX_RANK + 1))
         best_rank = int(state.get("best_rank_pos", RANK_PVP_MAX_RANK + 1))
-        if 1 <= new_rank <= RANK_PVP_MAX_RANK and (best_rank > RANK_PVP_MAX_RANK or new_rank < best_rank):
+        record_improved = (
+            1 <= new_rank <= RANK_PVP_MAX_RANK
+            and (best_rank > RANK_PVP_MAX_RANK or new_rank < best_rank)
+        )
+        new_record = bool(win and record_improved)
+        if record_improved:
             state["best_rank_pos"] = new_rank
             best_rank = new_rank
         state["pre_rank_pos"] = old_rank
@@ -15537,6 +15564,7 @@ def _rank_pvp_finalize_state(character, win, reason):
                 opponent_state["best_rank_pos"] = opponent_new_rank
         result = {
             "old_rank": old_rank, "new_rank": new_rank, "best_rank": best_rank,
+            "new_record": new_record,
             "opponent": opponent, "opponent_old_rank": opponent_old_rank,
             "opponent_new_rank": opponent_new_rank, "opponent_swapped": swapped,
             "timestamp": now_ts
@@ -20326,13 +20354,24 @@ def client_handler(conn, addr):
         reward_id = "33001" if win else "33101"
         reward_rows = _rank_pvp_reward_rows(reward_id)
         item_payload = []
-        if reward_rows:
+        record_reward_rows = []
+        if result["new_record"]:
+            record_tier = _rank_pvp_tier_for_rank(int(result["new_rank"]))
+            if record_tier:
+                record_reward_rows = _rank_pvp_reward_rows(record_tier[4])
+        rank_up_honor = (
+            10 if win and int(result["new_rank"]) < int(result["old_rank"]) else 0
+        )
+        resolved_rewards = list(reward_rows) + record_reward_rows
+        if rank_up_honor:
+            resolved_rewards.append(("2002", 0, rank_up_honor))
+        if resolved_rewards:
             grant_item_rewards(
                 picked_char,
-                [(item_id, quality, amount) for item_id, quality, amount in reward_rows],
+                [(item_id, quality, amount) for item_id, quality, amount in resolved_rewards],
                 conn, send_rpc_push, save=False
             )
-            for item_id, quality, amount in reward_rows:
+            for item_id, quality, amount in resolved_rewards:
                 # item.quality is wire tag 3; wire tag 2 is reserved.
                 item_payload.append(encode_sproto([
                     (0, item_id), (1, amount), (3, quality)
@@ -20340,7 +20379,7 @@ def client_handler(conn, addr):
             state = _rank_pvp_state(picked_char)
             if win:
                 state["win_reward_count"] = int(state.get("win_reward_count", 0)) + 1
-        else:
+        if not reward_rows:
             print(f"[RANK PVP REWARD] unresolved client reward reference={reward_id}; "
                   f"ZIP has no matching reward/drop definition")
 
@@ -20364,6 +20403,7 @@ def client_handler(conn, addr):
         save_chars(all_accounts_chars)
         print(f"[RANK PVP] result player={picked_char.get('id')} win={bool(win)} "
               f"reason={reason} rank={result['old_rank']}->{result['new_rank']} "
+              f"new_record={result['new_record']} "
               f"opponent={match.get('opponent_id')}")
         return True
 
