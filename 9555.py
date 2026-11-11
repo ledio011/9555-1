@@ -318,7 +318,7 @@ SKILL_CONFIG = {} # skillId -> skill info template
 EFF_TO_SKILL = {} # effId -> skillId (reverse lookup for Tag 128)
 MOUNT_CONFIG = {} # garage vehicle id -> client MountData definition
 COLOR_CONFIG = {} # color id -> authoritative PriceType/PriceCost from ColorData
-WILD_BOSS_CONFIG = {} # ID -> configured PVE world boss and required level band
+WILD_BOSS_CONFIG = {} # ID -> configured world boss and required level band
 COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
 TOWER_CONFIG = {} # floor index -> TowerData fields used by the APK
 TOWER_MAP_TO_FLOOR = {} # map ID -> TowerData floor index
@@ -3214,7 +3214,6 @@ WILD_BOSS_LOCK = threading.RLock()
 WILD_BOSS_EVENTS = {}
 WILD_BOSS_ENTRY_RESERVATIONS = {}
 WILD_BOSS_RANK_ROWS = 10
-WILD_BOSS_MISSING_REWARD_LOGGED = set()
 GUILD_BOSS_LOCK = threading.RLock()
 GUILD_BOSS_ENTRY_RESERVATIONS = {}
 GUILD_BOSS_OVERRIDE_PATH = os.path.join(SCRIPT_DIR, "guild_boss_override.json")
@@ -17948,6 +17947,256 @@ def _wild_boss_map_id(map_id):
                  if str(row.get('map_id', '')) == map_id), None)
 
 
+# Provisional Raid Boss payout quantities supplied for the configured selectors.
+WILD_BOSS_ARMOR_POOLS = [
+    ('8002', '8003'), ('8003', '8004'), ('8004', '8005'),
+    ('8005', '8006'), ('8006', '8007'), ('8007', '8008')
+]
+WILD_BOSS_PARTICIPATION_COUNTS = [
+    (3, 1, 22), (4, 1, 28), (5, 1, 33),
+    (6, 1, 39), (8, 1, 44), (10, 1, 55)
+]
+WILD_BOSS_LAST_HIT_COUNTS = [
+    (9, 33, 33, 100), (12, 40, 42, 100), (15, 50, 50, 100),
+    (18, 60, 58, 100), (24, 73, 66, 100), (30, 87, 82, 100)
+]
+WILD_BOSS_PVE_RANK_COUNTS = [
+    [(12, 67, 33), (10, 53, 31), (7, 40, 29), (5, 27, 25), (3, 20, 22)],
+    [(16, 80, 42), (13, 64, 39), (10, 48, 36), (6, 32, 32), (4, 24, 28)],
+    [(20, 100, 50), (16, 80, 47), (12, 60, 43), (8, 40, 38), (5, 30, 33)],
+    [(24, 120, 58), (19, 96, 55), (14, 72, 51), (10, 48, 45), (6, 36, 39)],
+    [(32, 147, 66), (26, 117, 62), (19, 88, 57), (13, 59, 51), (8, 44, 44)],
+    [(40, 173, 82), (32, 139, 77), (24, 104, 72), (16, 69, 63), (10, 52, 55)]
+]
+WILD_BOSS_PVP_RANK_COUNTS = [
+    [(12, 100, 33, 200), (10, 80, 31, 187), (7, 60, 29, 173),
+     (5, 40, 25, 160), (3, 30, 22, 133)],
+    [(16, 120, 42, 200), (13, 96, 39, 187), (10, 72, 36, 173),
+     (6, 48, 32, 160), (4, 36, 28, 133)],
+    [(20, 150, 50, 200), (16, 120, 47, 187), (12, 90, 43, 173),
+     (8, 60, 38, 160), (5, 45, 33, 133)],
+    [(24, 180, 58, 200), (19, 144, 55, 187), (14, 108, 51, 173),
+     (10, 72, 45, 160), (6, 54, 39, 133)],
+    [(32, 220, 66, 200), (26, 176, 62, 187), (19, 132, 57, 173),
+     (13, 88, 51, 160), (8, 66, 44, 133)],
+    [(40, 260, 82, 200), (32, 208, 77, 187), (24, 156, 72, 173),
+     (16, 104, 63, 160), (10, 78, 55, 133)]
+]
+
+
+def _wild_boss_reward_rows(selector, record, char_id):
+    try:
+        selector_id = int(selector)
+    except (TypeError, ValueError):
+        return None
+    stage = 0
+    role = ''
+    counts = None
+    armor_count = 1
+    if 50001 <= selector_id <= 50006:
+        stage = selector_id - 50001
+        role = 'participation'
+        counts = WILD_BOSS_PARTICIPATION_COUNTS[stage]
+    elif 50101 <= selector_id <= 50106:
+        stage = selector_id - 50101
+        role = 'last-hit'
+        counts = WILD_BOSS_LAST_HIT_COUNTS[stage]
+        armor_count = 2
+    elif 50201 <= selector_id <= 50230:
+        offset = selector_id - 50201
+        stage, rank_tier = divmod(offset, 5)
+        role = 'rank'
+        counts = WILD_BOSS_PVE_RANK_COUNTS[stage][rank_tier]
+        armor_count = 2 if rank_tier < 3 else 1
+    elif 50301 <= selector_id <= 50330:
+        offset = selector_id - 50301
+        stage, rank_tier = divmod(offset, 5)
+        role = 'rank'
+        counts = WILD_BOSS_PVP_RANK_COUNTS[stage][rank_tier]
+        armor_count = 2 if rank_tier < 3 else 1
+    if counts is None:
+        return None
+
+    rolls = record.setdefault('reward_rolls', {})
+    player_rolls = rolls.setdefault(str(int(char_id)), {})
+    armor_id = player_rolls.get(str(selector_id))
+    if armor_id not in WILD_BOSS_ARMOR_POOLS[stage]:
+        armor_id = random.choice(WILD_BOSS_ARMOR_POOLS[stage])
+        player_rolls[str(selector_id)] = armor_id
+    rewards = [
+        (armor_id, 0, armor_count),
+        ('4001', 0, int(counts[0])),
+        ('1002', 0, int(counts[1])),
+        ('3001', 0, int(counts[2])),
+    ]
+    honor = int(counts[3]) if role == 'last-hit' else (
+        int(counts[3]) if len(counts) > 3 else 0
+    )
+    if honor > 0:
+        rewards.append(('2002', 0, honor))
+    return rewards
+
+
+def _wild_boss_awards_by_player(row, record):
+    awards = {}
+
+    def add_award(char_id, selector):
+        if selector:
+            awards.setdefault(str(int(char_id)), []).append(str(selector))
+
+    participant_ids = set(str(value) for value in record.get('participants', {}))
+    ranked_rows = _wild_boss_rank_rows(record)
+    participant_ids.update(str(entry.get('id', 0)) for entry in ranked_rows)
+    for participant_id in sorted(participant_ids, key=lambda value: int(value)):
+        add_award(participant_id, row.get('participate_drop_id'))
+
+    rank_drop_ids = row.get('rank_drop_ids', [])
+    rank_limits = row.get('rank_limits', [])
+    for rank, entry in enumerate(ranked_rows, 1):
+        rank_selector = next((
+            drop_id for drop_id, rank_limit in zip(rank_drop_ids, rank_limits)
+            if drop_id and int(rank_limit or 0) >= rank
+        ), '')
+        add_award(entry.get('id', 0), rank_selector)
+        if int(entry.get('id', 0) or 0) == int(record.get('last_kill_id', 0) or 0):
+            add_award(entry.get('id', 0), row.get('last_kill_drop_id'))
+    return awards
+
+
+def _wild_boss_deliver_rewards_locked(row, record, char_id, rewards, notify=True):
+    char_id = int(char_id)
+    claim_key = str(char_id)
+    claims = record.setdefault('reward_claims', {})
+    delivered_rows = record.setdefault('delivered_reward_rows', {})
+    if claims.get(claim_key):
+        return list(delivered_rows.get(claim_key, rewards))
+    if not rewards:
+        claims[claim_key] = True
+        delivered_rows[claim_key] = []
+        return []
+    for item_id, _quality, amount in rewards:
+        if (int(amount) <= 0 or
+                (str(item_id) not in DIRECT_REWARD_RESOURCE_IDS
+                 and str(item_id) not in ITEM_CONFIG)):
+            print(f"[WILD BOSS REWARD BLOCKED] invalid configured item={item_id} player={char_id}")
+            return None
+
+    conn, online_char = ALL_CONNECTIONS.get(char_id, (None, None))
+    online = bool(conn and online_char
+                  and is_current_character_connection(conn, online_char))
+    in_scene = bool(
+        online and str(online_char.get('map_id', '')) == str(row.get('map_id', ''))
+        and str(online_char.get('_wild_boss_boss_id', '')) == str(row.get('id', ''))
+        and int(online_char.get('_wild_boss_event_start', 0) or 0)
+        == int(record.get('event_start', 0) or 0))
+    char = online_char if online else _guild_char_by_id(char_id)
+    if not char:
+        print(f"[WILD BOSS REWARD BLOCKED] missing character player={char_id}")
+        return None
+
+    if in_scene and can_add_reward_list_to_inventory(char, rewards):
+        with get_character_transaction_lock(char):
+            try:
+                snapshot = copy.deepcopy(char)
+            except Exception as snapshot_error:
+                print(f"[WILD BOSS REWARD BLOCKED] snapshot failed player={char_id}: {snapshot_error}")
+                return None
+            grant_item_rewards(char, rewards, save=False)
+            if not save_chars(all_accounts_chars):
+                char.clear()
+                char.update(snapshot)
+                print(f"[WILD BOSS REWARD BLOCKED] save failed player={char_id}")
+                return None
+        claims[claim_key] = True
+        delivered_rows[claim_key] = list(rewards)
+        sync_char_attrs_rpc(conn, char)
+        push = lambda tag, data: send_push_to_char(char_id, tag, data)
+        sync_all_backpacks(char, push)
+        if notify:
+            push(638, encode_sproto([(0, [encode_sproto([
+                (0, str(item_id)), (1, int(amount)), (3, int(quality))
+            ]) for item_id, quality, amount in rewards])]))
+        return list(rewards)
+
+    mails = char.setdefault('mails', [])
+    source_key = (
+        f"wild-boss:{row.get('id', '')}:"
+        f"{int(record.get('event_start', 0) or 0)}:{char_id}"
+    )
+    existing_mail = next((mail for mail in mails
+                          if isinstance(mail, dict)
+                          and mail.get('wildBossRewardKey') == source_key), None)
+    if existing_mail:
+        claims[claim_key] = True
+        delivered_rows[claim_key] = list(rewards)
+        if online:
+            send_push_to_char(char_id, 531, build_mail_update(existing_mail))
+        return list(rewards)
+
+    by_item_id = {}
+    for item_id, quality, amount in rewards:
+        item_id = str(item_id)
+        if item_id in by_item_id:
+            by_item_id[item_id]['count'] += int(amount)
+        else:
+            by_item_id[item_id] = {
+                'itemId': item_id, 'count': int(amount),
+                'quality': int(quality), 'count2': 0
+            }
+    mail_entry = {
+        'mailId': next_mail_id(), 'sendertype': 0,
+        'title': 'Raid Boss Rewards', 'senderTime': int(time.time()),
+        'receiveId': char_id, 'readTime': 0,
+        'context': 'Your Raid Boss rewards are attached.',
+        'mailState': 0, 'sortTime': int(time.time()),
+        'items': list(by_item_id.values()), 'expireday': 7,
+        'wildBossRewardKey': source_key
+    }
+    mails.append(mail_entry)
+    if not save_chars(all_accounts_chars):
+        mails.remove(mail_entry)
+        print(f"[WILD BOSS REWARD BLOCKED] mail save failed player={char_id}")
+        return None
+    claims[claim_key] = True
+    delivered_rows[claim_key] = list(rewards)
+    send_push_to_char(char_id, 531, build_mail_update(mail_entry))
+    return list(rewards)
+
+
+def _wild_boss_deliver_rewards(row, record, char_id, rewards, notify=True):
+    reward_lock = record.setdefault('_reward_lock', threading.RLock())
+    with reward_lock:
+        return _wild_boss_deliver_rewards_locked(
+            row, record, char_id, rewards, notify)
+
+
+def _wild_boss_distribute_rewards_locked(row, record, notify=True):
+    delivered = {}
+    if not record.get('win'):
+        return delivered
+    for char_id, selectors in _wild_boss_awards_by_player(row, record).items():
+        rewards = []
+        for selector in selectors:
+            package = _wild_boss_reward_rows(selector, record, char_id)
+            if package is None:
+                rewards = None
+                break
+            rewards.extend(package)
+        if rewards is None:
+            print(f"[WILD BOSS REWARD BLOCKED] unresolved package player={char_id}")
+            continue
+        paid = _wild_boss_deliver_rewards(row, record, char_id, rewards, notify)
+        if paid is not None:
+            delivered[str(char_id)] = paid
+    return delivered
+
+
+def _wild_boss_distribute_rewards(row, record, notify=True):
+    reward_lock = record.setdefault('_reward_lock', threading.RLock())
+    with reward_lock:
+        return _wild_boss_distribute_rewards_locked(row, record, notify)
+
+
 def _wild_boss_clock(row, now=None):
     now = int(time.time() if now is None else now)
     start_times = [int(value) for value in row.get('start_times', [])
@@ -18081,7 +18330,8 @@ def _wild_boss_entry_commit(char, boss_id, event_start):
             counts[str(boss_id)] = int(counts.get(str(boss_id), 0) or 0) + 1
             char['_wild_boss_boss_id'] = str(boss_id)
             char['_wild_boss_event_start'] = int(event_start)
-            _wild_boss_event(row, event_start, create=True)
+            record = _wild_boss_event(row, event_start, create=True)
+            record.setdefault('participants', {})[str(char_id)] = True
             committed = True
     if committed:
         save_chars(all_accounts_chars)
@@ -18161,13 +18411,18 @@ def _wild_boss_scene_chars(map_id):
 def _wild_boss_send_result(row, record, won):
     if not _wild_boss_rank_rows(record):
         return
+    delivered = _wild_boss_distribute_rewards(row, record) if won else {}
     for char_id, conn, char in _wild_boss_scene_chars(record.get('map_id', '')):
         if (str(char.get('_wild_boss_boss_id', '')) != str(row.get('id', ''))
                 or int(char.get('_wild_boss_event_start', 0) or 0)
                 != int(record.get('event_start', 0) or 0)):
             continue
+        item_list = [encode_sproto([
+            (0, str(item_id)), (1, int(amount)), (3, int(quality)),
+            (4, str(item_id)), (5, 0)
+        ]) for item_id, quality, amount in delivered.get(str(char_id), [])]
         payload = encode_sproto([
-            (0, 5), (2, bool(won)), (3, []),
+            (0, 5), (2, bool(won)), (3, item_list),
             (4, _wild_boss_battle_info(char, record)),
             (5, str(row.get('id', '')))
         ])
@@ -18253,12 +18508,6 @@ def _wild_boss_finish(key, won, killer_id=0):
         cleanup_timer.start()
     if not won:
         print(f"[WILD BOSS] event expired boss={key[0]} damage_rows={len(rows)}")
-    elif not any(
-            SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(str(drop_id))
-            for drop_id in [row.get('last_kill_drop_id', ''),
-                            row.get('participate_drop_id', '')]
-                            + list(row.get('rank_drop_ids', []))):
-        print(f"[WILD BOSS REWARD BLOCKED] missing explicit item counts boss={key[0]}")
     return True
 
 
@@ -18276,9 +18525,15 @@ def _wild_boss_spawn(conn, char, boss_id, map_id):
         _wild_boss_auto_exit((str(boss_id), event_start))
         return False
     if record.get('finished'):
+        delivered = _wild_boss_distribute_rewards(row, record, notify=False)
         if _wild_boss_rank_rows(record):
+            item_list = [encode_sproto([
+                (0, str(item_id)), (1, int(amount)), (3, int(quality)),
+                (4, str(item_id)), (5, 0)
+            ]) for item_id, quality, amount in delivered.get(
+                str(char.get('id', 0)), [])]
             send_rpc_push_safe(conn, 620, encode_sproto([
-                (0, 5), (2, bool(record.get('win'))), (3, []),
+                (0, 5), (2, bool(record.get('win'))), (3, item_list),
                 (4, _wild_boss_battle_info(char, record)),
                 (5, str(boss_id))
             ]))
