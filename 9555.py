@@ -18204,9 +18204,13 @@ def _wild_boss_clock(row, now=None):
     duration = max(0, int(row.get('duration', 0) or 0))
     if not start_times or duration <= 0:
         return False, 0, 0, now, 0
+    pvp_slot = int(row.get('time', 0) or 0)
+    is_pvp = bool(int(row.get('pvp', 0) or 0))
     utc_day_start = now - (now % 86400)
     for day_offset in range(3):
         for slot, seconds in enumerate(start_times, 1):
+            if bool(slot == pvp_slot) != is_pvp:
+                continue
             event_start = utc_day_start + day_offset * 86400 + seconds
             if event_start <= now < event_start + duration:
                 return True, slot, event_start, event_start, event_start + duration
@@ -18238,6 +18242,8 @@ def _wild_boss_event(row, event_start, create=False):
             'damage_players': {}, 'participants': {},
             'finished': False, 'win': False, 'last_kill_id': 0,
             'last_kill_name': '', 'position': None, 'timer': None,
+            'ai_timer': None, 'ai_next_attack_at': 0.0,
+            'ai_skill_ready_at': {}, 'ai_tick_lock': threading.Lock(),
         }
         WILD_BOSS_EVENTS[key] = record
         delay = max(0.0, record['end_time'] - time.time())
@@ -18257,7 +18263,27 @@ def _wild_boss_attempts(char, boss_id):
         state['counts'] = {}
     if not isinstance(state.get('counts'), dict):
         state['counts'] = {}
+    if not isinstance(state.get('events'), dict):
+        state['events'] = {}
     return state['counts']
+
+
+def _wild_boss_record_attempt_event(char, boss_id, event_start, charge):
+    if not boss_id or not int(event_start or 0):
+        return False
+    counts = _wild_boss_attempts(char, boss_id)
+    state = char['_wild_boss_attempts']
+    boss_events = state['events'].get(str(boss_id))
+    if not isinstance(boss_events, dict):
+        boss_events = {}
+        state['events'][str(boss_id)] = boss_events
+    event_key = str(int(event_start))
+    if event_key in boss_events:
+        return False
+    boss_events[event_key] = True
+    if charge:
+        counts[str(boss_id)] = int(counts.get(str(boss_id), 0) or 0) + 1
+    return True
 
 
 def _wild_boss_entry_check(char, boss_id, now=None):
@@ -18294,7 +18320,16 @@ def _wild_boss_entry_check(char, boss_id, now=None):
         reservation_key = (str(boss_id), event_start, char_id)
         if not already_inside:
             counts = _wild_boss_attempts(char, boss_id)
-            if int(counts.get(str(boss_id), 0) or 0) >= max(0, int(row.get('limit', 0) or 0)):
+            event_key = str(int(event_start))
+            seen_events = char['_wild_boss_attempts']['events'].get(
+                str(boss_id), {})
+            if not isinstance(seen_events, dict):
+                seen_events = {}
+            already_participated = bool(
+                record and str(char_id) in record.get('participants', {}))
+            if (event_key not in seen_events and not already_participated
+                    and int(counts.get(str(boss_id), 0) or 0)
+                    >= max(0, int(row.get('limit', 0) or 0))):
                 return False, 'daily_limit', row, 0
             in_scene = sum(
                 1 for peer_id, (peer_conn, peer) in list(ALL_CONNECTIONS.items())
@@ -18326,11 +18361,12 @@ def _wild_boss_entry_commit(char, boss_id, event_start):
         if (was_reserved
                 and str(char.get('map_id', '')) == str(row.get('map_id', ''))
                 and str(char.get('active_copy_id', '')) == str(row.get('map_id', ''))):
-            counts = _wild_boss_attempts(char, boss_id)
-            counts[str(boss_id)] = int(counts.get(str(boss_id), 0) or 0) + 1
+            record = _wild_boss_event(row, event_start, create=True)
+            already_participated = str(char_id) in record.get('participants', {})
+            _wild_boss_record_attempt_event(
+                char, boss_id, event_start, charge=not already_participated)
             char['_wild_boss_boss_id'] = str(boss_id)
             char['_wild_boss_event_start'] = int(event_start)
-            record = _wild_boss_event(row, event_start, create=True)
             record.setdefault('participants', {})[str(char_id)] = True
             committed = True
     if committed:
@@ -18391,6 +18427,11 @@ def _wild_boss_activity_payload(char, now=None):
         counts = _wild_boss_attempts(char, boss_id)
         remaining = max(0, int(row.get('limit', 0) or 0)
                         - int(counts.get(str(boss_id), 0) or 0))
+        if active:
+            record = _wild_boss_event(row, event_start)
+            if record and str(int(char.get('id', 0) or 0)) in record.get(
+                    'participants', {}):
+                remaining = max(1, remaining)
         activities[str(boss_id)] = encode_sproto([
             (0, str(boss_id)), (1, remaining), (2, int(row.get('type', 0) or 0)),
             (3, 1 if active else 0), (4, int(next_start)), (5, ''),
@@ -18452,6 +18493,8 @@ def _wild_boss_auto_exit(key):
             continue
         return_map = str(char.get('pre_copy_map') or '101')
         return_pos = char.get('pre_copy_pos')
+        _wild_boss_record_attempt_event(
+            char, key[0], key[1], charge=False)
         char['_wild_boss_boss_id'] = ''
         char['_wild_boss_event_start'] = 0
         char['active_copy_id'] = None
@@ -18488,6 +18531,9 @@ def _wild_boss_finish(key, won, killer_id=0):
         timer = record.get('timer')
         if timer:
             timer.cancel()
+        ai_timer = record.get('ai_timer')
+        if ai_timer:
+            ai_timer.cancel()
     row = WILD_BOSS_CONFIG.get(str(key[0]), {})
     _wild_boss_send_result(row, record, won)
     exit_at = int(record['end_time'])
@@ -18569,7 +18615,182 @@ def _wild_boss_spawn(conn, char, boss_id, map_id):
     stats = get_npc_attr(npc_id)
     stats['hp_max'] = int(record.get('hp_max', stats['hp_max']))
     sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur)
+    _schedule_wild_boss_ai((str(boss_id), event_start), record)
     return True
+
+
+def _schedule_wild_boss_ai(key, record):
+    with WILD_BOSS_LOCK:
+        if WILD_BOSS_EVENTS.get(key) is not record or record.get('finished'):
+            return
+        timer = record.get('ai_timer')
+        if timer is not None and timer.is_alive():
+            return
+        record['ai_timer'] = RepeatingTask(
+            0.2, lambda: _wild_boss_ai_tick(key, record)).start()
+
+
+def _wild_boss_ai_tick(key, record):
+    if WILD_BOSS_EVENTS.get(key) is not record or record.get('finished'):
+        return False
+    tick_lock = record['ai_tick_lock']
+    if not tick_lock.acquire(False):
+        return True
+    try:
+        _wild_boss_ai_tick_locked(key, record)
+    finally:
+        tick_lock.release()
+    return WILD_BOSS_EVENTS.get(key) is record and not record.get('finished')
+
+
+def _wild_boss_ai_tick_locked(key, record):
+    with WILD_BOSS_LOCK:
+        if (WILD_BOSS_EVENTS.get(key) is not record or record.get('finished')
+                or int(record.get('hp', 0) or 0) <= 0):
+            return
+    row = WILD_BOSS_CONFIG.get(str(key[0]), {})
+    npc_id = str(row.get('boss_npc_id', ''))
+    npc_cfg = NPC_CONFIG.get(npc_id, {})
+    ai_cfg = AI_DATA_CONFIG.get(str(npc_cfg.get('ai_data_id') or ''), {})
+    members = [
+        member for member in _wild_boss_scene_chars(record.get('map_id', ''))
+        if (str(member[2].get('_wild_boss_boss_id', '')) == str(key[0])
+            and int(member[2].get('_wild_boss_event_start', 0) or 0) == int(key[1])
+            and int(member[2].get('hp', 0) or 0) > 0)
+    ]
+    if not members:
+        return
+
+    attack_distance = max(
+        0.5,
+        (int(ai_cfg.get('around_min_distance', 100) or 100)
+         + int(ai_cfg.get('around_max_distance', 200) or 200)) / 200.0
+    )
+    skills = [
+        skill.strip() for skill in
+        re.split(r'[;,]', str(npc_cfg.get('skill_group', '')))
+        if skill.strip() in SKILL_CONFIG
+    ]
+    if not skills:
+        return
+    skill_info = {
+        skill: _guild_boss_skill_range(skill, attack_distance)
+        for skill in skills
+    }
+    configured_lock = int(ai_cfg.get('lock_distance', 500) or 500)
+    search_radius = int(npc_cfg.get('search_radius', 0) or 0)
+    lock_distance = (
+        search_radius / 100.0 if configured_lock < 0 and search_radius > 0
+        else max(0.5, configured_lock / 100.0)
+    )
+    if search_radius > 0:
+        lock_distance = min(lock_distance, search_radius / 100.0)
+    boss_x, boss_z = record.get('position') or (0.0, 0.0)
+
+    def member_position(member):
+        pos = member[2].get('pos') or [0, 0, 0, 0]
+        return float(pos[0]) / 100.0, float(pos[2]) / 100.0
+
+    targets = []
+    for member in members:
+        px, pz = member_position(member)
+        distance = math.hypot(px - boss_x, pz - boss_z)
+        if distance <= lock_distance:
+            targets.append((distance, member))
+    if not targets:
+        return
+    distance, (target_id, _target_conn, target_char) = min(
+        targets, key=lambda item: item[0])
+
+    now = time.time()
+    if now < float(record.get('ai_next_attack_at', 0.0)):
+        return
+    ready = [
+        skill for skill in skills
+        if distance <= skill_info[skill][0]
+        and float(record['ai_skill_ready_at'].get(skill, 0.0)) <= now
+    ]
+    if not ready:
+        return
+    highest_priority = max(int(SKILL_CONFIG[skill].get('priority', 0)) for skill in ready)
+    skill_id = random.choice([
+        skill for skill in ready
+        if int(SKILL_CONFIG[skill].get('priority', 0)) == highest_priority
+    ])
+    skill_cfg = SKILL_CONFIG[skill_id]
+    effect_id = str(skill_cfg.get('eff0') or '10000')
+    cooldown = max(0, int(skill_cfg.get('cooldown_ms', 0) or 0)) / 1000.0
+    record['ai_skill_ready_at'][skill_id] = now + cooldown
+    cd_min = max(0, int(ai_cfg.get('skill_cd_min', 1000) or 1000))
+    cd_max = max(cd_min, int(ai_cfg.get('skill_cd_max', 3000) or 3000))
+    record['ai_next_attack_at'] = now + random.uniform(cd_min, cd_max) / 1000.0
+
+    _range, area_type, radius, angle = skill_info[skill_id]
+    victims = [(target_id, _target_conn, target_char)]
+    if area_type in (3, 4) and radius > 0:
+        tx, tz = member_position((target_id, _target_conn, target_char))
+        target_angle = math.degrees(math.atan2(tx - boss_x, tz - boss_z))
+        half_angle = (angle / 2.0) if 0 < angle < 360 else 180.0
+        for member in members:
+            if member[0] == target_id:
+                continue
+            px, pz = member_position(member)
+            distance_to_boss = math.hypot(px - boss_x, pz - boss_z)
+            if distance_to_boss > radius:
+                continue
+            if half_angle < 180.0 and distance_to_boss > 0.01:
+                member_angle = math.degrees(math.atan2(px - boss_x, pz - boss_z))
+                difference = abs((member_angle - target_angle + 180.0) % 360.0 - 180.0)
+                if difference > half_angle:
+                    continue
+            victims.append(member)
+
+    attack_items, damage_items, downed = [], [], []
+    boss_stats = get_npc_attr(npc_id)
+    for victim_id, victim_conn, victim_char in victims:
+        damage, hit, critical = get_combat_damage(
+            boss_stats, get_character_stats(victim_char), skill_id, 0,
+            effinfo_id=effect_id, sat_type=npc_damage_sat_type(npc_id),
+            attacker_is_npc=True)
+        if not (hit and damage > 0):
+            continue
+        with WILD_BOSS_LOCK:
+            if (WILD_BOSS_EVENTS.get(key) is not record or record.get('finished')
+                    or not is_current_character_connection(victim_conn, victim_char)
+                    or str(victim_char.get('_wild_boss_boss_id', '')) != str(key[0])
+                    or int(victim_char.get('_wild_boss_event_start', 0) or 0) != int(key[1])
+                    or int(victim_char.get('hp', 0) or 0) <= 0):
+                continue
+            victim_char['hp'] = max(0, int(victim_char.get('hp', 0) or 0) - damage)
+        attack_items.append(encode_sproto([(0, victim_id), (1, damage)]))
+        damage_items.append(encode_sproto([
+            (0, victim_id), (1, damage), (2, skill_id),
+            (3, effect_id), (4, critical)
+        ]))
+        sync_char_attrs_rpc(victim_conn, victim_char)
+        if victim_char['hp'] <= 0:
+            downed.append((victim_id, victim_conn, victim_char))
+
+    if attack_items:
+        for _member_id, member_conn, _member_char in members:
+            send_rpc_push_safe(member_conn, 508, encode_sproto([
+                (0, int(record.get('inst_id') or 0)), (1, target_id),
+                (2, skill_id), (3, attack_items)
+            ]))
+            send_rpc_push_safe(member_conn, 511, encode_sproto([(0, damage_items)]))
+        if not save_chars(all_accounts_chars):
+            print(f"[WILD BOSS] failed to persist attack hp boss={key[0]} event={key[1]}")
+    for _victim_id, victim_conn, victim_char in downed:
+        if supports_normal_relife(str(victim_char.get('map_id', ''))):
+            death_count = int(victim_char.get('death_count', 0) or 0) + 1
+            victim_char['death_count'] = death_count
+            relife_cfg = get_relife_config(death_count)
+            relife_type = 0 if map_relife_type(
+                str(victim_char.get('map_id', ''))) == 2 else 1
+            offer = remember_relife_offer(
+                victim_char, relife_type, relife_cfg.get('use_count', 1), '9011')
+            send_rpc_push_safe(victim_conn, 618, offer)
+            save_chars(all_accounts_chars)
 
 
 def _wild_boss_apply_hit(conn, char, target_id, client_dmg, skill_id,
@@ -18677,34 +18898,6 @@ def _wild_boss_apply_hit(conn, char, target_id, client_dmg, skill_id,
             DEAD_NPC_SET.add(int(target_id))
             _wild_boss_finish((boss_id, event_start), True, int(char.get('id', 0) or 0))
     return True
-
-
-def _wild_boss_character_damage(char, effinfo_id):
-    boss_id = str(char.get('_wild_boss_boss_id', ''))
-    row = WILD_BOSS_CONFIG.get(boss_id)
-    if not row or str(char.get('map_id', '')) != str(row.get('map_id', '')):
-        return 0, False
-    record = _wild_boss_event(
-        row or {}, int(char.get('_wild_boss_event_start', 0) or 0))
-    if not row or not record or record.get('finished') or int(record.get('hp', 0) or 0) <= 0:
-        return 0, False
-    npc_id = str(row.get('boss_npc_id', ''))
-    npc_cfg = NPC_CONFIG.get(npc_id, {})
-    matched_skill = next((
-        skill_id for skill_id in str(npc_cfg.get('skill_group', '')).split(';')
-        if skill_id.strip() in SKILL_CONFIG
-        and str(effinfo_id) in {
-            str(SKILL_CONFIG[skill_id.strip()].get(field) or '')
-            for field in ('eff0', 'eff1', 'eff2')
-        }
-    ), None)
-    if not matched_skill:
-        return 0, False
-    damage, hit, critical = get_combat_damage(
-        get_npc_attr(npc_id), get_character_stats(char), matched_skill, 0,
-        effinfo_id=str(effinfo_id), sat_type=npc_damage_sat_type(npc_id),
-        attacker_is_npc=True)
-    return (damage if hit else 0), bool(critical and hit)
 
 
 def _guild_boss_map_id(map_id):
@@ -24941,12 +25134,10 @@ def client_handler(conn, addr):
                     # Street Race traffic is client-side scenery. It does not
                     # damage the character or open a character-revive dialog.
                     print(f"[STREET RACE] ignored character attack report player={picked_char.get('id')} map={current_map}")
-                elif (picked_char and wild_boss_id
-                      and is_current_character_connection(conn, picked_char)
-                      and int(picked_char.get('hp', 0) or 0) > 0
-                      and target_id == int(picked_char.get('id', 0) or 0)):
-                    server_dmg, calc_cri = _wild_boss_character_damage(
-                        picked_char, effinfo_id)
+                elif picked_char and wild_boss_id:
+                    # Wild Boss attacks come from the server AI below; do not
+                    # apply a duplicate client-local NPC damage report.
+                    print(f"[WILD BOSS] ignored client-local attack player={picked_char.get('id')}")
                 elif picked_char and guild_boss_id:
                     # Guild Boss attacks are emitted by the configured server
                     # AI; accepting the client's local report would duplicate
@@ -25142,6 +25333,7 @@ def client_handler(conn, addr):
                     # However, we should NOT trust client_dmg directly as it allows damage manipulation.
                     # Use a reasonable default NPC attacker stats for server-authoritative calculation.
                     if (not is_area and not is_rank_pvp and not guild_boss_id
+                            and not wild_boss_id
                             and not is_tower and picked_char):
                         # Use a generic NPC attacker with basic stats for non-arena single-copy scenes
                         # The original game trusted client-authoritative damage, but server-side validation
@@ -27712,6 +27904,11 @@ def client_handler(conn, addr):
                             picked_char.pop('cash_stage_state', None)
                         if (_wild_boss_map_id(current_map)
                                 and str(current_map) != str(mid)):
+                            _wild_boss_record_attempt_event(
+                                picked_char,
+                                picked_char.get('_wild_boss_boss_id', ''),
+                                picked_char.get('_wild_boss_event_start', 0),
+                                charge=False)
                             picked_char['_wild_boss_boss_id'] = ''
                             picked_char['_wild_boss_event_start'] = 0
                         if is_public_world_map(mid):
@@ -27730,6 +27927,13 @@ def client_handler(conn, addr):
                                     or default_map_spawn_position(picked_char.get('map_id')))
                                 picked_char['pre_copy_map'] = str(picked_char.get('map_id', '11'))
                             picked_char['active_copy_id'] = mid
+                        if msg == 201:
+                            picked_char['_wild_boss_boss_id'] = str(
+                                boss_cfg.get('id', body.get(0)))
+                            picked_char['_wild_boss_event_start'] = int(
+                                wild_boss_event_start)
+                            _wild_boss_event(
+                                boss_cfg, wild_boss_event_start, create=True)
                         start_map_transition(conn, picked_char, mid, send_rpc_push)
                         if msg == 201: # world_boss
                             entered_new_event = _wild_boss_entry_commit(
