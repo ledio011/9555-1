@@ -13689,7 +13689,7 @@ def function_unlock_payload(character):
         if fid == "105":
             func_state = 2
         elif fid == "100":
-            func_state = 1 if player_tutorial == 1 else 0
+            func_state = 1 if player_tutorial == 1 or fid in completed_tutorials else 0
         elif fid in class4_fids:
             func_state = 1 if fid in completed_tutorials else 0
         else:
