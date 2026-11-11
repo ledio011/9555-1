@@ -13670,7 +13670,7 @@ def sign_week_has_seven_claims(character):
 
 
 def resolve_sign_week_state(character):
-    """Return (day, can_claim, complete) for the current 7-day login cycle."""
+    """Return (day, can_claim, complete) for this character's one-time 7-day run."""
     sign_calendar = current_sign_calendar()
     today_iso = sign_calendar['date']
     last_claimed = character.get('sign_week_claimed_date')
@@ -13683,8 +13683,10 @@ def resolve_sign_week_state(character):
     if character.get('sign_week_complete') and not complete:
         character['sign_week_complete'] = False
 
+    if complete:
+        return 7, False, True
+
     if not last_claimed:
-        character['sign_week_complete'] = False
         return 1, True, False
 
     if last_claimed == today_iso:
@@ -13698,11 +13700,6 @@ def resolve_sign_week_state(character):
     days_since = (today_date - last_date).days
     if days_since <= 0:
         return max(1, current_day or 1), False, complete
-
-    if complete and days_since >= 1:
-        character['sign_week_complete'] = False
-        character['sign_week_day'] = 0
-        return 1, True, False
 
     if days_since == 1:
         next_day = min(7, max(1, current_day + 1))
@@ -13785,17 +13782,13 @@ def unlocked_function_ids(character):
 
 
 def sign_week_push_mask(character):
-    """Preserve other saved common-data push flags while updating Lucky 7."""
+    """Keep the client's Lucky 7 tab hidden permanently after day seven."""
     try:
         push_mask = int(character.get('push', 0) or 0)
     except (TypeError, ValueError):
         push_mask = 0
     push_mask = max(0, push_mask) & ~8
-    completed_today = (
-        sign_week_has_seven_claims(character)
-        and character.get('sign_week_claimed_date') == current_sign_calendar()['date']
-    )
-    return push_mask | 8 if completed_today else push_mask
+    return push_mask | 8 if sign_week_has_seven_claims(character) else push_mask
 
 
 def function_unlock_payload(character):
@@ -13823,7 +13816,7 @@ def function_unlock_payload(character):
         funcs[fid] = encode_sproto([(0, fid), (1, func_state)])
 
     return encode_sproto([
-        (0, int(time.time())), (2, 0), (4, 10000),
+        (0, int(time.time())), (2, 0), (3, 3), (4, 10000),
         (8, 0), (9, funcs), (10, push_mask),
         (11, _guild_champion_id()), (12, random.randint(1, 10000)),
         (13, 1), (14, int(time.time()))
