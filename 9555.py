@@ -3212,6 +3212,7 @@ GUILD_CITY_LOCK = threading.RLock()
 GUILD_CITY_EVENT_STATE = {}
 WILD_BOSS_LOCK = threading.RLock()
 WILD_BOSS_EVENTS = {}
+WILD_BOSS_ANNOUNCED_STARTS = set()
 WILD_BOSS_ENTRY_RESERVATIONS = {}
 WILD_BOSS_RANK_ROWS = 10
 GUILD_BOSS_LOCK = threading.RLock()
@@ -18258,23 +18259,52 @@ def _wild_boss_distribute_rewards(row, record, notify=True):
 def _wild_boss_clock(row, now=None):
     now = int(time.time() if now is None else now)
     start_times = [int(value) for value in row.get('start_times', [])
-                   if int(value) >= 0]
+                   if 0 <= int(value) < 86400]
     duration = max(0, int(row.get('duration', 0) or 0))
     if not start_times or duration <= 0:
         return False, 0, 0, now, 0
-    pvp_slot = int(row.get('time', 0) or 0)
-    is_pvp = bool(int(row.get('pvp', 0) or 0))
     utc_day_start = now - (now % 86400)
     for day_offset in range(3):
         for slot, seconds in enumerate(start_times, 1):
-            if bool(slot == pvp_slot) != is_pvp:
-                continue
             event_start = utc_day_start + day_offset * 86400 + seconds
             if event_start <= now < event_start + duration:
                 return True, slot, event_start, event_start, event_start + duration
             if event_start > now:
                 return False, slot, event_start, event_start, event_start + duration
     return False, 0, 0, now, now
+
+
+def _wild_boss_schedule_tick(now=None):
+    now = int(time.time() if now is None else now)
+    utc_day_start = now - (now % 86400)
+    start_times = {
+        int(seconds)
+        for row in WILD_BOSS_CONFIG.values()
+        for seconds in row.get('start_times', [])
+        if 0 <= int(seconds) < 86400
+    }
+    with WILD_BOSS_LOCK:
+        for old_start in list(WILD_BOSS_ANNOUNCED_STARTS):
+            if old_start < utc_day_start - 86400:
+                WILD_BOSS_ANNOUNCED_STARTS.discard(old_start)
+
+    for seconds in sorted(start_times):
+        event_start = utc_day_start + seconds
+        if not event_start <= now < event_start + 10:
+            continue
+        with WILD_BOSS_LOCK:
+            if event_start in WILD_BOSS_ANNOUNCED_STARTS:
+                continue
+            WILD_BOSS_ANNOUNCED_STARTS.add(event_start)
+        scroll_message = f"#{{101912}}*Raid Boss"
+        system_time = time.strftime('%H:%M UTC', time.gmtime(event_start))
+        system_message = f"#{{200404}}*{system_time}"
+        scroll_delivered = gotham_broadcast_scroll_message(scroll_message)
+        system_delivered = gotham_broadcast_system_message(system_message)
+        print(f"[WILD BOSS] scheduled start "
+              f"utc={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(event_start))} "
+              f"scroll={scroll_delivered} system={system_delivered}")
+    return True
 
 
 def _wild_boss_event(row, event_start, create=False):
@@ -18349,12 +18379,9 @@ def _wild_boss_entry_check(char, boss_id, now=None):
     if not row or int(row.get('type', 0) or 0) != 5:
         return False, 'unconfigured', None, 0
     now = int(time.time() if now is None else now)
-    active, slot, event_start, _next_start, _slot_end = _wild_boss_clock(row, now)
+    active, _slot, event_start, _next_start, _slot_end = _wild_boss_clock(row, now)
     if not active:
         return False, 'closed', row, 0
-    pvp_slot = int(row.get('time', 0) or 0)
-    if bool(int(row.get('pvp', 0) or 0)) != (slot == pvp_slot):
-        return False, 'wrong_variant', row, 0
     level = int(char.get('level', 1) or 1)
     if not int(row.get('min_level', 1) or 1) <= level <= int(row.get('max_level', 80) or 80):
         return False, 'level', row, 0
@@ -18604,6 +18631,14 @@ def _wild_boss_finish(key, won, killer_id=0):
             ai_timer.cancel()
     row = WILD_BOSS_CONFIG.get(str(key[0]), {})
     _wild_boss_send_result(row, record, won)
+    if won and rows:
+        winner = rows[0]
+        level_range = f"Lv.{int(row.get('min_level', 1))}-{int(row.get('max_level', 80))}"
+        winner_name = str(winner.get('name') or f"Player {winner.get('id', 0)}")
+        message = f"#{{101917}}*{level_range}*[ffff00]{winner_name}[-]"
+        delivered = gotham_broadcast_scroll_message(message)
+        print(f"[WILD BOSS] rank-1 congratulations boss={key[0]} "
+              f"player={winner.get('id')} delivered={delivered}")
     exit_at = int(record['end_time'])
     for _char_id, conn, char in _wild_boss_scene_chars(record.get('map_id', '')):
         if (str(char.get('_wild_boss_boss_id', '')) == str(key[0])
@@ -31304,6 +31339,7 @@ def start_server():
     print(f"GAME SERVER 9555 READY ON PORT {PORT}")
     _restore_guild_dance_speaker_timers()
     threading.Thread(target=_guild_boss_scheduler_loop, daemon=True).start()
+    RepeatingTask(1.0, _wild_boss_schedule_tick).start()
     RepeatingTask(10.0, _inventory_expiry_worker_tick).start()
     while True:
         try:
