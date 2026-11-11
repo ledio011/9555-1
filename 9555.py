@@ -13604,6 +13604,19 @@ def sign_week_claim_result_payload(day, can_claim):
     ])
 
 
+def resolve_sign_week_claim_day(requested_day, day, can_claim, complete):
+    """Use the server's sole claimable day when the client omits its request body."""
+    if requested_day is not None:
+        return requested_day
+    try:
+        current_day = int(day)
+    except (TypeError, ValueError):
+        return None
+    if can_claim and not complete and 1 <= current_day <= 7:
+        return current_day
+    return None
+
+
 def sign_week_reward_list(character, day):
     day_config = SIGN_IN_WEEK_CONFIG.get(int(day))
     if not day_config:
@@ -27288,37 +27301,41 @@ def client_handler(conn, addr):
                     requested_day = get_val_int(body, 0, None)
                     with get_character_transaction_lock(picked_char):
                         day, can_claim, complete = resolve_sign_week_state(picked_char)
-                        if (requested_day is None
-                                or requested_day < 1
-                                or requested_day > 7
-                                or requested_day != day
-                                or not can_claim):
+                        claim_day = resolve_sign_week_claim_day(
+                            requested_day, day, can_claim, complete
+                        )
+                        if (claim_day is None
+                                or claim_day < 1
+                                or claim_day > 7
+                                or claim_day != day
+                                or not can_claim
+                                or complete):
                             print(
                                 f"[REWARD SECURITY] weekly sign rejected "
                                 f"player={picked_char.get('id')} requested_day={requested_day} "
                                 f"current_day={day} can_claim={can_claim}"
                             )
                             send_rpc_push(
-                                643, sign_week_claim_result_payload(day, can_claim)
+                                641, sign_week_payload(day, can_claim, complete)
                             )
                         else:
-                            rewards = sign_week_reward_list(picked_char, day)
+                            rewards = sign_week_reward_list(picked_char, claim_day)
                             if not rewards:
                                 print(
                                     f"[SIGN WEEK] no configured rewards "
-                                    f"day={day} profession={picked_char.get('prof')} "
+                                    f"day={claim_day} profession={picked_char.get('prof')} "
                                     f"player={picked_char.get('id')}"
                                 )
                                 send_rpc_push(
-                                    643, sign_week_claim_result_payload(day, can_claim)
+                                    641, sign_week_payload(day, can_claim, complete)
                                 )
                             elif not can_add_reward_list_to_inventory(picked_char, rewards):
                                 print(
                                     f"[SIGN WEEK] inventory full "
-                                    f"day={day} player={picked_char.get('id')}"
+                                    f"day={claim_day} player={picked_char.get('id')}"
                                 )
                                 send_rpc_push(
-                                    643, sign_week_claim_result_payload(day, can_claim)
+                                    641, sign_week_payload(day, can_claim, complete)
                                 )
                             else:
                                 reward_snapshot = snapshot_character_reward_state(picked_char)
@@ -27335,13 +27352,13 @@ def client_handler(conn, addr):
                                 grant_item_rewards(picked_char, rewards, save=False)
                                 sign_calendar = current_sign_calendar()
                                 picked_char['sign_week_claimed_date'] = sign_calendar['date']
-                                picked_char['sign_week_day'] = day
+                                picked_char['sign_week_day'] = claim_day
                                 picked_char['sign_week_claimed'] = True
-                                picked_char['sign_week_complete'] = (day >= 7)
+                                picked_char['sign_week_complete'] = (claim_day >= 7)
                                 if save_chars(all_accounts_chars):
                                     after_complete = bool(picked_char['sign_week_complete'])
                                     send_rpc_push(
-                                        643, sign_week_claim_result_payload(day, False)
+                                        643, sign_week_claim_result_payload(claim_day, False)
                                     )
                                     if after_complete:
                                         send_rpc_push(
@@ -27349,7 +27366,7 @@ def client_handler(conn, addr):
                                         )
                                     print(
                                         f"[SIGN WEEK CLAIMED] player={picked_char.get('id')} "
-                                        f"day={day} complete={after_complete}"
+                                        f"day={claim_day} complete={after_complete}"
                                     )
                                     sync_all_backpacks(picked_char, send_rpc_push)
                                     sync_char_attrs_rpc(conn, picked_char)
@@ -27364,10 +27381,10 @@ def client_handler(conn, addr):
                                             picked_char.pop(key, None)
                                     print(
                                         f"[SIGN WEEK] persistence failed "
-                                        f"day={day} player={picked_char.get('id')}"
+                                        f"day={claim_day} player={picked_char.get('id')}"
                                     )
                                     send_rpc_push(
-                                        643, sign_week_claim_result_payload(day, can_claim)
+                                        641, sign_week_payload(day, can_claim, complete)
                                     )
 
                 elif msg == 252 and picked_char: # request_sign_30_day_info
