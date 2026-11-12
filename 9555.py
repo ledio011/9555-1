@@ -11075,16 +11075,20 @@ def _prison_npc_skills(npc_cfg, attack_distance):
     return skills
 
 
-def _prison_npc_broadcast_move(slot_key, inst_id, x, z, heading, stop=False):
+def _prison_npc_broadcast_move(
+        slot_key, inst_id, x, z, heading, stop=False, walk=True):
     pos_data = encode_sproto([(0, int(x)), (1, 0), (2, int(z)), (3, int(heading))])
     move_data = encode_sproto([(0, pos_data)])
-    character_data = encode_sproto([(0, int(inst_id)), (1, move_data), (2, True)])
+    character_data = encode_sproto([
+        (0, int(inst_id)), (1, move_data), (2, bool(walk))
+    ])
     for peer_conn, _peer_char in prison_npc_visible_connections(slot_key, inst_id):
         send_rpc_push_safe(peer_conn, 513 if stop else 507,
                            encode_sproto([(0, character_data)]))
 
 
-def _prison_npc_move_toward(slot_key, inst_id, target_x, target_z, speed, now):
+def _prison_npc_move_toward(
+        slot_key, inst_id, target_x, target_z, speed, now, walk=True):
     with PRISON_NPC_LOCK:
         slot = PRISON_NPC_SHARED_SLOTS.get(str(slot_key), {})
         if (int(slot.get("inst_id") or 0) != int(inst_id)
@@ -11105,7 +11109,8 @@ def _prison_npc_move_toward(slot_key, inst_id, target_x, target_z, speed, now):
         slot["heading"] = heading
         slot["last_move_at"] = now
         slot["moving"] = True
-    _prison_npc_broadcast_move(slot_key, inst_id, next_x, next_z, heading)
+    _prison_npc_broadcast_move(
+        slot_key, inst_id, next_x, next_z, heading, walk=walk)
 
 
 def _prison_npc_stop(slot_key, inst_id, now):
@@ -11117,7 +11122,30 @@ def _prison_npc_stop(slot_key, inst_id, now):
         heading = int(slot.get("heading", 0) or 0)
         slot["moving"] = False
         slot["last_move_at"] = now
-    _prison_npc_broadcast_move(slot_key, inst_id, x, z, heading, stop=True)
+    _prison_npc_broadcast_move(
+        slot_key, inst_id, x, z, heading, stop=True, walk=False)
+
+
+def prison_npc_retarget_on_hit(inst_id, attacker):
+    try:
+        inst_id = int(inst_id)
+        attacker_id = int(attacker.get("id", 0) or 0)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    slot_key = PRISON_NPC_SHARED_BY_INSTANCE.get(inst_id)
+    if not slot_key or attacker_id <= 0:
+        return False
+    with PRISON_NPC_LOCK:
+        slot = PRISON_NPC_SHARED_SLOTS.get(str(slot_key))
+        if (not slot or str(slot.get("map_id", "")) not in SURVIVE_BATTLE_NPC_MAP_IDS
+                or int(slot.get("inst_id") or 0) != inst_id
+                or slot.get("dead_at")
+                or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
+            return False
+        slot["target_id"] = attacker_id
+        slot["patrol_target"] = None
+        slot["last_move_at"] = time.time()
+    return True
 
 
 def _prison_npc_ai_tick():
@@ -11160,6 +11188,8 @@ def _prison_npc_ai_tick():
             lock_distance = lock_cm / 100.0
             return_cm = max(
                 lock_cm, int(ai_cfg.get("return_distance", lock_cm) or lock_cm))
+            if str(snapshot.get("map_id", "")) in SURVIVE_BATTLE_NPC_MAP_IDS:
+                return_cm = max(return_cm, search_cm)
             return_distance = return_cm / 100.0
             around_min = max(0, int(ai_cfg.get("around_min_distance", 100) or 100))
             around_max = max(around_min, int(ai_cfg.get("around_max_distance", 200) or 200))
@@ -11260,7 +11290,8 @@ def _prison_npc_ai_tick():
                     _prison_npc_move_toward(
                         slot_key, inst_id,
                         px_cm - int(dx / distance * max_range * 100),
-                        pz_cm - int(dz / distance * max_range * 100), speed, now)
+                        pz_cm - int(dz / distance * max_range * 100),
+                        speed, now, walk=False)
                 else:
                     _prison_npc_stop(slot_key, inst_id, now)
                 continue
@@ -13808,9 +13839,7 @@ def _survive_battle_rank_rows(config, char=None):
                 if not isinstance(candidate, dict):
                     continue
                 candidate_state = candidate.get('survival_battle_state')
-                if (str(candidate.get('map_id', '')) not in map_ids
-                        or str(candidate.get('active_copy_id') or '') not in map_ids
-                        or not isinstance(candidate_state, dict)
+                if (not isinstance(candidate_state, dict)
                         or str(candidate_state.get('activity_id')) != config_id):
                     continue
                 try:
@@ -26828,6 +26857,9 @@ def client_handler(conn, addr):
                                 continue
 
                             cash_stage_state = picked_char.get('cash_stage_state') if picked_char else None
+                            if (applied_damage > 0
+                                    and cur_map in SURVIVE_BATTLE_NPC_MAP_IDS):
+                                prison_npc_retarget_on_hit(target_id, picked_char)
                             if (not is_stage_combat and isinstance(cash_stage_state, dict)
                                     and str(cash_stage_state.get('copy_id'))
                                     == str(picked_char.get('active_copy_id') or '')
