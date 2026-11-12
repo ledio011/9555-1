@@ -13525,6 +13525,11 @@ def escort_activity_info_payload(char, now=None):
     for activity_id, cfg in ESCORT_ACTIVITY_CONFIG.items():
         if str(cfg.get('map_id')) != GOTHAM_MAP_ID:
             continue
+        # Keep the default Escort row visible; its other RandomIndex variants
+        # remain configured and are still accepted as mission IDs.
+        if (int(cfg.get('type', 0) or 0) == 1
+                and int(cfg.get('random_index', 0) or 0) > 0):
+            continue
         active, next_start = escort_activity_clock(
             cfg.get('start_time', 0), cfg.get('duration', 0), now)
         used = max(0, int(state['attempts'].get(activity_id, 0) or 0))
@@ -18475,6 +18480,27 @@ def _wild_boss_rank_rows(record):
     )
 
 
+def _wild_boss_activity_rank_string(boss_id, event_start, active, now):
+    with WILD_BOSS_LOCK:
+        if active:
+            record = WILD_BOSS_EVENTS.get((str(boss_id), int(event_start or 0)))
+        else:
+            previous = [
+                (start, candidate)
+                for (candidate_id, start), candidate in WILD_BOSS_EVENTS.items()
+                if candidate_id == str(boss_id) and int(start) <= int(now)
+                and _wild_boss_rank_rows(candidate)
+            ]
+            record = max(previous, key=lambda item: item[0])[1] if previous else None
+        rows = _wild_boss_rank_rows(record)[:3]
+
+    rank_names = []
+    for rank, entry in enumerate(rows, 1):
+        name = str(entry.get('name', '') or '').replace('#', ' ').replace('@', ' ').strip()
+        rank_names.append(f'{rank}@{name}' if name else '')
+    return '#'.join(rank_names)
+
+
 def _wild_boss_battle_info(char, record=None):
     if record is None and char:
         boss_id = str(char.get('_wild_boss_boss_id', ''))
@@ -18519,7 +18545,8 @@ def _wild_boss_activity_payload(char, now=None):
                 remaining = max(1, remaining)
         activities[str(boss_id)] = encode_sproto([
             (0, str(boss_id)), (1, remaining), (2, int(row.get('type', 0) or 0)),
-            (3, 1 if active else 0), (4, int(next_start)), (5, ''),
+            (3, 1 if active else 0), (4, int(next_start)),
+            (5, _wild_boss_activity_rank_string(boss_id, event_start, active, now)),
             (6, 0), (7, now), (8, int(slot))
         ])
     return encode_sproto([(0, activities)])
