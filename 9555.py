@@ -450,6 +450,7 @@ LEVEL_REWARD_CONFIG = {} # LevelRewardData ID -> milestone claim definitions
 LEVEL_PACKAGE_CONFIG = {} # LevelPackageData ID -> level-up item bundle
 DAILY_ACTIVE_CONFIG = {} # DailyActiveData ID -> activity score/count/unlock values
 DAILY_ACTIVE_REWARD_CONFIG = {} # DailyActiveRewardData ID -> level/score/drop definition
+SURVIVE_BATTLE_CONFIG = {} # SurviveBattleData ID -> schedule, maps, scores and rank drops
 RETRIEVE_CONFIG = {} # RetrieveData ID -> recovery costs/scales/level drop key
 
 try:
@@ -2176,6 +2177,48 @@ try:
                 for index, key in enumerate(table_header)
             }
         debug_log(f"[DAILY ACTIVE REWARD CONFIG LOADED] count={len(DAILY_ACTIVE_REWARD_CONFIG)}")
+
+    survive_battle_path = os.path.join(text_asset_root, "SurviveBattleData")
+    if os.path.exists(survive_battle_path):
+        with open(survive_battle_path, "r", encoding="utf-8") as table_file:
+            for row in (line.strip().split(",") for line in table_file if line.strip()):
+                if len(row) < 28 or row[0] != "*" or not row[1].strip().isdigit():
+                    continue
+                try:
+                    start_times = [
+                        int(value) for value in row[5].split("#")
+                        if value.strip().isdigit()
+                    ]
+                    SURVIVE_BATTLE_CONFIG[row[1].strip()] = {
+                        "id": row[1].strip(),
+                        "map_id": row[2].strip(),
+                        "map_id2": row[3].strip(),
+                        "type": int(row[4] or 0),
+                        "start_times": start_times,
+                        "duration": int(row[6] or 0),
+                        "wait_time": int(row[7] or 0),
+                        "exist_time": int(row[8] or 0),
+                        "max_player": int(row[9] or 0),
+                        "unlock_level": int(row[10] or 0),
+                        "first_max_score": int(row[11] or 0),
+                        "second_min_score": int(row[12] or 0),
+                        "rank_drop_ids": [
+                            row[13].strip(), row[15].strip(),
+                            row[17].strip(), row[19].strip(), row[21].strip()
+                        ],
+                        "rank_limits": [
+                            int(row[index] or 0) for index in (14, 16, 18, 20)
+                        ],
+                        "show_reward_id": row[22].strip(),
+                        "name": row[23].strip(),
+                        "desc": row[24].strip(),
+                        "rule": row[25].strip(),
+                        "background": row[26].strip(),
+                        "icon": row[27].strip(),
+                    }
+                except (TypeError, ValueError):
+                    continue
+        debug_log(f"[SURVIVE BATTLE CONFIG LOADED] count={len(SURVIVE_BATTLE_CONFIG)}")
 
     # Load FunctionData (feature unlock gates by level)
     func_path = os.path.join(text_asset_root, "FunctionData")
@@ -4261,7 +4304,7 @@ def update_street_race_checkpoint_progress(char, move_body, car_pos):
 # IsBigWorld(), and IsCanAttackOtherPlayerScene() in the shipped Assembly-CSharp.
 # Unknown map types fail closed: the client still knows how to create a remote
 # player from AOI packets, but it does not expect those packets in local-only modes.
-CLIENT_PLAYER_AOI_MAP_TYPES = frozenset((1, 3, 5, 12, 14, 15, 16, 17, 20, 21, 22, 23, 24))
+CLIENT_PLAYER_AOI_MAP_TYPES = frozenset((1, 3, 5, 12, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24))
 
 def client_expects_player_aoi(map_id):
     map_cfg = MAP_CONFIG.get(str(map_id), {})
@@ -13544,11 +13587,138 @@ def escort_activity_info_payload(char, now=None):
 def activity_info_payload(char, now=None):
     now = int(time.time() if now is None else now)
     activities = escort_activity_info_payload(char, now)
+    for activity_id, payload in survive_battle_activity_payload(now).items():
+        activities[activity_id] = payload
     activities["101"] = encode_sproto([
         (0, "101"), (1, 0), (2, 3), (3, 1),
         (4, 0), (5, ""), (6, 0), (7, now), (8, 0)
     ])
     return encode_sproto([(0, activities)])
+
+def survive_battle_occurrence(config, now):
+    duration = max(0, int(config.get('duration', 0) or 0))
+    start_times = [
+        int(value) for value in config.get('start_times', [])
+        if 0 <= int(value) < 86400
+    ]
+    if duration <= 0 or not start_times:
+        return None
+    day_number = now // 86400
+    occurrences = []
+    for day_offset in range(-1, 3):
+        day_start = (day_number + day_offset) * 86400
+        for slot, start_seconds in enumerate(start_times, 1):
+            start_time = day_start + start_seconds
+            occurrences.append({
+                'active': start_time <= now < start_time + duration,
+                'start_time': start_time,
+                'end_time': start_time + duration,
+                'slot': slot,
+            })
+    active = [row for row in occurrences if row['active']]
+    if active:
+        return max(active, key=lambda row: row['start_time'])
+    future = [row for row in occurrences if row['start_time'] > now]
+    return min(future, key=lambda row: row['start_time']) if future else None
+
+def survive_battle_activity_payload(now):
+    activities = {}
+    for activity_id, config in SURVIVE_BATTLE_CONFIG.items():
+        occurrence = survive_battle_occurrence(config, now)
+        if occurrence is None:
+            continue
+        active = occurrence['active']
+        activities[activity_id] = encode_sproto([
+            (0, activity_id), (1, 0), (2, int(config.get('type', 0) or 0)),
+            (3, 1 if active else 0),
+            (4, occurrence['end_time'] if active else occurrence['start_time']),
+            (5, ''), (6, 0), (7, now), (8, occurrence['slot'])
+        ])
+    return activities
+
+def survive_battle_config_for_map(map_id):
+    map_id = str(map_id)
+    return next((
+        config for config in SURVIVE_BATTLE_CONFIG.values()
+        if map_id in (str(config.get('map_id', '')), str(config.get('map_id2', '')))
+    ), None)
+
+def survive_battle_top_payload(char):
+    config = survive_battle_config_for_map(char.get('map_id', ''))
+    state = char.get('survival_battle_state')
+    if not config or not isinstance(state, dict) or str(state.get('activity_id')) != str(config.get('id')):
+        return None
+    try:
+        score = max(0, int(state.get('score', 0) or 0))
+        end_time = max(0, int(state.get('end_time', 0) or 0))
+    except (TypeError, ValueError):
+        return None
+    return encode_sproto([
+        (0, []), (1, 0), (2, score), (3, end_time)
+    ])
+
+def resolve_survive_battle_entry(char, request, now):
+    activity_id = get_val_str(request, 0, '')
+    config = SURVIVE_BATTLE_CONFIG.get(activity_id)
+    if config is None:
+        return None, False, None, None, 'activity configuration is missing'
+    map_id = str(config.get('map_id', ''))
+    map_id2 = str(config.get('map_id2', ''))
+    if not map_id or not map_id2 or map_id not in MAP_CONFIG or map_id2 not in MAP_CONFIG:
+        return None, False, None, None, 'configured Survival Field maps are missing'
+    try:
+        if (int(MAP_CONFIG[map_id].get('type', -1)) != 18
+                or int(MAP_CONFIG[map_id2].get('type', -1)) != 19):
+            return None, False, None, None, 'configured Survival Field map types do not match'
+    except (TypeError, ValueError):
+        return None, False, None, None, 'configured Survival Field map types are invalid'
+    floor = get_val_int(request, 1, 0)
+    entry_type = get_val_int(request, 2, 0)
+    current_map = str(char.get('map_id', ''))
+    active_copy = str(char.get('active_copy_id') or '')
+    state = char.get('survival_battle_state')
+    valid_run = (
+        isinstance(state, dict)
+        and str(state.get('activity_id')) == activity_id
+        and active_copy in (map_id, map_id2)
+    )
+    if floor == 1 and entry_type == 0:
+        if current_map != map_id or not valid_run:
+            return None, False, None, None, 'second-floor request is not from the active first-floor run'
+        try:
+            score = max(0, int(state.get('score', 0) or 0))
+            minimum_score = max(0, int(config.get('second_min_score', 0) or 0))
+            end_time = int(state.get('end_time', 0) or 0)
+        except (TypeError, ValueError):
+            return None, False, None, None, 'invalid Survival Field score state'
+        if now >= end_time or score < minimum_score:
+            return None, False, None, None, 'server score is below the configured second-floor threshold'
+        return map_id2, False, config, None, None
+    if floor == 0 and entry_type == 1:
+        if current_map != map_id2 or not valid_run:
+            return None, False, None, None, 'return request is not from the active second-floor run'
+        return map_id, False, config, None, None
+    if floor != 0 or entry_type != 0:
+        return None, False, None, None, 'unsupported Survival Field floor or transition type'
+    if current_map in (map_id, map_id2):
+        return None, False, None, None, 'new activity entry requested from inside a Survival Field map'
+    try:
+        player_level = max(1, int(char.get('level', 1) or 1))
+        unlock_level = max(0, int(config.get('unlock_level', 0) or 0))
+    except (TypeError, ValueError):
+        return None, False, None, None, 'invalid player or activity level'
+    if player_level < unlock_level:
+        return None, False, None, None, 'player is below the configured unlock level'
+    occurrence = survive_battle_occurrence(config, now)
+    if occurrence is None or not occurrence['active']:
+        return None, False, None, None, 'activity is outside its configured UTC start window'
+    try:
+        exist_time = max(0, int(config.get('exist_time', 0) or 0))
+    except (TypeError, ValueError):
+        return None, False, None, None, 'invalid Survival Field existence time'
+    if exist_time <= 0 or occurrence['start_time'] + exist_time <= now:
+        return None, False, None, None, 'configured Survival Field instance has expired'
+    return map_id, True, config, occurrence, None
 
 def accept_gotham_escort_mission(char, mid):
     cfg = next((row for row in ESCORT_ACTIVITY_CONFIG.values()
@@ -16772,6 +16942,9 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
 
     src_map = str(picked_char.get('map_id') or '11')
     target_map_id = str(target_map_id) or '11'
+    if (survive_battle_config_for_map(src_map)
+            and not survive_battle_config_for_map(target_map_id)):
+        picked_char.pop('survival_battle_state', None)
     if (override_pos is None
             and (target_map_id not in MAP_CONFIG
                  or configured_map_birth_position(target_map_id) is None)):
@@ -27954,6 +28127,18 @@ def client_handler(conn, addr):
                         reconcile_exp_stage_login(picked_char)
                         reconcile_equipment_stage_login(picked_char)
                     current_map = str(picked_char.get('map_id', '11'))
+                    valid_survival_entry = True
+                    survival_new_entry = False
+                    survival_entry_config = None
+                    survival_entry_occurrence = None
+                    survival_entry_error = None
+                    if msg == 246:
+                        (survival_target, survival_new_entry, survival_entry_config,
+                         survival_entry_occurrence, survival_entry_error) = (
+                            resolve_survive_battle_entry(picked_char, body, int(time.time())))
+                        valid_survival_entry = survival_entry_error is None
+                        if valid_survival_entry:
+                            mid = survival_target
                     boss_cfg = WILD_BOSS_CONFIG.get(mid, {}) if msg == 201 else {}
                     wild_boss_entry_ok = True
                     wild_boss_event_start = 0
@@ -28007,6 +28192,9 @@ def client_handler(conn, addr):
                             # enter_guild_city_scene sends GuildCaptureData.ID;
                             # resolve that capture ID to its actual MapInfoData ID.
                             mid = str(capture_map_id)
+                    if msg != 246 and survive_battle_config_for_map(mid):
+                        valid_survival_entry = False
+                        survival_entry_error = 'Survival Field maps require the validated activity-entry request'
                     valid_world_boss = wild_boss_entry_ok
                     if not is_current_character_connection(conn, picked_char):
                         print(f"[SCENE ENTRY] denied stale character socket player={picked_char.get('id')}")
@@ -28018,6 +28206,9 @@ def client_handler(conn, addr):
                             send_rpc_push(628, encode_sproto([(0, False)]))
                     elif not valid_guild_city:
                         print(f"[GUILD CITY SECURITY] rejected capture id={body.get(0)} player={picked_char.get('id')}")
+                    elif not valid_survival_entry:
+                        print(f"[SURVIVAL FIELD] entry rejected player={picked_char.get('id')} "
+                              f"target={mid} reason={survival_entry_error}")
                     elif (is_exp_map(mid) or is_exp_map(current_map)
                           or is_equipment_copy_map(mid) or is_equipment_copy_map(current_map)
                           or picked_char.get('exp_stage_state')
@@ -28064,7 +28255,17 @@ def client_handler(conn, addr):
                                 wild_boss_event_start)
                             _wild_boss_event(
                                 boss_cfg, wild_boss_event_start, create=True)
+                        if msg == 246 and survival_new_entry:
+                            exist_time = max(0, int(survival_entry_config.get('exist_time', 0) or 0))
+                            picked_char['survival_battle_state'] = {
+                                'activity_id': str(survival_entry_config.get('id', '')),
+                                'event_start_time': int(survival_entry_occurrence['start_time']),
+                                'end_time': int(survival_entry_occurrence['start_time']) + exist_time,
+                                'score': 0,
+                            }
                         start_map_transition(conn, picked_char, mid, send_rpc_push)
+                        if msg == 246 and survival_new_entry:
+                            record_daily_active_event(picked_char, 18, send_rpc_push)
                         if msg == 201: # world_boss
                             entered_new_event = _wild_boss_entry_commit(
                                 picked_char, str(boss_cfg.get('id', body.get(0))),
@@ -29036,6 +29237,14 @@ def client_handler(conn, addr):
                         (7, 0 if claimed else 1)
                     ]))
                     send_rpc_push(658, retrieve_info_payload(picked_char))
+
+                elif msg == 245: # request_survive_top
+                    if (picked_char
+                            and is_current_character_connection(conn, picked_char)):
+                        survival_payload = survive_battle_top_payload(picked_char)
+                        if survival_payload is not None:
+                            send_rpc_push(636, survival_payload)
+                    send_rpc_response(session)
 
                 elif msg == 261 and picked_char: # request_daily_active
                     with get_character_transaction_lock(picked_char):
