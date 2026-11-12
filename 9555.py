@@ -5245,8 +5245,9 @@ def map_relife_type(map_id):
 def supports_normal_relife(map_id):
     """Allow ordinary revives on configured maps and boss activity maps."""
     mid = str(map_id)
-    if _guild_boss_map_id(mid) or _wild_boss_map_id(mid):
-        # Boss activity maps use RelifeType 0 despite defining revive positions.
+    if (mid in SURVIVE_BATTLE_NPC_MAP_IDS
+            or _guild_boss_map_id(mid) or _wild_boss_map_id(mid)):
+        # These activity maps use RelifeType 0 despite defining revive positions.
         return True
     return (not _domin_capture_is_arena(mid)
             and not is_exp_map(mid)
@@ -5324,8 +5325,10 @@ def is_legacy_map_spawn_position(map_id, position):
 
 
 def configured_map_relife_position(map_id):
-    """Return the first client-configured revive point, or the map birth point."""
+    """Return a configured revive point, or the map birth point."""
     positions = map_config_position_list(map_id, 'relife_pos')
+    if str(map_id) in SURVIVE_BATTLE_NPC_MAP_IDS and positions:
+        return list(random.choice(positions))
     return list(positions[0]) if positions else configured_map_birth_position(map_id)
 
 def _random_attr_field(entry, field_tag, field_name):
@@ -11075,7 +11078,7 @@ def _prison_npc_skills(npc_cfg, attack_distance):
 
 def _prison_npc_broadcast_move(slot_key, inst_id, x, z, heading, stop=False):
     pos_data = encode_sproto([(0, int(x)), (1, 0), (2, int(z)), (3, int(heading))])
-    move_data = encode_sproto([(0, pos_data), (1, pos_data)])
+    move_data = encode_sproto([(0, pos_data)])
     character_data = encode_sproto([(0, int(inst_id)), (1, move_data), (2, True)])
     for peer_conn, _peer_char in prison_npc_visible_connections(slot_key, inst_id):
         send_rpc_push_safe(peer_conn, 513 if stop else 507,
@@ -14009,8 +14012,8 @@ def resolve_survive_battle_entry(char, request, now):
         exist_time = max(0, int(config.get('exist_time', 0) or 0))
     except (TypeError, ValueError):
         return None, False, None, None, 'invalid Survival Field existence time'
-    if exist_time <= 0 or occurrence['start_time'] + exist_time <= now:
-        return None, False, None, None, 'configured Survival Field instance has expired'
+    if exist_time <= 0:
+        return None, False, None, None, 'configured Survival Field existence time is invalid'
     return map_id, True, config, occurrence, None
 
 def accept_gotham_escort_mission(char, mid):
@@ -17291,6 +17294,10 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         landing_pos = street_race_start_position(target_map_id)
         if landing_pos:
             print(f"[STREET RACE] route start map={target_map_id} pos={landing_pos}")
+    if not landing_pos and survive_battle_config_for_map(target_map_id):
+        survival_birth_positions = map_config_position_list(target_map_id, 'birth')
+        if survival_birth_positions:
+            landing_pos = list(random.choice(survival_birth_positions))
     if not landing_pos:
         landing_pos = configured_map_birth_position(target_map_id)
 
@@ -28571,10 +28578,12 @@ def client_handler(conn, addr):
                                 boss_cfg, wild_boss_event_start, create=True)
                         if msg == 246 and survival_new_entry:
                             exist_time = max(0, int(survival_entry_config.get('exist_time', 0) or 0))
+                            run_start_time = int(time.time())
                             picked_char['survival_battle_state'] = {
                                 'activity_id': str(survival_entry_config.get('id', '')),
                                 'event_start_time': int(survival_entry_occurrence['start_time']),
-                                'end_time': int(survival_entry_occurrence['start_time']) + exist_time,
+                                'run_start_time': run_start_time,
+                                'end_time': run_start_time + exist_time,
                                 'score': 0,
                             }
                         start_map_transition(conn, picked_char, mid, send_rpc_push)
