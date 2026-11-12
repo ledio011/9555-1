@@ -5242,11 +5242,10 @@ def map_relife_type(map_id):
         return 0
 
 def supports_normal_relife(map_id):
-    """MapInfo enables ordinary revive offers on rule 1/2 maps only."""
+    """Allow ordinary revives on configured maps and boss activity maps."""
     mid = str(map_id)
-    if _guild_boss_map_id(mid):
-        # MapInfoData RelifeType is 0 for the Gang Boss maps: without this the boss
-        # kills players but never offers a revive (618) and 132 is denied.
+    if _guild_boss_map_id(mid) or _wild_boss_map_id(mid):
+        # Boss activity maps use RelifeType 0 despite defining revive positions.
         return True
     return (not _domin_capture_is_arena(mid)
             and not is_exp_map(mid)
