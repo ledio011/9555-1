@@ -133,7 +133,8 @@ TEAM_ID_COUNTER = 500000
 EXP_RUN_COUNTER = 900000
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 NPC_AOI_TRACK = {}  # connection identity -> {inst_id: {'nid': ..., 'x': ..., 'z': ...}}
-PRISON_NPC_AOI_MAP_IDS = frozenset(("1201", "1202"))
+SURVIVE_BATTLE_NPC_MAP_IDS = frozenset(("1101", "1102"))
+PRISON_NPC_AOI_MAP_IDS = frozenset(("1201", "1202")) | SURVIVE_BATTLE_NPC_MAP_IDS
 PRISON_NPC_AOI_TRACK = {}  # connection identity -> {shared spawn key: instance ID}
 PRISON_NPC_SHARED_SLOTS = {}
 PRISON_NPC_SHARED_BY_INSTANCE = {}
@@ -616,7 +617,7 @@ try:
                         'eff2': parts[28] if len(parts) > 28 else "",
                         'cooldown_ms': int(parts[10]) if len(parts) > 10 and parts[10].isdigit() else 0,
                         'trace_distance_cm': int(parts[12]) if len(parts) > 12 and parts[12].isdigit() else 0,
-                        'priority': int(parts[29]) if len(parts) > 29 and parts[29].isdigit() else 0,
+                        'priority': int(parts[30]) if len(parts) > 30 and parts[30].isdigit() else 0,
                         # Equip inheritance groups weapon skills by SkillData.TeamID;
                         # matching skill IDs alone rejects valid client selections.
                         'team_id': int(parts[32]) if len(parts) > 32 and parts[32].lstrip('-').isdigit() else 0,
@@ -10378,8 +10379,10 @@ def _guild_boss_skill_range(skill, attack_distance):
     params = effect_cfg.get('params', [])
     try:
         param1 = abs(int(params[0] if len(params) > 0 else 0)) / 100.0
-        param2 = abs(int(params[1] if len(params) > 1 else 0)) / 100.0
         area_type = int(effect_cfg.get('area_type', 0) or 0)
+        param2 = abs(int(params[1] if len(params) > 1 else 0))
+        if area_type != 3:
+            param2 /= 100.0
     except (TypeError, ValueError):
         param1, param2, area_type = 0.0, 0.0, 0
     if area_type == 1:
@@ -10838,9 +10841,15 @@ def clear_prison_npc_aoi(conn, send_remove=False):
             send_rpc_push_safe(conn, 506, encode_sproto([(0, int(inst_id))]))
 
 
-def prison_npc_specs(map_id):
+def prison_npc_specs(map_id, player_level=1):
     specs = []
     map_str = str(map_id)
+    if map_str not in SURVIVE_BATTLE_NPC_MAP_IDS:
+        player_level = 1
+    try:
+        player_level = max(1, min(PLAYER_MAX_LEVEL, int(player_level)))
+    except (TypeError, ValueError):
+        player_level = 1
     for index, row in enumerate(MONSTER_DATA.get(map_str, [])):
         try:
             nid = str(row.get("nid") or "")
@@ -10855,6 +10864,7 @@ def prison_npc_specs(map_id):
                 "z": int(row.get("z", 0)),
                 "o": int(row.get("o", 0)),
                 "rebirth_time": int(row.get("rebirth_time", -1)),
+                "player_level": player_level,
             })
         except (TypeError, ValueError):
             continue
@@ -10864,9 +10874,11 @@ def prison_npc_specs(map_id):
 def prison_create_shared_npc(slot, spec):
     nid = str(spec["nid"])
     cfg = NPC_CONFIG[nid]
+    player_level = max(1, int(spec.get("player_level", 1) or 1))
     inst_id, attr = build_npc_attr_sproto(
         nid, cfg.get("name", f"Monster_{nid}"),
-        int(spec["x"]), int(spec["z"]), int(spec.get("o", 0)))
+        int(spec["x"]), int(spec["z"]), int(spec.get("o", 0)),
+        player_level=player_level)
     NPC_INSTANCE_MAP[inst_id] = str(spec["map_id"])
     slot.update({
         **spec,
@@ -10904,7 +10916,8 @@ def prison_shared_npc_for_spawn(spec):
         inst_id, attr = build_npc_attr_sproto(
             spec["nid"], cfg.get("name", f"Monster_{spec['nid']}"),
             int(position[0]), int(position[1]), int(slot.get("heading", spec.get("o", 0))),
-            existing_inst_id=inst_id)
+            existing_inst_id=inst_id,
+            player_level=int(slot.get("player_level", spec.get("player_level", 1)) or 1))
         return inst_id, attr, slot
 
 
@@ -11012,7 +11025,11 @@ def update_prison_npc_aoi(conn, map_id, picked_char):
     radius_sq = radius_units * radius_units
     tracked = PRISON_NPC_AOI_TRACK.setdefault(id(conn), {})
     visible_slots = set()
-    for spec in prison_npc_specs(map_str):
+    try:
+        player_level = int(picked_char.get("level", 1) or 1)
+    except (TypeError, ValueError):
+        player_level = 1
+    for spec in prison_npc_specs(map_str, player_level):
         slot_key = str(spec["slot"])
         slot = PRISON_NPC_SHARED_SLOTS.get(slot_key)
         position = (slot.get("position") if slot else None) or (spec["x"], spec["z"])
@@ -11033,8 +11050,9 @@ def update_prison_npc_aoi(conn, map_id, picked_char):
             send_rpc_push_safe(conn, 506, encode_sproto([(0, int(previous_inst))]))
         if send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
             tracked[slot_key] = int(inst_id)
+            npc_level = int(slot.get("player_level", spec.get("player_level", 1)) or 1)
             sync_npc_attrs_rpc(
-                conn, inst_id, get_npc_attr(spec["nid"]),
+                conn, inst_id, get_npc_attr(spec["nid"], npc_level),
                 NPC_HP_MAP.get(inst_id, 0))
 
     for slot_key, inst_id in list(tracked.items()):
@@ -11049,9 +11067,9 @@ def _prison_npc_skills(npc_cfg, attack_distance):
         skill_id = skill_id.strip()
         if not skill_id or skill_id not in SKILL_CONFIG:
             continue
-        skill_range, _area, _param1, _param2 = _guild_boss_skill_range(
+        skill_range, area_type, param1, param2 = _guild_boss_skill_range(
             skill_id, attack_distance)
-        skills.append((skill_id, skill_range))
+        skills.append((skill_id, skill_range, area_type, param1, param2))
     return skills
 
 
@@ -11185,12 +11203,13 @@ def _prison_npc_ai_tick():
             dx, dz = px_cm / 100.0 - mx, pz_cm / 100.0 - mz
             distance = math.hypot(dx, dz)
             ready_skills = [
-                (skill_id, skill_range) for skill_id, skill_range in skills
+                (skill_id, skill_range, _area_type, _radius, _angle)
+                for skill_id, skill_range, _area_type, _radius, _angle in skills
                 if distance <= skill_range
                 and float(snapshot.get("skill_ready_at", {}).get(skill_id, 0) or 0) <= now
             ]
             if not ready_skills:
-                max_range = max(skill_range for _skill_id, skill_range in skills)
+                max_range = max(skill_range for _skill_id, skill_range, *_ in skills)
                 if distance > max_range:
                     _prison_npc_move_toward(
                         slot_key, inst_id,
@@ -11209,10 +11228,12 @@ def _prison_npc_ai_tick():
             _prison_npc_stop(slot_key, inst_id, now)
             top_priority = max(
                 int(SKILL_CONFIG[sid].get("priority", 0) or 0)
-                for sid, _range in ready_skills)
+                for sid, _range, _area_type, _radius, _angle in ready_skills)
             skill_id = random.choice([
-                sid for sid, _range in ready_skills
+                sid for sid, _range, _area_type, _radius, _angle in ready_skills
                 if int(SKILL_CONFIG[sid].get("priority", 0) or 0) == top_priority])
+            _, _, area_type, area_radius, area_angle = next(
+                skill for skill in ready_skills if skill[0] == skill_id)
             skill_cfg = SKILL_CONFIG[skill_id]
             cooldown = max(0, int(skill_cfg.get("cooldown_ms", 0) or 0)) / 1000.0
             min_cd = max(0, int(ai_cfg.get("skill_cd_min", 1000) or 1000))
@@ -11226,38 +11247,72 @@ def _prison_npc_ai_tick():
                 live_slot["next_attack_at"] = now + random.uniform(min_cd, max_cd) / 1000.0
 
             effect_id = str(skill_cfg.get("eff0") or "10000")
-            damage, hit, critical = get_combat_damage(
-                get_npc_attr(npc_id), get_character_stats(target_char), skill_id, 0,
-                effinfo_id=effect_id, attacker_is_npc=True)
-            if not hit or damage <= 0:
-                continue
-            with get_character_transaction_lock(target_char):
-                if int(target_char.get("hp", 0) or 0) <= 0:
+            victims = [target]
+            if area_type in (3, 4) and area_radius > 0:
+                half_angle = area_angle / 2.0 if 0 < area_angle < 360 else 180.0
+                for candidate in players:
+                    if candidate[0] == target_id:
+                        continue
+                    ox, oz = candidate[3] / 100.0, candidate[4] / 100.0
+                    other_distance = math.hypot(ox - mx, oz - mz)
+                    if other_distance > area_radius:
+                        continue
+                    if half_angle < 180.0 and other_distance > 0.01:
+                        difference = abs((
+                            math.degrees(math.atan2(ox - mx, oz - mz))
+                            - math.degrees(math.atan2(dx, dz)) + 180.0
+                        ) % 360.0 - 180.0)
+                        if difference > half_angle:
+                            continue
+                    victims.append(candidate)
+
+            npc_level = int(snapshot.get("player_level", 1) or 1)
+            npc_stats = get_npc_attr(npc_id, npc_level)
+            attack_items, damage_items, downed = [], [], []
+            for victim_id, victim_conn, victim_char, _x, _z in victims:
+                damage, hit, critical = get_combat_damage(
+                    npc_stats, get_character_stats(victim_char), skill_id, 0,
+                    effinfo_id=effect_id, attacker_is_npc=True)
+                if not hit or damage <= 0:
                     continue
-                actual_damage = min(int(target_char["hp"]), int(damage))
-                target_char["hp"] -= actual_damage
-                target_hp = int(target_char["hp"])
-            attack_data = encode_sproto([
-                (0, inst_id), (1, target_id), (2, skill_id),
-                (3, [encode_sproto([(0, target_id), (1, actual_damage)])])
-            ])
-            damage_data = encode_sproto([(0, [encode_sproto([
-                (0, target_id), (1, actual_damage), (2, skill_id),
-                (3, effect_id), (4, critical)
-            ])])])
-            for peer_conn, _peer_char in prison_npc_visible_connections(slot_key, inst_id):
-                send_rpc_push_safe(peer_conn, 508, attack_data)
-                send_rpc_push_safe(peer_conn, 511, damage_data)
-            sync_char_attrs_rpc(target_conn, target_char)
-            save_chars(all_accounts_chars)
-            if target_hp <= 0 and supports_normal_relife(str(target_char.get("map_id", ""))):
-                death_count = int(target_char.get("death_count", 0) or 0) + 1
-                target_char["death_count"] = death_count
-                relife_cfg = get_relife_config(death_count)
-                offer = remember_relife_offer(
-                    target_char, 1, relife_cfg.get("use_count", 1), "9011")
-                send_rpc_push_safe(target_conn, 618, offer)
+                with get_character_transaction_lock(victim_char):
+                    if int(victim_char.get("hp", 0) or 0) <= 0:
+                        continue
+                    actual_damage = min(int(victim_char["hp"]), int(damage))
+                    victim_char["hp"] -= actual_damage
+                    target_hp = int(victim_char["hp"])
+                attack_items.append(encode_sproto([
+                    (0, victim_id), (1, actual_damage)
+                ]))
+                damage_items.append(encode_sproto([
+                    (0, victim_id), (1, actual_damage), (2, skill_id),
+                    (3, effect_id), (4, critical)
+                ]))
+                sync_char_attrs_rpc(victim_conn, victim_char)
+                if target_hp <= 0:
+                    downed.append((victim_conn, victim_char))
+
+            if attack_items:
+                attack_data = encode_sproto([
+                    (0, inst_id), (1, target_id), (2, skill_id),
+                    (3, attack_items)
+                ])
+                damage_data = encode_sproto([(0, damage_items)])
+                for peer_conn, _peer_char in prison_npc_visible_connections(
+                        slot_key, inst_id):
+                    send_rpc_push_safe(peer_conn, 508, attack_data)
+                    send_rpc_push_safe(peer_conn, 511, damage_data)
                 save_chars(all_accounts_chars)
+
+            for victim_conn, victim_char in downed:
+                if supports_normal_relife(str(victim_char.get("map_id", ""))):
+                    death_count = int(victim_char.get("death_count", 0) or 0) + 1
+                    victim_char["death_count"] = death_count
+                    relife_cfg = get_relife_config(death_count)
+                    offer = remember_relife_offer(
+                        victim_char, 1, relife_cfg.get("use_count", 1), "9011")
+                    send_rpc_push_safe(victim_conn, 618, offer)
+                    save_chars(all_accounts_chars)
 
         for peer_conn, peer_char in list(ALL_CONNECTIONS.values()):
             if (peer_conn and peer_char
@@ -13882,10 +13937,10 @@ def survive_battle_pvp_kill(killer, victim):
                 configured_map_birth_position(str(config.get('map_id', '')))
                 or default_map_spawn_position(str(config.get('map_id', ''))))
             save_chars(all_accounts_chars)
-    else:
-        victim_payload = survive_battle_top_payload(victim)
-        if victim_payload is not None:
-            send_push_to_char(victim_id, 636, victim_payload)
+
+    victim_payload = survive_battle_top_payload(victim)
+    if victim_payload is not None:
+        send_push_to_char(victim_id, 636, victim_payload)
     return force_return
 
 
@@ -26507,7 +26562,22 @@ def client_handler(conn, addr):
                                 defender_stats = capture_enemy['stats']
                             else:
                                 nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
-                                defender_stats = get_npc_attr(nid_str, picked_char.get('level', 1))
+                                npc_level = picked_char.get('level', 1)
+                                if cur_map in SURVIVE_BATTLE_NPC_MAP_IDS:
+                                    try:
+                                        shared_slot_key = PRISON_NPC_SHARED_BY_INSTANCE.get(
+                                            int(target_id))
+                                    except (TypeError, ValueError):
+                                        shared_slot_key = None
+                                    shared_slot = PRISON_NPC_SHARED_SLOTS.get(
+                                        str(shared_slot_key), {})
+                                    if (shared_slot_key
+                                            and str(shared_slot.get("map_id", "")) == cur_map
+                                            and int(shared_slot.get("inst_id") or 0)
+                                            == int(target_id)):
+                                        npc_level = shared_slot.get(
+                                            "player_level", npc_level)
+                                defender_stats = get_npc_attr(nid_str, npc_level)
 
                             if target_id not in NPC_HP_MAP:
                                 NPC_HP_MAP[target_id] = defender_stats['hp_max']
