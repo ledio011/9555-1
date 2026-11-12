@@ -11023,8 +11023,9 @@ def record_prison_npc_death(inst_id):
 
 
 def update_prison_npc_aoi(conn, map_id, picked_char):
-    """Track shared prison NPCs within MapInfoData.radius (centimeter coordinates)."""
+    """Track prison NPCs; stream every authored Survival Field spawn."""
     map_str = str(map_id)
+    survival_field = map_str in SURVIVE_BATTLE_NPC_MAP_IDS
     if (map_str not in PRISON_NPC_AOI_MAP_IDS or not conn or not picked_char
             or str(picked_char.get("map_id", "")) != map_str):
         return
@@ -11037,7 +11038,7 @@ def update_prison_npc_aoi(conn, map_id, picked_char):
         radius_units = max(0, int(MAP_CONFIG.get(map_str, {}).get("radius", 0) or 0))
     except (TypeError, ValueError, IndexError):
         return
-    if radius_units <= 0:
+    if radius_units <= 0 and not survival_field:
         print(f"[PRISON AOI] missing configured visibility radius map={map_str}")
         return
 
@@ -11053,7 +11054,7 @@ def update_prison_npc_aoi(conn, map_id, picked_char):
         slot = PRISON_NPC_SHARED_SLOTS.get(slot_key)
         position = (slot.get("position") if slot else None) or (spec["x"], spec["z"])
         dx, dz = px - int(position[0]), pz - int(position[1])
-        if dx * dx + dz * dz > radius_sq:
+        if (not survival_field and dx * dx + dz * dz > radius_sq):
             continue
         visible_slots.add(slot_key)
         if (slot and slot.get("inst_id") is not None
@@ -12213,7 +12214,7 @@ def spawn_exp_team_stage_map(conn, map_id, char, force=False):
 def spawn_map_npcs(conn, map_id, picked_char=None):
     map_str = str(map_id)
     if map_str in PRISON_NPC_AOI_MAP_IDS:
-        # Prison enemies are created after map_ready and then streamed by AOI.
+        # Prison enemies are created after map_ready and streamed to the client.
         return
     if map_str != GOTHAM_MAP_ID:
         clear_gotham_npc_aoi(conn)
@@ -13954,12 +13955,11 @@ def survive_battle_top_payload(char):
     rank_index = next((index for index, row in enumerate(rows, 1)
                        if int(row.get('id', 0) or 0) == int((char or {}).get('id', 0) or 0)),
                       len(rows) + 1)
-    top_rows = rows[:max(1, int(config.get('max_player', 40) or 40))]
     score_infos = [encode_sproto([
         (0, int(row.get('id', 0) or 0)),
         (1, str(row.get('name', ''))),
         (2, int(row.get('value', 0) or 0)),
-    ]) for row in top_rows]
+    ]) for row in rows]
     return encode_sproto([
         (0, score_infos), (1, rank_index), (2, score), (3, end_time)
     ])
@@ -13970,7 +13970,8 @@ def survive_battle_enemy_reward(char, npcid, now=None):
     config = survive_battle_config_for_map(map_id)
     state = char.get('survival_battle_state')
     if (not config
-            or map_id != str(config.get('map_id', ''))
+            or map_id not in (str(config.get('map_id', '')),
+                              str(config.get('map_id2', '')))
             or str(char.get('active_copy_id') or '') != map_id
             or not isinstance(state, dict)
             or str(state.get('activity_id')) != str(config.get('id'))):
@@ -13990,7 +13991,10 @@ def survive_battle_enemy_reward(char, npcid, now=None):
         npc_type = int(NPC_CONFIG[npc_id].get('type', -1))
     except (TypeError, ValueError):
         return None
-    rewards_by_npc_type = {0: (1, 2), 1: (2, 5)}
+    if map_id == str(config.get('map_id2', '')):
+        rewards_by_npc_type = {1: (2, 5), 2: (10, 20)}
+    else:
+        rewards_by_npc_type = {0: (1, 2), 1: (2, 5)}
     reward = rewards_by_npc_type.get(npc_type)
     if reward is None:
         return None
@@ -14033,9 +14037,8 @@ def survive_battle_pvp_kill(killer, victim):
             victim_score = max(0, int(victim_state.get('score', 0) or 0))
         except (TypeError, ValueError):
             return False
-        transferred = victim_score // 2
-        killer_state['score'] = killer_score + transferred
-        victim_state['score'] = victim_score - transferred
+        killer_state['score'] = killer_score + 100
+        victim_state['score'] = victim_score // 2
 
     save_chars(all_accounts_chars)
     killer_payload = survive_battle_top_payload(killer)
