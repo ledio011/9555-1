@@ -10149,9 +10149,35 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                 if is_tower_map(picked_char.get('map_id')) else 1)
             exp_kill, cash_kill = calculate_npc_kill_rewards(
                 picked_char.get('level', 1), npc_stats.get('lv', 1))
-            grant_item_rewards(
-                picked_char, [("2001", 0, exp_kill), ("1001", 0, cash_kill)],
-                conn, send_rpc_push, save=False)
+            rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
+            survival_reward = None
+            if current_map == '1101':
+                with get_character_transaction_lock(picked_char):
+                    survival_reward = survive_battle_enemy_reward(picked_char, npcid)
+                    if survival_reward:
+                        honor_reward, score_reward = survival_reward
+                        survival_state = picked_char['survival_battle_state']
+                        survival_state['score'] = (
+                            max(0, int(survival_state.get('score', 0) or 0))
+                            + score_reward
+                        )
+                        rewards.append(("2002", 0, honor_reward))
+                    grant_item_rewards(
+                        picked_char, rewards, conn, send_rpc_push, save=False)
+                    if survival_reward:
+                        honor_reward, _score_reward = survival_reward
+                        save_chars(all_accounts_chars)
+                        send_rpc_push(638, encode_sproto([(0, [
+                            encode_sproto([
+                                (0, "2002"), (1, honor_reward), (3, 0)
+                            ])
+                        ])]))
+                        score_payload = survive_battle_top_payload(picked_char)
+                        if score_payload is not None:
+                            send_rpc_push(636, score_payload)
+            else:
+                grant_item_rewards(
+                    picked_char, rewards, conn, send_rpc_push, save=False)
 
 def start_exp_stage_runtime(conn, owner, state):
     if not state or state.get('runtime_started') or state.get('defer_start'): return
@@ -13655,6 +13681,38 @@ def survive_battle_top_payload(char):
     return encode_sproto([
         (0, []), (1, 0), (2, score), (3, end_time)
     ])
+
+def survive_battle_enemy_reward(char, npcid, now=None):
+    map_id = str(char.get('map_id', ''))
+    config = survive_battle_config_for_map(map_id)
+    state = char.get('survival_battle_state')
+    if (not config or str(config.get('id')) != '1101'
+            or map_id != str(config.get('map_id', ''))
+            or str(char.get('active_copy_id') or '') != map_id
+            or not isinstance(state, dict)
+            or str(state.get('activity_id')) != '1101'):
+        return None
+    try:
+        if int(state.get('end_time', 0) or 0) <= int(time.time() if now is None else now):
+            return None
+    except (TypeError, ValueError):
+        return None
+
+    npc_id = str(npcid or '')
+    if (npc_id not in NPC_CONFIG
+            or not any(str(spawn.get('nid', '')) == npc_id
+                       for spawn in MONSTER_DATA.get(map_id, []))):
+        return None
+    score_by_npc_type = {0: 2, 1: 5}
+    try:
+        npc_type = int(NPC_CONFIG[npc_id].get('type', -1))
+    except (TypeError, ValueError):
+        return None
+    score = score_by_npc_type.get(npc_type)
+    if score is None:
+        return None
+    honor = 1 if npc_type == 0 else 2
+    return honor, score
 
 def resolve_survive_battle_entry(char, request, now):
     activity_id = get_val_str(request, 0, '')
