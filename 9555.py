@@ -134,6 +134,7 @@ EXP_RUN_COUNTER = 900000
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 NPC_AOI_TRACK = {}  # connection identity -> {inst_id: {'nid': ..., 'x': ..., 'z': ...}}
 SURVIVE_BATTLE_NPC_MAP_IDS = frozenset(("1101", "1102"))
+SURVIVAL_PLAYER_MODEL_RADIUS_CM = 30  # CharacterModelData IDs 100, 104, and 105.
 PRISON_NPC_AOI_MAP_IDS = frozenset(("1201", "1202")) | SURVIVE_BATTLE_NPC_MAP_IDS
 PRISON_NPC_AOI_TRACK = {}  # connection identity -> {shared spawn key: instance ID}
 PRISON_NPC_SHARED_SLOTS = {}
@@ -315,6 +316,7 @@ MOVE_TARGET_DATA = {}   # logicId -> dict
 SURVEY_DATA = {}        # logicId -> dict
 MULTI_DELIVERY_DATA = {} # logicId -> ordered delivery stops
 EFF_CONFIG = {}   # effId -> effect info template
+CHARACTER_MODEL_RADIUS_CONFIG = {}  # CharacterModelData ID -> radius in centimeters
 SKILL_CONFIG = {} # skillId -> skill info template
 EFF_TO_SKILL = {} # effId -> skillId (reverse lookup for Tag 128)
 MOUNT_CONFIG = {} # garage vehicle id -> client MountData definition
@@ -1040,6 +1042,16 @@ try:
                     }
                 except (TypeError, ValueError):
                     continue
+
+    # Load character collision radii used by the client when checking skill range.
+    model_path = os.path.join(text_asset_root, "CharacterModelData")
+    if os.path.exists(model_path):
+        with open(model_path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if (len(parts) > 8 and parts[0] == "*" and parts[1]
+                        and parts[8].isdigit()):
+                    CHARACTER_MODEL_RADIUS_CONFIG[parts[1]] = int(parts[8])
 
     # Load NpcData
     npc_path = os.path.join(text_asset_root, "NpcData")
@@ -5241,6 +5253,11 @@ def map_relife_type(map_id):
         return int(cfg.get('relife_type', 0))
     except (TypeError, ValueError):
         return 0
+
+def relife_offer_type(map_id):
+    mid = str(map_id)
+    return 0 if (mid in SURVIVE_BATTLE_NPC_MAP_IDS
+                 or map_relife_type(mid) == 2) else 1
 
 def supports_normal_relife(map_id):
     """Allow ordinary revives on configured maps and boss activity maps."""
@@ -11063,14 +11080,29 @@ def update_prison_npc_aoi(conn, map_id, picked_char):
             tracked.pop(slot_key, None)
 
 
-def _prison_npc_skills(npc_cfg, attack_distance):
+def _prison_npc_skills(npc_cfg, attack_distance, survival_field=False):
     skills = []
+    npc_radius = (
+        CHARACTER_MODEL_RADIUS_CONFIG.get(
+            str(npc_cfg.get("model") or ""), 0) / 100.0
+        if survival_field else 0.0)
     for skill_id in re.split(r"[;,]", str(npc_cfg.get("skill_group") or "")):
         skill_id = skill_id.strip()
         if not skill_id or skill_id not in SKILL_CONFIG:
             continue
-        skill_range, area_type, param1, param2 = _guild_boss_skill_range(
+        configured_range, area_type, param1, param2 = _guild_boss_skill_range(
             skill_id, attack_distance)
+        skill_range = configured_range
+        if survival_field:
+            trace_distance = max(
+                0, int(SKILL_CONFIG[skill_id].get("trace_distance_cm", 0) or 0)
+            ) / 100.0
+            # Client CheckSkillDistance uses TraceDistance plus both model
+            # radii; effect radii only determine secondary targets.
+            skill_range = max(
+                attack_distance,
+                trace_distance + npc_radius
+                + SURVIVAL_PLAYER_MODEL_RADIUS_CM / 100.0)
         skills.append((skill_id, skill_range, area_type, param1, param2))
     return skills
 
@@ -11096,6 +11128,7 @@ def _prison_npc_move_toward(
                 or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
             return
         current_x, current_z = slot.get("position", (slot["x"], slot["z"]))
+        is_survival_map = str(slot.get("map_id", "")) in SURVIVE_BATTLE_NPC_MAP_IDS
         dx, dz = float(target_x) - current_x, float(target_z) - current_z
         distance = math.hypot(dx, dz)
         if distance <= 1:
@@ -11109,8 +11142,13 @@ def _prison_npc_move_toward(
         slot["heading"] = heading
         slot["last_move_at"] = now
         slot["moving"] = True
+        move_x, move_z = (
+            (int(target_x), int(target_z))
+            if is_survival_map else (next_x, next_z))
+    # The Survival NPC client holds one waypoint and continually reapplies it;
+    # send the destination instead of a short predicted point every AI tick.
     _prison_npc_broadcast_move(
-        slot_key, inst_id, next_x, next_z, heading, walk=walk)
+        slot_key, inst_id, move_x, move_z, heading, walk=walk)
 
 
 def _prison_npc_stop(slot_key, inst_id, now):
@@ -11177,6 +11215,7 @@ def _prison_npc_ai_tick():
                 continue
             npc_id = str(snapshot["nid"])
             npc_cfg = NPC_CONFIG.get(npc_id, {})
+            is_survival_map = str(snapshot.get("map_id", "")) in SURVIVE_BATTLE_NPC_MAP_IDS
             ai_cfg = AI_DATA_CONFIG.get(str(npc_cfg.get("ai_data_id") or ""), {})
             search_cm = max(0, int(npc_cfg.get("search_radius", 0) or 0))
             configured_lock = int(ai_cfg.get("lock_distance", -1) or -1)
@@ -11194,23 +11233,34 @@ def _prison_npc_ai_tick():
             around_min = max(0, int(ai_cfg.get("around_min_distance", 100) or 100))
             around_max = max(around_min, int(ai_cfg.get("around_max_distance", 200) or 200))
             attack_distance = max(0.5, (around_min + around_max) / 200.0)
-            skills = _prison_npc_skills(npc_cfg, attack_distance)
+            skills = _prison_npc_skills(
+                npc_cfg, attack_distance, is_survival_map)
             if not skills:
                 continue
             speed = max(0.1, float(npc_cfg.get("move_speed", 50) or 50) / 10.0)
             mx_cm, mz_cm = snapshot.get("position") or (snapshot["x"], snapshot["z"])
             mx, mz = float(mx_cm) / 100.0, float(mz_cm) / 100.0
+            home_x, home_z = int(snapshot["x"]), int(snapshot["z"])
+            outside_survival_leash = (
+                is_survival_map
+                and math.hypot(mx_cm - home_x, mz_cm - home_z) / 100.0
+                > return_distance)
             target = None
             prior_target = int(snapshot.get("target_id", 0) or 0)
-            if prior_target:
+            if prior_target and not outside_survival_leash:
                 target = next((p for p in players if p[0] == prior_target), None)
-                if target and math.hypot(target[3] / 100.0 - mx,
-                                         target[4] / 100.0 - mz) > return_distance:
+                if (target and not is_survival_map
+                        and math.hypot(target[3] / 100.0 - mx,
+                                       target[4] / 100.0 - mz) > return_distance):
                     target = None
                     with PRISON_NPC_LOCK:
                         if PRISON_NPC_SHARED_SLOTS.get(slot_key, {}).get("inst_id") == inst_id:
                             PRISON_NPC_SHARED_SLOTS[slot_key]["target_id"] = 0
-            if target is None:
+            if prior_target and outside_survival_leash:
+                with PRISON_NPC_LOCK:
+                    if PRISON_NPC_SHARED_SLOTS.get(slot_key, {}).get("inst_id") == inst_id:
+                        PRISON_NPC_SHARED_SLOTS[slot_key]["target_id"] = 0
+            if target is None and not outside_survival_leash:
                 candidates = [
                     (math.hypot(p[3] / 100.0 - mx, p[4] / 100.0 - mz), p)
                     for p in players
@@ -11223,7 +11273,6 @@ def _prison_npc_ai_tick():
                             PRISON_NPC_SHARED_SLOTS[slot_key]["target_id"] = target[0]
 
             if target is None:
-                home_x, home_z = int(snapshot["x"]), int(snapshot["z"])
                 if math.hypot(mx_cm - home_x, mz_cm - home_z) / 100.0 > return_distance:
                     with PRISON_NPC_LOCK:
                         live_slot = PRISON_NPC_SHARED_SLOTS.get(slot_key, {})
@@ -11387,7 +11436,9 @@ def _prison_npc_ai_tick():
                     victim_char["death_count"] = death_count
                     relife_cfg = get_relife_config(death_count)
                     offer = remember_relife_offer(
-                        victim_char, 1, relife_cfg.get("use_count", 1), "9011")
+                        victim_char,
+                        relife_offer_type(victim_char.get("map_id", "")),
+                        relife_cfg.get("use_count", 1), "9011")
                     send_rpc_push_safe(victim_conn, 618, offer)
                     save_chars(all_accounts_chars)
 
@@ -26051,7 +26102,7 @@ def client_handler(conn, addr):
                             death_count = int(picked_char.get('death_count', 0)) + 1
                             picked_char['death_count'] = death_count
                             relife_cfg = get_relife_config(death_count)
-                            relife_type = 0 if map_relife_type(current_map) == 2 else 1
+                            relife_type = relife_offer_type(current_map)
                             offer_payload = remember_relife_offer(
                                 picked_char, relife_type,
                                 relife_cfg.get('use_count', 1), '9011')
@@ -26449,8 +26500,7 @@ def client_handler(conn, addr):
                                     death_count = int(target_char.get('death_count', 0)) + 1
                                     target_char['death_count'] = death_count
                                     relife_cfg = get_relife_config(death_count)
-                                    relife_type = (
-                                        0 if map_relife_type(death_map) == 2 else 1)
+                                    relife_type = relife_offer_type(death_map)
                                     # Keep killer details because the client
                                     # offers an optional Add Foe action here.
                                     relife_req = remember_relife_offer(
@@ -26503,7 +26553,7 @@ def client_handler(conn, addr):
                                     death_count = int(picked_char.get('death_count', 0)) + 1
                                     picked_char['death_count'] = death_count
                                     relife_cfg = get_relife_config(death_count)
-                                    relife_type = 0 if map_relife_type(current_map) == 2 else 1
+                                    relife_type = relife_offer_type(current_map)
                                     send_rpc_push(618, remember_relife_offer(
                                         picked_char, relife_type,
                                         relife_cfg.get('use_count', 1), '9011'))
