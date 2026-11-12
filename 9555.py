@@ -10146,32 +10146,48 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
         else:
             npc_stats = get_npc_attr(
                 npcid, picked_char.get('level', 1)
-                if is_tower_map(picked_char.get('map_id')) else 1)
+                if (is_tower_map(picked_char.get('map_id'))
+                    or survive_battle_config_for_map(picked_char.get('map_id')))
+                else 1)
             exp_kill, cash_kill = calculate_npc_kill_rewards(
                 picked_char.get('level', 1), npc_stats.get('lv', 1))
             rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
             survival_reward = None
-            if current_map == '1101':
+            if survive_battle_config_for_map(current_map):
                 with get_character_transaction_lock(picked_char):
                     survival_reward = survive_battle_enemy_reward(picked_char, npcid)
+                    score_gain = 0
                     if survival_reward:
                         honor_reward, score_reward = survival_reward
                         survival_state = picked_char['survival_battle_state']
-                        survival_state['score'] = (
-                            max(0, int(survival_state.get('score', 0) or 0))
-                            + score_reward
-                        )
+                        current_score = max(
+                            0, int(survival_state.get('score', 0) or 0))
+                        survival_config = survive_battle_config_for_map(current_map)
+                        if current_map == str(survival_config.get('map_id', '')):
+                            score_limit = max(
+                                0, int(survival_config.get('first_max_score', 200) or 200))
+                            score_gain = min(score_reward, max(0, score_limit - current_score))
+                        else:
+                            score_gain = score_reward
+                        survival_state['score'] = current_score + score_gain
                         rewards.append(("2002", 0, honor_reward))
                     grant_item_rewards(
                         picked_char, rewards, conn, send_rpc_push, save=False)
                     if survival_reward:
-                        honor_reward, _score_reward = survival_reward
                         save_chars(all_accounts_chars)
-                        send_rpc_push(638, encode_sproto([(0, [
+                        display_rewards = [
                             encode_sproto([
                                 (0, "2002"), (1, honor_reward), (3, 0)
                             ])
-                        ])]))
+                        ]
+                        if score_gain > 0:
+                            # 8001 is the client-authored class-1 display item.
+                            # Tag 638 is presentation-only; the score is stored
+                            # in survival_battle_state and is never added to inventory.
+                            display_rewards.append(encode_sproto([
+                                (0, "8001"), (1, score_gain), (3, 0)
+                            ]))
+                        send_rpc_push(638, encode_sproto([(0, display_rewards)]))
                         score_payload = survive_battle_top_payload(picked_char)
                         if score_payload is not None:
                             send_rpc_push(636, score_payload)
@@ -12055,7 +12071,8 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         inst_id, attr = build_npc_attr_sproto(
             nid, name, x, z, o,
             player_level=(int(picked_char.get('level', 1))
-                          if is_cash_truck else 1),
+                          if is_cash_truck or survive_battle_config_for_map(map_str)
+                          else 1),
             initial_hp=initial_hp
         )
         NPC_INSTANCE_MAP[inst_id] = map_str
@@ -13668,6 +13685,74 @@ def survive_battle_config_for_map(map_id):
         if map_id in (str(config.get('map_id', '')), str(config.get('map_id2', '')))
     ), None)
 
+def _survive_battle_rank_rows(config, char=None):
+    if not isinstance(config, dict):
+        return []
+    config_id = str(config.get('id', ''))
+    map_ids = {str(config.get('map_id', '')), str(config.get('map_id2', ''))}
+    state = (char or {}).get('survival_battle_state')
+    try:
+        event_start = int(state.get('event_start_time', 0) or 0)
+    except (AttributeError, TypeError, ValueError):
+        event_start = 0
+    rows = []
+    seen = set()
+    for area_chars in all_accounts_chars.values():
+        if not isinstance(area_chars, dict):
+            continue
+        for char_list in area_chars.values():
+            if not isinstance(char_list, list):
+                continue
+            for candidate in char_list:
+                if not isinstance(candidate, dict):
+                    continue
+                candidate_state = candidate.get('survival_battle_state')
+                if (str(candidate.get('map_id', '')) not in map_ids
+                        or str(candidate.get('active_copy_id') or '') not in map_ids
+                        or not isinstance(candidate_state, dict)
+                        or str(candidate_state.get('activity_id')) != config_id):
+                    continue
+                try:
+                    candidate_event_start = int(
+                        candidate_state.get('event_start_time', 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if candidate_event_start != event_start:
+                    continue
+                try:
+                    char_id = int(candidate.get('id', 0) or 0)
+                    score = max(0, int(candidate_state.get('score', 0) or 0))
+                except (TypeError, ValueError):
+                    continue
+                if char_id in seen:
+                    continue
+                seen.add(char_id)
+                rows.append({
+                    'id': char_id,
+                    'name': str(candidate.get('name', '')),
+                    'value': score,
+                })
+    if char is not None:
+        try:
+            char_id = int((char or {}).get('id', 0) or 0)
+            own_event_start = int(state.get('event_start_time', 0) or 0)
+            own_score = max(0, int(state.get('score', 0) or 0))
+        except (AttributeError, TypeError, ValueError):
+            char_id, own_event_start, own_score = 0, -1, 0
+        if (isinstance(state, dict)
+                and str(state.get('activity_id')) == config_id
+                and str((char or {}).get('map_id', '')) in map_ids
+                and own_event_start == event_start
+                and char_id not in seen):
+            rows.append({
+                'id': char_id,
+                'name': str((char or {}).get('name', '')),
+                'value': own_score,
+            })
+    rows.sort(key=lambda row: (-int(row.get('value', 0) or 0), int(row.get('id', 0) or 0)))
+    return rows
+
+
 def survive_battle_top_payload(char):
     config = survive_battle_config_for_map(char.get('map_id', ''))
     state = char.get('survival_battle_state')
@@ -13678,19 +13763,36 @@ def survive_battle_top_payload(char):
         end_time = max(0, int(state.get('end_time', 0) or 0))
     except (TypeError, ValueError):
         return None
+    rows = _survive_battle_rank_rows(config, char)
+    if not rows:
+        rows = [{
+            'id': int((char or {}).get('id', 0) or 0),
+            'name': str((char or {}).get('name', '')),
+            'value': score,
+        }]
+    rank_index = next((index for index, row in enumerate(rows, 1)
+                       if int(row.get('id', 0) or 0) == int((char or {}).get('id', 0) or 0)),
+                      len(rows) + 1)
+    top_rows = rows[:max(1, int(config.get('max_player', 40) or 40))]
+    score_infos = [encode_sproto([
+        (0, int(row.get('id', 0) or 0)),
+        (1, str(row.get('name', ''))),
+        (2, int(row.get('value', 0) or 0)),
+    ]) for row in top_rows]
     return encode_sproto([
-        (0, []), (1, 0), (2, score), (3, end_time)
+        (0, score_infos), (1, rank_index), (2, score), (3, end_time)
     ])
+
 
 def survive_battle_enemy_reward(char, npcid, now=None):
     map_id = str(char.get('map_id', ''))
     config = survive_battle_config_for_map(map_id)
     state = char.get('survival_battle_state')
-    if (not config or str(config.get('id')) != '1101'
+    if (not config
             or map_id != str(config.get('map_id', ''))
             or str(char.get('active_copy_id') or '') != map_id
             or not isinstance(state, dict)
-            or str(state.get('activity_id')) != '1101'):
+            or str(state.get('activity_id')) != str(config.get('id'))):
         return None
     try:
         if int(state.get('end_time', 0) or 0) <= int(time.time() if now is None else now):
@@ -13711,8 +13813,81 @@ def survive_battle_enemy_reward(char, npcid, now=None):
     score = score_by_npc_type.get(npc_type)
     if score is None:
         return None
-    honor = 1 if npc_type == 0 else 2
+    honor = 2
     return honor, score
+
+
+def survive_battle_pvp_kill(killer, victim):
+    try:
+        if int((killer or {}).get('id', 0) or 0) == int((victim or {}).get('id', 0) or 0):
+            return False
+    except (TypeError, ValueError):
+        return False
+    map_id = str((killer or {}).get('map_id', ''))
+    config = survive_battle_config_for_map(map_id)
+    if (not config or map_id != str(config.get('map_id2', ''))
+            or map_id != str((victim or {}).get('map_id', ''))):
+        return False
+    killer_state = (killer or {}).get('survival_battle_state')
+    victim_state = (victim or {}).get('survival_battle_state')
+    try:
+        same_event = (
+            int(killer_state.get('event_start_time', 0) or 0)
+            == int(victim_state.get('event_start_time', 0) or 0))
+        active = (
+            int(killer_state.get('end_time', 0) or 0) > int(time.time())
+            and int(victim_state.get('end_time', 0) or 0) > int(time.time()))
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if (not isinstance(killer_state, dict) or not isinstance(victim_state, dict)
+            or str(killer_state.get('activity_id')) != str(config.get('id'))
+            or str(victim_state.get('activity_id')) != str(config.get('id'))
+            or not same_event or not active):
+        return False
+
+    first, second = sorted(
+        (killer, victim), key=lambda character: int(character.get('id', 0) or 0))
+    with get_character_transaction_lock(first), get_character_transaction_lock(second):
+        try:
+            killer_score = max(0, int(killer_state.get('score', 0) or 0))
+            victim_score = max(0, int(victim_state.get('score', 0) or 0))
+        except (TypeError, ValueError):
+            return False
+        transferred = victim_score // 2
+        killer_state['score'] = killer_score + transferred
+        victim_state['score'] = victim_score - transferred
+
+    save_chars(all_accounts_chars)
+    killer_payload = survive_battle_top_payload(killer)
+    killer_id = int(killer.get('id', 0) or 0)
+    victim_id = int(victim.get('id', 0) or 0)
+    if killer_payload is not None:
+        send_push_to_char(killer_id, 636, killer_payload)
+
+    force_return = int(victim_state.get('score', 0) or 0) < int(
+        config.get('second_min_score', 100) or 100)
+    if force_return:
+        victim_conn, current_victim = ALL_CONNECTIONS.get(victim_id, (None, None))
+        if (victim_conn and current_victim is victim
+                and is_current_character_connection(victim_conn, victim)):
+            first_map = str(config.get('map_id', ''))
+            victim['active_copy_id'] = first_map
+            start_map_transition(
+                victim_conn, victim, first_map,
+                lambda tag, payload, cid=victim_id: send_push_to_char(cid, tag, payload))
+        else:
+            victim['map_id'] = str(config.get('map_id', ''))
+            victim['active_copy_id'] = str(config.get('map_id', ''))
+            victim['pos'] = list(
+                configured_map_birth_position(str(config.get('map_id', '')))
+                or default_map_spawn_position(str(config.get('map_id', ''))))
+            save_chars(all_accounts_chars)
+    else:
+        victim_payload = survive_battle_top_payload(victim)
+        if victim_payload is not None:
+            send_push_to_char(victim_id, 636, victim_payload)
+    return force_return
+
 
 def resolve_survive_battle_entry(char, request, now):
     activity_id = get_val_str(request, 0, '')
@@ -13754,6 +13929,12 @@ def resolve_survive_battle_entry(char, request, now):
     if floor == 0 and entry_type == 1:
         if current_map != map_id2 or not valid_run:
             return None, False, None, None, 'return request is not from the active second-floor run'
+        try:
+            state['score'] = min(
+                max(0, int(state.get('score', 0) or 0)),
+                max(0, int(config.get('first_max_score', 200) or 200)))
+        except (TypeError, ValueError):
+            return None, False, None, None, 'invalid Survival Field score state'
         return map_id, False, config, None, None
     if floor != 0 or entry_type != 0:
         return None, False, None, None, 'unsupported Survival Field floor or transition type'
@@ -26124,8 +26305,14 @@ def client_handler(conn, addr):
                             if old_hp > 0 and new_hp == 0:
                                 print(f"[PvP] Player {target_id} killed by {picked_char['id']}")
                                 record_pvp_kill_streak(picked_char, target_char)
+                                survival_forced_return = survive_battle_pvp_kill(
+                                    picked_char, target_char)
                                 death_map = str(target_char.get('map_id', ''))
-                                if supports_normal_relife(death_map):
+                                if survival_forced_return:
+                                    print(f"[SURVIVAL FIELD] forced PK-area return "
+                                          f"player={target_id} score="
+                                          f"{target_char.get('survival_battle_state', {}).get('score', 0)}")
+                                elif supports_normal_relife(death_map):
                                     death_count = int(target_char.get('death_count', 0)) + 1
                                     target_char['death_count'] = death_count
                                     relife_cfg = get_relife_config(death_count)
