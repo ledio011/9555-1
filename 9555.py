@@ -11196,10 +11196,54 @@ def _prison_npc_ai_tick():
             if target is None:
                 home_x, home_z = int(snapshot["x"]), int(snapshot["z"])
                 if math.hypot(mx_cm - home_x, mz_cm - home_z) / 100.0 > return_distance:
+                    with PRISON_NPC_LOCK:
+                        live_slot = PRISON_NPC_SHARED_SLOTS.get(slot_key, {})
+                        if int(live_slot.get("inst_id") or 0) == inst_id:
+                            live_slot["patrol_target"] = None
                     _prison_npc_move_toward(
                         slot_key, inst_id, home_x, home_z, speed, now)
-                else:
+                elif str(snapshot.get("map_id", "")) not in SURVIVE_BATTLE_NPC_MAP_IDS:
                     _prison_npc_stop(slot_key, inst_id, now)
+                else:
+                    patrol_type = int(ai_cfg.get("patrol_type", 0) or 0)
+                    # AIData distances are centi-units; PatrolRadius is in meters.
+                    patrol_distance = min(
+                        max(0, int(ai_cfg.get("patrol_distance", 0) or 0)) / 100.0,
+                        max(0.0, float(npc_cfg.get("patrol_radius", 0) or 0)))
+                    if not patrol_type or patrol_distance <= 0:
+                        _prison_npc_stop(slot_key, inst_id, now)
+                        continue
+
+                    with PRISON_NPC_LOCK:
+                        live_slot = PRISON_NPC_SHARED_SLOTS.get(slot_key, {})
+                        patrol_target = live_slot.get("patrol_target")
+                        if (int(live_slot.get("inst_id") or 0) == inst_id
+                                and not patrol_target
+                                and now >= float(live_slot.get("patrol_next_at", 0) or 0)):
+                            angle = random.uniform(0, math.tau)
+                            radius = random.uniform(patrol_distance * 0.35, patrol_distance)
+                            patrol_target = (
+                                home_x + int(math.cos(angle) * radius * 100),
+                                home_z + int(math.sin(angle) * radius * 100))
+                            live_slot["patrol_target"] = patrol_target
+
+                    if patrol_target:
+                        if math.hypot(
+                                patrol_target[0] - mx_cm,
+                                patrol_target[1] - mz_cm) <= 60:
+                            with PRISON_NPC_LOCK:
+                                live_slot = PRISON_NPC_SHARED_SLOTS.get(slot_key, {})
+                                if int(live_slot.get("inst_id") or 0) == inst_id:
+                                    live_slot["patrol_target"] = None
+                                    live_slot["patrol_next_at"] = now + max(
+                                        0.3, int(ai_cfg.get("wait_time", 300) or 300) / 1000.0)
+                            _prison_npc_stop(slot_key, inst_id, now)
+                        else:
+                            walk_speed = max(
+                                0.1, float(npc_cfg.get("walk_speed", 5) or 5))
+                            _prison_npc_move_toward(
+                                slot_key, inst_id, patrol_target[0], patrol_target[1],
+                                walk_speed, now)
                 continue
 
             target_id, target_conn, target_char, px_cm, pz_cm = target
@@ -14012,8 +14056,8 @@ def resolve_survive_battle_entry(char, request, now):
         exist_time = max(0, int(config.get('exist_time', 0) or 0))
     except (TypeError, ValueError):
         return None, False, None, None, 'invalid Survival Field existence time'
-    if exist_time <= 0:
-        return None, False, None, None, 'configured Survival Field existence time is invalid'
+    if exist_time <= 0 or occurrence['start_time'] + exist_time <= now:
+        return None, False, None, None, 'configured Survival Field instance has expired'
     return map_id, True, config, occurrence, None
 
 def accept_gotham_escort_mission(char, mid):
@@ -28578,12 +28622,12 @@ def client_handler(conn, addr):
                                 boss_cfg, wild_boss_event_start, create=True)
                         if msg == 246 and survival_new_entry:
                             exist_time = max(0, int(survival_entry_config.get('exist_time', 0) or 0))
-                            run_start_time = int(time.time())
                             picked_char['survival_battle_state'] = {
                                 'activity_id': str(survival_entry_config.get('id', '')),
                                 'event_start_time': int(survival_entry_occurrence['start_time']),
-                                'run_start_time': run_start_time,
-                                'end_time': run_start_time + exist_time,
+                                'end_time': (
+                                    int(survival_entry_occurrence['start_time'])
+                                    + exist_time),
                                 'score': 0,
                             }
                         start_map_transition(conn, picked_char, mid, send_rpc_push)
