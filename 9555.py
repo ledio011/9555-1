@@ -10119,7 +10119,8 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
         exp_state.get('attack_cd', {}).pop(inst_id, None) if exp_state else None
 
     if valid_kill and grant_rewards:
-        if exp_state and exp_state.get('team_id'):
+        survival_activity = survive_battle_config_for_map(current_map)
+        if exp_state and exp_state.get('team_id') and not survival_activity:
             for member_id, member_conn, member_char in exp_participant_chars(exp_state):
                 member_exp = (
                     exp_stage_kill_experience(
@@ -10137,7 +10138,7 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                 collected_exp = exp_state.setdefault('collected_exp_by_member', {})
                 collected_exp[member_id] = int(collected_exp.get(member_id, 0)) + member_exp
                 member_push(638, member_popup)
-        elif exp_state:
+        elif exp_state and not survival_activity:
             exp_kill = exp_stage_kill_experience(
                 exp_state.get('copy_id'), picked_char.get('level', 1))
             if exp_kill > 0:
@@ -10148,19 +10149,9 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                 char_id = int(picked_char.get('id', 0))
                 collected_exp[char_id] = int(collected_exp.get(char_id, 0)) + exp_kill
         else:
-            npc_stats = get_npc_attr(
-                npcid, picked_char.get('level', 1)
-                if (is_tower_map(picked_char.get('map_id'))
-                    or survive_battle_config_for_map(picked_char.get('map_id')))
-                else 1)
-            exp_kill, cash_kill = calculate_npc_kill_rewards(
-                picked_char.get('level', 1), npc_stats.get('lv', 1))
-            rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
-            survival_reward = None
-            if survive_battle_config_for_map(current_map):
+            if survival_activity:
                 with get_character_transaction_lock(picked_char):
                     survival_reward = survive_battle_enemy_reward(picked_char, npcid)
-                    score_gain = 0
                     if survival_reward:
                         honor_reward, score_reward = survival_reward
                         survival_state = picked_char['survival_battle_state']
@@ -10174,10 +10165,9 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                         else:
                             score_gain = score_reward
                         survival_state['score'] = current_score + score_gain
-                        rewards.append(("2002", 0, honor_reward))
-                    grant_item_rewards(
-                        picked_char, rewards, conn, send_rpc_push, save=False)
-                    if survival_reward:
+                        grant_item_rewards(
+                            picked_char, [("2002", 0, honor_reward)],
+                            conn, send_rpc_push, save=False)
                         save_chars(all_accounts_chars)
                         display_rewards = [
                             encode_sproto([
@@ -10196,6 +10186,12 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                         if score_payload is not None:
                             send_rpc_push(636, score_payload)
             else:
+                npc_stats = get_npc_attr(
+                    npcid, picked_char.get('level', 1)
+                    if is_tower_map(picked_char.get('map_id')) else 1)
+                exp_kill, cash_kill = calculate_npc_kill_rewards(
+                    picked_char.get('level', 1), npc_stats.get('lv', 1))
+                rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
                 grant_item_rewards(
                     picked_char, rewards, conn, send_rpc_push, save=False)
 
@@ -10912,7 +10908,10 @@ def prison_shared_npc_for_spawn(spec):
         if inst_id is None:
             if slot.get("retired") or time.time() < float(slot.get("respawn_at", 0) or 0):
                 return None, None, slot
-            inst_id, attr = prison_create_shared_npc(slot, spec)
+            spawn_spec = spec
+            if slot.get("player_level") is not None:
+                spawn_spec = dict(spec, player_level=slot["player_level"])
+            inst_id, attr = prison_create_shared_npc(slot, spawn_spec)
             return inst_id, attr, slot
         cfg = NPC_CONFIG[str(spec["nid"])]
         position = slot.get("position") or (spec["x"], spec["z"])
@@ -11240,7 +11239,7 @@ def _prison_npc_ai_tick():
                             _prison_npc_stop(slot_key, inst_id, now)
                         else:
                             walk_speed = max(
-                                0.1, float(npc_cfg.get("walk_speed", 5) or 5))
+                                0.1, float(npc_cfg.get("walk_speed", 5) or 5) / 10.0)
                             _prison_npc_move_toward(
                                 slot_key, inst_id, patrol_target[0], patrol_target[1],
                                 walk_speed, now)
@@ -13907,16 +13906,15 @@ def survive_battle_enemy_reward(char, npcid, now=None):
             or not any(str(spawn.get('nid', '')) == npc_id
                        for spawn in MONSTER_DATA.get(map_id, []))):
         return None
-    score_by_npc_type = {0: 2, 1: 5}
     try:
         npc_type = int(NPC_CONFIG[npc_id].get('type', -1))
     except (TypeError, ValueError):
         return None
-    score = score_by_npc_type.get(npc_type)
-    if score is None:
+    rewards_by_npc_type = {0: (1, 2), 1: (2, 5)}
+    reward = rewards_by_npc_type.get(npc_type)
+    if reward is None:
         return None
-    honor = 2
-    return honor, score
+    return reward
 
 
 def survive_battle_pvp_kill(killer, victim):
