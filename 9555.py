@@ -23265,6 +23265,23 @@ def client_handler(conn, addr):
                               f"player={picked_char.get('id')} items={item_summary}")
                     if mid in PRISON_NPC_AOI_MAP_IDS:
                         update_prison_npc_aoi(conn, mid, picked_char)
+                        if mid in SURVIVE_BATTLE_NPC_MAP_IDS:
+                            survival_state = picked_char.get('survival_battle_state')
+                            survival_config = survive_battle_config_for_map(mid)
+                            if (isinstance(survival_state, dict)
+                                    and survival_config
+                                    and str(survival_state.get('activity_id'))
+                                    == str(survival_config.get('id', ''))
+                                    and str(picked_char.get('active_copy_id') or '') == mid):
+                                try:
+                                    survival_end_time = int(
+                                        survival_state.get('end_time', 0) or 0)
+                                except (TypeError, ValueError):
+                                    survival_end_time = 0
+                                if survival_end_time > int(time.time()):
+                                    send_rpc_push(629, encode_sproto([
+                                        (0, survival_end_time), (1, 2)
+                                    ]))
                     elif is_exp_map(mid):
                         exp_state = picked_char.get('exp_stage_state')
                         if exp_state:
