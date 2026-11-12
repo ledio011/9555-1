@@ -454,6 +454,19 @@ LEVEL_PACKAGE_CONFIG = {} # LevelPackageData ID -> level-up item bundle
 DAILY_ACTIVE_CONFIG = {} # DailyActiveData ID -> activity score/count/unlock values
 DAILY_ACTIVE_REWARD_CONFIG = {} # DailyActiveRewardData ID -> level/score/drop definition
 SURVIVE_BATTLE_CONFIG = {} # SurviveBattleData ID -> schedule, maps, scores and rank drops
+SURVIVE_BATTLE_RANK_REWARDS = {
+    '32301': {'honor': 300, 'random_badges': 5},
+    '32302': {'honor': 275, 'random_badges': 3},
+    '32303': {'honor': 100, 'random_badges': 2},
+    '32304': {'honor': 50, 'random_badges': 1},
+    '32305': {'honor': 30, 'random_badges': 0},
+}
+SURVIVE_BATTLE_BADGE_ITEM_IDS = (
+    '50001', '50011', '50021', '50101', '50111',
+    '50121', '50201', '50211', '50221',
+)
+SURVIVE_BATTLE_TIMERS = {} # (activity ID, event start) -> phase/timer
+SURVIVE_BATTLE_TIMER_LOCK = threading.RLock()
 RETRIEVE_CONFIG = {} # RetrieveData ID -> recovery costs/scales/level drop key
 
 try:
@@ -13965,6 +13978,167 @@ def survive_battle_top_payload(char):
     ])
 
 
+def survive_battle_rank_drop_id(config, rank):
+    drop_ids = config.get('rank_drop_ids', [])
+    rank_limits = config.get('rank_limits', [])
+    for index, rank_limit in enumerate(rank_limits):
+        if rank <= int(rank_limit or 0) and index < len(drop_ids):
+            return str(drop_ids[index] or '')
+    return str(drop_ids[-1] or '') if drop_ids else ''
+
+
+def settle_survive_battle_rank_rewards(config, event_start):
+    activity_id = str(config.get('id', ''))
+    participants = _survive_battle_event_chars(activity_id, event_start)
+    if not participants:
+        return False
+    participants_by_id = {char_id: char for char_id, char in participants}
+    rank_rows = _survive_battle_rank_rows(config, participants[0][1])
+    pending = False
+
+    for rank, row in enumerate(rank_rows, 1):
+        try:
+            char_id = int(row.get('id', 0) or 0)
+        except (TypeError, ValueError):
+            pending = True
+            continue
+        char = participants_by_id.get(char_id)
+        if char is None:
+            pending = True
+            continue
+        state = char.get('survival_battle_state')
+        if (not isinstance(state, dict)
+                or str(state.get('activity_id')) != activity_id
+                or int(state.get('event_start_time', 0) or 0) != int(event_start)):
+            pending = True
+            continue
+        if state.get('rank_reward_settled'):
+            continue
+
+        drop_id = survive_battle_rank_drop_id(config, rank)
+        reward = SURVIVE_BATTLE_RANK_REWARDS.get(drop_id)
+        if reward is None:
+            print(f"[SURVIVAL FIELD REWARD] missing reward definition "
+                  f"activity={activity_id} rank={rank} drop={drop_id}")
+            pending = True
+            continue
+
+        mail_key = f"survival-field:{activity_id}:{event_start}:{char_id}"
+        mails = char.setdefault('mails', [])
+        existing_mail = next((mail for mail in mails
+                              if isinstance(mail, dict)
+                              and mail.get('surviveBattleRewardKey') == mail_key), None)
+        if existing_mail:
+            with get_character_transaction_lock(char):
+                old_marker = state.get('rank_reward_settled')
+                old_mail_id = state.get('rank_reward_mail_id')
+                state['rank_reward_settled'] = True
+                state['rank_reward_mail_id'] = existing_mail.get('mailId')
+                if not save_chars(all_accounts_chars):
+                    if old_marker is None:
+                        state.pop('rank_reward_settled', None)
+                    else:
+                        state['rank_reward_settled'] = old_marker
+                    if old_mail_id is None:
+                        state.pop('rank_reward_mail_id', None)
+                    else:
+                        state['rank_reward_mail_id'] = old_mail_id
+                    pending = True
+            continue
+
+        attachment_counts = {'2002': int(reward.get('honor', 0) or 0)}
+        badge_count = max(0, int(reward.get('random_badges', 0) or 0))
+        for _ in range(badge_count):
+            badge_id = random.choice(SURVIVE_BATTLE_BADGE_ITEM_IDS)
+            attachment_counts[badge_id] = attachment_counts.get(badge_id, 0) + 1
+        attachments = []
+        valid_attachments = True
+        for item_id, count in attachment_counts.items():
+            if count <= 0:
+                continue
+            if (item_id not in DIRECT_REWARD_RESOURCE_IDS
+                    and item_id not in ITEM_CONFIG):
+                print(f"[SURVIVAL FIELD REWARD] invalid attachment "
+                      f"activity={activity_id} rank={rank} item={item_id}")
+                valid_attachments = False
+                break
+            attachments.append({
+                'itemId': item_id,
+                'count': count,
+                'quality': 0,
+                'count2': 0,
+            })
+        if not valid_attachments or not attachments:
+            pending = True
+            continue
+
+        now = int(time.time())
+        mail = {
+            'mailId': next_mail_id(),
+            'sendertype': 0,
+            'title': 'Survival Field Rank Rewards',
+            'senderTime': now,
+            'receiveId': char_id,
+            'readTime': 0,
+            'context': (
+                f"You ranked {rank} in Survival Field. "
+                "Please claim your rewards from the mail attachments."
+            ),
+            'mailState': 0,
+            'sortTime': now,
+            'items': attachments,
+            'expireday': 7,
+            'surviveBattleRewardKey': mail_key,
+        }
+        with get_character_transaction_lock(char):
+            state = char.get('survival_battle_state')
+            if (not isinstance(state, dict)
+                    or str(state.get('activity_id')) != activity_id
+                    or int(state.get('event_start_time', 0) or 0) != int(event_start)):
+                pending = True
+                continue
+            if state.get('rank_reward_settled'):
+                continue
+            if any(isinstance(existing, dict)
+                   and existing.get('surviveBattleRewardKey') == mail_key
+                   for existing in char.get('mails', [])):
+                state['rank_reward_settled'] = True
+                state['rank_reward_mail_id'] = next(
+                    existing.get('mailId') for existing in char['mails']
+                    if isinstance(existing, dict)
+                    and existing.get('surviveBattleRewardKey') == mail_key)
+                if not save_chars(all_accounts_chars):
+                    state.pop('rank_reward_settled', None)
+                    state.pop('rank_reward_mail_id', None)
+                    pending = True
+                continue
+            old_marker = state.get('rank_reward_settled')
+            old_mail_id = state.get('rank_reward_mail_id')
+            state['rank_reward_settled'] = True
+            state['rank_reward_mail_id'] = mail['mailId']
+            char.setdefault('mails', []).append(mail)
+            if not save_chars(all_accounts_chars):
+                char['mails'].remove(mail)
+                if old_marker is None:
+                    state.pop('rank_reward_settled', None)
+                else:
+                    state['rank_reward_settled'] = old_marker
+                if old_mail_id is None:
+                    state.pop('rank_reward_mail_id', None)
+                else:
+                    state['rank_reward_mail_id'] = old_mail_id
+                print(f"[SURVIVAL FIELD REWARD] persistence failed "
+                      f"activity={activity_id} player={char_id} rank={rank}")
+                pending = True
+                continue
+        send_push_to_char(char_id, 531, build_mail_update(mail))
+        print(f"[SURVIVAL FIELD REWARD] mailed activity={activity_id} "
+              f"player={char_id} rank={rank} drop={drop_id} "
+              f"attachments={len(attachments)}")
+
+    return not pending
+
+
 def survive_battle_enemy_reward(char, npcid, now=None):
     map_id = str(char.get('map_id', ''))
     config = survive_battle_config_for_map(map_id)
@@ -14026,12 +14200,17 @@ def survive_battle_pvp_kill(killer, victim):
     if (not isinstance(killer_state, dict) or not isinstance(victim_state, dict)
             or str(killer_state.get('activity_id')) != str(config.get('id'))
             or str(victim_state.get('activity_id')) != str(config.get('id'))
+            or killer_state.get('finished') or victim_state.get('finished')
             or not same_event or not active):
         return False
 
     first, second = sorted(
         (killer, victim), key=lambda character: int(character.get('id', 0) or 0))
     with get_character_transaction_lock(first), get_character_transaction_lock(second):
+        if (killer_state.get('finished') or victim_state.get('finished')
+                or int(killer_state.get('end_time', 0) or 0) <= int(time.time())
+                or int(victim_state.get('end_time', 0) or 0) <= int(time.time())):
+            return False
         try:
             killer_score = max(0, int(killer_state.get('score', 0) or 0))
             victim_score = max(0, int(victim_state.get('score', 0) or 0))
@@ -14072,6 +14251,154 @@ def survive_battle_pvp_kill(killer, victim):
     return force_return
 
 
+def _survive_battle_deadlines(config, event_start):
+    event_end = int(event_start) + max(0, int(config.get('duration', 0) or 0))
+    existence_end = int(event_start) + max(1, int(config.get('exist_time', 1) or 1))
+    wait_time = max(0, int(config.get('wait_time', 0) or 0))
+    exit_time = max(event_end, min(event_end + wait_time, existence_end))
+    return event_end, exit_time
+
+
+def _survive_battle_event_chars(activity_id, event_start):
+    rows = []
+    seen = set()
+    for area_chars in all_accounts_chars.values():
+        if not isinstance(area_chars, dict):
+            continue
+        for char_list in area_chars.values():
+            if not isinstance(char_list, list):
+                continue
+            for char in char_list:
+                if not isinstance(char, dict):
+                    continue
+                state = char.get('survival_battle_state')
+                if (not isinstance(state, dict)
+                        or str(state.get('activity_id')) != str(activity_id)):
+                    continue
+                try:
+                    same_event = int(state.get('event_start_time', 0) or 0) == int(event_start)
+                    char_id = int(char.get('id', 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                if same_event and char_id > 0 and char_id not in seen:
+                    seen.add(char_id)
+                    rows.append((char_id, char))
+    return rows
+
+
+def _schedule_survive_battle_timer(config, event_start, state):
+    activity_id = str(config.get('id', ''))
+    event_start = int(event_start)
+    if not activity_id or event_start <= 0:
+        return
+    event_end, exit_time = _survive_battle_deadlines(config, event_start)
+    finished = bool((state or {}).get('finished'))
+    phase = 'exit' if finished else 'end'
+    deadline = max(0, int((state or {}).get('exit_time', exit_time) or exit_time)) \
+        if finished else event_end
+    callback = _survive_battle_auto_exit if finished else _survive_battle_finish_event
+    key = (activity_id, event_start)
+    with SURVIVE_BATTLE_TIMER_LOCK:
+        current = SURVIVE_BATTLE_TIMERS.get(key)
+        if (current and current.get('phase') == phase
+                and current['timer'].is_alive()):
+            return
+        timer = threading.Timer(
+            max(0.01, deadline - time.time()),
+            callback, args=(activity_id, event_start))
+        timer.daemon = True
+        SURVIVE_BATTLE_TIMERS[key] = {'phase': phase, 'timer': timer}
+        timer.start()
+
+
+def _survive_battle_finish_event(activity_id, event_start):
+    config = SURVIVE_BATTLE_CONFIG.get(str(activity_id))
+    if not config:
+        return
+    event_end, exit_time = _survive_battle_deadlines(config, event_start)
+    if int(time.time()) < event_end:
+        participants = _survive_battle_event_chars(activity_id, event_start)
+        if participants:
+            _schedule_survive_battle_timer(config, event_start, participants[0][1].get(
+                'survival_battle_state'))
+        return
+
+    participants = _survive_battle_event_chars(activity_id, event_start)
+    if not participants:
+        with SURVIVE_BATTLE_TIMER_LOCK:
+            SURVIVE_BATTLE_TIMERS.pop((str(activity_id), int(event_start)), None)
+        return
+    if all(char['survival_battle_state'].get('finished') for _char_id, char in participants):
+        state = participants[0][1]['survival_battle_state']
+        settle_survive_battle_rank_rewards(config, event_start)
+        _schedule_survive_battle_timer(config, event_start, state)
+        return
+
+    map_ids = {str(config.get('map_id', '')), str(config.get('map_id2', ''))}
+    for _char_id, char in participants:
+        with get_character_transaction_lock(char):
+            state = char.get('survival_battle_state')
+            if (isinstance(state, dict)
+                    and str(state.get('activity_id')) == str(activity_id)
+                    and int(state.get('event_start_time', 0) or 0) == int(event_start)):
+                state['end_time'] = event_end
+                state['exit_time'] = exit_time
+                state['finished'] = True
+    if not save_chars(all_accounts_chars):
+        print(f"[SURVIVAL FIELD] failed to persist final results activity={activity_id} "
+              f"event_start={event_start}")
+    settle_survive_battle_rank_rewards(config, event_start)
+
+    for char_id, char in participants:
+        if str(char.get('map_id', '')) not in map_ids:
+            continue
+        conn, current_char = ALL_CONNECTIONS.get(char_id, (None, None))
+        if (not conn or current_char is not char
+                or not is_current_character_connection(conn, char)):
+            continue
+        result_payload = survive_battle_top_payload(char)
+        if result_payload is not None:
+            send_rpc_push_safe(conn, 636, result_payload)
+        send_rpc_push_safe(conn, 629, encode_sproto([
+            (0, exit_time), (1, 2)
+        ]))
+    print(f"[SURVIVAL FIELD] event ended activity={activity_id} "
+          f"participants={len(participants)} exit_at={exit_time}")
+    _schedule_survive_battle_timer(
+        config, event_start, {'finished': True, 'exit_time': exit_time})
+
+
+def _survive_battle_auto_exit(activity_id, event_start):
+    config = SURVIVE_BATTLE_CONFIG.get(str(activity_id))
+    if not config:
+        return
+    map_ids = {str(config.get('map_id', '')), str(config.get('map_id2', ''))}
+    for char_id, char in _survive_battle_event_chars(activity_id, event_start):
+        if (str(char.get('map_id', '')) not in map_ids
+                or not char.get('survival_battle_state', {}).get('finished')):
+            continue
+        conn, current_char = ALL_CONNECTIONS.get(char_id, (None, None))
+        if (not conn or current_char is not char
+                or not is_current_character_connection(conn, char)):
+            continue
+        return_map = str(char.get('pre_copy_map') or '101')
+        if return_map in map_ids or return_map not in MAP_CONFIG:
+            return_map = '101'
+        return_pos = char.get('pre_copy_pos')
+        if not isinstance(return_pos, (list, tuple)) or len(return_pos) < 3:
+            return_pos = default_map_spawn_position(return_map)
+        start_map_transition(
+            conn, char, return_map,
+            lambda tag, payload, c=conn: send_rpc_push_safe(c, tag, payload),
+            override_pos=list(return_pos))
+        save_chars(all_accounts_chars)
+
+    with SURVIVE_BATTLE_TIMER_LOCK:
+        timer_entry = SURVIVE_BATTLE_TIMERS.get((str(activity_id), int(event_start)))
+        if timer_entry and timer_entry.get('phase') == 'exit':
+            SURVIVE_BATTLE_TIMERS.pop((str(activity_id), int(event_start)), None)
+
+
 def resolve_survive_battle_entry(char, request, now):
     activity_id = get_val_str(request, 0, '')
     config = SURVIVE_BATTLE_CONFIG.get(activity_id)
@@ -14108,10 +14435,14 @@ def resolve_survive_battle_entry(char, request, now):
             return None, False, None, None, 'invalid Survival Field score state'
         if now >= end_time or score < minimum_score:
             return None, False, None, None, 'server score is below the configured second-floor threshold'
+        if state.get('finished'):
+            return None, False, None, None, 'Survival Field event has ended'
         return map_id2, False, config, None, None
     if floor == 0 and entry_type == 1:
         if current_map != map_id2 or not valid_run:
             return None, False, None, None, 'return request is not from the active second-floor run'
+        if state.get('finished'):
+            return None, False, None, None, 'Survival Field event has ended'
         try:
             state['score'] = min(
                 max(0, int(state.get('score', 0) or 0)),
@@ -19125,6 +19456,10 @@ def _wild_boss_battle_info(char, record=None):
 
 def _wild_boss_activity_payload(char, now=None):
     now = int(time.time() if now is None else now)
+    try:
+        player_level = max(1, int(char.get('level', 1) or 1))
+    except (AttributeError, TypeError, ValueError):
+        player_level = 1
     activities = {}
     for boss_id, row in WILD_BOSS_CONFIG.items():
         active, slot, event_start, next_start, _slot_end = _wild_boss_clock(row, now)
@@ -19143,7 +19478,11 @@ def _wild_boss_activity_payload(char, now=None):
                 remaining = max(1, remaining)
         activities[str(boss_id)] = encode_sproto([
             (0, str(boss_id)), (1, remaining), (2, int(row.get('type', 0) or 0)),
-            (3, 1 if active else 0), (4, int(next_start)),
+            (3, 1 if (
+                active
+                and int(row.get('min_level', 1) or 1) <= player_level
+                <= int(row.get('max_level', 80) or 80)
+            ) else 0), (4, int(next_start)),
             (5, _wild_boss_activity_rank_string(boss_id, event_start, active, now)),
             (6, 0), (7, now), (8, int(slot))
         ])
@@ -23274,9 +23613,29 @@ def client_handler(conn, addr):
                                     == str(survival_config.get('id', ''))
                                     and str(picked_char.get('active_copy_id') or '') == mid):
                                 try:
-                                    survival_end_time = int(
-                                        survival_state.get('end_time', 0) or 0)
+                                    event_start = int(
+                                        survival_state.get('event_start_time', 0) or 0)
                                 except (TypeError, ValueError):
+                                    event_start = 0
+                                if event_start > 0:
+                                    event_end, exit_time = _survive_battle_deadlines(
+                                        survival_config, event_start)
+                                    if survival_state.get('finished'):
+                                        survival_end_time = int(
+                                            survival_state.get('exit_time', exit_time)
+                                            or exit_time)
+                                        settle_survive_battle_rank_rewards(
+                                            survival_config, event_start)
+                                        final_payload = survive_battle_top_payload(
+                                            picked_char)
+                                        if final_payload is not None:
+                                            send_rpc_push(636, final_payload)
+                                    else:
+                                        survival_state['end_time'] = event_end
+                                        survival_end_time = event_end
+                                    _schedule_survive_battle_timer(
+                                        survival_config, event_start, survival_state)
+                                else:
                                     survival_end_time = 0
                                 if survival_end_time > int(time.time()):
                                     send_rpc_push(629, encode_sproto([
@@ -28721,16 +29080,27 @@ def client_handler(conn, addr):
                             _wild_boss_event(
                                 boss_cfg, wild_boss_event_start, create=True)
                         if msg == 246 and survival_new_entry:
-                            exist_time = max(0, int(survival_entry_config.get('exist_time', 0) or 0))
+                            event_start = int(survival_entry_occurrence['start_time'])
+                            event_end, _exit_time = _survive_battle_deadlines(
+                                survival_entry_config, event_start)
                             picked_char['survival_battle_state'] = {
                                 'activity_id': str(survival_entry_config.get('id', '')),
-                                'event_start_time': int(survival_entry_occurrence['start_time']),
-                                'end_time': (
-                                    int(survival_entry_occurrence['start_time'])
-                                    + exist_time),
+                                'event_start_time': event_start,
+                                'end_time': event_end,
                                 'score': 0,
                             }
                         start_map_transition(conn, picked_char, mid, send_rpc_push)
+                        if msg == 246:
+                            survival_state = picked_char.get('survival_battle_state')
+                            if (isinstance(survival_state, dict)
+                                    and survival_entry_config
+                                    and str(survival_state.get('activity_id'))
+                                    == str(survival_entry_config.get('id', ''))):
+                                _schedule_survive_battle_timer(
+                                    survival_entry_config,
+                                    survival_state.get('event_start_time', 0),
+                                    survival_state)
+                                save_chars(all_accounts_chars)
                         if msg == 246 and survival_new_entry:
                             record_daily_active_event(picked_char, 18, send_rpc_push)
                         if msg == 201: # world_boss
