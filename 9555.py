@@ -14259,6 +14259,56 @@ def _survive_battle_deadlines(config, event_start):
     return event_end, exit_time
 
 
+def recover_survive_battle_login(char, now=None):
+    current_map = str(char.get('map_id', ''))
+    config = survive_battle_config_for_map(current_map)
+    if not config:
+        return None
+
+    state = char.get('survival_battle_state')
+    event_start = 0
+    if (isinstance(state, dict)
+            and str(state.get('activity_id')) == str(config.get('id', ''))):
+        try:
+            event_start = int(state.get('event_start_time', 0) or 0)
+        except (TypeError, ValueError):
+            event_start = 0
+    now = int(time.time() if now is None else now)
+    event_end, _exit_time = _survive_battle_deadlines(config, event_start)
+    if event_start > 0 and not state.get('finished') and now < event_end:
+        state_changed = state.get('end_time') != event_end
+        state['end_time'] = event_end
+        state_changed = state_changed or char.get('active_copy_id') != current_map
+        char['active_copy_id'] = current_map
+        _schedule_survive_battle_timer(config, event_start, state)
+        if state_changed:
+            save_chars(all_accounts_chars)
+        return None
+
+    if event_start > 0:
+        _survive_battle_finish_event(config.get('id'), event_start, notify=False)
+    return_map = str(char.get('pre_copy_map') or '101')
+    if (return_map not in MAP_CONFIG
+            or return_map in (str(config.get('map_id', '')),
+                              str(config.get('map_id2', '')))):
+        return_map = '101' if '101' in MAP_CONFIG else '11'
+    return_pos = char.get('pre_copy_pos')
+    if not isinstance(return_pos, (list, tuple)) or len(return_pos) < 3:
+        return_pos = (configured_map_birth_position(return_map)
+                      or default_map_spawn_position(return_map)
+                      or [0, 0, 0, 0])
+    char['map_id'] = return_map
+    char['pos'] = list(return_pos)
+    char['active_copy_id'] = None
+    char.pop('survival_battle_state', None)
+    char['pre_copy_map'] = None
+    char['pre_copy_pos'] = None
+    save_chars(all_accounts_chars)
+    print(f"[SURVIVAL FIELD] recovered expired login player={char.get('id')} "
+          f"map={return_map} event_start={event_start}")
+    return return_map
+
+
 def _survive_battle_event_chars(activity_id, event_start):
     rows = []
     seen = set()
@@ -14311,7 +14361,7 @@ def _schedule_survive_battle_timer(config, event_start, state):
         timer.start()
 
 
-def _survive_battle_finish_event(activity_id, event_start):
+def _survive_battle_finish_event(activity_id, event_start, notify=True):
     config = SURVIVE_BATTLE_CONFIG.get(str(activity_id))
     if not config:
         return
@@ -14350,7 +14400,7 @@ def _survive_battle_finish_event(activity_id, event_start):
     settle_survive_battle_rank_rewards(config, event_start)
 
     for char_id, char in participants:
-        if str(char.get('map_id', '')) not in map_ids:
+        if not notify or str(char.get('map_id', '')) not in map_ids:
             continue
         conn, current_char = ALL_CONNECTIONS.get(char_id, (None, None))
         if (not conn or current_char is not char
@@ -14391,6 +14441,9 @@ def _survive_battle_auto_exit(activity_id, event_start):
             conn, char, return_map,
             lambda tag, payload, c=conn: send_rpc_push_safe(c, tag, payload),
             override_pos=list(return_pos))
+        char['active_copy_id'] = None
+        char['pre_copy_map'] = None
+        char['pre_copy_pos'] = None
         save_chars(all_accounts_chars)
 
     with SURVIVE_BATTLE_TIMER_LOCK:
@@ -23424,6 +23477,9 @@ def client_handler(conn, addr):
                         mid = saved_map
                         save_chars(all_accounts_chars)
                         print(f"[EXP RECOVERY] returned stale run to map={saved_map} player={char_id}")
+                    survival_return_map = recover_survive_battle_login(picked_char)
+                    if survival_return_map:
+                        mid = survival_return_map
                     if mid == 'None':
                         mid = '11'
                         picked_char['map_id'] = '11'
@@ -23610,8 +23666,7 @@ def client_handler(conn, addr):
                             if (isinstance(survival_state, dict)
                                     and survival_config
                                     and str(survival_state.get('activity_id'))
-                                    == str(survival_config.get('id', ''))
-                                    and str(picked_char.get('active_copy_id') or '') == mid):
+                                    == str(survival_config.get('id', ''))):
                                 try:
                                     event_start = int(
                                         survival_state.get('event_start_time', 0) or 0)
