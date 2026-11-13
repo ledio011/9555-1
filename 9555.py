@@ -19392,17 +19392,40 @@ def _wild_boss_record_attempt_event(char, boss_id, event_start, charge):
     return True
 
 
+def _wild_boss_stage_for_level(requested_row, player_level):
+    try:
+        requested_pvp = int(requested_row.get('pvp', 0) or 0)
+        player_level = int(player_level)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return next((
+        row for row in WILD_BOSS_CONFIG.values()
+        if int(row.get('type', 0) or 0) == 5
+        and int(row.get('pvp', 0) or 0) == requested_pvp
+        and int(row.get('min_level', 1) or 1) <= player_level
+        <= int(row.get('max_level', 80) or 80)
+    ), None)
+
+
 def _wild_boss_entry_check(char, boss_id, now=None):
     row = WILD_BOSS_CONFIG.get(str(boss_id))
     if not row or int(row.get('type', 0) or 0) != 5:
         return False, 'unconfigured', None, 0
     now = int(time.time() if now is None else now)
+    requested_boss_id = str(boss_id)
+    level = int(char.get('level', 1) or 1)
+    stage_row = _wild_boss_stage_for_level(row, level)
+    if not stage_row:
+        return False, 'level', row, 0
+    row = stage_row
+    boss_id = str(row.get('id', ''))
+    if boss_id != requested_boss_id:
+        print(f"[WILD BOSS] resolved requested stage={requested_boss_id} "
+              f"to player stage={boss_id} level={level} "
+              f"range={row.get('min_level')}-{row.get('max_level')}")
     active, _slot, event_start, _next_start, _slot_end = _wild_boss_clock(row, now)
     if not active:
         return False, 'closed', row, 0
-    level = int(char.get('level', 1) or 1)
-    if not int(row.get('min_level', 1) or 1) <= level <= int(row.get('max_level', 80) or 80):
-        return False, 'level', row, 0
 
     char_id = int(char.get('id', 0) or 0)
     map_id = str(row.get('map_id', ''))
@@ -19412,7 +19435,7 @@ def _wild_boss_entry_check(char, boss_id, now=None):
         and str(char.get('_wild_boss_boss_id', '')) == str(boss_id)
     )
     record = _wild_boss_event(row, event_start)
-    if record and record.get('finished') and not already_inside:
+    if record and record.get('finished'):
         return False, 'finished', row, 0
 
     with WILD_BOSS_LOCK:
@@ -19679,6 +19702,9 @@ def _wild_boss_finish(key, won, killer_id=0):
             ai_timer.cancel()
     row = WILD_BOSS_CONFIG.get(str(key[0]), {})
     _wild_boss_send_result(row, record, won)
+    for _char_id, (conn, char) in list(ALL_CONNECTIONS.items()):
+        if conn and char and is_current_character_connection(conn, char):
+            send_rpc_push_safe(conn, 605, _wild_boss_activity_payload(char))
     if won and rows:
         winner = rows[0]
         level_range = f"Lv.{int(row.get('min_level', 1))}-{int(row.get('max_level', 80))}"
@@ -29064,7 +29090,11 @@ def client_handler(conn, addr):
                             mid = str(boss_cfg.get('map_id', ''))
                         else:
                             print(f"[WILD BOSS] entry rejected id={body.get(0)} "
-                                  f"player={picked_char.get('id')} reason={entry_reason}")
+                                  f"player={picked_char.get('id')} "
+                                  f"level={picked_char.get('level')} "
+                                  f"required={boss_cfg.get('min_level', 1)}-"
+                                  f"{boss_cfg.get('max_level', 80)} "
+                                  f"reason={entry_reason}")
                             send_rpc_push(605, _wild_boss_activity_payload(picked_char))
                     elif _wild_boss_map_id(mid):
                         wild_boss_entry_ok = False
