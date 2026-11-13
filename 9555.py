@@ -6941,10 +6941,6 @@ def dance_state_info_payload(char, now=None):
             try:
                 if runtime.get('running_source') == 'free':
                     remaining = max(0, remaining - max(0, now - int(runtime.get('running_since', now))))
-                elif runtime.get('running_source') == 'paid':
-                    paid_end = int(runtime.get('paid_dances', {}).get(str(runtime.get('dance_id', '')), 0)
-                                   or runtime.get('paid_end_time', 0) or 0)
-                    remaining = max(0, paid_end - now)
                 elif runtime.get('running_source') == 'speaker':
                     remaining = max(0, int(runtime.get('speaker_end_time', 0)) - now)
             except (TypeError, ValueError):
@@ -26054,7 +26050,6 @@ def client_handler(conn, addr):
                                     runtime['reward_dance_id'] = dance_id
                                     runtime['running'] = True
                                     runtime['running_since'] = now
-                                    runtime['free_started_at'] = now
                                     runtime['dance_run_id'] = int(runtime.get('dance_run_id', 0)) + 1
                                     runtime['server_epoch'] = DANCE_SERVER_EPOCH
                                     if guild_speaker_end > now:
@@ -26068,6 +26063,8 @@ def client_handler(conn, addr):
                                         runtime['running_source'] = 'free'
                                     else:
                                         runtime['running_source'] = 'speaker'
+                                    if runtime['running_source'] == 'free':
+                                        runtime['free_started_at'] = now
                                     runtime['dance_id'] = dance_id
                                     source_key = f"{runtime['running_source']}:{dance_id}"
                                     try:
