@@ -166,7 +166,6 @@ CASH_STAGE_LOCK = threading.RLock()
 MAIL_ID_COUNTER_LOCK = threading.Lock()
 DANCE_REWARD_TIMER_LOCK = threading.Lock()
 DANCE_REWARD_TIMERS = {}  # character ID -> active personal-dance reward timer
-GUILD_DANCE_REWARD_MISSING_LOGGED = set()
 GUILD_DANCE_SPEAKER_LOCK = threading.RLock()
 GUILD_DANCE_SPEAKERS = {}  # guild ID -> active speaker instance records
 GUILD_DANCE_SPEAKER_TIMERS = {}  # NPC instance ID -> that speaker's expiry timer
@@ -6237,46 +6236,26 @@ def personal_dance_reward_list(char, dance_id, running_source='', interval_index
         if interval_index >= interval_count:
             return []
         reward_at = time.time() if reward_at is None else float(reward_at)
-        speaker_count = _guild_dance_speaker_count_for_char(
-            char, reward_at - 0.000001)
-        if speaker_count <= 0:
+        if _guild_dance_speaker_count_for_char(
+                char, reward_at - 0.000001) <= 0:
             return []
 
-        recovery_drop_id = str(
-            STREET_RACE_REWARD_BY_KEY_LEVEL.get('_drop_gwzh', {}).get(level, '') or ''
-        )
-        exp_amount = next(
-            (int(count) for item_id, _quality, count
-             in SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(recovery_drop_id, [])
-             if str(item_id) == '2001' and int(count) > 0),
-            0
-        )
-        if not exp_amount:
-            missing_key = (level, recovery_drop_id)
-            if missing_key not in GUILD_DANCE_REWARD_MISSING_LOGGED:
-                GUILD_DANCE_REWARD_MISSING_LOGGED.add(missing_key)
-                print("[GUILD DANCE REWARD] EXP payout unavailable: "
-                      f"no explicit item 2001 count for level {level} "
-                      f"drop row {recovery_drop_id or '(missing)'}")
         try:
             scale = max(0, int(dance_cfg.get('RewardScale', 100) or 100))
         except (TypeError, ValueError):
             scale = 100
-        # _drop_gwzh is the full 30-minute per-level EXP amount; pay its
-        # scaled total evenly across CityDanceData's one-second intervals.
-        scaled_exp_total = exp_amount * scale // 100
-        exp_per_interval = (
-            scaled_exp_total * (interval_index + 1) // interval_count
-            - scaled_exp_total * interval_index // interval_count
-        )
+        # CityDanceData pays each second; the per-level AdaptData reward rows
+        # are missing from this client export, so use the character's level.
+        exp_per_interval = level * scale // 100
         contribution_per_interval = scale // 100
-        rewards = []
-        for _speaker_index in range(speaker_count):
-            if contribution_per_interval > 0:
-                rewards.append(('1004', 0, contribution_per_interval))
-            if exp_per_interval > 0:
-                rewards.append(('2001', 0, exp_per_interval))
-        return rewards
+        return [
+            (item_id, 0, amount)
+            for item_id, amount in (
+                ('2001', exp_per_interval),
+                ('1004', contribution_per_interval),
+            )
+            if amount > 0
+        ]
 
     # Some AdaptData levels point to 303xx IDs that are absent from this APK's
     # ShowRewardData export. CityDanceData's ShowRewardId is the client preview
@@ -7493,6 +7472,43 @@ def send_combat_power_gain_tip(send_rpc_push, previous_power, current_power):
     # numeric character attributes; this separate push opens the gain UI.
     send_rpc_push(651, encode_sproto([(0, previous_power), (1, current_power)]))
     return True
+
+
+def _guild_member_power_snapshot(guild):
+    powers = {}
+    if not guild:
+        return powers
+    for member_id, member in (guild.get('members') or {}).items():
+        if not member or int(member.get('job', 3)) == 4:
+            continue
+        try:
+            char_id = int(member_id)
+        except (TypeError, ValueError):
+            continue
+        conn, char = ALL_CONNECTIONS.get(char_id, (None, None))
+        if (conn is None or char is None
+                or not is_current_character_connection(conn, char)
+                or _guild_id_for_character(char) != int(guild.get('id', 0) or 0)):
+            continue
+        powers[char_id] = (conn, char, get_character_stats(char)['power'])
+    return powers
+
+
+def _guild_send_power_gain_tips(guild, previous_powers):
+    if not guild:
+        return
+    for char_id, (old_conn, old_char, previous_power) in previous_powers.items():
+        conn, char = ALL_CONNECTIONS.get(char_id, (None, None))
+        member = _guild_member_id(guild, char_id)
+        if (conn is not old_conn or char is not old_char
+                or not member or int(member.get('job', 3)) == 4
+                or not is_current_character_connection(conn, char)):
+            continue
+        current_power = get_character_stats(char)['power']
+        send_combat_power_gain_tip(
+            lambda tag, payload, c=conn: send_rpc_push_safe(c, tag, payload),
+            previous_power, current_power)
+
 
 def get_npc_attr(nid, player_level=1):
     try:
@@ -12512,9 +12528,12 @@ TIMED_ITEM_BUCKETS = (
     ('equipped_badges', 4),
     ('equipped_fashion', 6),
 )
+SERVER_NON_EXPIRING_ITEM_IDS = {'5026', '6002'}
 
 
 def item_use_hour(item_id):
+    if str(item_id) in SERVER_NON_EXPIRING_ITEM_IDS:
+        return 0
     try:
         return max(0, int(ITEM_CONFIG.get(str(item_id), {}).get('use_hour', 0) or 0))
     except (TypeError, ValueError):
@@ -12536,7 +12555,6 @@ def expire_timed_inventory_items(picked_char, now=None):
         bucket_changed = False
         for item in records:
             item_id = str(item.get('id', ''))
-            use_hour = item_use_hour(item_id)
             parm = item.get('parm')
             if not isinstance(parm, list):
                 parm = list(parm) if isinstance(parm, tuple) else []
@@ -12546,6 +12564,15 @@ def expire_timed_inventory_items(picked_char, now=None):
                 expires_at = int(parm[4] or 0)
             except (TypeError, ValueError):
                 expires_at = 0
+            if item_id in SERVER_NON_EXPIRING_ITEM_IDS:
+                if parm[4] != 0:
+                    parm[4] = 0
+                    item['parm'] = parm
+                    updates.append((container_type, item))
+                    changed = True
+                retained.append(item)
+                continue
+            use_hour = item_use_hour(item_id)
             if expires_at <= 0 and use_hour > 0:
                 parm[4] = now + use_hour * 3600
                 item['parm'] = parm
@@ -13214,6 +13241,14 @@ def ensure_slot_state(picked_char):
         free_spins = max(0, int(state.get('free_spins', picked_char.get('slot_free_spins', 0))))
     except (TypeError, ValueError):
         free_spins = 0
+    free_spins = min(1, free_spins)
+    refresh_stamp = str(state.get('free_spin_refresh', '') or '')
+    current_stamp = str(current_daily_stamp())
+    if refresh_stamp != current_stamp:
+        # Carry one unused spin forward, but never stack spins across refreshes.
+        if free_spins == 0:
+            free_spins = 1
+        state['free_spin_refresh'] = current_stamp
     try:
         sum_num = max(0, int(state.get('sum_num', 0)))
     except (TypeError, ValueError):
@@ -21583,6 +21618,7 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         rows = GUILD_SKILL_DATA.get(skill_type, [])
         next_row = next((row for row in rows if int(row.get('level', 0)) == current_level + 1), None)
         success = False
+        previous_powers = _guild_member_power_snapshot(guild) if guild else {}
         if (guild and member and int(member.get('job', 4)) != 4 and next_row and current_level < _guild_level(guild)
                 and _guild_level(guild) >= int(next_row.get('level_limit', 99))):
             cost = max(0, int(next_row.get('cost', 0)))
@@ -21598,6 +21634,7 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
             if success:
                 sync_char_attrs_rpc(conn, char)
                 _guild_refresh_members(guild)
+                _guild_send_power_gain_tips(guild, previous_powers)
         response = encode_sproto([
             (0, 0 if success else 1), (1, skill_type),
             (2, int(get_currency_balance(char, 3))),
@@ -21919,6 +21956,7 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         stars = guild.setdefault('stars', {}) if guild else {}
         success = False
         spend = {}
+        previous_powers = _guild_member_power_snapshot(guild) if guild else {}
         if cfg and guild and member and int(member.get('job', 4)) != 4:
             rows_for_map = sorted(
                 ((key, row) for key, row in GUILD_STAR_DATA.items()
@@ -21960,6 +21998,7 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
                     success = True
         if success:
             _guild_refresh_members(guild)
+            _guild_send_power_gain_tips(guild, previous_powers)
         send_rpc_push(672, encode_sproto([(0, _guild_star_map(guild))]))
 
     elif msg == 295:  # req_guild_battle_state
