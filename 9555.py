@@ -17228,9 +17228,10 @@ def accept_mission_logic(picked_char, mid):
     return True
 
 def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type=0,
-                     map_id=None, deferred_pushes=None):
+                     map_id=None):
     """Apply one authoritative gameplay event to every active mission."""
     updated = False
+    daily_mission_completed = False
     for mid, mdata in picked_char.get('active_missions', {}).items():
         if mdata.get('state') != 1:
             continue
@@ -17293,8 +17294,7 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             matched = (str(mid) == '1009' and str(map_id) == '101'
                        and target_value == '101')
         elif logic_type == 103 and event == 'daily_mission':
-            # This event is emitted only after a daily-task claim, not a UI click.
-            matched = True
+            matched = int(cfg.get('class', 0) or 0) == 1
         elif logic_type in [102, 105, 106, 107, 108, 110, 113, 114, 117, 119, 120, 132] and event in ['dungeon', 'car_copy']:
             # Dungeon/Guide entry missions advance on specific 'dungeon' or 'car_copy' events
             logic_id_str = str(cfg.get('logic_id'))
@@ -17349,21 +17349,32 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
         # Bug 3: Send TAG 524 only if progress actually changed
         old_progress = mdata.get('_last_progress', 0)
         if progress != old_progress:
-            push = (524, encode_sproto([(0, mid), (1, 1), (2, progress)]))
-            if deferred_pushes is not None:
-                deferred_pushes.append(push)
-            elif send_rpc_push is not None:
-                send_rpc_push(*push)
+            if send_rpc_push is not None:
+                send_rpc_push(524, encode_sproto([(0, mid), (1, 1), (2, progress)]))
         mdata['_last_progress'] = progress
 
         if progress >= required:
             mdata['state'] = 2
-            push = (523, encode_sproto([(0, mid), (1, 2)]))
-            if deferred_pushes is not None:
-                deferred_pushes.append(push)
-            elif send_rpc_push is not None:
-                send_rpc_push(*push)
+            if send_rpc_push is not None:
+                send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+            if int(cfg.get('class', 0) or 0) == 0:
+                daily_mission_completed = True
         updated = True
+
+    if daily_mission_completed:
+        # A completed class-0 task is the real objective for the main Daily
+        # Mission guide. Batch its advancement with this gameplay event.
+        had_skip_mission_save = '_skip_mission_save' in picked_char
+        previous_skip_mission_save = picked_char.get('_skip_mission_save')
+        picked_char['_skip_mission_save'] = True
+        try:
+            updated = advance_missions(
+                picked_char, send_rpc_push, 'daily_mission') or updated
+        finally:
+            if had_skip_mission_save:
+                picked_char['_skip_mission_save'] = previous_skip_mission_save
+            else:
+                picked_char.pop('_skip_mission_save', None)
 
     # Bug 4: Support skip_save/skip_sync for batched mission advancement
     # When called from EXP dungeon wave completion, skip save/sync to batch at dungeon completion
@@ -24853,14 +24864,8 @@ def client_handler(conn, addr):
                             had_skip_mission_save = '_skip_mission_save' in picked_char
                             previous_skip_mission_save = picked_char.get('_skip_mission_save')
                             picked_char['_skip_mission_save'] = True
-                            deferred_mission_pushes = []
                             try:
                                 exp_add, cash_add, items_add, popup_items, mission_leveled_up = give_mission_rewards(picked_char, mid)
-                                if int(m_cfg.get('class', 0) or 0) in (0, 6):
-                                    advance_missions(
-                                        picked_char, send_rpc_push, 'daily_mission',
-                                        target_id=mid,
-                                        deferred_pushes=deferred_mission_pushes)
                             finally:
                                 if had_skip_mission_save:
                                     picked_char['_skip_mission_save'] = previous_skip_mission_save
@@ -24924,8 +24929,6 @@ def client_handler(conn, addr):
 
                             # Push Sync sequence
                             send_rpc_push(521, encode_sproto([(0, mid), (1, 0)])) # Success feedback
-                            for mission_tag, mission_payload in deferred_mission_pushes:
-                                send_rpc_push(mission_tag, mission_payload)
                             if is_chained and next_mid:
                                 next_m_entry = picked_char.get('active_missions', {}).get(str(next_mid), {})
                                 next_parm = next_m_entry.get('parm', [0]*8)
