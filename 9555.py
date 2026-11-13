@@ -3278,6 +3278,78 @@ print(f"[GUILD] loaded guilds={len(GUILD_STATES)} next_id={GUILD_ID_COUNTER}")
 GUILD_CITY_OWNER_PATH = os.path.join(SCRIPT_DIR, "guild_city.json")
 GUILD_CITY_LOCK = threading.RLock()
 GUILD_CITY_EVENT_STATE = {}
+WILD_BOSS_FINISHED_PATH = os.path.join(SCRIPT_DIR, "wild_boss_finished_events.json")
+WILD_BOSS_FINISHED_LOCK = threading.RLock()
+
+def _wild_boss_finished_event_key(boss_id, event_start):
+    return f"{str(boss_id)}:{int(event_start)}"
+
+def _load_wild_boss_finished_events():
+    try:
+        with open(WILD_BOSS_FINISHED_PATH, "r", encoding="utf-8") as event_file:
+            loaded = json.load(event_file)
+    except FileNotFoundError:
+        return {}
+    except (OSError, TypeError, ValueError) as load_error:
+        print(f"[WILD BOSS] failed to load finished events: {load_error}")
+        return {}
+    if not isinstance(loaded, dict):
+        return {}
+    cutoff = int(time.time()) - 2 * 86400
+    finished = {}
+    for key, event in loaded.items():
+        try:
+            boss_id, event_start = str(key).split(":", 1)
+            if (not boss_id.isdigit() or int(event_start) < cutoff
+                    or not isinstance(event, dict) or not event.get("finished")):
+                continue
+            finished[str(key)] = {
+                "finished": True,
+                "win": bool(event.get("win")),
+                "finished_at": max(0, int(event.get("finished_at", 0) or 0)),
+                "end_time": max(0, int(event.get("end_time", 0) or 0)),
+            }
+        except (TypeError, ValueError):
+            continue
+    return finished
+
+def _save_wild_boss_finished_event(key, record):
+    now = int(time.time())
+    cutoff = now - 2 * 86400
+    event_key = _wild_boss_finished_event_key(*key)
+    event = {
+        "finished": True,
+        "win": bool(record.get("win")),
+        "finished_at": max(0, int(record.get("finished_at", now) or now)),
+        "end_time": max(0, int(record.get("end_time", 0) or 0)),
+    }
+    temp_path = WILD_BOSS_FINISHED_PATH + ".tmp"
+    with WILD_BOSS_FINISHED_LOCK:
+        WILD_BOSS_FINISHED_EVENTS[event_key] = event
+        for old_key in list(WILD_BOSS_FINISHED_EVENTS):
+            try:
+                _old_boss_id, old_start = str(old_key).split(":", 1)
+                if int(old_start) < cutoff:
+                    WILD_BOSS_FINISHED_EVENTS.pop(old_key, None)
+            except (TypeError, ValueError):
+                WILD_BOSS_FINISHED_EVENTS.pop(old_key, None)
+        try:
+            with open(temp_path, "w", encoding="utf-8") as event_file:
+                json.dump(WILD_BOSS_FINISHED_EVENTS, event_file, ensure_ascii=False)
+                event_file.flush()
+                os.fsync(event_file.fileno())
+            os.replace(temp_path, WILD_BOSS_FINISHED_PATH)
+            return True
+        except OSError as save_error:
+            print(f"[WILD BOSS] failed to persist finished event {event_key}: {save_error}")
+            try:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+            except OSError as cleanup_error:
+                print(f"[WILD BOSS] failed to remove finished-event temp file: {cleanup_error}")
+            return False
+
+WILD_BOSS_FINISHED_EVENTS = _load_wild_boss_finished_events()
 WILD_BOSS_LOCK = threading.RLock()
 WILD_BOSS_EVENTS = {}
 WILD_BOSS_ANNOUNCED_STARTS = set()
@@ -19331,8 +19403,28 @@ def _wild_boss_event(row, event_start, create=False):
     key = (boss_id, event_start)
     with WILD_BOSS_LOCK:
         record = WILD_BOSS_EVENTS.get(key)
-        if record or not create:
+        if record:
             return record
+        with WILD_BOSS_FINISHED_LOCK:
+            persisted = copy.deepcopy(WILD_BOSS_FINISHED_EVENTS.get(
+                _wild_boss_finished_event_key(boss_id, event_start)))
+        if persisted:
+            record = {
+                'boss_id': boss_id, 'map_id': str(row.get('map_id', '')),
+                'event_start': event_start,
+                'end_time': int(persisted.get('end_time', 0) or 0),
+                'hp_max': 1, 'hp': 0, 'inst_id': None,
+                'damage_players': {}, 'participants': {},
+                'finished': True, 'win': bool(persisted.get('win')),
+                'finished_at': int(persisted.get('finished_at', 0) or 0),
+                'last_kill_id': 0, 'last_kill_name': '', 'position': None,
+                'timer': None, 'ai_timer': None, 'ai_next_attack_at': 0.0,
+                'ai_skill_ready_at': {}, 'ai_tick_lock': threading.Lock(),
+            }
+            WILD_BOSS_EVENTS[key] = record
+            return record
+        if not create:
+            return None
         npc_id = str(row.get('boss_npc_id', ''))
         template_hp = int(get_npc_attr(npc_id).get('hp_max', 1) or 1)
         min_hp = max(0, int(row.get('min_hp', 0) or 0))
@@ -19567,8 +19659,34 @@ def _wild_boss_activity_payload(char, now=None):
         player_level = max(1, int(char.get('level', 1) or 1))
     except (AttributeError, TypeError, ValueError):
         player_level = 1
+    stage_by_mode = {}
+    for row in WILD_BOSS_CONFIG.values():
+        if int(row.get('type', 0) or 0) != 5:
+            continue
+        try:
+            mode = int(row.get('pvp', 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if mode in stage_by_mode:
+            continue
+        stage = _wild_boss_stage_for_level(row, player_level)
+        if stage is None:
+            mode_rows = [
+                candidate for candidate in WILD_BOSS_CONFIG.values()
+                if int(candidate.get('type', 0) or 0) == 5
+                and int(candidate.get('pvp', 0) or 0) == mode
+            ]
+            stage = min(
+                mode_rows,
+                key=lambda candidate: int(candidate.get('min_level', 1) or 1)
+            ) if mode_rows else None
+        if stage:
+            stage_by_mode[mode] = str(stage.get('id', ''))
+    selected_stage_ids = set(stage_by_mode.values())
     activities = {}
     for boss_id, row in WILD_BOSS_CONFIG.items():
+        if str(boss_id) not in selected_stage_ids:
+            continue
         active, slot, event_start, next_start, _slot_end = _wild_boss_clock(row, now)
         if active:
             record = _wild_boss_event(row, event_start)
@@ -19700,6 +19818,9 @@ def _wild_boss_finish(key, won, killer_id=0):
         ai_timer = record.get('ai_timer')
         if ai_timer:
             ai_timer.cancel()
+    if not _save_wild_boss_finished_event(key, record):
+        print(f"[WILD BOSS] event remains closed in memory but persistence failed "
+              f"boss={key[0]} event_start={key[1]}")
     row = WILD_BOSS_CONFIG.get(str(key[0]), {})
     _wild_boss_send_result(row, record, won)
     for _char_id, (conn, char) in list(ALL_CONNECTIONS.items()):
