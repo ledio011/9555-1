@@ -213,8 +213,12 @@ def contains_mission_id(value: Any, depth: int = 0) -> bool:
         return False
     if isinstance(value, str):
         return value == MISSION_ID
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value == int(MISSION_ID)
     if isinstance(value, (bytes, bytearray)):
         raw = bytes(value)
+        if to_int(raw) == int(MISSION_ID):
+            return True
         try:
             if raw.decode("ascii").strip() == MISSION_ID:
                 return True
@@ -302,6 +306,7 @@ class Mission1014SnifferState:
         self.account_id = account_id
         self.allowed_char_ids = set(allowed_char_ids)
         self.current_char_id: Optional[int] = None
+        self.reject_connection = False
         self.log_fp = log_fp
         self.raw_fp = raw_fp
         self.lock = threading.RLock()
@@ -404,11 +409,16 @@ class Mission1014SnifferState:
             if requested_char_id not in self.allowed_char_ids:
                 self.target_active = False
                 self.current_char_id = None
+                self.reject_connection = True
                 self.pending_picks.clear()
                 self.client_requests.clear()
                 self.server_requests.clear()
                 self.mission_client_sessions.clear()
                 self.mission_server_sessions.clear()
+                self.log(
+                    f"ACCOUNT CHARACTER REJECTED account={self.account_id} "
+                    f"character_id={requested_char_id!r}; connection blocked before backend forwarding."
+                )
                 return
             if session is not None:
                 self.pending_picks[session] = {
@@ -449,10 +459,9 @@ class Mission1014SnifferState:
         mission_match = contains_mission_id(body)
         if direction == "C->S":
             if msg is not None:
-                if mission_match:
-                    if session is not None:
-                        self.mission_client_sessions[session] = {"message_id": msg}
-                    self._log_packet(direction, payload, msg, session, body)
+                if session is not None:
+                    self.mission_client_sessions[session] = {"message_id": msg}
+                self._log_packet(direction, payload, msg, session, body)
             elif session is not None and session in self.mission_server_sessions:
                 self.mission_server_sessions.pop(session, None)
                 self._log_packet(direction, payload, msg, session, body)
@@ -559,6 +568,9 @@ class ClientHandler:
                             f"PARSER DISABLED direction={direction} after diagnostic error: {parse_error}; "
                             "forwarding remains byte-for-byte"
                         )
+                if self.state.reject_connection:
+                    self.close_all()
+                    return
                 destination.sendall(chunk)
         except (ConnectionError, OSError):
             pass
@@ -663,7 +675,8 @@ def main() -> int:
     print(f"Text log: {os.path.abspath(args.log_file) if args.log_file else 'disabled'}", flush=True)
     print(f"Raw log : {os.path.abspath(args.raw_log) if args.raw_log else 'disabled'}", flush=True)
     print("Select any character belonging to the allowed account and play mission 1014 normally.", flush=True)
-    print("Only allowed-account character packets containing mission 1014 and their paired RPC replies are logged.", flush=True)
+    print("Character selections outside the allowed account are rejected before backend forwarding.", flush=True)
+    print("All client requests for an allowed character and their paired RPC replies are logged for mission-click diagnosis.", flush=True)
     print("Wire message IDs are recorded as observed; no mission result is fabricated.", flush=True)
     print("Traffic is relayed byte-for-byte; no server source or game data is modified.", flush=True)
     print("=" * 72, flush=True)
