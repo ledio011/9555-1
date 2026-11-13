@@ -7,7 +7,7 @@ nested Sproto fields for the mission ID and pairs matching RPC requests with
 their replies by session ID, including replies that omit the mission ID.
 
 Serv00 layout:
-  client -> public :15678 -> AtgSniffer -> 127.0.0.1:14171 -> 9555.py
+  client -> public :15678 -> AtgSniffer -> 127.0.0.1:11899 -> 9555.py
 
 The proxy relays every byte unchanged. It does not fabricate mission responses,
 modify the game client, or edit 9555.py or game data.
@@ -534,7 +534,7 @@ def parse_endpoint(value: str) -> Tuple[str, int]:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only ATG mission 1014 sniffer (transparent TCP proxy)")
     parser.add_argument("--listen", default="0.0.0.0:15678", type=parse_endpoint, help="public proxy endpoint HOST:PORT")
-    parser.add_argument("--server", default="127.0.0.1:14171", type=parse_endpoint, help="local 9555.py backend HOST:PORT")
+    parser.add_argument("--server", default="127.0.0.1:11899", type=parse_endpoint, help="local 9555.py backend HOST:PORT")
     parser.add_argument("--target", type=int, default=DEFAULT_TARGET_CHAR_ID, help="only log this selected character ID")
     parser.add_argument("--log-file", default="AtgSniffer_mission1014.log", help="human-readable mission 1014 log")
     parser.add_argument("--raw-log", default="AtgSniffer_mission1014_packets.jsonl", help="matching raw Sproto frames; use empty string to disable")
