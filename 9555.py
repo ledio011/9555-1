@@ -3282,7 +3282,7 @@ WILD_BOSS_LOCK = threading.RLock()
 WILD_BOSS_EVENTS = {}
 WILD_BOSS_ANNOUNCED_STARTS = set()
 WILD_BOSS_ENTRY_RESERVATIONS = {}
-WILD_BOSS_RANK_ROWS = 10
+WILD_BOSS_RANK_ROWS = 6
 GUILD_BOSS_LOCK = threading.RLock()
 GUILD_BOSS_ENTRY_RESERVATIONS = {}
 GUILD_BOSS_OVERRIDE_PATH = os.path.join(SCRIPT_DIR, "guild_boss_override.json")
@@ -14003,7 +14003,7 @@ def survive_battle_top_payload(char):
         (0, int(row.get('id', 0) or 0)),
         (1, str(row.get('name', ''))),
         (2, int(row.get('value', 0) or 0)),
-    ]) for row in rows]
+    ]) for row in rows[:6]]
     return encode_sproto([
         (0, score_infos), (1, rank_index), (2, score), (3, end_time)
     ])
