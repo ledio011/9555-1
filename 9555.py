@@ -466,6 +466,7 @@ SURVIVE_BATTLE_BADGE_ITEM_IDS = (
 )
 SURVIVE_BATTLE_TIMERS = {} # (activity ID, event start) -> phase/timer
 SURVIVE_BATTLE_TIMER_LOCK = threading.RLock()
+SURVIVE_BATTLE_NPC_EVENT_STARTS = {}
 RETRIEVE_CONFIG = {} # RetrieveData ID -> recovery costs/scales/level drop key
 
 try:
@@ -10954,6 +10955,63 @@ def clear_prison_npc_aoi(conn, send_remove=False):
             send_rpc_push_safe(conn, 506, encode_sproto([(0, int(inst_id))]))
 
 
+def reset_survive_battle_npcs_for_event(map_id, event_start):
+    map_str = str(map_id)
+    if map_str not in SURVIVE_BATTLE_NPC_MAP_IDS:
+        return False
+    try:
+        event_start = int(event_start)
+    except (TypeError, ValueError):
+        return False
+    if event_start <= 0:
+        return False
+
+    removals = []
+    with PRISON_NPC_LOCK:
+        if SURVIVE_BATTLE_NPC_EVENT_STARTS.get(map_str) == event_start:
+            return False
+        SURVIVE_BATTLE_NPC_EVENT_STARTS[map_str] = event_start
+        slot_keys = [
+            key for key, slot in PRISON_NPC_SHARED_SLOTS.items()
+            if str(slot.get("map_id", "")) == map_str
+        ]
+        instance_ids = set()
+        for slot_key in slot_keys:
+            slot = PRISON_NPC_SHARED_SLOTS.pop(slot_key, {})
+            try:
+                old_inst_id = int(slot.get("inst_id") or 0)
+            except (TypeError, ValueError):
+                old_inst_id = 0
+            if old_inst_id:
+                instance_ids.add(old_inst_id)
+            for conn_id, tracked in list(PRISON_NPC_AOI_TRACK.items()):
+                try:
+                    tracked_inst_id = int(tracked.pop(slot_key, 0) or 0)
+                except (TypeError, ValueError):
+                    tracked_inst_id = 0
+                if not tracked_inst_id:
+                    continue
+                instance_ids.add(tracked_inst_id)
+                connection = next((
+                    (conn, char) for conn, char in list(ALL_CONNECTIONS.values())
+                    if conn and id(conn) == conn_id
+                ), None)
+                if (connection
+                        and str(connection[1].get("map_id", "")) == map_str):
+                    removals.append((connection[0], tracked_inst_id))
+        for inst_id in instance_ids:
+            PRISON_NPC_SHARED_BY_INSTANCE.pop(inst_id, None)
+            NPC_HP_MAP.pop(inst_id, None)
+            NPC_INST_MAP.pop(inst_id, None)
+            NPC_INSTANCE_MAP.pop(inst_id, None)
+            NPC_ATTR_MAP.pop(inst_id, None)
+            DEAD_NPC_SET.discard(inst_id)
+
+    for conn, inst_id in removals:
+        send_rpc_push_safe(conn, 506, encode_sproto([(0, inst_id)]))
+    return True
+
+
 def prison_npc_specs(map_id, player_level=1):
     specs = []
     map_str = str(map_id)
@@ -14328,6 +14386,9 @@ def survive_battle_pvp_kill(killer, victim):
     victim_id = int(victim.get('id', 0) or 0)
     if killer_payload is not None:
         send_push_to_char(killer_id, 636, killer_payload)
+    send_push_to_char(killer_id, 638, encode_sproto([(0, [
+        encode_sproto([(0, '8001'), (1, 1), (3, 0)])
+    ])]))
 
     force_return = int(victim_state.get('score', 0) or 0) < int(
         config.get('second_min_score', 100) or 100)
@@ -14513,7 +14574,7 @@ def _survive_battle_finish_event(activity_id, event_start, notify=True):
         if result_payload is not None:
             send_rpc_push_safe(conn, 636, result_payload)
         send_rpc_push_safe(conn, 629, encode_sproto([
-            (0, exit_time), (1, 2)
+            (0, event_end), (1, 2)
         ]))
     print(f"[SURVIVAL FIELD] event ended activity={activity_id} "
           f"participants={len(participants)} exit_at={exit_time}")
@@ -23841,6 +23902,24 @@ def client_handler(conn, addr):
                         print(f"[DOWNLOAD REWARD] post-map item bag sync "
                               f"player={picked_char.get('id')} items={item_summary}")
                     if mid in PRISON_NPC_AOI_MAP_IDS:
+                        if mid in SURVIVE_BATTLE_NPC_MAP_IDS:
+                            survival_state = picked_char.get('survival_battle_state')
+                            survival_config = survive_battle_config_for_map(mid)
+                            if (isinstance(survival_state, dict)
+                                    and survival_config
+                                    and str(survival_state.get('activity_id'))
+                                    == str(survival_config.get('id', ''))
+                                    and str(picked_char.get('active_copy_id') or '') == mid
+                                    and not survival_state.get('finished')):
+                                try:
+                                    event_start = int(
+                                        survival_state.get('event_start_time', 0) or 0)
+                                except (TypeError, ValueError):
+                                    event_start = 0
+                                event_end, _exit_time = _survive_battle_deadlines(
+                                    survival_config, event_start)
+                                if event_start > 0 and int(time.time()) < event_end:
+                                    reset_survive_battle_npcs_for_event(mid, event_start)
                         update_prison_npc_aoi(conn, mid, picked_char)
                         if mid in SURVIVE_BATTLE_NPC_MAP_IDS:
                             survival_state = picked_char.get('survival_battle_state')
@@ -23858,9 +23937,7 @@ def client_handler(conn, addr):
                                     event_end, exit_time = _survive_battle_deadlines(
                                         survival_config, event_start)
                                     if survival_state.get('finished'):
-                                        survival_end_time = int(
-                                            survival_state.get('exit_time', exit_time)
-                                            or exit_time)
+                                        survival_end_time = event_end
                                         settle_survive_battle_rank_rewards(
                                             survival_config, event_start)
                                         final_payload = survive_battle_top_payload(
@@ -23874,7 +23951,8 @@ def client_handler(conn, addr):
                                         survival_config, event_start, survival_state)
                                 else:
                                     survival_end_time = 0
-                                if survival_end_time > int(time.time()):
+                                if (survival_end_time > int(time.time())
+                                        or survival_state.get('finished')):
                                     send_rpc_push(629, encode_sproto([
                                         (0, survival_end_time), (1, 2)
                                     ]))
