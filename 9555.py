@@ -10042,8 +10042,8 @@ def gotham_boss_rank_mail(slot):
         top_char = _guild_char_by_id(top_id)
         top_name = str(top_info.get("name") or
                        (top_char or {}).get("name") or f"Player {top_id}")
-        boss_kill_message = f"#{{101918}}*The Pain*[ffff00]{top_name}[-]"
-        delivered = gotham_broadcast_scroll_message(boss_kill_message)
+        delivered = gotham_broadcast_scroll_template(
+            101918, 18, [top_name, str(slot.get("nid", ""))])
         if delivered:
             slot["congratulations_announced"] = True
         print(f"[GOTHAM BOSS ANNOUNCE] slot={slot.get('slot')} "
@@ -18492,7 +18492,7 @@ def gotham_broadcast_tvshow_items(char, item_ids, template_id=101910,
             continue
         if int(kind) == 0:
             delivered += gotham_broadcast_scroll_template(
-                template_id, kind, [player_name], [int(item_id)])
+                template_id, kind, [player_name, item_id])
             continue
         delivered += gotham_broadcast_scroll_template(
             template_id, kind, [player_name, item_id])
@@ -20101,9 +20101,8 @@ def _wild_boss_finish(key, won, killer_id=0):
         winner = rows[0]
         winner_name = str(winner.get('name') or f"Player {winner.get('id', 0)}")
         boss_npc_id = str(row.get('boss_npc_id', ''))
-        boss_name = str(NPC_CONFIG.get(boss_npc_id, {}).get('name') or boss_npc_id)
-        message = f"#{{101917}}*{boss_name}*[ffff00]{winner_name}[-]"
-        delivered = gotham_broadcast_scroll_message(message)
+        delivered = gotham_broadcast_scroll_template(
+            101917, 18, [winner_name, boss_npc_id])
         print(f"[WILD BOSS] rank-1 congratulations boss={key[0]} "
               f"player={winner.get('id')} delivered={delivered}")
     exit_at = int(record['end_time'])
@@ -25585,6 +25584,11 @@ def client_handler(conn, addr):
                                             101911, 10,
                                             [str(picked_char.get('name', ''))],
                                             [part, current_level])
+                                        if current_level == 10:
+                                            gotham_broadcast_scroll_template(
+                                                101905, 4,
+                                                [str(picked_char.get('name', ''))],
+                                                [part])
                                     print(f"[BACKPACK] refine part={part} level={current_level} "
                                           f"state={response_state} protected={use_safety}")
                 response_data = encode_sproto([
