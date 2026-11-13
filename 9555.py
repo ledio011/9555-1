@@ -455,6 +455,7 @@ LEVEL_REWARD_CONFIG = {} # LevelRewardData ID -> milestone claim definitions
 LEVEL_PACKAGE_CONFIG = {} # LevelPackageData ID -> level-up item bundle
 DAILY_ACTIVE_CONFIG = {} # DailyActiveData ID -> activity score/count/unlock values
 DAILY_ACTIVE_REWARD_CONFIG = {} # DailyActiveRewardData ID -> level/score/drop definition
+DAILY_MISSION_CONFIG = {} # DailyMissionData ID -> level eligibility
 SURVIVE_BATTLE_CONFIG = {} # SurviveBattleData ID -> schedule, maps, scores and rank drops
 SURVIVE_BATTLE_RANK_REWARDS = {
     '32301': {'honor': 300, 'random_badges': 5},
@@ -2208,6 +2209,19 @@ try:
                     "Desc": row[9].strip(),
                 }
         debug_log(f"[DAILY ACTIVE CONFIG LOADED] count={len(DAILY_ACTIVE_CONFIG)}")
+
+    daily_mission_path = os.path.join(text_asset_root, "DailyMissionData")
+    if os.path.exists(daily_mission_path):
+        with open(daily_mission_path, "r", encoding="utf-8") as table_file:
+            for row in (line.strip().split(",") for line in table_file if line.strip()):
+                if (len(row) < 4 or row[0] != "*" or not row[1].strip().isdigit()
+                        or not row[2].strip().isdigit() or not row[3].strip().isdigit()):
+                    continue
+                DAILY_MISSION_CONFIG[row[1].strip()] = {
+                    "level_max": int(row[2]),
+                    "level_min": int(row[3]),
+                }
+        debug_log(f"[DAILY MISSION CONFIG LOADED] count={len(DAILY_MISSION_CONFIG)}")
 
     daily_active_reward_path = os.path.join(text_asset_root, "DailyActiveRewardData")
     if os.path.exists(daily_active_reward_path):
@@ -17227,6 +17241,52 @@ def accept_mission_logic(picked_char, mid):
     picked_char['active_missions'][mid] = {'state': 1, 'parm': parm, 'accept_time': int(time.time())}
     return True
 
+def ensure_daily_mission_for_guide(picked_char):
+    active_missions = picked_char.get('active_missions', {})
+    main_mission = active_missions.get('1014')
+    if not main_mission or int(main_mission.get('state', 0) or 0) != 1:
+        return None, False
+
+    active_daily_ids = sorted(
+        (str(mid) for mid, entry in active_missions.items()
+         if int(missions_data.get(str(mid), {}).get('class', 0) or 0) == 0
+         and int(entry.get('state', 0) or 0) in (1, 2)),
+        key=int,
+    )
+    if active_daily_ids:
+        return active_daily_ids[0], False
+
+    level = int(picked_char.get('level', 1) or 1)
+    completed_ids = {str(mid) for mid in picked_char.get('completed_side_missions', [])}
+    eligible_ids = sorted(
+        (str(mid) for mid, level_range in DAILY_MISSION_CONFIG.items()
+         if level_range['level_min'] <= level <= level_range['level_max']
+         and int(missions_data.get(str(mid), {}).get('class', 0) or 0) == 0
+         and str(mid) not in completed_ids),
+        key=int,
+    )
+    for mid in eligible_ids:
+        if accept_mission_logic(picked_char, mid):
+            debug_log(f"[DAILY MISSION] assigned mission={mid} level={level} for main mission 1014")
+            return mid, True
+
+    print(f"[DAILY MISSION] no eligible class-0 mission for level={level} while mission 1014 is active")
+    return None, False
+
+def push_daily_mission_task(picked_char, send_rpc_push, mission_id):
+    mission = picked_char.get('active_missions', {}).get(str(mission_id))
+    if not mission:
+        return
+    parm = mission.get('parm', [0]*8)
+    if len(parm) < 8: parm += [0]*(8-len(parm))
+    own_bytes = encode_sproto([
+        (0, str(mission_id)),
+        (1, int(mission.get('state', 1))),
+        (2, 0),
+        (3, [int(x) for x in parm])
+    ])
+    send_rpc_push(530, encode_sproto([(0, own_bytes)]))
+
 def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type=0,
                      map_id=None):
     """Apply one authoritative gameplay event to every active mission."""
@@ -24806,6 +24866,9 @@ def client_handler(conn, addr):
                     res = accept_mission_logic(picked_char, mid)
                     print(f"[MISSION ACCEPT REQ] mid={mid} result={res}")
                     if res:
+                        daily_mid_to_push = None
+                        if mid == '1014':
+                            daily_mid_to_push, _ = ensure_daily_mission_for_guide(picked_char)
                         save_chars(all_accounts_chars)
                         print(f"[MISSION ACCEPT] mission_id={mid}")
                         m_entry = picked_char.get('active_missions', {}).get(mid, {})
@@ -24823,6 +24886,8 @@ def client_handler(conn, addr):
                             (2, 0),
                             (3, own_bytes)
                         ]))
+                        if daily_mid_to_push:
+                            push_daily_mission_task(picked_char, send_rpc_push, daily_mid_to_push)
                         if m_entry.get('activity_id'):
                             spawn_gotham_escort_npc(conn, picked_char)
                             send_rpc_push(619, activity_info_payload(picked_char))
@@ -24836,6 +24901,7 @@ def client_handler(conn, addr):
                     mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
                     claim_mission = False
                     completion_snapshot = None
+                    daily_mid_to_push = None
                     with get_character_transaction_lock(picked_char):
                         m_entry = picked_char.get('active_missions', {}).get(mid)
                         try:
@@ -24884,6 +24950,8 @@ def client_handler(conn, addr):
                                     res = accept_mission_logic(picked_char, str(next_mid))
                                     print(f"[MISSION NEXT] previous={mid} next={next_mid} accepted={res}")
                                     is_chained = res
+                                    if res and str(next_mid) == '1014':
+                                        daily_mid_to_push, _ = ensure_daily_mission_for_guide(picked_char)
                             else:
                                 try:
                                     imid = int(mid)
@@ -24945,6 +25013,9 @@ def client_handler(conn, addr):
                                     (2, 0),
                                     (3, next_own_bytes)
                                 ]))
+                                if daily_mid_to_push:
+                                    push_daily_mission_task(
+                                        picked_char, send_rpc_push, daily_mid_to_push)
                             # The level-up UI reads WelfareData's level-package
                             # cache as soon as the attribute update triggers its
                             # animation, so refresh that cache first.
@@ -24999,6 +25070,11 @@ def client_handler(conn, addr):
 
             elif msg == 121: # request_daily_mission
                 if picked_char:
+                    daily_mid, assigned_daily = ensure_daily_mission_for_guide(picked_char)
+                    if assigned_daily:
+                        save_chars(all_accounts_chars)
+                    if daily_mid:
+                        push_daily_mission_task(picked_char, send_rpc_push, daily_mid)
                     for dmid, dmdata in picked_char.get('active_missions', {}).items():
                         mcfg = missions_data.get(dmid, {})
                         if mcfg.get('class') == 4:
