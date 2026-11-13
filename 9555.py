@@ -17241,10 +17241,18 @@ def accept_mission_logic(picked_char, mid):
     picked_char['active_missions'][mid] = {'state': 1, 'parm': parm, 'accept_time': int(time.time())}
     return True
 
+def mission1014_log(picked_char, message):
+    print(f"[MISSION1014] player={picked_char.get('id', '?')} {message}")
+
 def ensure_daily_mission_for_guide(picked_char):
     active_missions = picked_char.get('active_missions', {})
     main_mission = active_missions.get('1014')
-    if not main_mission or int(main_mission.get('state', 0) or 0) != 1:
+    if not main_mission:
+        mission1014_log(picked_char, "daily-task check skipped: mission 1014 is not active")
+        return None, False
+    main_state = int(main_mission.get('state', 0) or 0)
+    if main_state != 1:
+        mission1014_log(picked_char, f"daily-task check skipped: mission 1014 state={main_state}")
         return None, False
 
     active_daily_ids = sorted(
@@ -17254,7 +17262,18 @@ def ensure_daily_mission_for_guide(picked_char):
         key=int,
     )
     if active_daily_ids:
-        return active_daily_ids[0], False
+        daily_id = active_daily_ids[0]
+        daily_entry = active_missions[daily_id]
+        daily_cfg = missions_data.get(daily_id, {})
+        daily_parm = daily_entry.get('parm') or [0]
+        required = int(daily_cfg.get('require_num') or 1)
+        mission1014_log(
+            picked_char,
+            f"using active daily task={daily_id} state={daily_entry.get('state')} "
+            f"progress={daily_parm[0] if daily_parm else 0}/{required} "
+            f"logic={daily_cfg.get('logic_type')} target={daily_cfg.get('target_id')}",
+        )
+        return daily_id, False
 
     level = int(picked_char.get('level', 1) or 1)
     completed_ids = {str(mid) for mid in picked_char.get('completed_side_missions', [])}
@@ -17267,10 +17286,22 @@ def ensure_daily_mission_for_guide(picked_char):
     )
     for mid in eligible_ids:
         if accept_mission_logic(picked_char, mid):
-            debug_log(f"[DAILY MISSION] assigned mission={mid} level={level} for main mission 1014")
+            daily_cfg = missions_data.get(mid, {})
+            required = int(daily_cfg.get('require_num') or 1)
+            mission1014_log(
+                picked_char,
+                f"assigned daily task={mid} level={level} "
+                f"logic={daily_cfg.get('logic_type')} target={daily_cfg.get('target_id')} "
+                f"required={required}",
+            )
             return mid, True
+        mission1014_log(picked_char, f"daily-task candidate={mid} rejected by mission acceptance")
 
-    print(f"[DAILY MISSION] no eligible class-0 mission for level={level} while mission 1014 is active")
+    mission1014_log(
+        picked_char,
+        f"no eligible daily task at level={level}; configured={len(DAILY_MISSION_CONFIG)} "
+        f"candidates={len(eligible_ids)}",
+    )
     return None, False
 
 def push_daily_mission_task(picked_char, send_rpc_push, mission_id):
@@ -17285,6 +17316,10 @@ def push_daily_mission_task(picked_char, send_rpc_push, mission_id):
         (2, 0),
         (3, [int(x) for x in parm])
     ])
+    mission1014_log(
+        picked_char,
+        f"push tag=530 daily_task={mission_id} state={mission.get('state')} progress={parm[0]}",
+    )
     send_rpc_push(530, encode_sproto([(0, own_bytes)]))
 
 def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type=0,
@@ -17381,6 +17416,20 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             matched = target == str(map_id)
 
         if not matched:
+            main_mission = picked_char.get('active_missions', {}).get('1014', {})
+            if (int(cfg.get('class', 0) or 0) == 0
+                    and int(main_mission.get('state', 0) or 0) == 1
+                    and event in ('kill', 'pickup', 'interact', 'car', 'car_copy',
+                                  'dungeon', 'dance', 'world_boss', 'map')):
+                parm = mdata.get('parm') or [0]
+                mission1014_log(
+                    picked_char,
+                    f"objective check task={mid} event={event} matched=false "
+                    f"expected_target={target or str(cfg.get('logic_id', ''))} "
+                    f"actual_target={target_value} "
+                    f"progress={parm[0] if parm else 0}/"
+                    f"{int(cfg.get('count') or cfg.get('require_num') or 1)}",
+                )
             continue
 
         required = int(cfg.get('count') or cfg.get('require_num') or 1)
@@ -17406,6 +17455,15 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             mdata['parm'][0] = min(required, int(mdata['parm'][0]) + 1)
             progress = mdata['parm'][0]
 
+        if (int(cfg.get('class', 0) or 0) == 0
+                and int(picked_char.get('active_missions', {}).get('1014', {})
+                        .get('state', 0) or 0) == 1):
+            mission1014_log(
+                picked_char,
+                f"objective progress task={mid} event={event} matched=true "
+                f"target={target_value} progress={progress}/{required}",
+            )
+
         # Bug 3: Send TAG 524 only if progress actually changed
         old_progress = mdata.get('_last_progress', 0)
         if progress != old_progress:
@@ -17419,6 +17477,19 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                 send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
             if int(cfg.get('class', 0) or 0) == 0:
                 daily_mission_completed = True
+                main_state = int(
+                    picked_char.get('active_missions', {}).get('1014', {})
+                    .get('state', 0) or 0
+                )
+                mission1014_log(
+                    picked_char,
+                    f"daily task={mid} complete; mission 1014 state={main_state}",
+                )
+            elif str(mid) == '1014':
+                mission1014_log(
+                    picked_char,
+                    f"mission 1014 state changed to complete after event={event}",
+                )
         updated = True
 
     if daily_mission_completed:
@@ -24865,6 +24936,12 @@ def client_handler(conn, addr):
                     mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
                     res = accept_mission_logic(picked_char, mid)
                     print(f"[MISSION ACCEPT REQ] mid={mid} result={res}")
+                    if mid == '1014':
+                        mission1014_log(
+                            picked_char,
+                            f"accept request tag=112 result={res} "
+                            f"state={picked_char.get('active_missions', {}).get('1014', {}).get('state')}",
+                        )
                     if res:
                         daily_mid_to_push = None
                         if mid == '1014':
@@ -24923,6 +25000,13 @@ def client_handler(conn, addr):
                             m_entry['state'] = 3
                             claim_mission = True
                     print(f"[MISSION COMPLETE REQ] mid={mid} entry_exists={m_entry is not None} state={m_entry['state'] if m_entry else 'N/A'}")
+                    if mid == '1014':
+                        mission1014_log(
+                            picked_char,
+                            f"claim request tag=113 entry_exists={m_entry is not None} "
+                            f"state={mission_state} allowed={claim_mission} "
+                            f"current_main={current_main_mission}",
+                        )
                     if claim_mission:
                         m_cfg = missions_data.get(mid)
                         if m_cfg:
@@ -24938,6 +25022,11 @@ def client_handler(conn, addr):
                                 else:
                                     picked_char.pop('_skip_mission_save', None)
                             print(f"[MISSION REWARD] mission={mid} exp={exp_add} cash={cash_add} items={items_add}")
+                            if mid == '1014':
+                                mission1014_log(
+                                    picked_char,
+                                    f"claim reward granted exp={exp_add} cash={cash_add} items={items_add}",
+                                )
 
                             # Mission Chain and Unlocking logic
                             is_chained = False
@@ -24952,6 +25041,11 @@ def client_handler(conn, addr):
                                     is_chained = res
                                     if res and str(next_mid) == '1014':
                                         daily_mid_to_push, _ = ensure_daily_mission_for_guide(picked_char)
+                                        mission1014_log(
+                                            picked_char,
+                                            f"auto-chain activated 1014 from mission={mid} "
+                                            f"daily_task={daily_mid_to_push}",
+                                        )
                             else:
                                 try:
                                     imid = int(mid)
@@ -24982,6 +25076,8 @@ def client_handler(conn, addr):
                                             picked_char.pop('_skip_mission_save', None)
                             if not save_chars(all_accounts_chars):
                                 restore_character_reward_state(picked_char, completion_snapshot)
+                                if mid == '1014':
+                                    mission1014_log(picked_char, "claim persistence failed; mission state rolled back")
                                 print(f"[MISSION COMPLETE] persistence failed; rolled back mission={mid} player={picked_char.get('id')}")
                                 if session is not None:
                                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -25070,6 +25166,11 @@ def client_handler(conn, addr):
 
             elif msg == 121: # request_daily_mission
                 if picked_char:
+                    mission1014_log(
+                        picked_char,
+                        f"daily request tag=121 main_state="
+                        f"{picked_char.get('active_missions', {}).get('1014', {}).get('state')}",
+                    )
                     daily_mid, assigned_daily = ensure_daily_mission_for_guide(picked_char)
                     if assigned_daily:
                         save_chars(all_accounts_chars)
