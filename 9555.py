@@ -97,6 +97,7 @@ GOTHAM_AI_TASK = None
 GOTHAM_AI_LOCK = threading.Lock()
 PVP_KILL_STREAK_LOCK = threading.RLock()
 ESCORT_ACTIVITY_CONFIG = {}
+BAR_FIGHT_ACTIVITY_CONFIG = {}
 GOTHAM_ESCORT_NPC_OWNER = {} # instance ID -> character ID
 TOWER_NPC_OWNER = {} # inst_id -> character ID for private climbing-tower NPCs
 TOWER_NPC_SPAWN_INDEX = {} # inst_id -> MonsterData row index
@@ -276,6 +277,8 @@ GUILD_BOSS_POST_KILL_EXIT_SECONDS = 5  # fallback only; GuildBossData.WaitTime i
 GUILD_BOSS_SCENE_RANK_ROWS = 6
 GUILD_BOSS_RESULT_RANK_ROWS = 10
 GUILD_BOSS_SCHED_LAST = {}
+ACTIVITY_CHAT_ANNOUNCED_STARTS = set()
+ACTIVITY_CHAT_ANNOUNCED_LOCK = threading.Lock()
 GUILD_BOSS_MISSING_REWARD_LOGGED = set()
 # User-confirmed Gang Boss payouts. Badge counts are random draws from the
 # available Lv.1 badge IDs; repeated draws may award the same badge.
@@ -1686,6 +1689,23 @@ try:
                 except (TypeError, ValueError):
                     continue
         debug_log(f"[ESCORT ACTIVITY CONFIG LOADED] count={len(ESCORT_ACTIVITY_CONFIG)}")
+
+    bar_fight_path = os.path.join(text_asset_root, "BarFightCopyData")
+    if os.path.exists(bar_fight_path):
+        with open(bar_fight_path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.strip().split(",")
+                if len(parts) < 7 or parts[0] != "*" or not parts[1].isdigit():
+                    continue
+                try:
+                    BAR_FIGHT_ACTIVITY_CONFIG[parts[1]] = {
+                        "id": parts[1],
+                        "start_time": int(parts[5]),
+                        "duration": int(parts[6] or 0),
+                    }
+                except (TypeError, ValueError):
+                    continue
+        debug_log(f"[BAR FIGHT ACTIVITY CONFIG LOADED] count={len(BAR_FIGHT_ACTIVITY_CONFIG)}")
 
     # Daily-copy UI receives its state from TAG 555.  Keep the IDs/types in
     # lockstep with CopySceneData so client tutorials can locate their target.
@@ -14387,7 +14407,7 @@ def survive_battle_pvp_kill(killer, victim):
     if killer_payload is not None:
         send_push_to_char(killer_id, 636, killer_payload)
     send_push_to_char(killer_id, 638, encode_sproto([(0, [
-        encode_sproto([(0, '8001'), (1, 1), (3, 0)])
+        encode_sproto([(0, '8001'), (1, 100), (3, 0)])
     ])]))
 
     force_return = int(victim_state.get('score', 0) or 0) < int(
@@ -18363,6 +18383,36 @@ def gotham_broadcast_system_message(text):
     return gotham_broadcast_chat_message(text, 0)
 
 
+def gotham_broadcast_activity_state(activity_type, state=1, guild_id=None):
+    chat_item = encode_sproto([
+        (5, 6), (7, [int(activity_type), int(state)])
+    ])
+    payload = encode_sproto([(0, [chat_item])])
+    recipients = 0
+    delivered = 0
+    failed = 0
+    for char_id, (peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
+        if not peer_conn or not peer_char:
+            continue
+        if not is_current_character_connection(peer_conn, peer_char):
+            continue
+        if guild_id is not None:
+            guild = GUILD_STATES.get(str(int(guild_id)))
+            member = _guild_member_id(guild, char_id) if guild else None
+            if not member or int(member.get('job', 4)) == 4:
+                continue
+        recipients += 1
+        if send_rpc_push_safe(peer_conn, 528, payload):
+            delivered += 1
+        else:
+            failed += 1
+    if failed or not delivered:
+        print(f"[ACTIVITY CHAT] type={activity_type} state={state} "
+              f"guild={guild_id or 'all'} recipients={recipients} "
+              f"delivered={delivered} failed={failed}")
+    return delivered
+
+
 def gotham_broadcast_scroll_message(text, map_id=None):
     return gotham_broadcast_chat_message(text, 7, map_id)
 
@@ -19425,6 +19475,79 @@ def _wild_boss_clock(row, now=None):
     return False, 0, 0, now, now
 
 
+def _activity_chat_announce_start(activity_type, event_start, now, guild_id=None):
+    event_start = int(event_start)
+    if not event_start <= now < event_start + 10:
+        return 0
+    key = (int(activity_type), event_start,
+           int(guild_id) if guild_id is not None else 0)
+    with ACTIVITY_CHAT_ANNOUNCED_LOCK:
+        cutoff = now - (now % 86400) - 86400
+        for old_key in list(ACTIVITY_CHAT_ANNOUNCED_STARTS):
+            if old_key[1] < cutoff:
+                ACTIVITY_CHAT_ANNOUNCED_STARTS.discard(old_key)
+        if key in ACTIVITY_CHAT_ANNOUNCED_STARTS:
+            return 0
+        ACTIVITY_CHAT_ANNOUNCED_STARTS.add(key)
+    delivered = gotham_broadcast_activity_state(
+        activity_type, 1, guild_id=guild_id)
+    print(f"[ACTIVITY CHAT] scheduled start type={activity_type} "
+          f"utc={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(event_start))} "
+          f"guild={guild_id or 'all'} delivered={delivered}")
+    return delivered
+
+
+def _scheduled_activity_chat_tick(now=None):
+    now = int(time.time() if now is None else now)
+    utc_day_start = now - (now % 86400)
+    start_times_by_type = {}
+
+    def add_start(activity_type, seconds):
+        try:
+            seconds = int(seconds)
+        except (TypeError, ValueError):
+            return
+        if 0 <= seconds < 86400:
+            start_times_by_type.setdefault(int(activity_type), set()).add(seconds)
+
+    for row in SURVIVE_BATTLE_CONFIG.values():
+        for seconds in row.get('start_times', []):
+            add_start(7, seconds)
+    for row in ESCORT_ACTIVITY_CONFIG.values():
+        activity_type = int(row.get('type', 0) or 0)
+        if activity_type in (1, 2):
+            add_start(activity_type, row.get('start_time'))
+    for row in BAR_FIGHT_ACTIVITY_CONFIG.values():
+        add_start(4, row.get('start_time'))
+
+    for activity_type, start_times in start_times_by_type.items():
+        for seconds in start_times:
+            _activity_chat_announce_start(
+                activity_type, utc_day_start + seconds, now)
+
+    dance_row = CITY_DANCE_CONFIG.get('103', {})
+    dance_starts = []
+    for value in str(dance_row.get('StartTime', '')).split('#'):
+        try:
+            dance_starts.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    for guild_key, guild in list(GUILD_STATES.items()):
+        if not isinstance(guild, dict) or not dance_starts:
+            continue
+        try:
+            guild_id = int(guild.get('id', guild_key))
+            slot = int(guild.get('dance_slot', 1) or 1)
+        except (TypeError, ValueError):
+            continue
+        slot = min(max(1, slot), len(dance_starts))
+        seconds = dance_starts[slot - 1]
+        if 0 <= seconds < 86400:
+            _activity_chat_announce_start(
+                16, utc_day_start + seconds, now, guild_id=guild_id)
+    return True
+
+
 def _wild_boss_schedule_tick(now=None):
     now = int(time.time() if now is None else now)
     utc_day_start = now - (now % 86400)
@@ -19448,13 +19571,11 @@ def _wild_boss_schedule_tick(now=None):
                 continue
             WILD_BOSS_ANNOUNCED_STARTS.add(event_start)
         scroll_message = f"#{{101912}}*Raid Boss"
-        system_time = time.strftime('%H:%M UTC', time.gmtime(event_start))
-        system_message = f"#{{200404}}*{system_time}"
         scroll_delivered = gotham_broadcast_scroll_message(scroll_message)
-        system_delivered = gotham_broadcast_system_message(system_message)
+        activity_chat_delivered = gotham_broadcast_activity_state(5, 1)
         print(f"[WILD BOSS] scheduled start "
               f"utc={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(event_start))} "
-              f"scroll={scroll_delivered} system={system_delivered}")
+              f"scroll={scroll_delivered} activity_chat={activity_chat_delivered}")
     return True
 
 
@@ -21110,7 +21231,13 @@ def _guild_boss_scheduler_tick(now=None):
             current = (today_id, _guild_boss_activity_state(row, now, guild)[0] == 1)
             previous = GUILD_BOSS_SCHED_LAST.get(schedule_key)
             GUILD_BOSS_SCHED_LAST[schedule_key] = current
-            if previous is not None and previous != current and (current[1] or previous[1]):
+            event_start = now - (now % 86400) + int(row.get('start_time', 0) or 0)
+            at_scheduled_start = 0 <= now - event_start < 10
+            state_changed = (previous is not None and previous != current
+                             and (current[1] or previous[1]))
+            missed_initial_tick = (previous is None and current[1]
+                                   and at_scheduled_start)
+            if state_changed or missed_initial_tick:
                 _guild_boss_broadcast_state(
                     today_id, 1 if current[1] else 0, target_guild_id=guild_id
                 )
@@ -32733,6 +32860,7 @@ def start_server():
     _restore_guild_dance_speaker_timers()
     threading.Thread(target=_guild_boss_scheduler_loop, daemon=True).start()
     RepeatingTask(1.0, _wild_boss_schedule_tick).start()
+    RepeatingTask(1.0, _scheduled_activity_chat_tick).start()
     RepeatingTask(10.0, _inventory_expiry_worker_tick).start()
     while True:
         try:
