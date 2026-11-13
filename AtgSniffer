@@ -1,1 +1,595 @@
+#!/usr/bin/env python3
+"""AtgSniffer - read-only TCP proxy for Auto Theft Gangsters mission 1014 diagnostics.
 
+This diagnostic proxy watches the Sproto exchange for mission ID 1014 after
+character 263418376 has been selected successfully. It recursively checks
+nested Sproto fields for the mission ID and pairs matching RPC requests with
+their replies by session ID, including replies that omit the mission ID.
+
+Serv00 layout:
+  client -> public :15678 -> AtgSniffer -> 127.0.0.1:14171 -> 9555.py
+
+The proxy relays every byte unchanged. It does not fabricate mission responses,
+modify the game client, or edit 9555.py or game data.
+
+Python standard library only.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import socket
+import struct
+import threading
+from datetime import datetime, timezone
+from typing import Any, Dict, Optional, Tuple
+
+DEFAULT_TARGET_CHAR_ID = 263418376
+MISSION_ID = "1014"
+MAX_FRAME_SIZE = 65535
+MAX_BUFFER_SIZE = 2 * 1024 * 1024
+MAX_PENDING_RPCS = 4096
+HTTP_METHOD_PREFIXES = (b"GET ", b"HEAD ", b"POST ", b"PUT ", b"OPTIONS ")
+
+# Only stable, broadly useful protocol names are included. unidentified protocol message IDs
+# are intentionally left unknown until they are observed in a real client trace.
+PROTOCOL_NAMES = {
+    100: "map_ready",
+    101: "move",
+    105: "character_pick",
+    503: "enter_map",
+    504: "main_player_create",
+    505: "aoi_add",
+    529: "notice",
+    611: "sync_item_pack",
+    614: "sync_time",
+    644: "ret_request_level_pack",
+}
+
+
+def utc_stamp() -> str:
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="milliseconds")
+
+
+def sproto_unpack(data: bytes) -> bytes:
+    """Decode ATG's SprotoPack byte stream."""
+    out = bytearray()
+    pos = 0
+    while pos < len(data):
+        mask = data[pos]
+        pos += 1
+        if mask == 0xFF:
+            if pos >= len(data):
+                raise ValueError("truncated SprotoPack 0xFF block")
+            count = (data[pos] + 1) * 8
+            pos += 1
+            if pos + count > len(data):
+                raise ValueError("truncated SprotoPack raw block")
+            out.extend(data[pos:pos + count])
+            pos += count
+        else:
+            for bit in range(8):
+                if mask & (1 << bit):
+                    if pos >= len(data):
+                        raise ValueError("truncated SprotoPack mask block")
+                    out.append(data[pos])
+                    pos += 1
+                else:
+                    out.append(0)
+    return bytes(out)
+
+
+def decode_sproto(data: bytes, offset: int = 0) -> Dict[int, Any]:
+    """Decode one Sproto struct; byte/blob values are retained as bytes."""
+    if len(data) < offset + 2:
+        raise ValueError("Sproto struct shorter than header")
+    field_count = struct.unpack_from("<H", data, offset)[0]
+    if field_count > 4096:
+        raise ValueError(f"invalid Sproto field_count={field_count}")
+
+    header_start = offset + 2
+    body_pos = header_start + field_count * 2
+    if body_pos > len(data):
+        raise ValueError("Sproto header exceeds packet")
+
+    fields: Dict[int, Any] = {}
+    tag = -1
+    for index in range(field_count):
+        word = struct.unpack_from("<H", data, header_start + index * 2)[0]
+        if word == 0:
+            tag += 1
+            if body_pos + 4 > len(data):
+                raise ValueError("missing Sproto blob length")
+            size = struct.unpack_from("<I", data, body_pos)[0]
+            body_pos += 4
+            if size > len(data) - body_pos:
+                raise ValueError("Sproto blob length exceeds packet")
+            fields[tag] = data[body_pos:body_pos + size]
+            body_pos += size
+        elif word == 1:
+            tag += 1
+            fields[tag] = None
+        elif word & 1:
+            tag += (word >> 1) + 1
+        else:
+            tag += 1
+            fields[tag] = (word >> 1) - 1
+    return fields
+
+
+def to_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        raw = bytes(value)
+        try:
+            text = raw.decode("ascii").strip()
+            if text and (text.isdigit() or (text.startswith("-") and text[1:].isdigit())):
+                return int(text)
+        except UnicodeDecodeError:
+            pass
+        if len(raw) == 1:
+            return raw[0]
+        if len(raw) == 4:
+            return struct.unpack("<i", raw)[0]
+        if len(raw) == 8:
+            return struct.unpack("<q", raw)[0]
+    return None
+
+
+def to_text(value: Any) -> Optional[str]:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            candidate = bytes(value).decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        if all(ch.isprintable() or ch in "\r\n\t" for ch in candidate):
+            return candidate
+    return None
+
+
+def display_value(value: Any) -> Any:
+    if value is None or isinstance(value, (int, bool, float, str)):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        raw = bytes(value)
+        text = to_text(raw)
+        if text is not None:
+            return repr(text)
+        try:
+            nested = decode_sproto(raw)
+            if nested:
+                return f"Sproto(tags={sorted(nested)}, bytes={len(raw)})"
+        except Exception:
+            pass
+        return f"bytes({len(raw)} hex={raw[:32].hex()})"
+    return repr(value)
+
+
+def format_fields(fields: Dict[int, Any]) -> str:
+    return "{" + ", ".join(
+        f"{tag}:{display_value(fields[tag])!r}" for tag in sorted(fields)
+    ) + "}"
+
+
+def json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (int, bool, float, str)):
+        return value
+    if isinstance(value, (bytes, bytearray)):
+        raw = bytes(value)
+        text = to_text(raw)
+        result: Dict[str, Any] = {"bytes": len(raw), "hex": raw.hex()}
+        if text is not None:
+            result["text"] = text
+        return result
+    if isinstance(value, dict):
+        return {str(k): json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+    return repr(value)
+
+
+def decode_packet(payload: bytes) -> Tuple[Dict[int, Any], Dict[int, Any], Optional[int], Optional[int]]:
+    raw = sproto_unpack(payload)
+    envelope = decode_sproto(raw)
+    envelope_count = struct.unpack_from("<H", raw, 0)[0]
+    body_offset = 2 + envelope_count * 2
+    body = decode_sproto(raw, body_offset) if body_offset < len(raw) else {}
+    return envelope, body, to_int(envelope.get(0)), to_int(envelope.get(1))
+
+
+def contains_mission_id(value: Any, depth: int = 0) -> bool:
+    """Find the exact mission ID in nested Sproto structures."""
+    if depth > 10:
+        return False
+    if isinstance(value, str):
+        return value == MISSION_ID
+    if isinstance(value, (bytes, bytearray)):
+        raw = bytes(value)
+        try:
+            if raw.decode("ascii").strip() == MISSION_ID:
+                return True
+        except UnicodeDecodeError:
+            pass
+        try:
+            nested = decode_sproto(raw)
+        except Exception:
+            return False
+        return contains_mission_id(nested, depth + 1)
+    if isinstance(value, dict):
+        return any(contains_mission_id(item, depth + 1) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(contains_mission_id(item, depth + 1) for item in value)
+    return False
+
+
+class Mission1014SnifferState:
+    def __init__(self, target_id: int, log_fp, raw_fp):
+        self.target_id = target_id
+        self.log_fp = log_fp
+        self.raw_fp = raw_fp
+        self.lock = threading.RLock()
+        self.target_active = False
+        self.packet_number = 0
+        self.pending_picks: Dict[int, Dict[str, Any]] = {}
+        self.client_requests: Dict[int, Dict[str, Any]] = {}
+        self.server_requests: Dict[int, Dict[str, Any]] = {}
+        self.mission_client_sessions: Dict[int, Dict[str, Any]] = {}
+        self.mission_server_sessions: Dict[int, Dict[str, Any]] = {}
+
+    def log(self, message: str) -> None:
+        line = f"[{utc_stamp()}] {message}"
+        print(line, flush=True)
+        if self.log_fp:
+            self.log_fp.write(line + "\n")
+            self.log_fp.flush()
+
+    def _remember(self, table: Dict[int, Dict[str, Any]], session: Optional[int], entry: Dict[str, Any]) -> None:
+        if session is None:
+            return
+        table[session] = entry
+        if len(table) > MAX_PENDING_RPCS:
+            table.pop(next(iter(table)))
+
+    def _write_raw(self, direction: str, payload: bytes, msg: Optional[int], session: Optional[int], body: Dict[int, Any], event: str, paired_with: Optional[Dict[str, Any]]) -> None:
+        if not self.raw_fp:
+            return
+        record = {
+            "time": utc_stamp(),
+            "character_id": self.target_id,
+            "feature": "mission 1014 full-process trace",
+            "mission_id": MISSION_ID,
+            "direction": direction,
+            "event": event,
+            "message_id": msg,
+            "message_name": PROTOCOL_NAMES.get(msg, "unknown") if msg is not None else "rpc_response",
+            "session": session,
+            "paired_with": paired_with,
+            "body_fields": json_safe(body),
+            "wire_frame_hex": (struct.pack(">H", len(payload)) + payload).hex(),
+        }
+        self.raw_fp.write(json.dumps(record, separators=(",", ":"), ensure_ascii=False) + "\n")
+        self.raw_fp.flush()
+
+    def _log_packet(self, direction: str, payload: bytes, msg: Optional[int], session: Optional[int], body: Dict[int, Any]) -> None:
+        self.packet_number += 1
+        paired: Optional[Dict[str, Any]] = None
+        name = PROTOCOL_NAMES.get(msg, "unknown") if msg is not None else "rpc_response"
+
+        if direction == "C->S":
+            if msg is None:
+                paired = self.server_requests.pop(session, None) if session is not None else None
+                event = "RPC_REPLY_TO_SERVER" if paired else "CLIENT_RPC_REPLY_UNMATCHED"
+            else:
+                event = "CLIENT_REQUEST"
+                self._remember(self.client_requests, session, {"message_id": msg, "message_name": name})
+        else:
+            if msg is None:
+                paired = self.client_requests.pop(session, None) if session is not None else None
+                event = "SERVER_RPC_REPLY" if paired else "SERVER_RPC_REPLY_UNMATCHED"
+            else:
+                event = "SERVER_PUSH_OR_REQUEST"
+                self._remember(self.server_requests, session, {"message_id": msg, "message_name": name})
+
+        pair_text = ""
+        if paired:
+            pair_text = f" paired_with={paired['message_id']}({paired['message_name']})"
+        shown_name = f"{msg}({name})" if msg is not None else "RPC_REPLY"
+        self.log(
+            f"#{self.packet_number} {direction} {event} msg={shown_name} session={session}"
+            f" bytes={len(payload)}{pair_text} body={format_fields(body)}"
+        )
+        self._write_raw(direction, payload, msg, session, body, event, paired)
+
+    def observe(self, direction: str, payload: bytes) -> None:
+        try:
+            _envelope, body, msg, session = decode_packet(payload)
+        except Exception as exc:
+            with self.lock:
+                if self.target_active:
+                    self.log(f"PARSER WARNING direction={direction} bytes={len(payload)} error={type(exc).__name__}: {exc}")
+                    if self.raw_fp:
+                        self.raw_fp.write(json.dumps({
+                            "time": utc_stamp(), "character_id": self.target_id,
+                            "direction": direction, "parse_error": str(exc),
+                            "wire_frame_hex": (struct.pack(">H", len(payload)) + payload).hex(),
+                        }, separators=(",", ":")) + "\n")
+                        self.raw_fp.flush()
+            return
+
+        with self.lock:
+            self._observe_locked(direction, payload, body, msg, session)
+
+    def _observe_locked(self, direction: str, payload: bytes, body: Dict[int, Any], msg: Optional[int], session: Optional[int]) -> None:
+        if direction == "C->S" and msg == 105:
+            requested_char_id = to_int(body.get(0))
+            if requested_char_id != self.target_id:
+                self.target_active = False
+                self.pending_picks.clear()
+                self.client_requests.clear()
+                self.server_requests.clear()
+                self.mission_client_sessions.clear()
+                self.mission_server_sessions.clear()
+                return
+            if session is not None:
+                self.pending_picks[session] = {"payload": payload, "body": body}
+            return
+
+        if direction == "S->C" and msg is None and session is not None and session in self.pending_picks:
+            pick = self.pending_picks.pop(session)
+            accepted = to_int(body.get(0))
+            if accepted == 1:
+                self.target_active = True
+                self.client_requests.clear()
+                self.server_requests.clear()
+                self.mission_client_sessions.clear()
+                self.mission_server_sessions.clear()
+                self.log(f"TARGET CHARACTER CONFIRMED id={self.target_id}; mission {MISSION_ID} trace armed.")
+                self._log_packet("C->S", pick["payload"], 105, session, pick["body"])
+                self._log_packet("S->C", payload, None, session, body)
+            else:
+                self.target_active = False
+                self.log(f"TARGET CHARACTER NOT CONFIRMED id={self.target_id}: character_pick reply field0={accepted!r}; trace disabled.")
+            return
+
+        if not self.target_active:
+            return
+
+        mission_match = contains_mission_id(body)
+        if direction == "C->S":
+            if msg is not None:
+                if mission_match:
+                    if session is not None:
+                        self.mission_client_sessions[session] = {"message_id": msg}
+                    self._log_packet(direction, payload, msg, session, body)
+            elif session is not None and session in self.mission_server_sessions:
+                self.mission_server_sessions.pop(session, None)
+                self._log_packet(direction, payload, msg, session, body)
+        else:
+            if msg is not None:
+                if mission_match:
+                    if session is not None:
+                        self.mission_server_sessions[session] = {"message_id": msg}
+                    self._log_packet(direction, payload, msg, session, body)
+            elif session is not None and session in self.mission_client_sessions:
+                self.mission_client_sessions.pop(session, None)
+                self._log_packet(direction, payload, msg, session, body)
+
+
+class FrameObserver:
+    """Incremental 2-byte length-prefixed parser; forwarding is never changed."""
+    def __init__(self, state: Mission1014SnifferState, direction: str):
+        self.state = state
+        self.direction = direction
+        self.buffer = bytearray()
+        self.mode = "unknown"
+
+    def feed(self, data: bytes) -> None:
+        if self.mode == "http":
+            return
+        self.buffer.extend(data)
+        if len(self.buffer) > MAX_BUFFER_SIZE:
+            if self.state.target_active:
+                self.state.log(f"PARSER RESET direction={self.direction}: buffer exceeded {MAX_BUFFER_SIZE}; relay remains unchanged")
+            self.buffer.clear()
+            self.mode = "opaque"
+            return
+
+        if self.mode == "unknown":
+            probe = bytes(self.buffer[:8])
+            if len(probe) < max(map(len, HTTP_METHOD_PREFIXES)) and any(method.startswith(probe) for method in HTTP_METHOD_PREFIXES):
+                return
+            if any(probe.startswith(method) for method in HTTP_METHOD_PREFIXES):
+                self.mode = "http"
+                self.buffer.clear()
+                return
+            if len(self.buffer) < 2:
+                return
+            self.mode = "sproto"
+
+        if self.mode != "sproto":
+            return
+
+        while len(self.buffer) >= 2:
+            frame_size = struct.unpack_from(">H", self.buffer, 0)[0]
+            if frame_size == 0 or frame_size > MAX_FRAME_SIZE:
+                self.mode = "opaque"
+                self.buffer.clear()
+                return
+            if len(self.buffer) < frame_size + 2:
+                return
+            payload = bytes(self.buffer[2:2 + frame_size])
+            del self.buffer[:2 + frame_size]
+            self.state.observe(self.direction, payload)
+
+
+class ClientHandler:
+    def __init__(self, client: socket.socket, address, backend: Tuple[str, int], target_id: int, log_fp, raw_fp):
+        self.client = client
+        self.address = address
+        self.backend = backend
+        self.state = Mission1014SnifferState(target_id, log_fp, raw_fp)
+        self.backend_socket: Optional[socket.socket] = None
+        self.close_lock = threading.Lock()
+        self.closed = False
+
+    def close_all(self) -> None:
+        with self.close_lock:
+            if self.closed:
+                return
+            self.closed = True
+            for sock in (self.client, self.backend_socket):
+                if sock:
+                    try:
+                        sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+
+    def relay(self, source: socket.socket, destination: socket.socket, direction: str, observer: FrameObserver) -> None:
+        try:
+            while True:
+                chunk = source.recv(65536)
+                if not chunk:
+                    break
+                # Observe before forwarding so tag 105 is registered before the
+                # backend can respond. The diagnostic parser is fail-open.
+                try:
+                    observer.feed(chunk)
+                except Exception as parse_error:
+                    observer.buffer.clear()
+                    observer.mode = "opaque"
+                    if self.state.target_active:
+                        self.state.log(
+                            f"PARSER DISABLED direction={direction} after diagnostic error: {parse_error}; "
+                            "forwarding remains byte-for-byte"
+                        )
+                destination.sendall(chunk)
+        except (ConnectionError, OSError):
+            pass
+        finally:
+            self.close_all()
+
+    def run(self) -> None:
+        try:
+            print(
+                f"[{utc_stamp()}] CLIENT ACCEPTED peer={self.address[0]}:{self.address[1]} "
+                f"backend={self.backend[0]}:{self.backend[1]}", flush=True
+            )
+            self.backend_socket = socket.create_connection(self.backend, timeout=10)
+            print(
+                f"[{utc_stamp()}] BACKEND CONNECTED peer={self.address[0]}:{self.address[1]} "
+                f"backend={self.backend[0]}:{self.backend[1]}", flush=True
+            )
+            self.backend_socket.settimeout(None)
+            self.client.settimeout(None)
+            for sock in (self.client, self.backend_socket):
+                try:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                except OSError:
+                    pass
+
+            c2s = FrameObserver(self.state, "C->S")
+            s2c = FrameObserver(self.state, "S->C")
+            t1 = threading.Thread(target=self.relay, args=(self.client, self.backend_socket, "C->S", c2s), daemon=True)
+            t2 = threading.Thread(target=self.relay, args=(self.backend_socket, self.client, "S->C", s2c), daemon=True)
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
+        except Exception as exc:
+            print(
+                f"[{utc_stamp()}] CONNECTION FAILED peer={self.address[0]}:{self.address[1]} "
+                f"backend={self.backend[0]}:{self.backend[1]} error={type(exc).__name__}: {exc}",
+                flush=True
+            )
+        finally:
+            self.close_all()
+
+
+def parse_endpoint(value: str) -> Tuple[str, int]:
+    if ":" not in value:
+        raise argparse.ArgumentTypeError("endpoint must be HOST:PORT")
+    host, port_text = value.rsplit(":", 1)
+    try:
+        port = int(port_text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("port must be an integer") from exc
+    if not host or not 1 <= port <= 65535:
+        raise argparse.ArgumentTypeError("endpoint must have a host and port 1..65535")
+    return host, port
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Read-only ATG mission 1014 sniffer (transparent TCP proxy)")
+    parser.add_argument("--listen", default="0.0.0.0:15678", type=parse_endpoint, help="public proxy endpoint HOST:PORT")
+    parser.add_argument("--server", default="127.0.0.1:14171", type=parse_endpoint, help="local 9555.py backend HOST:PORT")
+    parser.add_argument("--target", type=int, default=DEFAULT_TARGET_CHAR_ID, help="only log this selected character ID")
+    parser.add_argument("--log-file", default="AtgSniffer_mission1014.log", help="human-readable mission 1014 log")
+    parser.add_argument("--raw-log", default="AtgSniffer_mission1014_packets.jsonl", help="matching raw Sproto frames; use empty string to disable")
+    args = parser.parse_args()
+
+    log_fp = open(args.log_file, "a", encoding="utf-8", buffering=1) if args.log_file else None
+    raw_fp = open(args.raw_log, "a", encoding="utf-8", buffering=1) if args.raw_log else None
+    listen_host, listen_port = args.listen
+    backend_host, backend_port = args.server
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        server.bind((listen_host, listen_port))
+        server.listen(50)
+    except Exception:
+        server.close()
+        if log_fp:
+            log_fp.close()
+        if raw_fp:
+            raw_fp.close()
+        raise
+
+    print("=" * 72, flush=True)
+    print("ATG MISSION 1014 SNIFFER - READ-ONLY TCP PROXY", flush=True)
+    print(f"Listen : {listen_host}:{listen_port}", flush=True)
+    print(f"Backend: {backend_host}:{backend_port}", flush=True)
+    print(f"Target : character_id={args.target}", flush=True)
+    print(f"Mission filter: mission_id={MISSION_ID}", flush=True)
+    print(f"Text log: {os.path.abspath(args.log_file) if args.log_file else 'disabled'}", flush=True)
+    print(f"Raw log : {os.path.abspath(args.raw_log) if args.raw_log else 'disabled'}", flush=True)
+    print("Select character 263418376 and play mission 1014 normally.", flush=True)
+    print("Only target-character packets containing mission 1014 and their paired RPC replies are logged.", flush=True)
+    print("Wire message IDs are recorded as observed; no mission result is fabricated.", flush=True)
+    print("Traffic is relayed byte-for-byte; no server source or game data is modified.", flush=True)
+    print("=" * 72, flush=True)
+
+    try:
+        while True:
+            client, address = server.accept()
+            handler = ClientHandler(client, address, (backend_host, backend_port), args.target, log_fp, raw_fp)
+            threading.Thread(target=handler.run, daemon=True).start()
+    except KeyboardInterrupt:
+        print(f"\n[{utc_stamp()}] [AtgSniffer] stopping", flush=True)
+    finally:
+        try:
+            server.close()
+        except OSError:
+            pass
+        if log_fp:
+            log_fp.close()
+        if raw_fp:
+            raw_fp.close()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
