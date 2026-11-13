@@ -274,9 +274,11 @@ def load_account_character_ids(path: str, account_id: str) -> set[int]:
         "gamecharacterid",
     }
     container_fields = {
-        "characters", "characterlist", "charlist", "roles", "rolelist",
-        "players", "playerlist", "characterdata", "characterinfos",
-        "roleinfos",
+        "character", "characters", "characterlist", "charlist",
+        "charactermap", "characterrecords", "charinfo", "charinfos",
+        "roles", "role", "rolelist", "roleinfo", "roleinfos",
+        "players", "playerlist", "playercharacters",
+        "characterdata", "characterinfos",
     }
     profile_fields = {
         "name", "charname", "charactername", "nickname", "level",
@@ -300,7 +302,7 @@ def load_account_character_ids(path: str, account_id: str) -> set[int]:
                 )
 
                 # Common representation: account -> {character_id: record}.
-                if account_root and isinstance(value, (dict, list)):
+                if account_root or character_container:
                     candidate = _numeric_character_id(key_text)
                     if candidate is not None:
                         found.add(candidate)
@@ -323,6 +325,10 @@ def load_account_character_ids(path: str, account_id: str) -> set[int]:
 
         elif isinstance(node, list):
             for item in node:
+                if character_container:
+                    candidate = _numeric_character_id(item)
+                    if candidate is not None:
+                        found.add(candidate)
                 walk(item, character_container=character_container)
 
     for account_node in account_nodes:
