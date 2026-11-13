@@ -1842,6 +1842,7 @@ try:
                         'max_stack': int(parts[13]) if len(parts) > 13 and parts[13].isdigit() else 1,
                         'function': int(parts[14]) if len(parts) > 14 and parts[14].isdigit() else 0,
                         'funlock': parts[15] if len(parts) > 15 else '',
+                        'tvshow': parts[18].strip() if len(parts) > 18 else '',
                         'use_hour': int(parts[19]) if len(parts) > 19 and parts[19].lstrip('-').isdigit() else 0,
                         'flags': int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else 0,
                         'level': int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
@@ -13597,6 +13598,18 @@ def slot_spin_result(picked_char, conn, request_body):
             print(f"[SLOT] persistence failed player={picked_char.get('id')} option={auto_id}")
             return None, False
 
+        for slot_id, reward_list in selected:
+            slot_cfg = SLOT_DATA_CONFIG.get(str(slot_id), {})
+            if str(slot_cfg.get('cast_type', '')).strip().lower() != 'y':
+                continue
+            item_id = next((
+                str(reward[0]) for reward in reward_list
+                if len(reward) >= 3 and int(reward[2]) > 0
+                and str(reward[0]) in ITEM_CONFIG
+            ), '')
+            if item_id:
+                gotham_broadcast_scroll_template(
+                    101901, 2, [str(picked_char.get('name', '')), item_id])
         print(f"[SLOT] spun player={picked_char.get('id')} option={auto_id} rolls={roll_count} "
               f"free={use_free_spin} cost={price_cost if charged else 0} outcomes="
               f"{[slot_id for slot_id, _rewards in selected]}")
@@ -14176,6 +14189,25 @@ def settle_survive_battle_rank_rewards(config, event_start):
     participants_by_id = {char_id: char for char_id, char in participants}
     rank_rows = _survive_battle_rank_rows(config, participants[0][1])
     pending = False
+
+    if rank_rows:
+        winner_id = int(rank_rows[0].get('id', 0) or 0)
+        winner = participants_by_id.get(winner_id)
+        winner_state = winner.get('survival_battle_state') if winner else None
+        if isinstance(winner_state, dict) and not winner_state.get(
+                'rank_scroll_announced'):
+            with get_character_transaction_lock(winner):
+                winner_state['rank_scroll_announced'] = True
+                if save_chars(all_accounts_chars):
+                    delivered = gotham_broadcast_scroll_template(
+                        101907, 3, [str(winner.get('name', ''))])
+                    if not delivered:
+                        winner_state.pop('rank_scroll_announced', None)
+                        save_chars(all_accounts_chars)
+                else:
+                    winner_state.pop('rank_scroll_announced', None)
+                    print(f"[SURVIVAL FIELD] failed to persist rank announcement "
+                          f"activity={activity_id} event_start={event_start}")
 
     for rank, row in enumerate(rank_rows, 1):
         try:
@@ -16799,7 +16831,10 @@ def _rank_pvp_finalize_state(character, win, reason):
             "opponent_new_rank": opponent_new_rank, "opponent_swapped": swapped,
             "timestamp": now_ts
         }
-        save_chars(all_accounts_chars)
+        saved = save_chars(all_accounts_chars)
+        if saved and win and old_rank != 1 and new_rank == 1:
+            gotham_broadcast_scroll_template(
+                101904, 3, [str(character.get("name", ""))])
         return result
 
 
@@ -16992,6 +17027,7 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None,
     honor_gained = 0
     currency_gains = {field: 0 for field in MONEY_FIELDS}
     inv_changed = False
+    tvshow_item_ids = set()
 
     for entry in rewards_list:
         item_id = str(entry[0])
@@ -17010,6 +17046,8 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None,
             reward_quality = int(entry[1]) if len(entry) > 2 else None
             add_to_inventory(picked_char, item_id, amount, quality=reward_quality)
             inv_changed = True
+            if ITEM_CONFIG.get(item_id, {}).get('tvshow'):
+                tvshow_item_ids.add(item_id)
 
     if exp_gained > 0:
         normalize_player_level(picked_char)
@@ -17050,8 +17088,10 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None,
     if honor_gained > 0:
         picked_char['title_exp'] = max(0, int(picked_char.get('title_exp', 0))) + honor_gained
 
-    if save:
-        save_chars(all_accounts_chars)
+    saved = save_chars(all_accounts_chars) if save else False
+
+    if saved and tvshow_item_ids:
+        gotham_broadcast_tvshow_items(picked_char, tvshow_item_ids)
 
     if (exp_gained > 0 or honor_gained > 0 or any(currency_gains.values())) and conn:
         sync_char_attrs_rpc(conn, picked_char)
@@ -18415,6 +18455,48 @@ def gotham_broadcast_activity_state(activity_type, state=1, guild_id=None):
 
 def gotham_broadcast_scroll_message(text, map_id=None):
     return gotham_broadcast_chat_message(text, 7, map_id)
+
+
+def gotham_broadcast_scroll_template(template_id, kind, stringdata,
+                                     intdata_tail=()):
+    chat_item = encode_sproto([
+        (4, f'#{{{int(template_id)}}}'), (5, 7),
+        (7, [int(kind), *(int(value) for value in intdata_tail)]),
+        (8, [str(value) for value in stringdata])
+    ])
+    payload = encode_sproto([(0, [chat_item])])
+    recipients = 0
+    delivered = 0
+    failed = 0
+    for peer_conn, peer_char in list(ALL_CONNECTIONS.values()):
+        if (peer_conn and peer_char
+                and is_current_character_connection(peer_conn, peer_char)):
+            recipients += 1
+            if send_rpc_push_safe(peer_conn, 528, payload):
+                delivered += 1
+            else:
+                failed += 1
+    if failed or not delivered:
+        print(f"[SCROLL] template={template_id} kind={kind} "
+              f"recipients={recipients} delivered={delivered} failed={failed}")
+    return delivered
+
+
+def gotham_broadcast_tvshow_items(char, item_ids, template_id=101910,
+                                  kind=0):
+    player_name = str((char or {}).get('name', ''))
+    delivered = 0
+    for item_id in sorted({str(value) for value in item_ids}):
+        item = ITEM_CONFIG.get(item_id, {})
+        if str(item.get('tvshow', '')).strip().lower() not in ('y', '1', 'true'):
+            continue
+        if int(kind) == 0:
+            delivered += gotham_broadcast_scroll_template(
+                template_id, kind, [player_name], [int(item_id)])
+            continue
+        delivered += gotham_broadcast_scroll_template(
+            template_id, kind, [player_name, item_id])
+    return delivered
 
 
 def record_pvp_kill_streak(killer, victim):
@@ -20017,9 +20099,10 @@ def _wild_boss_finish(key, won, killer_id=0):
             send_rpc_push_safe(conn, 605, _wild_boss_activity_payload(char))
     if won and rows:
         winner = rows[0]
-        level_range = f"Lv.{int(row.get('min_level', 1))}-{int(row.get('max_level', 80))}"
         winner_name = str(winner.get('name') or f"Player {winner.get('id', 0)}")
-        message = f"#{{101917}}*{level_range}*[ffff00]{winner_name}[-]"
+        boss_npc_id = str(row.get('boss_npc_id', ''))
+        boss_name = str(NPC_CONFIG.get(boss_npc_id, {}).get('name') or boss_npc_id)
+        message = f"#{{101917}}*{boss_name}*[ffff00]{winner_name}[-]"
         delivered = gotham_broadcast_scroll_message(message)
         print(f"[WILD BOSS] rank-1 congratulations boss={key[0]} "
               f"player={winner.get('id')} delivered={delivered}")
@@ -22087,6 +22170,7 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         success = False
         response_sent = False
         champion_id_before = _guild_champion_id()
+        guild_level_before = _guild_level(guild) if guild else 0
         if cfg and guild and member and int(member.get('job', 4)) != 4:
             _guild_donate_records(char, guild)
             remaining = member.setdefault('donate_remaining', {})
@@ -22118,6 +22202,11 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
                 response_sent = True
                 sync_char_attrs_rpc(conn, char)
                 _guild_donation_refresh(guild)
+                guild_level_after = _guild_level(guild)
+                if guild_level_after > guild_level_before:
+                    gotham_broadcast_scroll_template(
+                        101909, 8, [str(guild.get('name', ''))],
+                        [guild_level_after])
                 if _guild_champion_id() != champion_id_before:
                     _guild_sync_champion_id()
         if not response_sent:
@@ -25372,7 +25461,7 @@ def client_handler(conn, addr):
                                             str(slot): level for slot, level in levels.items()
                                         }
                                         item['level'] = target_level
-                                        save_chars(all_accounts_chars)
+                                        saved = save_chars(all_accounts_chars)
                                         push_backpack_item_update(send_rpc_push, 1, item)
                                         sync_char_attrs_rpc(conn, picked_char)
                                         send_combat_power_gain_tip(
@@ -25380,6 +25469,14 @@ def client_handler(conn, addr):
                                             get_character_stats(picked_char)['power']
                                         )
                                         sync_equipment_status_to_peers(picked_char)
+                                        max_level = max(
+                                            EQUIPMENT_UPGRADE_CONFIG.get(position, {}),
+                                            default=target_level)
+                                        if saved and target_level == max_level:
+                                            gotham_broadcast_scroll_template(
+                                                101906, 2,
+                                                [str(picked_char.get('name', '')),
+                                                 item_id])
                                         print(f"[BACKPACK] enhanced slot={subtype} item={item_id} level={current_level}->{target_level} material={total_material} cash={total_cash}")
                 send_rpc_response(session)
 
@@ -25476,13 +25573,18 @@ def client_handler(conn, addr):
                                     }
                                     response_level = current_level
                                     response_allstar = sum(levels.values())
-                                    save_chars(all_accounts_chars)
+                                    saved = save_chars(all_accounts_chars)
                                     sync_char_attrs_rpc(conn, picked_char)
                                     send_combat_power_gain_tip(
                                         send_rpc_push, power_before,
                                         get_character_stats(picked_char)['power']
                                     )
                                     sync_equipment_status_to_peers(picked_char)
+                                    if saved and succeeded:
+                                        gotham_broadcast_scroll_template(
+                                            101911, 10,
+                                            [str(picked_char.get('name', ''))],
+                                            [part, current_level])
                                     print(f"[BACKPACK] refine part={part} level={current_level} "
                                           f"state={response_state} protected={use_safety}")
                 response_data = encode_sproto([
@@ -26086,6 +26188,13 @@ def client_handler(conn, addr):
                                                     (0, item_id), (1, amount), (3, quality)
                                                 ]) for (item_id, quality), amount in reward_totals.items()]
                                                 opened = True
+                                                if saved:
+                                                    gotham_broadcast_tvshow_items(
+                                                        picked_char,
+                                                        [item_id for item_id, _quality
+                                                         in reward_totals],
+                                                        template_id=101903,
+                                                        kind=2)
                                                 print(f"[BACKPACK] opened package={package_id} count={package_count} rewards={len(display_rewards)}")
                                     elif valid_rewards:
                                         failure_reason = 'reward would exceed backpack capacity'
@@ -26116,8 +26225,12 @@ def client_handler(conn, addr):
                             # Capture actual combat power before applying title bonuses.
                             power_before = get_character_stats(picked_char)['power']
                             picked_char['title_level'] = current_level + 1
-                            save_chars(all_accounts_chars)
+                            saved = save_chars(all_accounts_chars)
                             sync_char_attrs_rpc(conn, picked_char)
+                            if saved and current_level + 1 == 10:
+                                gotham_broadcast_scroll_template(
+                                    101908, 3,
+                                    [str(picked_char.get('name', ''))])
                         send_rpc_push(569, encode_sproto([
                             (0, int(picked_char.get('title_level', 0))),
                             (1, int(picked_char.get('title_exp', 0)))
