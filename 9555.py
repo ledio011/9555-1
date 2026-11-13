@@ -19870,24 +19870,31 @@ def _wild_boss_activity_payload(char, now=None):
         if str(boss_id) not in selected_stage_ids:
             continue
         active, slot, event_start, next_start, _slot_end = _wild_boss_clock(row, now)
+        activity_state = 1 if active else 0
+        record = None
         if active:
             record = _wild_boss_event(row, event_start)
             if record and record.get('finished'):
-                active, slot, _event_start, next_start, _slot_end = _wild_boss_clock(
-                    row, event_start + max(1, int(row.get('duration', 1) or 1)))
+                _next_active, next_slot, next_event_start, _next_start, _next_end = (
+                    _wild_boss_clock(
+                        row, event_start + max(1, int(row.get('duration', 1) or 1))))
+                next_start = next_event_start
+                if record.get('win'):
+                    activity_state = 2
+                else:
+                    active = False
+                    slot = next_slot
+                    activity_state = 0
         counts = _wild_boss_attempts(char, boss_id)
         remaining = max(0, int(row.get('limit', 0) or 0)
                         - int(counts.get(str(boss_id), 0) or 0))
-        if active:
-            record = _wild_boss_event(row, event_start)
-            if record and str(int(char.get('id', 0) or 0)) in record.get(
-                    'participants', {}):
+        if active and not (record and record.get('finished')):
+            if record and str(int(char.get('id', 0) or 0)) in record.get('participants', {}):
                 remaining = max(1, remaining)
         activities[str(boss_id)] = encode_sproto([
             (0, str(boss_id)), (1, remaining), (2, int(row.get('type', 0) or 0)),
-            (3, 1 if (
-                active
-                and int(row.get('min_level', 1) or 1) <= player_level
+            (3, activity_state if (
+                int(row.get('min_level', 1) or 1) <= player_level
                 <= int(row.get('max_level', 80) or 80)
             ) else 0), (4, int(next_start)),
             (5, _wild_boss_activity_rank_string(boss_id, event_start, active, now)),
