@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """AtgSniffer - read-only TCP proxy for Auto Theft Gangsters mission 1014 diagnostics.
 
-This diagnostic proxy watches the Sproto exchange for mission ID 1014 after
-character 263418376 has been selected successfully. It recursively checks
-nested Sproto fields for the mission ID and pairs matching RPC requests with
-their replies by session ID, including replies that omit the mission ID.
+This diagnostic proxy watches mission 1014 for every character stored under
+the allowed account ID 68086000311496 in characters_final.json. It resolves
+the account's character IDs at startup and only arms after a successful
+selection of one of those characters. It recursively checks nested Sproto
+fields and pairs matching RPC requests with their replies by session ID.
 
 Serv00 layout:
   client -> public :15678 -> AtgSniffer -> 127.0.0.1:11899 -> 9555.py
@@ -25,7 +26,8 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
 
-DEFAULT_TARGET_CHAR_ID = 263418376
+DEFAULT_ALLOWED_ACCOUNT_ID = "68086000311496"
+DEFAULT_CHARACTERS_FILE = "characters_final.json"
 MISSION_ID = "1014"
 MAX_FRAME_SIZE = 65535
 MAX_BUFFER_SIZE = 2 * 1024 * 1024
@@ -230,9 +232,115 @@ def contains_mission_id(value: Any, depth: int = 0) -> bool:
     return False
 
 
+
+def _numeric_character_id(value: Any) -> Optional[int]:
+    """Accept ATG character-ID-sized numbers; account IDs are longer."""
+    if isinstance(value, bool) or value is None:
+        return None
+    text = str(value).strip()
+    if not text.isdigit() or not 7 <= len(text) <= 12:
+        return None
+    return int(text)
+
+
+def load_account_character_ids(path: str, account_id: str) -> set[int]:
+    """Resolve every character for an account from characters_final.json.
+
+    The observed database layout stores account IDs as dictionary keys under
+    a top-level partition (for example data["1"][account_id]). Character
+    membership may be represented as a character-ID map, list, or record.
+    """
+    with open(path, "r", encoding="utf-8") as source:
+        data = json.load(source)
+
+    account_nodes = []
+
+    def find_account(node: Any) -> None:
+        if isinstance(node, dict):
+            if account_id in node:
+                account_nodes.append(node[account_id])
+            for value in node.values():
+                find_account(value)
+        elif isinstance(node, list):
+            for value in node:
+                find_account(value)
+
+    find_account(data)
+    if not account_nodes:
+        raise RuntimeError(f"account {account_id} was not found as a key in {path}")
+
+    id_fields = {
+        "characterid", "charid", "roleid", "playercharacterid",
+        "gamecharacterid",
+    }
+    container_fields = {
+        "characters", "characterlist", "charlist", "roles", "rolelist",
+        "players", "playerlist", "characterdata", "characterinfos",
+        "roleinfos",
+    }
+    profile_fields = {
+        "name", "charname", "charactername", "nickname", "level",
+        "profession", "career", "job", "power", "mapid",
+    }
+    found: set[int] = set()
+
+    def walk(node: Any, character_container: bool = False,
+             account_root: bool = False) -> None:
+        if isinstance(node, dict):
+            normalized_keys = {
+                "".join(ch for ch in str(key).lower() if ch.isalnum())
+                for key in node.keys()
+            }
+            looks_like_character = bool(normalized_keys & profile_fields)
+
+            for key, value in node.items():
+                key_text = str(key)
+                normalized = "".join(
+                    ch for ch in key_text.lower() if ch.isalnum()
+                )
+
+                # Common representation: account -> {character_id: record}.
+                if account_root and isinstance(value, (dict, list)):
+                    candidate = _numeric_character_id(key_text)
+                    if candidate is not None:
+                        found.add(candidate)
+
+                if normalized in id_fields:
+                    candidate = _numeric_character_id(value)
+                    if candidate is not None:
+                        found.add(candidate)
+                elif normalized in {"id", "_id"} and (
+                    character_container or looks_like_character
+                ):
+                    candidate = _numeric_character_id(value)
+                    if candidate is not None:
+                        found.add(candidate)
+
+                if normalized in container_fields:
+                    walk(value, character_container=True)
+                else:
+                    walk(value)
+
+        elif isinstance(node, list):
+            for item in node:
+                walk(item, character_container=character_container)
+
+    for account_node in account_nodes:
+        walk(account_node, character_container=True, account_root=True)
+
+    if not found:
+        raise RuntimeError(
+            f"account {account_id} exists in {path}, but no character IDs "
+            "could be resolved; refusing to allow an unknown character set"
+        )
+    return found
+
+
 class Mission1014SnifferState:
-    def __init__(self, target_id: int, log_fp, raw_fp):
-        self.target_id = target_id
+    def __init__(self, account_id: str, allowed_char_ids: set[int], log_fp, raw_fp):
+        self.account_id = account_id
+        self.allowed_char_ids = set(allowed_char_ids)
+        self.current_char_id: Optional[int] = None
         self.log_fp = log_fp
         self.raw_fp = raw_fp
         self.lock = threading.RLock()
@@ -263,7 +371,8 @@ class Mission1014SnifferState:
             return
         record = {
             "time": utc_stamp(),
-            "character_id": self.target_id,
+            "account_id": self.account_id,
+            "character_id": self.current_char_id,
             "feature": "mission 1014 full-process trace",
             "mission_id": MISSION_ID,
             "direction": direction,
@@ -317,7 +426,8 @@ class Mission1014SnifferState:
                     self.log(f"PARSER WARNING direction={direction} bytes={len(payload)} error={type(exc).__name__}: {exc}")
                     if self.raw_fp:
                         self.raw_fp.write(json.dumps({
-                            "time": utc_stamp(), "character_id": self.target_id,
+                            "time": utc_stamp(), "account_id": self.account_id,
+                            "character_id": self.current_char_id,
                             "direction": direction, "parse_error": str(exc),
                             "wire_frame_hex": (struct.pack(">H", len(payload)) + payload).hex(),
                         }, separators=(",", ":")) + "\n")
@@ -330,8 +440,9 @@ class Mission1014SnifferState:
     def _observe_locked(self, direction: str, payload: bytes, body: Dict[int, Any], msg: Optional[int], session: Optional[int]) -> None:
         if direction == "C->S" and msg == 105:
             requested_char_id = to_int(body.get(0))
-            if requested_char_id != self.target_id:
+            if requested_char_id not in self.allowed_char_ids:
                 self.target_active = False
+                self.current_char_id = None
                 self.pending_picks.clear()
                 self.client_requests.clear()
                 self.server_requests.clear()
@@ -339,7 +450,11 @@ class Mission1014SnifferState:
                 self.mission_server_sessions.clear()
                 return
             if session is not None:
-                self.pending_picks[session] = {"payload": payload, "body": body}
+                self.pending_picks[session] = {
+                    "payload": payload,
+                    "body": body,
+                    "character_id": requested_char_id,
+                }
             return
 
         if direction == "S->C" and msg is None and session is not None and session in self.pending_picks:
@@ -347,16 +462,24 @@ class Mission1014SnifferState:
             accepted = to_int(body.get(0))
             if accepted == 1:
                 self.target_active = True
+                self.current_char_id = pick["character_id"]
                 self.client_requests.clear()
                 self.server_requests.clear()
                 self.mission_client_sessions.clear()
                 self.mission_server_sessions.clear()
-                self.log(f"TARGET CHARACTER CONFIRMED id={self.target_id}; mission {MISSION_ID} trace armed.")
+                self.log(
+                    f"ALLOWED ACCOUNT CHARACTER CONFIRMED account={self.account_id} "
+                    f"character_id={self.current_char_id}; mission {MISSION_ID} trace armed."
+                )
                 self._log_packet("C->S", pick["payload"], 105, session, pick["body"])
                 self._log_packet("S->C", payload, None, session, body)
             else:
                 self.target_active = False
-                self.log(f"TARGET CHARACTER NOT CONFIRMED id={self.target_id}: character_pick reply field0={accepted!r}; trace disabled.")
+                self.current_char_id = None
+                self.log(
+                    f"ACCOUNT CHARACTER NOT CONFIRMED account={self.account_id}: "
+                    f"character_pick reply field0={accepted!r}; trace disabled."
+                )
             return
 
         if not self.target_active:
@@ -431,11 +554,12 @@ class FrameObserver:
 
 
 class ClientHandler:
-    def __init__(self, client: socket.socket, address, backend: Tuple[str, int], target_id: int, log_fp, raw_fp):
+    def __init__(self, client: socket.socket, address, backend: Tuple[str, int],
+                 account_id: str, allowed_char_ids: set[int], log_fp, raw_fp):
         self.client = client
         self.address = address
         self.backend = backend
-        self.state = Mission1014SnifferState(target_id, log_fp, raw_fp)
+        self.state = Mission1014SnifferState(account_id, allowed_char_ids, log_fp, raw_fp)
         self.backend_socket: Optional[socket.socket] = None
         self.close_lock = threading.Lock()
         self.closed = False
@@ -535,10 +659,20 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Read-only ATG mission 1014 sniffer (transparent TCP proxy)")
     parser.add_argument("--listen", default="0.0.0.0:15678", type=parse_endpoint, help="public proxy endpoint HOST:PORT")
     parser.add_argument("--server", default="127.0.0.1:11899", type=parse_endpoint, help="local 9555.py backend HOST:PORT")
-    parser.add_argument("--target", type=int, default=DEFAULT_TARGET_CHAR_ID, help="only log this selected character ID")
+    parser.add_argument("--account", default=DEFAULT_ALLOWED_ACCOUNT_ID,
+                        help="only allow characters registered under this account ID")
+    parser.add_argument("--characters-file", default=DEFAULT_CHARACTERS_FILE,
+                        help="character database used to resolve account membership")
     parser.add_argument("--log-file", default="AtgSniffer_mission1014.log", help="human-readable mission 1014 log")
     parser.add_argument("--raw-log", default="AtgSniffer_mission1014_packets.jsonl", help="matching raw Sproto frames; use empty string to disable")
     args = parser.parse_args()
+
+    allowed_char_ids = load_account_character_ids(args.characters_file, args.account)
+    print(
+        f"[{utc_stamp()}] ACCOUNT ALLOWLIST loaded account={args.account} "
+        f"characters={len(allowed_char_ids)} ids={','.join(map(str, sorted(allowed_char_ids)))}",
+        flush=True,
+    )
 
     log_fp = open(args.log_file, "a", encoding="utf-8", buffering=1) if args.log_file else None
     raw_fp = open(args.raw_log, "a", encoding="utf-8", buffering=1) if args.raw_log else None
@@ -562,12 +696,13 @@ def main() -> int:
     print("ATG MISSION 1014 SNIFFER - READ-ONLY TCP PROXY", flush=True)
     print(f"Listen : {listen_host}:{listen_port}", flush=True)
     print(f"Backend: {backend_host}:{backend_port}", flush=True)
-    print(f"Target : character_id={args.target}", flush=True)
+    print(f"Allowed account: {args.account}", flush=True)
+    print(f"Allowed characters: {len(allowed_char_ids)}", flush=True)
     print(f"Mission filter: mission_id={MISSION_ID}", flush=True)
     print(f"Text log: {os.path.abspath(args.log_file) if args.log_file else 'disabled'}", flush=True)
     print(f"Raw log : {os.path.abspath(args.raw_log) if args.raw_log else 'disabled'}", flush=True)
-    print("Select character 263418376 and play mission 1014 normally.", flush=True)
-    print("Only target-character packets containing mission 1014 and their paired RPC replies are logged.", flush=True)
+    print("Select any character belonging to the allowed account and play mission 1014 normally.", flush=True)
+    print("Only allowed-account character packets containing mission 1014 and their paired RPC replies are logged.", flush=True)
     print("Wire message IDs are recorded as observed; no mission result is fabricated.", flush=True)
     print("Traffic is relayed byte-for-byte; no server source or game data is modified.", flush=True)
     print("=" * 72, flush=True)
@@ -575,7 +710,10 @@ def main() -> int:
     try:
         while True:
             client, address = server.accept()
-            handler = ClientHandler(client, address, (backend_host, backend_port), args.target, log_fp, raw_fp)
+            handler = ClientHandler(
+                client, address, (backend_host, backend_port),
+                args.account, allowed_char_ids, log_fp, raw_fp
+            )
             threading.Thread(target=handler.run, daemon=True).start()
     except KeyboardInterrupt:
         print(f"\n[{utc_stamp()}] [AtgSniffer] stopping", flush=True)
