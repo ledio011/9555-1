@@ -234,7 +234,7 @@ def contains_mission_id(value: Any, depth: int = 0) -> bool:
 
 
 def _numeric_character_id(value: Any) -> Optional[int]:
-    """Accept ATG character-ID-sized numbers; account IDs are longer."""
+    """Validate a character ID from a character record's explicit id field."""
     if isinstance(value, bool) or value is None:
         return None
     text = str(value).strip()
@@ -244,103 +244,58 @@ def _numeric_character_id(value: Any) -> Optional[int]:
 
 
 def load_account_character_ids(path: str, account_id: str) -> set[int]:
-    """Resolve every character for an account from characters_final.json.
+    """Load only the explicit id fields of records in the account's character list.
 
-    The observed database layout stores account IDs as dictionary keys under
-    a top-level partition (for example data["1"][account_id]). Character
-    membership may be represented as a character-ID map, list, or record.
+    Verified characters_final.json shape:
+        data["1"][account_id] -> [character_record, character_record, ...]
+    Each record has an explicit "id" field. Nested inventory, mail, friend,
+    guild, and other numeric values are never treated as character IDs.
     """
     with open(path, "r", encoding="utf-8") as source:
         data = json.load(source)
 
-    account_nodes = []
+    if not isinstance(data, dict):
+        raise RuntimeError(f"unexpected root structure in {path}: expected object")
 
-    def find_account(node: Any) -> None:
-        if isinstance(node, dict):
-            if account_id in node:
-                account_nodes.append(node[account_id])
-            for value in node.values():
-                find_account(value)
-        elif isinstance(node, list):
-            for value in node:
-                find_account(value)
-
-    find_account(data)
-    if not account_nodes:
-        raise RuntimeError(f"account {account_id} was not found as a key in {path}")
-
-    id_fields = {
-        "characterid", "charid", "roleid", "playercharacterid",
-        "gamecharacterid",
-    }
-    container_fields = {
-        "character", "characters", "characterlist", "charlist",
-        "charactermap", "characterrecords", "charinfo", "charinfos",
-        "roles", "role", "rolelist", "roleinfo", "roleinfos",
-        "players", "playerlist", "playercharacters",
-        "characterdata", "characterinfos",
-    }
-    profile_fields = {
-        "name", "charname", "charactername", "nickname", "level",
-        "profession", "career", "job", "power", "mapid",
-    }
-    found: set[int] = set()
-
-    def walk(node: Any, character_container: bool = False,
-             account_root: bool = False) -> None:
-        if isinstance(node, dict):
-            normalized_keys = {
-                "".join(ch for ch in str(key).lower() if ch.isalnum())
-                for key in node.keys()
-            }
-            looks_like_character = bool(normalized_keys & profile_fields)
-
-            for key, value in node.items():
-                key_text = str(key)
-                normalized = "".join(
-                    ch for ch in key_text.lower() if ch.isalnum()
-                )
-
-                # Common representation: account -> {character_id: record}.
-                if account_root or character_container:
-                    candidate = _numeric_character_id(key_text)
-                    if candidate is not None:
-                        found.add(candidate)
-
-                if normalized in id_fields:
-                    candidate = _numeric_character_id(value)
-                    if candidate is not None:
-                        found.add(candidate)
-                elif normalized in {"id", "_id"} and (
-                    character_container or looks_like_character
-                ):
-                    candidate = _numeric_character_id(value)
-                    if candidate is not None:
-                        found.add(candidate)
-
-                if normalized in container_fields:
-                    walk(value, character_container=True)
-                else:
-                    walk(value)
-
-        elif isinstance(node, list):
-            for item in node:
-                if character_container:
-                    candidate = _numeric_character_id(item)
-                    if candidate is not None:
-                        found.add(candidate)
-                walk(item, character_container=character_container)
-
-    for account_node in account_nodes:
-        walk(account_node, character_container=True, account_root=True)
-
-    if not found:
+    account_entries = [
+        partition[account_id]
+        for partition in data.values()
+        if isinstance(partition, dict) and account_id in partition
+    ]
+    if len(account_entries) != 1:
         raise RuntimeError(
-            f"account {account_id} exists in {path}, but no character IDs "
-            "could be resolved; refusing to allow an unknown character set"
+            f"expected exactly one account entry for {account_id} in {path}; "
+            f"found {len(account_entries)}"
         )
-    return found
 
+    records = account_entries[0]
+    if not isinstance(records, list):
+        raise RuntimeError(
+            f"account {account_id} entry must be a character list; "
+            f"found {type(records).__name__}"
+        )
+    if not records:
+        raise RuntimeError(f"account {account_id} has an empty character list")
+
+    character_ids: list[int] = []
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            raise RuntimeError(
+                f"account {account_id} character entry {index} is not an object"
+            )
+        character_id = _numeric_character_id(record.get("id"))
+        if character_id is None:
+            raise RuntimeError(
+                f"account {account_id} character entry {index} has an invalid id"
+            )
+        character_ids.append(character_id)
+
+    if len(set(character_ids)) != len(character_ids):
+        raise RuntimeError(
+            f"account {account_id} contains duplicate character IDs in {path}"
+        )
+
+    return set(character_ids)
 
 class Mission1014SnifferState:
     def __init__(self, account_id: str, allowed_char_ids: set[int], log_fp, raw_fp):
