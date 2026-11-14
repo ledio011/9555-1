@@ -5469,16 +5469,47 @@ def sync_equipment_status_to_peers(char):
             send_team_member_update(team['id'], char, force=True)
 
 def get_team_for_char(char_id):
-    return TEAM_STATES.get(CHAR_TEAM.get(int(char_id)))
+    char_id = int(char_id)
+    team_id = CHAR_TEAM.get(char_id)
+    team = TEAM_STATES.get(team_id)
+    if team is None:
+        CHAR_TEAM.pop(char_id, None)
+        return None
+    members = team.get('members', [])
+    if not any(int(member_id) == char_id for member_id in members):
+        if CHAR_TEAM.get(char_id) == team_id:
+            CHAR_TEAM.pop(char_id, None)
+        char = ALL_CONNECTIONS.get(char_id, (None, None))[1]
+        if char is None:
+            char = team.get('char_refs', {}).get(char_id)
+        if char:
+            char.pop('team_goal_copy', None)
+        team.get('char_refs', {}).pop(char_id, None)
+        if not members and TEAM_STATES.get(team_id) is team:
+            TEAM_STATES.pop(team_id, None)
+        return None
+    member_ids = {int(member_id) for member_id in members}
+    if int(team.get('leader_id', 0)) not in member_ids:
+        team['leader_id'] = int(members[0])
+    return team
+
+def is_team_recruitment_message(text):
+    normalized_text = str(text or '').casefold()
+    return any(marker in normalized_text for marker in (
+        'recruit:-', '招募队友', '#{100262}'))
 
 def team_recruitment_share_for_chat(char, chat_type, text):
-    if not char or chat_type not in (1, 2):
+    if not char or chat_type not in (1, 2, 4) or not is_team_recruitment_message(text):
         return None
-    normalized_text = str(text or '').casefold()
-    if not any(marker in normalized_text for marker in (
-            'recruit:-', '招募队友', '#{100262}')):
+    team = get_team_for_char(int(char.get('id', 0)))
+    if not team:
         return None
-    return get_team_for_char(int(char.get('id', 0)))
+    try:
+        # The client recruitment chooser uses Nearby/World/Gang chat types.
+        selected_channel = int(team.get('recruit', 0) or 0)
+    except (TypeError, ValueError):
+        selected_channel = 0
+    return team if selected_channel == int(chat_type) else None
 
 def get_relife_config(death_count):
     if RELIFE_DATA:
@@ -31239,13 +31270,20 @@ def client_handler(conn, addr):
                 chat_text = get_val_str(body, 2, '')
                 accepted_world_chat = False
                 reject_reason = ''
+                recruitment_message = is_team_recruitment_message(chat_text)
+                recruitment_team = (
+                    get_team_for_char(int(picked_char.get('id', 0)))
+                    if picked_char and recruitment_message else None
+                )
                 team_share = team_recruitment_share_for_chat(
                     picked_char, chat_type, chat_text)
-                duplicate_team_share = bool(team_share and team_share.get('recruit_share_sent'))
+                unselected_team_share = bool(
+                    recruitment_message and chat_type in (1, 2, 4)
+                    and (not recruitment_team or not team_share)
+                )
                 if picked_char and chat_type == 2:
-                    if duplicate_team_share:
-                        print(f"[CHAT] suppressed duplicate team recruitment share "
-                              f"team={team_share.get('id')} player={picked_char.get('id')}")
+                    if unselected_team_share:
+                        reject_reason = 'Select a recruitment channel before sharing your team.'
                     elif not chat_text or len(chat_text) > 256:
                         reject_reason = 'Message must contain 1–256 characters.'
                     elif not is_current_character_connection(conn, picked_char):
@@ -31301,8 +31339,6 @@ def client_handler(conn, addr):
                         for online_id, (online_conn, online_char) in list(ALL_CONNECTIONS.items()):
                             if online_conn is not None and online_char is not None:
                                 send_rpc_push_safe(online_conn, 528, push_data)
-                        if team_share:
-                            team_share['recruit_share_sent'] = True
                         print(f"[CHAT] world from={picked_char.get('name')} consumed WorldSpeak item=5026")
                     elif reject_reason:
                         send_rpc_push(529, encode_sproto([(0, reject_reason), (1, True)]))
@@ -31311,9 +31347,8 @@ def client_handler(conn, addr):
                     # ret_chat response shape as World chat. The APK sends
                     # these through msg 120 and only updates its history after
                     # receiving tag 528.
-                    if duplicate_team_share:
-                        print(f"[CHAT] suppressed duplicate team recruitment share "
-                              f"team={team_share.get('id')} player={picked_char.get('id')}")
+                    if unselected_team_share:
+                        reject_reason = 'Select a recruitment channel before sharing your team.'
                     elif not is_current_character_connection(conn, picked_char):
                         reject_reason = 'This character connection is no longer active.'
                     elif not chat_text or len(chat_text) > 256:
@@ -31433,8 +31468,6 @@ def client_handler(conn, addr):
                                         send_rpc_push_safe(conn, 528, push_data)
                                     else:
                                         send_push_to_char(recipient_id, 528, push_data)
-                                if team_share:
-                                    team_share['recruit_share_sent'] = True
                                 print(f"[CHAT] type={chat_type} from={sender_id} recipients={len(recipient_ids)}")
 
                     if reject_reason:
@@ -31590,7 +31623,10 @@ def client_handler(conn, addr):
                     team=get_team_for_char(cid)
                     if team:
                         detach_exp_team_member(team,cid)
-                        send_rpc_push(518,encode_sproto([]))
+                    else:
+                        CHAR_TEAM.pop(cid,None)
+                        picked_char.pop('team_goal_copy',None)
+                    send_rpc_push(518,encode_sproto([]))
                 elif picked_char and msg==214:
                     goal=get_val_str(body,0,''); goal_type=get_val_int(body,1,1)
                     if is_team_battle_copy(goal):
@@ -34218,13 +34254,40 @@ def team_copy_level_allowed(copy_id, level, leader=False):
     return level >= minimum
 
 def team_remove_member(team, char_id):
-    cid=int(char_id)
-    if not team or cid not in team.get('members',[]): return
-    team['members'].remove(cid); CHAR_TEAM.pop(cid,None); team.get('char_refs',{}).pop(cid,None)
-    ch=ALL_CONNECTIONS.get(cid,(None,None))[1]
-    if ch: ch.pop('team_goal_copy',None)
-    if team.get('leader_id')==cid and team['members']: team['leader_id']=team['members'][0]
-    if not team.get('members'): TEAM_STATES.pop(int(team['id']),None)
+    cid = int(char_id)
+    if not team:
+        return False
+    team_id = int(team.get('id', 0))
+    members = team.setdefault('members', [])
+    was_member = any(int(member_id) == cid for member_id in members)
+    team['members'] = [member_id for member_id in members if int(member_id) != cid]
+    mapped_to_team = CHAR_TEAM.get(cid) == team_id
+    ch = ALL_CONNECTIONS.get(cid, (None, None))[1]
+    if ch is None:
+        ch = team.get('char_refs', {}).get(cid)
+    if mapped_to_team:
+        CHAR_TEAM.pop(cid, None)
+    team.get('char_refs', {}).pop(cid, None)
+    if ch and (mapped_to_team or (was_member and cid not in CHAR_TEAM)):
+        ch.pop('team_goal_copy', None)
+    if (team['members']
+            and int(team.get('leader_id', 0)) not in {
+                int(member_id) for member_id in team['members']
+            }):
+        team['leader_id'] = int(team['members'][0])
+    if not team['members']:
+        for stale_id, stale_team_id in list(CHAR_TEAM.items()):
+            if stale_team_id != team_id:
+                continue
+            CHAR_TEAM.pop(stale_id, None)
+            stale_char = ALL_CONNECTIONS.get(stale_id, (None, None))[1]
+            if stale_char is None:
+                stale_char = team.get('char_refs', {}).get(stale_id)
+            if stale_char:
+                stale_char.pop('team_goal_copy', None)
+        if TEAM_STATES.get(team_id) is team:
+            TEAM_STATES.pop(team_id, None)
+    return was_member or mapped_to_team
 
 def send_team_match_state(member_ids, goal_id, goal_type, state):
     data=encode_sproto([(0,int(state)),(1,str(goal_id)),(2,int(goal_type))])
