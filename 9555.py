@@ -3270,6 +3270,52 @@ def save_chars(data):
     with CHAR_DB_SAVE_LOCK:
         return _save_chars_atomic(data)
 
+
+PVP_HP_SAVE_LOCK = threading.Lock()
+PVP_HP_SAVE_TIMER = None
+PVP_HP_SAVE_DIRTY = False
+PVP_HP_SAVE_WRITING = False
+PVP_HP_SAVE_INTERVAL_SECONDS = 0.25
+
+
+def schedule_pvp_hp_save():
+    """Coalesce frequent PvP HP updates into bounded-rate character DB writes."""
+    global PVP_HP_SAVE_TIMER, PVP_HP_SAVE_DIRTY
+    with PVP_HP_SAVE_LOCK:
+        PVP_HP_SAVE_DIRTY = True
+        if PVP_HP_SAVE_TIMER is not None or PVP_HP_SAVE_WRITING:
+            return
+        timer = threading.Timer(
+            PVP_HP_SAVE_INTERVAL_SECONDS, _flush_pvp_hp_save)
+        timer.daemon = True
+        PVP_HP_SAVE_TIMER = timer
+        timer.start()
+
+
+def _flush_pvp_hp_save():
+    global PVP_HP_SAVE_TIMER, PVP_HP_SAVE_DIRTY, PVP_HP_SAVE_WRITING
+    with PVP_HP_SAVE_LOCK:
+        if PVP_HP_SAVE_TIMER is not threading.current_thread():
+            return
+        PVP_HP_SAVE_TIMER = None
+        if not PVP_HP_SAVE_DIRTY:
+            return
+        PVP_HP_SAVE_DIRTY = False
+        PVP_HP_SAVE_WRITING = True
+    try:
+        if not save_chars(all_accounts_chars):
+            print("[PVP HP SAVE] coalesced character save failed")
+    finally:
+        with PVP_HP_SAVE_LOCK:
+            PVP_HP_SAVE_WRITING = False
+            if PVP_HP_SAVE_DIRTY and PVP_HP_SAVE_TIMER is None:
+                timer = threading.Timer(
+                    PVP_HP_SAVE_INTERVAL_SECONDS, _flush_pvp_hp_save)
+                timer.daemon = True
+                PVP_HP_SAVE_TIMER = timer
+                timer.start()
+
+
 def _save_chars_atomic(data):
     """Crash-safe atomic writer to prevent character loss during kill -9."""
     if not isinstance(data, dict):
@@ -28134,13 +28180,14 @@ def client_handler(conn, addr):
                                 new_hp = max(0, old_hp - server_dmg)
                                 target_char['hp'] = new_hp
 
-                            # Sync victim's HP to victim's own client (TAG 510)
-                            sync_char_attrs_rpc(target_conn, target_char)
-                            # Broadcast victim's updated HP to all other players on the map
-                            broadcast_aoi_attribute(target_char)
-
-                            # Save HP state so it persists after reconnect
-                            save_chars(all_accounts_chars)
+                            if server_dmg > 0:
+                                # Misses still get the damage-board and hit-action
+                                # packets below, but do not need a full attribute
+                                # refresh or database write.
+                                sync_char_attrs_rpc(target_conn, target_char)
+                                broadcast_aoi_attribute(target_char)
+                                if new_hp > 0:
+                                    schedule_pvp_hp_save()
 
                             # Build TAG 511 damage board with actual skill/eff IDs
                             dmg_item = encode_sproto([
@@ -28224,9 +28271,14 @@ def client_handler(conn, addr):
                                             target_conn.sendall(t_pkt)
                                     except Exception:
                                         pass
-                                    save_chars(all_accounts_chars)
                                 else:
                                     print(f"[PvP] death has no normal revive rule map={death_map}")
+                                # Survival Field kill handling already persists
+                                # the score and lethal HP together.
+                                if not survival_forced_return:
+                                    # Persist lethal HP and any revive offer;
+                                    # nonlethal HP uses the coalescer.
+                                    save_chars(all_accounts_chars)
 
                         elif target_id == picked_char['id']:
                             if is_stage_combat:
