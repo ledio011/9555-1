@@ -15480,24 +15480,25 @@ def start_scuffle_battle(conn, char, scuffle_id, floor_id, send_rpc_push):
         return False
 
     new_entry = not in_scuffle
-    remaining = None
     if new_entry:
-        remaining = copy_attempts_remaining(char, scuffle_id, copy_cfg)
-        if remaining <= 0:
+        active = active_scuffle_mission(char)
+        active_entry = (
+            (char.get("active_missions") or {}).get(active[0], {})
+            if active else {}
+        )
+        if (not active
+                or int(active_entry.get("state", 0) or 0) != 1):
             print(f"[SCUFFLE] entry rejected player={char.get('id')} "
-                  f"id={scuffle_id} reason=daily_attempts_exhausted")
+                  f"id={scuffle_id} reason=mission_not_accepted")
             return False
         if char.get("pre_copy_pos") is None:
             char["pre_copy_pos"] = list(
                 char.get("pos") or default_map_spawn_position(current_map))
             char["pre_copy_map"] = current_map
-        copy_state = ensure_daily_copy_state(char)
-        copy_state["remaining"][scuffle_id] = remaining - 1
 
     char["active_copy_id"] = scuffle_id
     if new_entry:
-        # Update the client's cached CurNum before the scene transition closes
-        # the daily-copy UI.
+        # Keep the client's copy state current before the scene transition.
         send_rpc_push(555, sync_copy_scenes(char))
     start_map_transition(conn, char, target_map, send_rpc_push)
     save_chars(all_accounts_chars)
@@ -15505,7 +15506,7 @@ def start_scuffle_battle(conn, char, scuffle_id, floor_id, send_rpc_push):
         advance_missions(char, send_rpc_push, "dungeon", target_id="108")
     print(f"[SCUFFLE] entered id={scuffle_id} floor={floor_id} "
           f"player={char.get('id')} remaining="
-          f"{max(0, remaining - 1) if remaining is not None else 'unchanged'}")
+          f"{copy_attempts_remaining(char, scuffle_id, copy_cfg)}")
     return True
 
 
@@ -17591,7 +17592,7 @@ def accept_mission_logic(picked_char, mid, online_id=None):
                     <= int(online_cfg.get('level_max', 0) or 0)):
             print(f"[accept_mission_logic] FAILED: invalid Scuffle selection mission={mid} online_id={online_id}")
             return False
-        copy_id, _ = scuffle_copy_scene_for_level(
+        copy_id, copy_cfg = scuffle_copy_scene_for_level(
             int(picked_char.get('level', 1) or 1))
         if (not copy_id
                 or online_id != scuffle_online_mission_offer(picked_char, copy_id)):
@@ -17660,6 +17661,13 @@ def accept_mission_logic(picked_char, mid, online_id=None):
             print(f"[accept_mission_logic] Gotham activity unavailable or exhausted: {mid}")
         return activity_accept
 
+    remaining = None
+    if is_scuffle_mission:
+        remaining = copy_attempts_remaining(picked_char, copy_id, copy_cfg)
+        if remaining <= 0:
+            print(f"[accept_mission_logic] FAILED: Scuffle attempts exhausted id={copy_id}")
+            return False
+
     parm = [0]*8
     if is_scuffle_mission:
         parm[1] = int(online_id)
@@ -17667,6 +17675,8 @@ def accept_mission_logic(picked_char, mid, online_id=None):
         copy_state.setdefault('scuffle_online_missions', {})[copy_id] = online_id
     parm[7] = int(time.time())
     picked_char['active_missions'][mid] = {'state': 1, 'parm': parm, 'accept_time': int(time.time())}
+    if is_scuffle_mission:
+        copy_state['remaining'][copy_id] = remaining - 1
     return True
 
 def mission1014_log(picked_char, message):
@@ -25393,7 +25403,8 @@ def client_handler(conn, addr):
                         online_id.decode('utf-8')
                         if isinstance(online_id, bytes) else str(online_id or '')
                     )
-                    res = accept_mission_logic(picked_char, mid, online_id)
+                    with get_character_transaction_lock(picked_char):
+                        res = accept_mission_logic(picked_char, mid, online_id)
                     print(f"[MISSION ACCEPT REQ] mid={mid} result={res}")
                     if mid == '1014':
                         mission1014_log(
