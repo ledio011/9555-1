@@ -136,7 +136,8 @@ NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 NPC_AOI_TRACK = {}  # connection identity -> {inst_id: {'nid': ..., 'x': ..., 'z': ...}}
 SURVIVE_BATTLE_NPC_MAP_IDS = frozenset(("1101", "1102"))
 SURVIVAL_PLAYER_MODEL_RADIUS_CM = 30  # CharacterModelData IDs 100, 104, and 105.
-PRISON_NPC_AOI_MAP_IDS = frozenset(("1201", "1202")) | SURVIVE_BATTLE_NPC_MAP_IDS
+SCUFFLE_NPC_MAP_IDS = frozenset(("1201", "1202"))
+PRISON_NPC_AOI_MAP_IDS = SCUFFLE_NPC_MAP_IDS | SURVIVE_BATTLE_NPC_MAP_IDS
 PRISON_NPC_AOI_TRACK = {}  # connection identity -> {shared spawn key: instance ID}
 PRISON_NPC_SHARED_SLOTS = {}
 PRISON_NPC_SHARED_BY_INSTANCE = {}
@@ -326,12 +327,14 @@ COLOR_CONFIG = {} # color id -> authoritative PriceType/PriceCost from ColorData
 WILD_BOSS_CONFIG = {} # ID -> configured world boss and required level band
 COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
 SCUFFLE_CONFIG = {} # scuffle ID -> ScuffleData fields used by the APK
+ONLINE_MISSION_CONFIG = {} # online mission ID -> rank mission selection and reward references
 TOWER_CONFIG = {} # floor index -> TowerData fields used by the APK
 TOWER_MAP_TO_FLOOR = {} # map ID -> TowerData floor index
 SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
 SHOW_REWARD_EXPLICIT_COUNT_CONFIG = {} # ShowRewardData id -> rewards with an explicit positive item count
 SHOW_REWARD_ITEM_SLOT_CONFIG = {} # ShowRewardData id -> authored Item1..Item8 slots (not Exp/Money columns)
 SHOW_REWARD_BASE_CONFIG = {} # ShowRewardData id -> authored Exp/Money1/Money2 values
+SCUFFLE_NPC_REWARD_CONFIG = {} # (map id, NPC id) -> NpcData DropID and exact ShowRewardData rows
 SLOT_DATA_CONFIG = {} # SlotData ID -> client prize metadata and paid/free weights
 SLOT_AUTO_CONFIG = {} # SlotAutoData ID -> spin count and authoritative price
 SLOT_SUM_REWARD_THRESHOLD = 10 # SlotUIRootLogic.SumMaxLimit in the client APK
@@ -1769,6 +1772,27 @@ try:
                     continue
         debug_log(f"[SCUFFLE CONFIG LOADED] areas={len(SCUFFLE_CONFIG)}")
 
+    online_mission_path = os.path.join(text_asset_root, "OnlineMissionData")
+    if os.path.exists(online_mission_path):
+        with open(online_mission_path, "r", encoding="utf-8") as online_mission_file:
+            for line in online_mission_file:
+                parts = line.strip().split(",")
+                if len(parts) < 9 or parts[0] != "*" or not parts[1].isdigit():
+                    continue
+                try:
+                    ONLINE_MISSION_CONFIG[parts[1]] = {
+                        "mission_id": parts[2].strip(),
+                        "level_min": int(parts[3]),
+                        "level_max": int(parts[4]),
+                        "mission_star": int(parts[5]),
+                        "drop_id": parts[6].strip(),
+                        "show_reward": parts[7].strip(),
+                        "weight": int(parts[8]),
+                    }
+                except (TypeError, ValueError):
+                    continue
+        debug_log(f"[ONLINE MISSION CONFIG LOADED] rows={len(ONLINE_MISSION_CONFIG)}")
+
     tower_path = os.path.join(text_asset_root, "TowerData")
     if os.path.exists(tower_path):
         tower_columns = {}
@@ -2557,6 +2581,25 @@ try:
         debug_log(f"[GAME CONFIG LOADED] keys={len(GAME_CONFIG)}")
 
 except: traceback.print_exc()
+
+_scuffle_reward_data_gaps = []
+for _scuffle_map_id in sorted(SCUFFLE_NPC_MAP_IDS):
+    for _spawn_row in MONSTER_DATA.get(_scuffle_map_id, []):
+        _scuffle_npc_id = str(_spawn_row.get("nid", "") or "").strip()
+        if not _scuffle_npc_id:
+            continue
+        _drop_id = str(NPC_CONFIG.get(_scuffle_npc_id, {}).get("drop_id", "") or "").strip()
+        _reward_rows = list(SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(_drop_id, []))
+        SCUFFLE_NPC_REWARD_CONFIG[(_scuffle_map_id, _scuffle_npc_id)] = {
+            "drop_id": _drop_id,
+            "show_reward_id": _drop_id,
+            "rewards": _reward_rows,
+        }
+        if not _reward_rows:
+            _scuffle_reward_data_gaps.append(
+                f"{_scuffle_map_id}/{_scuffle_npc_id} (DropID={_drop_id or 'missing'})")
+if _scuffle_reward_data_gaps:
+    print("[SCUFFLE NPC REWARD DATA MISSING] " + ", ".join(_scuffle_reward_data_gaps))
 
 # LIBERTY_CITY_CLIENT_LOADER_BEGIN
 # Client-table loader for map 101 (Liberty City / DSJ_zhuCheng).
@@ -10355,6 +10398,25 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                         score_payload = survive_battle_top_payload(picked_char)
                         if score_payload is not None:
                             send_rpc_push(636, score_payload)
+            elif current_map in SCUFFLE_NPC_MAP_IDS:
+                npc_reward = SCUFFLE_NPC_REWARD_CONFIG.get(
+                    (current_map, str(npcid)))
+                reward_rows = list(npc_reward.get('rewards', [])) if npc_reward else []
+                if reward_rows:
+                    grant_item_rewards(
+                        picked_char, reward_rows, conn, send_rpc_push, save=False)
+                    if send_rpc_push:
+                        reward_popup = [
+                            encode_sproto([
+                                (0, item_id), (1, amount), (3, quality)
+                            ])
+                            for item_id, quality, amount in reward_rows
+                        ]
+                        send_rpc_push(638, encode_sproto([(0, reward_popup)]))
+                else:
+                    drop_id = npc_reward.get('drop_id', '') if npc_reward else ''
+                    print(f"[SCUFFLE NPC REWARD SKIP] map={current_map} npc={npcid} "
+                          f"DropID={drop_id or 'missing'} has no explicit ShowRewardData counts")
             else:
                 npc_stats = get_npc_attr(
                     npcid, picked_char.get('level', 1)
@@ -11386,7 +11448,7 @@ def prison_npc_retarget_on_hit(inst_id, attacker):
         return False
     with PRISON_NPC_LOCK:
         slot = PRISON_NPC_SHARED_SLOTS.get(str(slot_key))
-        if (not slot or str(slot.get("map_id", "")) not in SURVIVE_BATTLE_NPC_MAP_IDS
+        if (not slot or str(slot.get("map_id", "")) not in PRISON_NPC_AOI_MAP_IDS
                 or int(slot.get("inst_id") or 0) != inst_id
                 or slot.get("dead_at")
                 or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
@@ -11491,8 +11553,6 @@ def _prison_npc_ai_tick():
                             live_slot["patrol_target"] = None
                     _prison_npc_move_toward(
                         slot_key, inst_id, home_x, home_z, speed, now)
-                elif str(snapshot.get("map_id", "")) not in SURVIVE_BATTLE_NPC_MAP_IDS:
-                    _prison_npc_stop(slot_key, inst_id, now)
                 else:
                     patrol_type = int(ai_cfg.get("patrol_type", 0) or 0)
                     # AIData distances are centi-units; PatrolRadius is in meters.
@@ -17222,13 +17282,61 @@ def give_mission_rewards(picked_char, mid):
     """Resolves rewards by profession and calculates level ups using BaseLvData."""
     try:
         m = missions_data.get(mid)
-        if not m or not m.get('reward_ids'): return 0, 0, [], [], False
+        if not m:
+            return 0, 0, [], [], False
 
-        prof = picked_char.get('prof', 0)
-        rids = m['reward_ids']
-        rid = rids[prof] if prof < len(rids) else rids[0]
-        reward = rewards_data.get(rid)
-        if not reward: return 0, 0, [], [], False
+        online_reward_rows = None
+        if int(m.get('class', 0) or 0) == 7:
+            active_entry = picked_char.get('active_missions', {}).get(mid, {})
+            parm = active_entry.get('parm', []) if isinstance(active_entry, dict) else []
+            try:
+                online_id = str(int(parm[1]))
+            except (IndexError, TypeError, ValueError):
+                print(f"[SCUFFLE MISSION REWARD MISSING] mission={mid} online_id unavailable")
+                return 0, 0, [], [], False
+            online_cfg = ONLINE_MISSION_CONFIG.get(online_id, {})
+            show_reward_id = str(online_cfg.get('show_reward', '') or '').strip()
+            if str(online_cfg.get('mission_id', '')) != str(mid) or not show_reward_id:
+                print(f"[SCUFFLE MISSION REWARD MISSING] mission={mid} online_id={online_id}")
+                return 0, 0, [], [], False
+            online_reward_rows = list(
+                SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(show_reward_id, []))
+            if not online_reward_rows:
+                print(f"[SCUFFLE MISSION REWARD MISSING] mission={mid} "
+                      f"online_id={online_id} ShowRewardID={show_reward_id}")
+                return 0, 0, [], [], False
+            unsupported_resources = [
+                item_id for item_id, _quality, _amount in online_reward_rows
+                if item_id in DIRECT_REWARD_RESOURCE_IDS
+                and item_id not in ('1001', '2001')
+            ]
+            if unsupported_resources:
+                print(f"[SCUFFLE MISSION REWARD UNSUPPORTED] mission={mid} "
+                      f"ShowRewardID={show_reward_id} items={unsupported_resources}")
+                return 0, 0, [], [], False
+            reward_items = [
+                (item_id, quality, amount)
+                for item_id, quality, amount in online_reward_rows
+                if item_id not in ('1001', '2001')
+            ]
+            reward = {
+                'exp': sum(amount for item_id, _quality, amount in online_reward_rows
+                           if item_id == '2001'),
+                'cash': sum(amount for item_id, _quality, amount in online_reward_rows
+                            if item_id == '1001'),
+                'items': [item_id for item_id, _quality, _amount in reward_items],
+                'item_amounts': [amount for _item_id, _quality, amount in reward_items],
+                'item_qualities': [quality for _item_id, quality, _amount in reward_items],
+            }
+        else:
+            if not m.get('reward_ids'):
+                return 0, 0, [], [], False
+            prof = picked_char.get('prof', 0)
+            rids = m['reward_ids']
+            rid = rids[prof] if prof < len(rids) else rids[0]
+            reward = rewards_data.get(rid)
+            if not reward:
+                return 0, 0, [], [], False
 
         added_exp = reward.get('exp', 0)
         added_cash = reward.get('cash', 0)
@@ -17261,18 +17369,28 @@ def give_mission_rewards(picked_char, mid):
 
         # Send original reward popup (Tag 638)
         # Sproto item schema: itemId(0), itemCount(1), quality(2).
-        popup_items = [
-            encode_sproto([(0, "2001"), (1, added_exp), (2, 0)]),
-            encode_sproto([(0, "1001"), (1, added_cash), (2, 0)])
-        ]
+        if online_reward_rows is None:
+            popup_items = [
+                encode_sproto([(0, "2001"), (1, added_exp), (2, 0)]),
+                encode_sproto([(0, "1001"), (1, added_cash), (2, 0)])
+            ]
+        else:
+            popup_items = [
+                encode_sproto([(0, item_id), (1, amount), (2, quality)])
+                for item_id, quality, amount in online_reward_rows
+            ]
 
         items, amts = reward.get('items', []), reward.get('item_amounts', [])
+        qualities = reward.get('item_qualities', [])
         granted_items = []
         for i in range(len(items)):
             if items[i]:
                 amt = amts[i] if i < len(amts) else 1
-                popup_items.append(encode_sproto([(0, items[i]), (1, amt), (2, 0)]))
-                add_to_inventory(picked_char, items[i], amt)
+                quality = qualities[i] if i < len(qualities) else None
+                if online_reward_rows is None:
+                    popup_items.append(encode_sproto([
+                        (0, items[i]), (1, amt), (2, quality or 0)]))
+                add_to_inventory(picked_char, items[i], amt, quality=quality)
                 granted_items.append((items[i], amt))
 
         # The caller sends TAG 638 after ret_complete_mission (521).  The APK
@@ -17283,11 +17401,22 @@ def give_mission_rewards(picked_char, mid):
         traceback.print_exc()
         return 0, 0, [], [], False
 
-def accept_mission_logic(picked_char, mid):
+def accept_mission_logic(picked_char, mid, online_id=None):
     if mid not in missions_data:
         print(f"[accept_mission_logic] FAILED: {mid} not in missions_data")
         return False
     m = missions_data[mid]
+    is_scuffle_mission = int(m.get('class', 0) or 0) == 7
+    online_id = str(online_id or '').strip()
+    if is_scuffle_mission:
+        online_cfg = ONLINE_MISSION_CONFIG.get(online_id)
+        if (not online_cfg
+                or str(online_cfg.get('mission_id')) != str(mid)
+                or not int(online_cfg.get('level_min', 0) or 0)
+                    <= int(picked_char.get('level', 1) or 1)
+                    <= int(online_cfg.get('level_max', 0) or 0)):
+            print(f"[accept_mission_logic] FAILED: invalid Scuffle selection mission={mid} online_id={online_id}")
+            return False
     # Main-chain completion may activate the next mission before the client
     # sends its follow-up accept request. Treat that retry as an acknowledgement
     # and preserve the existing state/progress instead of rejecting or resetting it.
@@ -17296,6 +17425,15 @@ def accept_mission_logic(picked_char, mid):
         active_missions = {}
         picked_char['active_missions'] = active_missions
     if mid in active_missions:
+        if is_scuffle_mission:
+            active_entry = active_missions[mid]
+            parm = active_entry.setdefault('parm', [0] * 8)
+            if len(parm) < 8:
+                parm.extend([0] * (8 - len(parm)))
+            if int(parm[1] or 0) not in (0, int(online_id)):
+                print(f"[accept_mission_logic] FAILED: Scuffle selection changed mission={mid}")
+                return False
+            parm[1] = int(online_id)
         print(f"[accept_mission_logic] {mid} already active; acknowledging existing state")
         return True
 
@@ -17342,7 +17480,10 @@ def accept_mission_logic(picked_char, mid):
             print(f"[accept_mission_logic] Gotham activity unavailable or exhausted: {mid}")
         return activity_accept
 
-    parm = [0]*8; parm[7] = int(time.time())
+    parm = [0]*8
+    if is_scuffle_mission:
+        parm[1] = int(online_id)
+    parm[7] = int(time.time())
     picked_char['active_missions'][mid] = {'state': 1, 'parm': parm, 'accept_time': int(time.time())}
     return True
 
@@ -25043,7 +25184,12 @@ def client_handler(conn, addr):
             elif msg == 112: # accept_mission
                 if picked_char:
                     mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
-                    res = accept_mission_logic(picked_char, mid)
+                    online_id = body.get(1, b'')
+                    online_id = (
+                        online_id.decode('utf-8')
+                        if isinstance(online_id, bytes) else str(online_id or '')
+                    )
+                    res = accept_mission_logic(picked_char, mid, online_id)
                     print(f"[MISSION ACCEPT REQ] mid={mid} result={res}")
                     if mid == '1014':
                         mission1014_log(
@@ -28164,7 +28310,7 @@ def client_handler(conn, addr):
 
                             cash_stage_state = picked_char.get('cash_stage_state') if picked_char else None
                             if (applied_damage > 0
-                                    and cur_map in SURVIVE_BATTLE_NPC_MAP_IDS):
+                                    and cur_map in PRISON_NPC_AOI_MAP_IDS):
                                 prison_npc_retarget_on_hit(target_id, picked_char)
                             if (not is_stage_combat and isinstance(cash_stage_state, dict)
                                     and str(cash_stage_state.get('copy_id'))
