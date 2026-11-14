@@ -28425,34 +28425,46 @@ def client_handler(conn, addr):
                                     continue
                                 skill_id, skill_lv, effinfo_id = validated_hit
                             else:
-                                # Verify the attacker actually has this skill learned.
-                                # Starter skills (101-105 for XD, 201-205 for QJ, 301-305 for NQS)
-                                # are always available at level 0, even if not in skill_levels.
                                 char_skill_levels = {str(key): value for key, value in
                                                      (picked_char.get('skill_levels') or {}).items()}
-                                learned_skill_ids = learned_non_weapon_skill_ids(char_skill_levels)
-                                prof = picked_char.get('prof', 0)
-                                starter_skills = get_character_combat_skills(
-                                    prof, picked_char.get('equipped_equip', [])
+                                # Use the same skill roster and levels sent to the
+                                # client. A fallback to basic skill 50001 here
+                                # recalculates active-skill hits with the wrong
+                                # damage ceiling and can leave a locally dead NPC
+                                # alive on the server.
+                                skill_map = build_skills_map(
+                                    picked_char.get('prof', 0),
+                                    picked_char.get('level', 1),
+                                    char_skill_levels,
+                                    picked_char.get('equipped_equip', []),
+                                    picked_char.get('skill_positions', {}),
                                 )
-                                always_available = set(starter_skills.get('atk', []))
-                                always_available.add(starter_skills.get('dodge', ''))
-                                always_available.add(starter_skills.get('starter_active', ''))
-                                always_available.update(equipped_weapon_skill_ids(picked_char))
-                                if skill_id not in learned_skill_ids and skill_id not in always_available:
-                                    # Skill not learned by player and not a starter skill, reject
-                                    skill_id = "50001"
-                                    effinfo_id = None
-                                skill_lv = char_skill_levels.get(skill_id, 0)
-                                if skill_lv < 0:
-                                    skill_id = "50001"
-                                    skill_lv = 0
-                                    effinfo_id = None
-
-                                # Server-authoritative effinfo_id: derive from skill_id, not from client
-                                if effinfo_id is None:
-                                    skill_cfg = SKILL_CONFIG.get(skill_id, {})
-                                    effinfo_id = skill_cfg.get('eff0', "10000")
+                                skill_data = skill_map.get(skill_id)
+                                skill_cfg = SKILL_CONFIG.get(skill_id, {})
+                                if skill_data is None or not skill_cfg:
+                                    print(f"[COMBAT SECURITY] rejected unavailable skill "
+                                          f"attacker={picked_char.get('id')} skill={skill_id}")
+                                    continue
+                                skill_lv = max(
+                                    0, get_val_int(decode_sproto(skill_data), 1, 0))
+                                valid_effects = {
+                                    str(skill_cfg.get(key) or '')
+                                    for key in ('eff0', 'eff1', 'eff2')
+                                    if skill_cfg.get(key)
+                                }
+                                if requested_effinfo_id:
+                                    if requested_effinfo_id not in valid_effects:
+                                        print(f"[COMBAT SECURITY] rejected invalid NPC skill effect "
+                                              f"attacker={picked_char.get('id')} "
+                                              f"skill={skill_id} effect={requested_effinfo_id}")
+                                        continue
+                                    effinfo_id = requested_effinfo_id
+                                else:
+                                    effinfo_id = str(skill_cfg.get('eff0') or '')
+                                    if not effinfo_id:
+                                        print(f"[COMBAT SECURITY] rejected skill without damage effect "
+                                              f"attacker={picked_char.get('id')} skill={skill_id}")
+                                        continue
 
                             if is_stage_combat:
                                 # The APK applies this damage locally before it
