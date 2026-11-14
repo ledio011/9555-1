@@ -9466,6 +9466,27 @@ def equipment_stage_result_items(copy_id, character):
             count = 20
         rewards.append((item_id, int(item_cfg.get('quality', 0)), count))
 
+    # The lower level brackets are rank-specific: use only the highest-rank
+    # preview in their client-authored table. The 71-80 bracket intentionally
+    # keeps its full configured pool so it can award a random rank.
+    try:
+        stage_min_level = int(cfg.get('min_level', 1))
+    except (TypeError, ValueError):
+        stage_min_level = 1
+    if gear_previews and stage_min_level < 71:
+        ranked_previews = []
+        for preview_id in gear_previews:
+            try:
+                ranked_previews.append((int(preview_id) % 10, preview_id))
+            except (TypeError, ValueError):
+                continue
+        if ranked_previews:
+            highest_tier = max(tier for tier, _preview_id in ranked_previews)
+            gear_previews = [
+                preview_id for tier, preview_id in ranked_previews
+                if tier == highest_tier
+            ]
+
     # Exp/Money are separate ShowRewardData columns only in client data versions
     # that actually define them. This APK's 36001..36007 tables do not have an
     # Exp column; their first item is 3001 (equipment enhancement material).
