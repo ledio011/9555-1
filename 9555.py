@@ -24618,6 +24618,9 @@ def client_handler(conn, addr):
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
             debug_log(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
+            if msg == 279:
+                print(f"[RETRIEVE RX] player={picked_char.get('id') if picked_char else None} "
+                      f"session={session} fields={body}")
             if msg in (202, 203, 204, 205, 208, 230):
                 print(f"[TOWER RX] player={picked_char.get('id') if picked_char else None} "
                       f"msg={msg} session={session} fields={sorted(body)} "
@@ -32039,6 +32042,9 @@ def client_handler(conn, addr):
                 elif msg == 279 and picked_char: # request_retrieve
                     retrieve_id = get_val_str(body, 0, '')
                     requested_type = get_val_int(body, 1, -1)
+                    print(f"[RETRIEVE REQUEST] player={picked_char.get('id')} "
+                          f"id={retrieve_id!r} type={requested_type} session={session} "
+                          f"current={is_current_character_connection(conn, picked_char)}")
                     claimed = False
                     claimed_items = []
                     claim_save_failed = False
@@ -32085,6 +32091,10 @@ def client_handler(conn, addr):
                                 and level >= unlock_level
                                 and (retrieve_type != 9 or guild_id > 0)
                             )
+                            print(f"[RETRIEVE CHECK] player={picked_char.get('id')} "
+                                  f"id={retrieve_id!r} cfg={bool(cfg)} selected={selected} "
+                                  f"state={retrieve_state} level={level}/{unlock_level} "
+                                  f"guild={guild_id} allowed={allowed}")
                             rewards = []
                             if allowed:
                                 option_index, money_type, scale, price_base, price_add, price_max = selected
@@ -32197,12 +32207,17 @@ def client_handler(conn, addr):
                               f"type={requested_type} reason={failure_reason}")
                     # The APK's commercial-reward handler closes the 279 wait box
                     # and shows item rows for any non-daily-active reward type.
-                    send_rpc_push(650, encode_sproto([
+                    result_sent = send_rpc_push(650, encode_sproto([
                         (0, claimed_items), (1, 8), (3, retrieve_id),
                         (7, 0 if claimed else 1)
                     ]))
                     send_rpc_response(session)
-                    send_rpc_push(658, retrieve_info_payload(picked_char))
+                    info_sent = send_rpc_push(
+                        658, retrieve_info_payload(picked_char))
+                    print(f"[RETRIEVE RESPONSE] player={picked_char.get('id')} "
+                          f"id={retrieve_id!r} claimed={claimed} "
+                          f"tag650_sent={result_sent} tag658_sent={info_sent} "
+                          f"session={session}")
                     if claimed:
                         for tag, payload in pending_reward_pushes:
                             send_rpc_push(tag, payload)
@@ -32214,6 +32229,17 @@ def client_handler(conn, addr):
                             gotham_broadcast_tvshow_items(
                                 picked_char, post_claim_tvshow_item_ids
                             )
+
+                elif msg == 279: # request_retrieve without a selected character
+                    retrieve_id = get_val_str(body, 0, '')
+                    print(f"[RETRIEVE REQUEST] rejected without selected character "
+                          f"id={retrieve_id!r} session={session}")
+                    result_sent = send_rpc_push(650, encode_sproto([
+                        (0, []), (1, 8), (3, retrieve_id), (7, 1)
+                    ]))
+                    send_rpc_response(session)
+                    print(f"[RETRIEVE RESPONSE] no selected character "
+                          f"tag650_sent={result_sent} session={session}")
 
                 elif msg == 245: # request_survive_top
                     if (picked_char
