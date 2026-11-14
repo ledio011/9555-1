@@ -328,6 +328,7 @@ WILD_BOSS_CONFIG = {} # ID -> configured world boss and required level band
 COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
 SCUFFLE_CONFIG = {} # scuffle ID -> ScuffleData fields used by the APK
 ONLINE_MISSION_CONFIG = {} # online mission ID -> rank mission selection and reward references
+SCUFFLE_REFRESH_GOLD_COST = 20
 TOWER_CONFIG = {} # floor index -> TowerData fields used by the APK
 TOWER_MAP_TO_FLOOR = {} # map ID -> TowerData floor index
 SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
@@ -505,6 +506,7 @@ try:
                         'target_id': parts[11],
                         'pre_id': parts[12],
                         'next_id': parts[14],
+                        'map_id': parts[20] if len(parts) > 20 else '',
                         'min_level': int(parts[23]) if parts[23].isdigit() else 1,
                         'reward_ids': [parts[25] if len(parts)>25 else "", parts[27] if len(parts)>27 else "", parts[29] if len(parts)>29 else ""]
                     }
@@ -10257,7 +10259,9 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
     if is_tower_map(current_map) and inst_id:
         tower_npc_killed(picked_char, inst_id, conn, send_rpc_push)
     if valid_kill and not is_exp_map(current_map) and not is_equipment_copy_map(current_map):
-        advance_missions(picked_char, send_rpc_push, 'kill', target_id=npcid)
+        advance_missions(
+            picked_char, send_rpc_push, 'kill', target_id=npcid,
+            map_id=current_map)
 
     if exp_state and inst_id:
         active_monsters = exp_state.get('active_monsters', [])
@@ -12697,6 +12701,24 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                             if str(s['map']) == map_str:
                                 for _ in range(s['num']): send_npc_create(s['nid'], f"Quest_{s['nid']}", s['x'], s['z'], 0)
 
+def mission_rank_for_active_entry(mid, mission_entry):
+    mission_cfg = missions_data.get(str(mid), {})
+    if int(mission_cfg.get('class', 0) or 0) != 7:
+        return 0
+    parm = mission_entry.get('parm', []) if isinstance(mission_entry, dict) else []
+    try:
+        online_id = str(int(parm[1]))
+    except (IndexError, TypeError, ValueError):
+        return 0
+    online_cfg = ONLINE_MISSION_CONFIG.get(online_id, {})
+    if str(online_cfg.get('mission_id', '')) != str(mid):
+        return 0
+    try:
+        return max(0, int(online_cfg.get('mission_star', 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def sync_mission_data(picked_char):
     active_missions = picked_char.get("active_missions", {})
     main_mission = active_missions.get("1014", {})
@@ -12740,7 +12762,7 @@ def sync_mission_data(picked_char):
         m_bytes = encode_sproto([
             (0, str(mid)),
             (1, int(mdata['state'])),
-            (2, 0), # missionquality
+            (2, mission_rank_for_active_entry(mid, mdata)),
             (3, [int(x) for x in parm])
         ])
         own_missions_list.append(m_bytes)
@@ -15239,8 +15261,118 @@ def ensure_daily_copy_state(picked_char):
     if state.get('day') != stamp:
         state['day'] = stamp
         state['remaining'] = {}
+        state['scuffle_online_missions'] = {}
         # Do NOT reset best_times on daily reset - best times are persistent records
     return state
+
+def scuffle_copy_scene_for_level(level):
+    eligible = []
+    for copy_id, cfg in COPY_SCENE_CONFIG.items():
+        if int(cfg.get('subtype', -1)) != 20:
+            continue
+        if not int(cfg.get('min_level', 1)) <= int(level) <= int(cfg.get('max_level', 80)):
+            continue
+        try:
+            numeric_id = int(copy_id)
+        except (TypeError, ValueError):
+            numeric_id = 0
+        eligible.append(((int(cfg.get('min_level', 1)), -numeric_id), copy_id, cfg))
+    if not eligible:
+        return None, None
+    _, copy_id, cfg = max(eligible, key=lambda row: row[0])
+    return str(copy_id), cfg
+
+def scuffle_online_mission_candidates(level):
+    candidates = []
+    for online_id, cfg in ONLINE_MISSION_CONFIG.items():
+        mission_id = str(cfg.get('mission_id', ''))
+        mission = missions_data.get(mission_id, {})
+        try:
+            eligible_level = int(cfg.get('level_min', 0)) <= int(level) <= int(cfg.get('level_max', 0))
+            weight = int(cfg.get('weight', 0))
+        except (TypeError, ValueError):
+            continue
+        if (eligible_level and weight > 0
+                and int(mission.get('class', 0) or 0) == 7):
+            candidates.append((str(online_id), weight))
+    return candidates
+
+def active_scuffle_mission(picked_char):
+    for mission_id, entry in (picked_char.get('active_missions') or {}).items():
+        if int(missions_data.get(str(mission_id), {}).get('class', 0) or 0) != 7:
+            continue
+        try:
+            state = int(entry.get('state', 0) or 0)
+            parm = entry.get('parm', [])
+            online_id = str(int(parm[1]))
+        except (AttributeError, IndexError, TypeError, ValueError):
+            continue
+        if state in (1, 2, 3):
+            return str(mission_id), online_id
+    return None
+
+def scuffle_online_mission_offer(picked_char, copy_id):
+    active = active_scuffle_mission(picked_char)
+    if active:
+        return active[1]
+
+    level = int(picked_char.get('level', 1) or 1)
+    candidates = scuffle_online_mission_candidates(level)
+    if not candidates:
+        return ''
+
+    state = ensure_daily_copy_state(picked_char)
+    offers = state.setdefault('scuffle_online_missions', {})
+    online_id = str(offers.get(str(copy_id), '') or '')
+    if any(candidate_id == online_id for candidate_id, _ in candidates):
+        return online_id
+
+    seed = f"{picked_char.get('id', '')}:{state.get('day', '')}:{copy_id}"
+    chooser = random.Random(seed)
+    return chooser.choices(
+        [candidate_id for candidate_id, _ in candidates],
+        weights=[weight for _, weight in candidates],
+        k=1,
+    )[0]
+
+def refresh_scuffle_mission_offer(picked_char, all_characters):
+    level = int(picked_char.get('level', 1) or 1)
+    copy_id, copy_cfg = scuffle_copy_scene_for_level(level)
+    if not copy_id or not copy_cfg:
+        return False, "scuffle_unavailable"
+    if active_scuffle_mission(picked_char):
+        return False, "mission_active"
+    if copy_attempts_remaining(picked_char, copy_id, copy_cfg) <= 0:
+        return False, "attempts_exhausted"
+
+    candidates = scuffle_online_mission_candidates(level)
+    if not candidates:
+        return False, "no_eligible_missions"
+    old_balance = get_currency_balance(picked_char, 1)
+    if old_balance < SCUFFLE_REFRESH_GOLD_COST:
+        return False, "insufficient_gold"
+
+    new_offer = random.choices(
+        [candidate_id for candidate_id, _ in candidates],
+        weights=[weight for _, weight in candidates],
+        k=1,
+    )[0]
+    copy_state = ensure_daily_copy_state(picked_char)
+    offers = copy_state.setdefault('scuffle_online_missions', {})
+    had_old_offer = copy_id in offers
+    old_offer = offers.get(copy_id)
+    offers[copy_id] = new_offer
+    set_currency_balance(
+        picked_char, 1, old_balance - SCUFFLE_REFRESH_GOLD_COST)
+    if save_chars(all_characters):
+        return True, "ok"
+
+    set_currency_balance(picked_char, 1, old_balance)
+    if had_old_offer:
+        offers[copy_id] = old_offer
+    else:
+        offers.pop(copy_id, None)
+    return False, "persistence_failed"
 
 def calculate_npc_kill_rewards(player_level, npc_level=1):
     """Calculates balanced EXP and Cash rewards for killing/hitting an NPC based on BaseLvData."""
@@ -17172,24 +17304,32 @@ def sync_copy_scenes(picked_char):
         # copyscene_info: ID, CurNum, BestGrade, Type, str, enable, state, Type2.
         # Type=1 marks a daily copy.  The client finds the Street Race entry
         # through CopySceneData.SubType == 7, rather than a server-made ID.
-        state = ensure_daily_copy_state(picked_char)
-        best_grade = state.get('best_times', {}).get(copy_id)
-        best_str = state.get('best_times_str', {}).get(copy_id)
+        copy_state = ensure_daily_copy_state(picked_char)
+        best_grade = copy_state.get('best_times', {}).get(copy_id)
+        best_str = copy_state.get('best_times_str', {}).get(copy_id)
+        is_scuffle = int(cfg.get('subtype', -1)) == 20
+        scuffle_active = active_scuffle_mission(picked_char) if is_scuffle else None
+        scuffle_offer = (
+            scuffle_active[1] if scuffle_active
+            else scuffle_online_mission_offer(picked_char, copy_id)
+        ) if is_scuffle else ''
 
         info_fields = [
             (0, str(copy_id)),
             (1, copy_scene_current_num(picked_char, copy_id, cfg, now)),
             (3, 1),
             (5, True),
-            (6, 0),
+            (6, 1 if scuffle_active else 0),
             (7, cfg['subtype'])
         ]
-        best_copy_grade = state.get('best_grades', {}).get(copy_id)
+        best_copy_grade = copy_state.get('best_grades', {}).get(copy_id)
         if best_copy_grade is not None:
             info_fields.append((2, int(best_copy_grade)))
         elif best_grade is not None:
             info_fields.append((2, int(best_grade)))
-        if best_str:
+        if is_scuffle and scuffle_offer:
+            info_fields.append((4, str(scuffle_offer)))
+        elif best_str:
             info_fields.append((4, str(best_str)))
 
         copies[str(copy_id)] = encode_sproto(info_fields)
@@ -17417,6 +17557,12 @@ def accept_mission_logic(picked_char, mid, online_id=None):
                     <= int(online_cfg.get('level_max', 0) or 0)):
             print(f"[accept_mission_logic] FAILED: invalid Scuffle selection mission={mid} online_id={online_id}")
             return False
+        copy_id, _ = scuffle_copy_scene_for_level(
+            int(picked_char.get('level', 1) or 1))
+        if (not copy_id
+                or online_id != scuffle_online_mission_offer(picked_char, copy_id)):
+            print(f"[accept_mission_logic] FAILED: stale Scuffle offer mission={mid} online_id={online_id}")
+            return False
     # Main-chain completion may activate the next mission before the client
     # sends its follow-up accept request. Treat that retry as an acknowledgement
     # and preserve the existing state/progress instead of rejecting or resetting it.
@@ -17483,6 +17629,8 @@ def accept_mission_logic(picked_char, mid, online_id=None):
     parm = [0]*8
     if is_scuffle_mission:
         parm[1] = int(online_id)
+        copy_state = ensure_daily_copy_state(picked_char)
+        copy_state.setdefault('scuffle_online_missions', {})[copy_id] = online_id
     parm[7] = int(time.time())
     picked_char['active_missions'][mid] = {'state': 1, 'parm': parm, 'accept_time': int(time.time())}
     return True
@@ -17600,6 +17748,11 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                     for s in KILL_TARGET_SPAWNS[spawn_key]:
                         spawn_nids.add(str(s['nid']))
                 matched = target == target_value or target_value in spawn_nids
+            if int(cfg.get('class', 0) or 0) == 7:
+                    mission_map = str(cfg.get('map_id', '') or '').strip()
+                    event_map = str(map_id or picked_char.get('map_id', '') or '').strip()
+                    if mission_map:
+                        matched = matched and event_map == mission_map
         elif logic_type == 19 and event == 'car':
             # The client sends type 2 for a normal car robbery without an
             # NPC/car id, so its event type is the authoritative discriminator.
@@ -25181,6 +25334,23 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, p_raw)]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif msg == 309: # refresh_online_misison
+                refresh_success = False
+                refresh_reason = "invalid_character"
+                if (picked_char
+                        and is_current_character_connection(conn, picked_char)):
+                    with get_character_transaction_lock(picked_char):
+                        refresh_success, refresh_reason = refresh_scuffle_mission_offer(
+                            picked_char, all_accounts_chars)
+                if refresh_success:
+                    sync_char_attrs_rpc(conn, picked_char)
+                    send_rpc_push(555, sync_copy_scenes(picked_char))
+                else:
+                    print(f"[SCUFFLE REFRESH] rejected player="
+                          f"{picked_char.get('id') if picked_char else '-'} "
+                          f"reason={refresh_reason}")
+                send_rpc_response(session)
+
             elif msg == 112: # accept_mission
                 if picked_char:
                     mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
@@ -25209,7 +25379,7 @@ def client_handler(conn, addr):
                         own_bytes = encode_sproto([
                             (0, str(mid)),
                             (1, int(m_entry.get('state', 1))),
-                            (2, 0),
+                            (2, mission_rank_for_active_entry(mid, m_entry)),
                             (3, [int(x) for x in parm])
                         ])
                         send_rpc_push(520, encode_sproto([
@@ -25218,6 +25388,8 @@ def client_handler(conn, addr):
                             (2, 0),
                             (3, own_bytes)
                         ]))
+                        if int(missions_data.get(mid, {}).get('class', 0) or 0) == 7:
+                            send_rpc_push(555, sync_copy_scenes(picked_char))
                         if daily_mid_to_push:
                             push_daily_mission_task(picked_char, send_rpc_push, daily_mid_to_push)
                         if m_entry.get('activity_id'):
@@ -25383,6 +25555,8 @@ def client_handler(conn, addr):
                                 )
                                 send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
                             send_rpc_push(519, sync_mission_data(picked_char))   # Mission UI update
+                            if int(m_cfg.get('class', 0) or 0) == 7:
+                                send_rpc_push(555, sync_copy_scenes(picked_char))
                             if popup_items:
                                 send_rpc_push(638, encode_sproto([(0, popup_items)]))
                             if items_add:
@@ -25412,6 +25586,8 @@ def client_handler(conn, addr):
                     save_chars(all_accounts_chars)
                     send_rpc_push(522, encode_sproto([(0, mid), (1, 0)]))
                     send_rpc_push(519, sync_mission_data(picked_char))
+                    if int(m_cfg.get('class', 0) or 0) == 7:
+                        send_rpc_push(555, sync_copy_scenes(picked_char))
                     if picked_char.get('map_id') == GOTHAM_MAP_ID:
                         send_rpc_push(619, activity_info_payload(picked_char))
                     print(f"[MISSION ABANDON] mission_id={mid}")
