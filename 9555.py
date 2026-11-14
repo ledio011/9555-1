@@ -8618,6 +8618,7 @@ def start_tower_floor(conn, char, floor_id, send_rpc_push, continuation=False):
         start_map_transition(conn, char, config["map_id"], send_rpc_push)
     sync_char_attrs_rpc(conn, char)
     tower_info_response(char, send_rpc_push)
+    advance_missions(char, send_rpc_push, "dungeon", target_id="107")
     return True
 
 
