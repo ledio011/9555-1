@@ -15463,10 +15463,13 @@ def start_scuffle_battle(conn, char, scuffle_id, floor_id, send_rpc_push):
         copy_state["remaining"][scuffle_id] = remaining - 1
 
     char["active_copy_id"] = scuffle_id
+    if new_entry:
+        # Update the client's cached CurNum before the scene transition closes
+        # the daily-copy UI.
+        send_rpc_push(555, sync_copy_scenes(char))
     start_map_transition(conn, char, target_map, send_rpc_push)
     save_chars(all_accounts_chars)
     if new_entry:
-        send_rpc_push(555, sync_copy_scenes(char))
         advance_missions(char, send_rpc_push, "dungeon", target_id="108")
     print(f"[SCUFFLE] entered id={scuffle_id} floor={floor_id} "
           f"player={char.get('id')} remaining="
@@ -30145,7 +30148,7 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
-            elif msg in [106, 246, 273, 207, 201, 194, 322]:
+            elif msg in [106, 246, 207, 201, 194, 322]:
                 # Scene/Dungeon Entry
                 mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0))
                 debug_log(f"[RX] Scene Entry: {mid} (MSG={msg})")
