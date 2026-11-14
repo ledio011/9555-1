@@ -27551,7 +27551,9 @@ def client_handler(conn, addr):
                         item = found['item']
                         item.setdefault('parm', [0] * 8)[5] = 1
                         save_chars(all_accounts_chars)
-                        push_backpack_item_update(send_rpc_push, container_type, item)
+                        # The client already clears its local New flag before
+                        # sending this request. Echoing an item update refreshes
+                        # the full backpack UI and clears recycle selections.
                 send_rpc_response(session)
 
             elif msg == 303: # equip_appraise
