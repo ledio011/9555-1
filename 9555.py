@@ -505,7 +505,11 @@ try:
                         'target_id': parts[11],
                         'pre_id': parts[12],
                         'next_id': parts[14],
+                        'accept_npc': parts[18],
+                        'accept_map_id': parts[19],
                         'map_id': parts[20] if len(parts) > 20 else '',
+                        'submit_npc': parts[21],
+                        'submit_map_id': parts[22],
                         'min_level': int(parts[23]) if parts[23].isdigit() else 1,
                         'reward_ids': [parts[25] if len(parts)>25 else "", parts[27] if len(parts)>27 else "", parts[29] if len(parts)>29 else ""]
                     }
@@ -17576,6 +17580,40 @@ def give_mission_rewards(picked_char, mid):
         traceback.print_exc()
         return 0, 0, [], [], False
 
+def validate_mission_npc_contact(picked_char, mission_id, role):
+    mission = missions_data.get(str(mission_id), {})
+    npc_id = str(mission.get(f'{role}_npc', '') or '').strip()
+    map_id = str(mission.get(f'{role}_map_id', '') or '').strip()
+    if not npc_id or npc_id == '#N/A' or not map_id or map_id == '#N/A':
+        return True, 'not_configured'
+    if str(picked_char.get('map_id', '')) != map_id:
+        return False, 'wrong_map'
+
+    spawns = list(STATIC_NPC_DATA.get(map_id, []))
+    spawns.extend(MONSTER_DATA.get(map_id, []))
+    npc_spawns = [spawn for spawn in spawns if str(spawn.get('nid')) == npc_id]
+    if not npc_spawns:
+        # MissionData assigns this NPC to map 11, but MonsterData has no
+        # matching spawn there. Keep the client's map requirement, but do not
+        # invent a proximity point that the client data does not provide.
+        return role == 'accept', 'npc_spawn_missing'
+
+    player_pos = picked_char.get('pos')
+    try:
+        if not isinstance(player_pos, (list, tuple)) or len(player_pos) < 3:
+            return False, 'player_position_missing'
+        near_npc = any(
+            math.hypot(
+                int(player_pos[0]) - int(spawn['x']),
+                int(player_pos[2]) - int(spawn['z']),
+            ) < 500
+            for spawn in npc_spawns
+        )
+    except (KeyError, TypeError, ValueError):
+        return False, 'invalid_position'
+    return near_npc, 'accepted' if near_npc else 'too_far'
+
+
 def accept_mission_logic(picked_char, mid, online_id=None):
     if mid not in missions_data:
         print(f"[accept_mission_logic] FAILED: {mid} not in missions_data")
@@ -17606,8 +17644,10 @@ def accept_mission_logic(picked_char, mid, online_id=None):
         active_missions = {}
         picked_char['active_missions'] = active_missions
     if mid in active_missions:
+        active_entry = active_missions[mid]
+        if m.get('logic_type') == 2 and active_entry.get('state') == 1:
+            active_entry['state'] = 2
         if is_scuffle_mission:
-            active_entry = active_missions[mid]
             parm = active_entry.setdefault('parm', [0] * 8)
             if len(parm) < 8:
                 parm.extend([0] * (8 - len(parm)))
@@ -17674,7 +17714,10 @@ def accept_mission_logic(picked_char, mid, online_id=None):
         copy_state = ensure_daily_copy_state(picked_char)
         copy_state.setdefault('scuffle_online_missions', {})[copy_id] = online_id
     parm[7] = int(time.time())
-    picked_char['active_missions'][mid] = {'state': 1, 'parm': parm, 'accept_time': int(time.time())}
+    initial_state = 2 if m.get('logic_type') == 2 else 1
+    picked_char['active_missions'][mid] = {
+        'state': initial_state, 'parm': parm, 'accept_time': int(time.time())
+    }
     if is_scuffle_mission:
         copy_state['remaining'][copy_id] = remaining - 1
     return True
@@ -17807,7 +17850,7 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             matched = die_type == 6
         elif logic_type == 20 and event == 'impact':
             matched = die_type == 3 and (not target or target == target_value)
-        elif logic_type in [0, 2, 6, 21] and event == 'interact':
+        elif logic_type in [0, 6, 21] and event == 'interact':
             if logic_type == 21 and die_type == 4:
                 # Arrive Target sends missionId as target_id
                 matched = (target_value == mid)
@@ -25404,8 +25447,23 @@ def client_handler(conn, addr):
                         if isinstance(online_id, bytes) else str(online_id or '')
                     )
                     with get_character_transaction_lock(picked_char):
-                        res = accept_mission_logic(picked_char, mid, online_id)
-                    print(f"[MISSION ACCEPT REQ] mid={mid} result={res}")
+                        is_delivery = (
+                            missions_data.get(mid, {}).get('logic_type') == 2)
+                        already_active = (
+                            mid in picked_char.get('active_missions', {}))
+                        contact_ok, contact_reason = (
+                            validate_mission_npc_contact(
+                                picked_char, mid, 'accept')
+                            if is_delivery and not already_active
+                            else (True, 'active_ack' if already_active
+                                  else 'not_delivery')
+                        )
+                        res = (
+                            accept_mission_logic(picked_char, mid, online_id)
+                            if contact_ok else False
+                        )
+                    print(f"[MISSION ACCEPT REQ] mid={mid} result={res} "
+                          f"contact={contact_reason}")
                     if mid == '1014':
                         mission1014_log(
                             picked_char,
@@ -25458,6 +25516,20 @@ def client_handler(conn, addr):
                         except (AttributeError, TypeError, ValueError):
                             mission_state = 0
                         m_cfg = missions_data.get(mid, {})
+                        delivery_contact_ok = True
+                        delivery_contact_reason = 'not_delivery'
+                        if m_entry and m_cfg.get('logic_type') == 2:
+                            delivery_contact_ok, delivery_contact_reason = (
+                                validate_mission_npc_contact(
+                                    picked_char, mid, 'submit')
+                            )
+                        if (m_entry and mission_state == 1
+                                and m_cfg.get('logic_type') == 2
+                                and delivery_contact_ok):
+                            # Older active Delivery missions were left accepted,
+                            # although the client completes them immediately.
+                            mission_state = 2
+                            m_entry['state'] = mission_state
                         current_main_mission = (
                             mid != '1003'
                             or int(m_cfg.get('class', 0) or 0) != 1
@@ -25465,6 +25537,7 @@ def client_handler(conn, addr):
                             str(picked_char.get('last_main_mission_id', ''))
                         )
                         if (m_entry and mission_state == 2
+                                and delivery_contact_ok
                                 and current_main_mission):
                             # Mark before granting: duplicate/reconnected
                             # sessions cannot both claim the same objective.
@@ -25479,6 +25552,10 @@ def client_handler(conn, addr):
                             f"state={mission_state} allowed={claim_mission} "
                             f"current_main={current_main_mission}",
                         )
+                    if (m_entry and m_cfg.get('logic_type') == 2
+                            and not delivery_contact_ok):
+                        print(f"[MISSION SECURITY] rejected Delivery turn-in "
+                              f"mission={mid} contact={delivery_contact_reason}")
                     if claim_mission:
                         m_cfg = missions_data.get(mid)
                         if m_cfg:
@@ -25615,10 +25692,12 @@ def client_handler(conn, addr):
                                 # the exit sequence only after that response has been pushed.
                                 schedule_domin_return()
                         else:
-                            m_entry['state'] = 2
+                            print(f"[MISSION SECURITY] rejected complete request "
+                                  f"mission={mid} state={mission_state}")
                             if session is not None:
                                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                                 conn.sendall(struct.pack(">H", len(pf)) + pf)
+                            send_rpc_push(519, sync_mission_data(picked_char))
                     else:
                         if session is not None:
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -30358,6 +30437,9 @@ def client_handler(conn, addr):
                                     survival_state)
                                 save_chars(all_accounts_chars)
                         if msg == 246 and survival_new_entry:
+                            advance_missions(
+                                picked_char, send_rpc_push, 'dungeon',
+                                target_id='120')
                             record_daily_active_event(picked_char, 18, send_rpc_push)
                         if msg == 201: # world_boss
                             entered_new_event = _wild_boss_entry_commit(
