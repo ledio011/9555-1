@@ -15742,15 +15742,30 @@ def start_scuffle_battle(conn, char, scuffle_id, floor_id, send_rpc_push):
     new_entry = not in_scuffle
     if new_entry:
         active = active_scuffle_mission(char)
-        active_entry = (
-            (char.get("active_missions") or {}).get(active[0], {})
-            if active else {}
-        )
-        if (not active
-                or int(active_entry.get("state", 0) or 0) != 1):
-            print(f"[SCUFFLE] entry rejected player={char.get('id')} "
-                  f"id={scuffle_id} reason=mission_not_accepted")
-            return False
+        if active:
+            active_entry = (char.get("active_missions") or {}).get(active[0], {})
+            if int(active_entry.get("state", 0) or 0) != 1:
+                print(f"[SCUFFLE] entry rejected player={char.get('id')} "
+                      f"id={scuffle_id} reason=mission_not_accepted")
+                return False
+        else:
+            guide_active = any(
+                int(missions_data.get(str(mission_id), {}).get('logic_type', 0) or 0) == 108
+                and str(missions_data.get(str(mission_id), {}).get('logic_id', '')) == '108'
+                and int(entry.get('state', 0) or 0) == 1
+                for mission_id, entry in (char.get('active_missions') or {}).items()
+            )
+            if not guide_active:
+                print(f"[SCUFFLE] entry rejected player={char.get('id')} "
+                      f"id={scuffle_id} reason=mission_not_accepted")
+                return False
+            remaining = copy_attempts_remaining(char, scuffle_id, copy_cfg)
+            if remaining <= 0:
+                print(f"[SCUFFLE] entry rejected player={char.get('id')} "
+                      f"id={scuffle_id} reason=attempts_exhausted")
+                return False
+            copy_state = ensure_daily_copy_state(char)
+            copy_state.setdefault("remaining", {})[scuffle_id] = remaining - 1
         if char.get("pre_copy_pos") is None:
             char["pre_copy_pos"] = list(
                 char.get("pos") or default_map_spawn_position(current_map))
