@@ -18150,7 +18150,9 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             matched = int(cfg.get('class', 0) or 0) == 1
         elif logic_type == 110 and event == 'rank_pvp':
             matched = target_value == '110' or str(cfg.get('logic_id', '')) == '110'
-        elif logic_type in [102, 105, 106, 107, 108, 113, 114, 117, 119, 120, 132] and event in ['dungeon', 'car_copy']:
+        elif logic_type in [102, 105, 106, 107, 108, 113, 114, 117, 119, 120, 132] and (
+                event in ['dungeon', 'car_copy']
+                or (logic_type == 108 and event == 'kill')):
             # Dungeon/Guide entry missions advance on specific 'dungeon' or 'car_copy' events
             logic_id_str = str(cfg.get('logic_id'))
             target_id_str = str(target_id) if target_id is not None else ''
@@ -18168,6 +18170,12 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                 # EXP and Cash Stage missions use activity discriminators
                 # (105/106), not their configured CopySceneData IDs.
                 matched = target == target_id_str or logic_id_str == target_id_str
+            elif logic_type == 108 and event == 'kill':
+                # Mission 10 is a targetless SCUFFLE_COPY objective. A
+                # server-confirmed Prison kill also proves participation if
+                # the mission became active after the entry event.
+                event_map = str(map_id or picked_char.get('map_id', '') or '')
+                matched = event_map in SCUFFLE_NPC_MAP_IDS
             else:
                 matched = logic_id_str == target_id_str
         elif logic_type == 114 and event == 'world_boss':
