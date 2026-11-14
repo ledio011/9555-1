@@ -325,6 +325,7 @@ MOUNT_CONFIG = {} # garage vehicle id -> client MountData definition
 COLOR_CONFIG = {} # color id -> authoritative PriceType/PriceCost from ColorData
 WILD_BOSS_CONFIG = {} # ID -> configured world boss and required level band
 COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
+SCUFFLE_CONFIG = {} # scuffle ID -> ScuffleData fields used by the APK
 TOWER_CONFIG = {} # floor index -> TowerData fields used by the APK
 TOWER_MAP_TO_FLOOR = {} # map ID -> TowerData floor index
 SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
@@ -1749,6 +1750,24 @@ try:
                         'single_map_id': parts[31] if len(parts) > 31 and parts[31].isdigit() else ''
                     }
         debug_log(f"[COPY SCENE CONFIG LOADED] daily_copies={len(COPY_SCENE_CONFIG)}")
+
+    scuffle_path = os.path.join(text_asset_root, "ScuffleData")
+    if os.path.exists(scuffle_path):
+        with open(scuffle_path, "r", encoding="utf-8") as scuffle_file:
+            for line in scuffle_file:
+                parts = line.strip().split(",")
+                if len(parts) < 6 or parts[0] != "*" or not parts[1].isdigit():
+                    continue
+                try:
+                    SCUFFLE_CONFIG[parts[1]] = {
+                        "map_id": parts[2].strip(),
+                        "map_id2": parts[3].strip(),
+                        "max_player": int(parts[4]),
+                        "unlock_level": int(parts[5]),
+                    }
+                except (TypeError, ValueError):
+                    continue
+        debug_log(f"[SCUFFLE CONFIG LOADED] areas={len(SCUFFLE_CONFIG)}")
 
     tower_path = os.path.join(text_asset_root, "TowerData")
     if os.path.exists(tower_path):
@@ -15199,6 +15218,69 @@ def copy_attempts_remaining(picked_char, copy_id, cfg):
     if copy_id not in remaining:
         remaining[copy_id] = int(cfg.get('max_plays', 3))
     return max(0, int(remaining[copy_id]))
+
+def start_scuffle_battle(conn, char, scuffle_id, floor_id, send_rpc_push):
+    scuffle_id = str(scuffle_id or "")
+    try:
+        floor_id = int(floor_id)
+    except (TypeError, ValueError):
+        floor_id = -1
+    scuffle = SCUFFLE_CONFIG.get(scuffle_id)
+    copy_cfg = COPY_SCENE_CONFIG.get(scuffle_id)
+    if (not char or not is_current_character_connection(conn, char)
+            or not scuffle or not copy_cfg
+            or int(copy_cfg.get("subtype", -1)) != 20
+            or floor_id not in (0, 1)):
+        print(f"[SCUFFLE] entry rejected player={char.get('id') if char else '-'} "
+              f"id={scuffle_id} floor={floor_id} reason=invalid_request")
+        return False
+
+    floor_maps = (str(scuffle.get("map_id") or ""),
+                  str(scuffle.get("map_id2") or ""))
+    target_map = floor_maps[floor_id]
+    current_map = str(char.get("map_id") or "11")
+    in_scuffle = current_map in floor_maps
+    level = int(char.get("level", 1) or 1)
+    min_level = max(
+        int(scuffle.get("unlock_level", 1) or 1),
+        int(copy_cfg.get("min_level", 1) or 1))
+    max_level = int(copy_cfg.get("max_level", 80) or 80)
+    active_copy_id = str(char.get("active_copy_id") or "")
+    if (not target_map or target_map not in MAP_CONFIG
+            or (not in_scuffle and floor_id != 0)
+            or (in_scuffle and active_copy_id not in ("", scuffle_id))
+            or (not in_scuffle and active_copy_id)
+            or level < min_level or level > max_level):
+        print(f"[SCUFFLE] entry rejected player={char.get('id')} id={scuffle_id} "
+              f"floor={floor_id} map={current_map} level={level} "
+              f"reason=invalid_state_or_level")
+        return False
+
+    new_entry = not in_scuffle
+    remaining = None
+    if new_entry:
+        remaining = copy_attempts_remaining(char, scuffle_id, copy_cfg)
+        if remaining <= 0:
+            print(f"[SCUFFLE] entry rejected player={char.get('id')} "
+                  f"id={scuffle_id} reason=daily_attempts_exhausted")
+            return False
+        if char.get("pre_copy_pos") is None:
+            char["pre_copy_pos"] = list(
+                char.get("pos") or default_map_spawn_position(current_map))
+            char["pre_copy_map"] = current_map
+        copy_state = ensure_daily_copy_state(char)
+        copy_state["remaining"][scuffle_id] = remaining - 1
+
+    char["active_copy_id"] = scuffle_id
+    start_map_transition(conn, char, target_map, send_rpc_push)
+    save_chars(all_accounts_chars)
+    if new_entry:
+        send_rpc_push(555, sync_copy_scenes(char))
+        advance_missions(char, send_rpc_push, "dungeon", target_id="108")
+    print(f"[SCUFFLE] entered id={scuffle_id} floor={floor_id} "
+          f"player={char.get('id')} remaining="
+          f"{max(0, remaining - 1) if remaining is not None else 'unchanged'}")
+    return True
 
 
 def is_cash_stage_copy(copy_id):
@@ -28994,6 +29076,16 @@ def client_handler(conn, addr):
                     print(f"[STREET RACE SECURITY] ignored MSG 298 outside active race player={picked_char.get('id') if picked_char else '-'}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
+            elif msg == 273: # enter_scuffle_batttle
+                if picked_char:
+                    start_scuffle_battle(
+                        conn, picked_char, field_text(body, 0, ''),
+                        get_val_int(body, 1, -1), send_rpc_push)
+                if session is not None:
+                    ph = encode_sproto([(1, session)])
+                    pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg in (107, 276): # enter_copy_scene / enter_single_exp_scene
