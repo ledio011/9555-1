@@ -5493,24 +5493,6 @@ def get_team_for_char(char_id):
         team['leader_id'] = int(members[0])
     return team
 
-def is_team_recruitment_message(text):
-    normalized_text = str(text or '').casefold()
-    return any(marker in normalized_text for marker in (
-        'recruit:-', '招募队友', '#{100262}'))
-
-def team_recruitment_share_for_chat(char, chat_type, text):
-    if not char or chat_type not in (1, 2, 4) or not is_team_recruitment_message(text):
-        return None
-    team = get_team_for_char(int(char.get('id', 0)))
-    if not team:
-        return None
-    try:
-        # The client recruitment chooser uses Nearby/World/Gang chat types.
-        selected_channel = int(team.get('recruit', 0) or 0)
-    except (TypeError, ValueError):
-        selected_channel = 0
-    return team if selected_channel == int(chat_type) else None
-
 def get_relife_config(death_count):
     if RELIFE_DATA:
         for cfg in RELIFE_DATA:
@@ -9636,6 +9618,11 @@ def finish_equipment_stage(state, win):
         state['result_grade'] = grade
         state['result_elapsed'] = elapsed
         state['result_items'] = rewards
+        team = TEAM_STATES.get(int(state.get('team_id') or 0))
+        if team:
+            team['active_run'] = None
+            team['pending_run'] = None
+            send_team_update(team['id'])
         save_chars(all_accounts_chars)
         print(f"[EQUIP STAGE] Finished copy={copy_id} win={bool(win)} "
               f"elapsed={elapsed}s grade={grade} exp={stage_exp if win else 0} "
@@ -31270,21 +31257,8 @@ def client_handler(conn, addr):
                 chat_text = get_val_str(body, 2, '')
                 accepted_world_chat = False
                 reject_reason = ''
-                recruitment_message = is_team_recruitment_message(chat_text)
-                recruitment_team = (
-                    get_team_for_char(int(picked_char.get('id', 0)))
-                    if picked_char and recruitment_message else None
-                )
-                team_share = team_recruitment_share_for_chat(
-                    picked_char, chat_type, chat_text)
-                unselected_team_share = bool(
-                    recruitment_message and chat_type in (1, 2, 4)
-                    and (not recruitment_team or not team_share)
-                )
                 if picked_char and chat_type == 2:
-                    if unselected_team_share:
-                        reject_reason = 'Select a recruitment channel before sharing your team.'
-                    elif not chat_text or len(chat_text) > 256:
+                    if not chat_text or len(chat_text) > 256:
                         reject_reason = 'Message must contain 1–256 characters.'
                     elif not is_current_character_connection(conn, picked_char):
                         reject_reason = 'This character connection is no longer active.'
@@ -31347,9 +31321,7 @@ def client_handler(conn, addr):
                     # ret_chat response shape as World chat. The APK sends
                     # these through msg 120 and only updates its history after
                     # receiving tag 528.
-                    if unselected_team_share:
-                        reject_reason = 'Select a recruitment channel before sharing your team.'
-                    elif not is_current_character_connection(conn, picked_char):
+                    if not is_current_character_connection(conn, picked_char):
                         reject_reason = 'This character connection is no longer active.'
                     elif not chat_text or len(chat_text) > 256:
                         reject_reason = 'Message must contain 1–256 characters.'
@@ -31368,7 +31340,7 @@ def client_handler(conn, addr):
                             else:
                                 picked_char['last_chat_sent_at'] = now
 
-                        if not reject_reason and not duplicate_team_share:
+                        if not reject_reason:
                             tell_id = get_val_int(body, 0, 0)
                             tell_name = get_val_str(body, 1, '')
                             recipient_ids = set()
@@ -31622,11 +31594,22 @@ def client_handler(conn, addr):
                 elif picked_char and msg==166:
                     team=get_team_for_char(cid)
                     if team:
-                        detach_exp_team_member(team,cid)
+                        disband_team(team)
                     else:
+                        stale_teams = [
+                            candidate for candidate in list(TEAM_STATES.values())
+                            if int(candidate.get('leader_id', 0)) == cid
+                            or cid in {int(member_id)
+                                       for member_id in candidate.get('members', [])}
+                            or CHAR_TEAM.get(cid) == int(candidate.get('id', 0))
+                        ]
+                        for stale_team in stale_teams:
+                            disband_team(stale_team)
                         CHAR_TEAM.pop(cid,None)
                         picked_char.pop('team_goal_copy',None)
-                    send_rpc_push(518,encode_sproto([]))
+                        send_rpc_push(518,encode_sproto([]))
+                    if team:
+                        send_rpc_push(518,encode_sproto([]))
                 elif picked_char and msg==214:
                     goal=get_val_str(body,0,''); goal_type=get_val_int(body,1,1)
                     if is_team_battle_copy(goal):
@@ -34403,7 +34386,7 @@ def detach_equipment_stage_member(team, member_id):
             team['pending_run'] = None
     elif team:
         state['owner_id'] = int(team.get('leader_id', state.get('owner_id', 0)))
-        team['active_run'] = state
+        team['active_run'] = None if state.get('_finish_handled') else state
     if team and team.get('members'):
         send_team_update(team['id'])
     save_chars(all_accounts_chars)
@@ -34453,6 +34436,67 @@ def detach_exp_team_member(team, member_id):
             if team: team['active_run']=None; team['pending_run']=None
     if team and team.get('members'): send_team_update(team['id'])
     save_chars(all_accounts_chars)
+
+def disband_team(team):
+    """Apply the client's Leave behavior to the full team roster."""
+    if not team:
+        return False
+    team_id = int(team.get('id', 0))
+    member_ids = set(int(cid) for cid in team.get('members', []))
+    member_ids.update(int(cid) for cid in team.get('char_refs', {}))
+    member_ids.update(
+        int(cid) for cid, mapped_team_id in CHAR_TEAM.items()
+        if mapped_team_id == team_id
+    )
+    if int(team.get('leader_id', 0)):
+        member_ids.add(int(team['leader_id']))
+    member_ids = sorted(member_ids)
+    if team.get('matching'):
+        stop_team_match(team, team.get('goal_id', ''), 1)
+    if team.get('pending_run'):
+        for cid in member_ids:
+            send_push_to_char(cid, 603, encode_sproto([(0, cid), (1, 1)]))
+        team['pending_run'] = None
+    ready_timer = team.pop('_ready_timer', None)
+    if ready_timer:
+        ready_timer.cancel()
+
+    state = team.get('active_run')
+    if not state:
+        for cid in member_ids:
+            char = ALL_CONNECTIONS.get(cid, (None, team.get('char_refs', {}).get(cid)))[1]
+            state = (char.get('equipment_stage_state') or char.get('exp_stage_state')) if char else None
+            if state:
+                break
+    if state and state.get('stage_kind') == 'equipment':
+        for cid in member_ids:
+            detach_equipment_stage_member(team, cid)
+    elif state and state.get('stage_kind') == 'team_exp':
+        for cid in member_ids:
+            detach_exp_team_member(team, cid)
+    else:
+        for cid in member_ids:
+            team_remove_member(team, cid)
+
+    team['members'] = []
+    team['char_refs'] = {}
+    team['active_run'] = None
+    team['pending_run'] = None
+    team.pop('matching', None)
+    for cid, mapped_team_id in list(CHAR_TEAM.items()):
+        if mapped_team_id == team_id:
+            CHAR_TEAM.pop(cid, None)
+    if TEAM_STATES.get(team_id) is team:
+        TEAM_STATES.pop(team_id, None)
+    empty_payload = encode_sproto([])
+    for cid in member_ids:
+        char = ALL_CONNECTIONS.get(cid, (None, None))[1]
+        if char:
+            char.pop('team_goal_copy', None)
+        send_push_to_char(cid, 518, empty_payload)
+    save_chars(all_accounts_chars)
+    return True
+
 def start_team_exp_run(team, copy_id):
     copy_id = str(copy_id)
     cfg = COPY_SCENE_CONFIG.get(copy_id)
