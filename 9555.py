@@ -17396,7 +17396,8 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             # Collect Item / Monster Drop matches on logic_id (item ID)
             matched = str(cfg.get('logic_id')) == target_value
         elif logic_type == 25 and event in ['capture', 'kill']:
-            # LogicType 25 (Capture/Boss Kill) - match target NPC or KillTargetMissionData spawns
+            # Capture-success missions match the Domin district in logic_id;
+            # target_id is the map NPC used to open that district.
             logic_id = str(cfg.get('logic_id', ''))
             spawn_key = logic_id if logic_id in KILL_TARGET_SPAWNS else str(mid)
             spawn_nids = set()
@@ -28257,27 +28258,14 @@ def client_handler(conn, addr):
                                         send_rpc_push(510, encode_sproto([(0, aoi_attr)]))
 
                                     did = picked_char.get('active_domin_id', '1')
-                                    debug_log(f"[M1003 DEBUG] Boss {target_id} killed by client dmg. Winning did={did}")
+                                    debug_log(f"[CAPTURE] boss {target_id} defeated; winning district={did}")
                                     capture_enemy = picked_char.get('_domin_capture_enemy') or {}
                                     is_player_rival = capture_enemy.get('kind') == 'player'
-                                    capture_mission = missions_data.get('1003', {})
-                                    capture_entry = picked_char.get(
-                                        'active_missions', {}).get('1003')
-                                    capture_story_current = _domin_capture_story_current(
-                                        picked_char, did
-                                    )
                                     _domin_capture_assign_owner(picked_char, did)
                                     notify_domin_result("win", "opponent_defeated")
-                                    if (not is_player_rival and capture_story_current
-                                            and capture_entry
-                                            and int(capture_entry.get('state', 0)) == 1):
-                                        cap_target = did
-                                        for act_m, act_mdata in list(picked_char.get('active_missions', {}).items()):
-                                            cap_cfg = missions_data.get(act_m, {})
-                                            if cap_cfg.get('logic_type') == 25:
-                                                cap_target = str(cap_cfg.get('target_id', did))
-                                                break
-                                        advance_missions(picked_char, send_rpc_push, 'capture', target_id=cap_target)
+                                    advance_missions(
+                                        picked_char, send_rpc_push, 'capture',
+                                        target_id=did)
                                     _domin_capture_clear_enemy_instance(target_id)
                                     picked_char['boss_inst_id'] = None
                                     picked_char.pop('_domin_capture_enemy', None)
