@@ -15587,7 +15587,7 @@ def start_cash_stage_run(conn, char, copy_id, cfg, use_time_item, send_rpc_push)
     if ticket_used:
         sync_all_backpacks(char, send_rpc_push)
     send_rpc_push(555, sync_copy_scenes(char))
-    advance_missions(char, send_rpc_push, 'dungeon', target_id=copy_id)
+    advance_missions(char, send_rpc_push, 'dungeon', target_id='106')
     start_map_transition(conn, char, map_id, send_rpc_push)
     print(f"[CASH STAGE] entered id={copy_id} map={map_id} "
           f"remaining={cash_stage_attempts_remaining(char)} ticket={ticket_used}")
@@ -17426,9 +17426,9 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                         target_id_str in race_copy_ids
                         or target_id_str in ['102', '飙车副本']
                 )
-            elif logic_type == 105:
-                # Mission 1019 (EXP copy) stores its discriminator in Target=105;
-                # LogicID is #N/A in this client's MissionData row.
+            elif logic_type in (105, 106):
+                # EXP and Cash Stage missions use activity discriminators
+                # (105/106), not their configured CopySceneData IDs.
                 matched = target == target_id_str or logic_id_str == target_id_str
             else:
                 matched = logic_id_str == target_id_str
