@@ -96,6 +96,12 @@ GOTHAM_AOI_TRACK = {}  # connection identity -> {shared slot: current instance I
 GOTHAM_AI_TASK = None
 GOTHAM_AI_LOCK = threading.Lock()
 PVP_KILL_STREAK_LOCK = threading.RLock()
+PVP_COMBAT_HISTORY_LOCK = threading.RLock()
+PVP_POSITION_HISTORY = {}
+PVP_SKILL_CAST_HISTORY = {}
+PVP_ACCEPTED_HITS = {}
+PVP_REVIVE_PROTECTION = {}
+PVP_PENDING_RELIFE = {}
 ESCORT_ACTIVITY_CONFIG = {}
 BAR_FIGHT_ACTIVITY_CONFIG = {}
 GOTHAM_ESCORT_NPC_OWNER = {} # instance ID -> character ID
@@ -625,6 +631,8 @@ try:
                         'dmg_fixed_add': int(parts[4]) if parts[4].isdigit() else 0,
                         'dmg_multi': int(parts[5]) if parts[5].isdigit() else 0,
                         'dmg_multi_add': int(parts[6]) if parts[6].isdigit() else 0,
+                        'buff_id': parts[7] if len(parts) > 7 else '',
+                        'buff_duration_ms': int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else 0,
                         'area_type': int(parts[16]) if len(parts) > 16 and parts[16].isdigit() else 0,
                         'params': [int(parts[i]) if len(parts) > i and parts[i].isdigit() else 0 for i in range(17, 22)],
                         'adds': adds
@@ -643,6 +651,10 @@ try:
                         'eff0': parts[24],
                         'eff1': parts[26] if len(parts) > 26 else "",
                         'eff2': parts[28] if len(parts) > 28 else "",
+                        'effect_delays_ms': [
+                            int(parts[index]) if len(parts) > index and parts[index].isdigit() else 0
+                            for index in (25, 27, 29)
+                        ],
                         'cooldown_ms': int(parts[10]) if len(parts) > 10 and parts[10].isdigit() else 0,
                         'trace_distance_cm': int(parts[12]) if len(parts) > 12 and parts[12].isdigit() else 0,
                         'priority': int(parts[30]) if len(parts) > 30 and parts[30].isdigit() else 0,
@@ -6287,7 +6299,7 @@ def is_in_map_safe_area(map_id, position):
             points = area.get('points', [])
             if int(area.get('type', 0)) != 0:
                 center_x, center_z = points[0]
-                radius = max(0, int(areas[0].get('range', 0))) / 100.0
+                radius = max(0, int(area.get('range', 0))) / 100.0
                 if radius > 0 and (x - center_x / 100.0) ** 2 + (z - center_z / 100.0) ** 2 <= radius ** 2:
                     return True
                 continue
@@ -6310,6 +6322,204 @@ def is_in_map_safe_area(map_id, position):
         return False
     except (TypeError, ValueError, IndexError, OverflowError):
         return True
+
+
+PVP_COMBAT_HISTORY_SECONDS = 15.0
+PVP_MAX_SKILL_HIT_DELAY_SECONDS = 3.0
+
+
+def record_pvp_position(char, now=None):
+    if not isinstance(char, dict):
+        return
+    try:
+        char_id = int(char.get('id', 0) or 0)
+        position = tuple(int(value) for value in char.get('pos', []))
+        if char_id <= 0 or len(position) < 3:
+            return
+    except (TypeError, ValueError):
+        return
+    stamp = time.monotonic() if now is None else float(now)
+    map_id = str(char.get('map_id', '') or '')
+    with PVP_COMBAT_HISTORY_LOCK:
+        history = PVP_POSITION_HISTORY.setdefault(char_id, [])
+        history[:] = [
+            entry for entry in history
+            if stamp - entry[0] <= PVP_COMBAT_HISTORY_SECONDS
+        ]
+        history.append((stamp, map_id, position))
+        if len(history) > 160:
+            del history[:-160]
+
+
+def record_pvp_skill_cast(char, skill_id, client_tick, now=None):
+    if not isinstance(char, dict):
+        return
+    try:
+        char_id = int(char.get('id', 0) or 0)
+        client_tick = int(client_tick)
+    except (TypeError, ValueError):
+        return
+    if char_id <= 0 or client_tick <= 0:
+        return
+    stamp = time.monotonic() if now is None else float(now)
+    entry = (
+        stamp, client_tick, str(char.get('map_id', '') or ''), str(skill_id or '')
+    )
+    with PVP_COMBAT_HISTORY_LOCK:
+        history = PVP_SKILL_CAST_HISTORY.setdefault(char_id, [])
+        history[:] = [
+            cast for cast in history
+            if stamp - cast[0] <= PVP_COMBAT_HISTORY_SECONDS
+        ]
+        history.append(entry)
+        if len(history) > 32:
+            del history[:-32]
+
+
+def resolve_pvp_hit_time(char, skill_id, client_hit_tick, now=None):
+    try:
+        char_id = int(char.get('id', 0) or 0)
+        hit_tick = int(client_hit_tick)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    if char_id <= 0 or hit_tick <= 0:
+        return None
+    now = time.monotonic() if now is None else float(now)
+    map_id = str(char.get('map_id', '') or '')
+    with PVP_COMBAT_HISTORY_LOCK:
+        casts = list(PVP_SKILL_CAST_HISTORY.get(char_id, ()))
+    candidates = []
+    for cast_time, cast_tick, cast_map, cast_skill in casts:
+        delta_ticks = hit_tick - cast_tick
+        if (cast_map != map_id or cast_skill != str(skill_id or '')
+                or delta_ticks < 0
+                or delta_ticks > PVP_MAX_SKILL_HIT_DELAY_SECONDS * 100):
+            continue
+        hit_time = cast_time + delta_ticks / 100.0
+        if (now - hit_time <= PVP_COMBAT_HISTORY_SECONDS
+                and hit_time <= now + 0.5):
+            candidates.append(hit_time)
+    return min(candidates, key=lambda stamp: abs(now - stamp)) if candidates else None
+
+
+def claim_pvp_hit_report(attacker, target_id, skill_id, effect_id, damage,
+                         is_critical, is_hit, client_hit_tick, send_index,
+                         now=None):
+    try:
+        char_id = int(attacker.get('id', 0) or 0)
+        client_hit_tick = int(client_hit_tick)
+        send_index = int(send_index)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if char_id <= 0 or client_hit_tick <= 0:
+        return False
+    stamp = time.monotonic() if now is None else float(now)
+    signature = (
+        int(target_id), str(skill_id or ''), str(effect_id or ''), client_hit_tick,
+        send_index, int(damage), bool(is_critical), bool(is_hit)
+    )
+    with PVP_COMBAT_HISTORY_LOCK:
+        reports = PVP_ACCEPTED_HITS.setdefault(char_id, {})
+        for old_signature, old_stamp in list(reports.items()):
+            if stamp - old_stamp > PVP_COMBAT_HISTORY_SECONDS:
+                reports.pop(old_signature, None)
+        if signature in reports:
+            return False
+        reports[signature] = stamp
+        return True
+
+
+def pvp_position_at(char, hit_time):
+    try:
+        char_id = int(char.get('id', 0) or 0)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    map_id = str(char.get('map_id', '') or '')
+    with PVP_COMBAT_HISTORY_LOCK:
+        history = list(PVP_POSITION_HISTORY.get(char_id, ()))
+    map_history = [entry for entry in history if entry[1] == map_id]
+    preceding = [
+        entry for entry in map_history if entry[0] <= hit_time
+    ]
+    if preceding:
+        return list(max(preceding, key=lambda entry: entry[0])[2])
+    if map_history:
+        return None
+    return list(char.get('pos', [])) if map_id and char.get('pos') else None
+
+
+def pvp_hit_safe_area_allowed(attacker, target, hit_time):
+    if hit_time is None:
+        hit_time = time.monotonic()
+    map_id = str(attacker.get('map_id', '') or '')
+    attacker_pos = pvp_position_at(attacker, hit_time)
+    target_pos = pvp_position_at(target, hit_time)
+    return (attacker_pos is not None and target_pos is not None
+            and not is_in_map_safe_area(map_id, attacker_pos)
+            and not is_in_map_safe_area(map_id, target_pos))
+
+
+def pvp_relive_protection_timing():
+    intervals = []
+    for skill_id in ('199', '299', '399'):
+        skill = SKILL_CONFIG.get(skill_id, {})
+        effects = skill.get('effect_delays_ms', [])
+        for index, key in enumerate(('eff0', 'eff1', 'eff2')):
+            effect = EFF_CONFIG.get(str(skill.get(key) or ''), {})
+            if (str(effect.get('buff_id') or '') != '10000'
+                    or int(effect.get('buff_duration_ms', 0) or 0) <= 0):
+                continue
+            delay_ms = int(effects[index]) if index < len(effects) else 0
+            intervals.append((
+                max(0, delay_ms) / 1000.0,
+                (max(0, delay_ms) + int(effect['buff_duration_ms'])) / 1000.0
+            ))
+    if not intervals:
+        return None
+    return min(start for start, _end in intervals), max(
+        end for _start, end in intervals
+    )
+
+
+def mark_pvp_relived(char, now=None):
+    try:
+        char_id = int(char.get('id', 0) or 0)
+    except (AttributeError, TypeError, ValueError):
+        return
+    if char_id <= 0:
+        return
+    timing = pvp_relive_protection_timing()
+    if timing is None:
+        print(f"[PvP RELIFE] invincibility config missing player={char_id}")
+        return
+    revived_at = time.monotonic() if now is None else float(now)
+    map_id = str(char.get('map_id', '') or '')
+    with PVP_COMBAT_HISTORY_LOCK:
+        PVP_REVIVE_PROTECTION[char_id] = (
+            map_id, revived_at, revived_at + timing[0], revived_at + timing[1]
+        )
+    record_pvp_position(char, revived_at)
+
+
+def pvp_relive_hit_block_reason(char, hit_time):
+    try:
+        char_id = int(char.get('id', 0) or 0)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    hit_time = time.monotonic() if hit_time is None else float(hit_time)
+    with PVP_COMBAT_HISTORY_LOCK:
+        protection = PVP_REVIVE_PROTECTION.get(char_id)
+        if protection and hit_time >= protection[3]:
+            PVP_REVIVE_PROTECTION.pop(char_id, None)
+            protection = None
+    if not protection or protection[0] != str(char.get('map_id', '') or ''):
+        return None
+    if hit_time < protection[1]:
+        return 'before_revive'
+    if protection[2] <= hit_time < protection[3]:
+        return 'invincible'
+    return None
+
 
 def ensure_dance_runtime(char, now=None):
     """Create/reset the character's personal-dance state from client config."""
@@ -19025,7 +19235,7 @@ def _same_player_team(first, second):
     except (TypeError, ValueError, AttributeError):
         return False
 
-def can_player_attack_player(attacker, target):
+def can_player_attack_player(attacker, target, check_safe_area=True):
     """Enforce the APK's player-PvP scene, safety-area, team and PK-mode rules."""
     if not isinstance(attacker, dict) or not isinstance(target, dict):
         return False
@@ -19038,8 +19248,9 @@ def can_player_attack_player(attacker, target):
         return False
     if not client_expects_player_aoi(map_id):
         return False
-    if (is_in_map_safe_area(map_id, attacker.get('pos'))
-            or is_in_map_safe_area(map_id, target.get('pos'))):
+    if (check_safe_area
+            and (is_in_map_safe_area(map_id, attacker.get('pos'))
+                 or is_in_map_safe_area(map_id, target.get('pos')))):
         return False
     if map_type not in (1, 15, 21, 24):
         # In scenes without client PK-mode rules, the APK checks camps. The
@@ -24732,6 +24943,13 @@ def client_handler(conn, addr):
             elif msg == 100: # map_ready
                 if picked_char:
                     mid = str(picked_char.get('map_id', '11'))
+                    char_id = int(picked_char.get('id', 0) or 0)
+                    pending_relive_map = PVP_PENDING_RELIFE.get(char_id)
+                    if pending_relive_map == mid:
+                        PVP_PENDING_RELIFE.pop(char_id, None)
+                        mark_pvp_relived(picked_char)
+                    else:
+                        record_pvp_position(picked_char)
                     if is_current_character_connection(conn, picked_char):
                         picked_char['_cash_stage_map_ready'] = True
                     print(
@@ -25417,6 +25635,7 @@ def client_handler(conn, addr):
                         # coordinates below.
                         new_pos = update_exp_authoritative_position(picked_char, move_stage_state, new_pos)
                     picked_char['pos'] = new_pos
+                    record_pvp_position(picked_char)
                     # Issue 224: Throttle position saves to avoid excessive disk I/O.
                     # Save every 30 seconds instead of on every move packet (~10Hz).
                     # The position is still saved on important events: dungeon entry/exit,
@@ -25907,6 +26126,9 @@ def client_handler(conn, addr):
                             print(f"[SKILL LOCKED] sid={sid} req={req_lv}")
                             send_rpc_push(529, encode_sproto([(0, "#{100681}"), (1, True)]))
                         else:
+                            record_pvp_skill_cast(
+                                picked_char, sid, get_val_int(body, 4, 0)
+                            )
                             # Do not echo Tag 508 back to the casting player.
                             # The casting player executes skill effects locally on client.
                             # Broadcast TAG 508 (ret_skill_use) to other players on the same map
@@ -28089,9 +28311,25 @@ def client_handler(conn, addr):
                                 stage_label = 'EQUIP' if is_equipment else 'EXP'
                                 print(f"[{stage_label} HIT] rejected player target={target_id} attacker={picked_char.get('id')}")
                                 continue
+                            pvp_hit_time = resolve_pvp_hit_time(
+                                picked_char, skill_id, get_val_int(d, 7, 0)
+                            )
+                            revive_block = pvp_relive_hit_block_reason(
+                                target_char, pvp_hit_time
+                            )
+                            if revive_block:
+                                print(f"[PvP] rejected hit during revive protection "
+                                      f"attacker={picked_char.get('id')} target={target_id} "
+                                      f"reason={revive_block}")
+                                continue
                             if (not is_current_character_connection(conn, picked_char)
                                     or target_conn is None
-                                    or not can_player_attack_player(picked_char, target_char)):
+                                    or not can_player_attack_player(
+                                        picked_char, target_char, check_safe_area=False
+                                    )
+                                    or not pvp_hit_safe_area_allowed(
+                                        picked_char, target_char, pvp_hit_time
+                                    )):
                                 print(f"[PvP SECURITY] rejected illegal player hit attacker={picked_char.get('id')} target={target_id} map={picked_char.get('map_id')}")
                                 continue
                             if int(target_char.get('hp', 0)) <= 0:
@@ -28172,6 +28410,14 @@ def client_handler(conn, addr):
                                     continue
                                 server_dmg = client_dmg
                                 calc_cri = is_cri
+                            if not claim_pvp_hit_report(
+                                    picked_char, target_id, skill_id, effinfo_id,
+                                    server_dmg, calc_cri, client_hit_flag,
+                                    get_val_int(d, 7, 0), get_val_int(d, 8, 0)):
+                                print(f"[PvP SECURITY] rejected duplicate/invalid hit report "
+                                      f"attacker={picked_char.get('id')} target={target_id} "
+                                      f"skill={skill_id} effect={effinfo_id}")
+                                continue
                             print(f"[PvP] accepted damage={server_dmg} cri={calc_cri} target={target_id}")
 
                             # Apply damage to victim
@@ -30036,15 +30282,18 @@ def client_handler(conn, addr):
                             picked_char['pre_copy_map'] = None
                             picked_char['pre_copy_pos'] = None
                             picked_char.pop('_pending_relife', None)
+                            PVP_PENDING_RELIFE[int(picked_char.get('id', 0) or 0)] = target_map
                             start_map_transition(conn, picked_char, target_map, send_rpc_push, override_pos=pos)
                             save_chars(all_accounts_chars)
                             print(f"[REVIVE] player={picked_char['id']} returned to main city map={target_map} pos={pos}")
                         else:
                             stats = get_character_stats(picked_char)
+                            mark_pvp_relived(picked_char)
                             picked_char['hp'] = stats['hp_max']
                             pos = (list(picked_char.get('pos') or default_map_spawn_position(current_map)) if is_inplace
                                    else configured_map_relife_position(current_map))
                             picked_char['pos'] = pos
+                            record_pvp_position(picked_char)
                             picked_char.pop('_pending_relife', None)
                             sync_char_attrs_rpc(conn, picked_char)
                             attr_oth = encode_sproto(character_attribute_other_fields(
@@ -30148,6 +30397,7 @@ def client_handler(conn, addr):
                             pos = birth_pos
 
                     picked_char['pos'] = pos
+                    record_pvp_position(picked_char)
 
                     print(f'[REVIVE] Consumed {revive_cost} revive item(s) {revive_item_id}')
 
@@ -30258,6 +30508,7 @@ def client_handler(conn, addr):
                         picked_char['map_id'] = saved_map
                         start_map_transition(conn, picked_char, saved_map, send_rpc_push, override_pos=saved_pos)
                         print(f"[RELIFE] Player {picked_char['id']} returned from EXP to map={saved_map}")
+                    mark_pvp_relived(picked_char)
                     save_chars(all_accounts_chars)
                     print(f"[REVIVE] Player {picked_char['id']} revived with HP={p_stats['hp_max']} isInplace={is_inplace} pos={pos}")
 
