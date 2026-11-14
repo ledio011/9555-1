@@ -529,6 +529,7 @@ SURVIVE_BATTLE_TIMERS = {} # (activity ID, event start) -> phase/timer
 SURVIVE_BATTLE_TIMER_LOCK = threading.RLock()
 SURVIVE_BATTLE_NPC_EVENT_STARTS = {}
 RETRIEVE_CONFIG = {} # RetrieveData ID -> recovery costs/scales/level drop key
+RETRIEVE_RANDOM_BADGE_LEVELS = {'8801': 1} # Retrieve preview placeholder -> random actual badge level
 
 try:
     script_dir = os.path.dirname(__file__)
@@ -7728,7 +7729,14 @@ def retrieve_reward_list(retrieve_id, level, scale):
     for item_id, quality, amount in rewards:
         value = int(amount) * scale // 100
         if value > 0:
-            scaled.append((str(item_id), int(quality), value))
+            badge_level = RETRIEVE_RANDOM_BADGE_LEVELS.get(str(item_id))
+            if badge_level is not None:
+                badge_rewards = random_badge_reward_list(badge_level, value)
+                if not badge_rewards:
+                    return []
+                scaled.extend(badge_rewards)
+            else:
+                scaled.append((str(item_id), int(quality), value))
     return scaled
 
 def record_daily_active_event(char, activity_type, send_rpc_push):
@@ -14234,6 +14242,33 @@ def ensure_download_rewards_granted(picked_char):
           f"items={[(item_id, count) for item_id, _quality, count in pending]}")
     return True
 
+def random_badge_reward_list(badge_level, badge_count, badge_type=None):
+    """Choose actual badge inventory items matching a configured level/type."""
+    try:
+        badge_level = int(badge_level)
+        badge_count = int(badge_count)
+    except (TypeError, ValueError):
+        return []
+    if badge_count < 1:
+        return []
+
+    candidates = [
+        str(badge_id) for badge_id, badge_cfg in BADGE_CONFIG.items()
+        if int(badge_cfg.get('level', -1)) == badge_level
+        and (badge_type is None or int(badge_cfg.get('badge_type', -1)) == int(badge_type))
+        and str(badge_id) in ITEM_CONFIG
+        and int(ITEM_CONFIG[str(badge_id)].get('type', -1)) == 6
+    ]
+    if not candidates:
+        return []
+    totals = {}
+    for _ in range(badge_count):
+        reward_id = str(random.choice(candidates))
+        quality = int(ITEM_CONFIG.get(reward_id, {}).get('quality', 0))
+        totals[(reward_id, quality)] = totals.get((reward_id, quality), 0) + 1
+    return [(reward_id, quality, count)
+            for (reward_id, quality), count in sorted(totals.items())]
+
 def resolve_item_package_rewards(item_id, package_count=1, character=None):
     """Return exact client package rewards when their source data exists."""
     item_id = str(item_id)
@@ -14255,22 +14290,7 @@ def resolve_item_package_rewards(item_id, package_count=1, character=None):
     badge_type = ITEM_PACKAGE_BADGE_TYPES.get(item_id)
     if badge_level is not None or badge_type is not None:
         expected_level = badge_level if badge_level is not None else 1
-        candidates = [
-            str(badge_id) for badge_id, badge_cfg in BADGE_CONFIG.items()
-            if int(badge_cfg.get('level', -1)) == expected_level
-            and (badge_type is None or int(badge_cfg.get('badge_type', -1)) == badge_type)
-            and str(badge_id) in ITEM_CONFIG
-            and int(ITEM_CONFIG[str(badge_id)].get('type', -1)) == 6
-        ]
-        if not candidates:
-            return []
-        totals = {}
-        for _ in range(package_count):
-            reward_id = str(random.choice(candidates))
-            quality = int(ITEM_CONFIG.get(reward_id, {}).get('quality', 0))
-            totals[(reward_id, quality)] = totals.get((reward_id, quality), 0) + 1
-        return [(reward_id, quality, count)
-                for (reward_id, quality), count in sorted(totals.items())]
+        return random_badge_reward_list(expected_level, package_count, badge_type)
 
     function_id = str(cfg.get('function', 0))
     rewards = ITEM_PACKAGE_FIXED_REWARDS.get(function_id)
