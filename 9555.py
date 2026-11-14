@@ -17412,7 +17412,9 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                        and target_value == '101')
         elif logic_type == 103 and event == 'daily_mission':
             matched = int(cfg.get('class', 0) or 0) == 1
-        elif logic_type in [102, 105, 106, 107, 108, 110, 113, 114, 117, 119, 120, 132] and event in ['dungeon', 'car_copy']:
+        elif logic_type == 110 and event == 'rank_pvp':
+            matched = target_value == '110' or str(cfg.get('logic_id', '')) == '110'
+        elif logic_type in [102, 105, 106, 107, 108, 113, 114, 117, 119, 120, 132] and event in ['dungeon', 'car_copy']:
             # Dungeon/Guide entry missions advance on specific 'dungeon' or 'car_copy' events
             logic_id_str = str(cfg.get('logic_id'))
             target_id_str = str(target_id) if target_id is not None else ''
@@ -23149,6 +23151,7 @@ def client_handler(conn, addr):
         result = _rank_pvp_finalize_state(picked_char, bool(win), reason)
         if not result:
             return False
+        advance_missions(picked_char, send_rpc_push, 'rank_pvp', target_id='110')
         timeout_timer = picked_char.pop("_rank_pvp_timer", None)
         if timeout_timer is not None:
             timeout_timer.cancel()
