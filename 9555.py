@@ -335,7 +335,6 @@ SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
 SHOW_REWARD_EXPLICIT_COUNT_CONFIG = {} # ShowRewardData id -> rewards with an explicit positive item count
 SHOW_REWARD_ITEM_SLOT_CONFIG = {} # ShowRewardData id -> authored Item1..Item8 slots (not Exp/Money columns)
 SHOW_REWARD_BASE_CONFIG = {} # ShowRewardData id -> authored Exp/Money1/Money2 values
-SCUFFLE_NPC_REWARD_CONFIG = {} # (map id, NPC id) -> NpcData DropID and exact ShowRewardData rows
 SLOT_DATA_CONFIG = {} # SlotData ID -> client prize metadata and paid/free weights
 SLOT_AUTO_CONFIG = {} # SlotAutoData ID -> spin count and authoritative price
 SLOT_SUM_REWARD_THRESHOLD = 10 # SlotUIRootLogic.SumMaxLimit in the client APK
@@ -1100,7 +1099,7 @@ try:
                         'ai_type': parts[18] if len(parts) > 18 and parts[18] else '',
                         'ai_data_id': parts[19] if len(parts) > 19 and parts[19] else '',
                         'drop_id': parts[20] if len(parts) > 20 and parts[20] else '',
-                        'walk_speed': int(parts[21]) if len(parts) > 21 and parts[21].isdigit() else 5,
+                        'walk_speed': int(parts[21]) if len(parts) > 21 and parts[21].isdigit() else 10,
                         # NpcData.MoveSpeed defaults to 50 in the APK when the table cell is blank.
                         'move_speed': int(parts[22]) if len(parts) > 22 and parts[22].isdigit() else 50,
                         'atk_coe': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 10000,
@@ -2583,25 +2582,6 @@ try:
         debug_log(f"[GAME CONFIG LOADED] keys={len(GAME_CONFIG)}")
 
 except: traceback.print_exc()
-
-_scuffle_reward_data_gaps = []
-for _scuffle_map_id in sorted(SCUFFLE_NPC_MAP_IDS):
-    for _spawn_row in MONSTER_DATA.get(_scuffle_map_id, []):
-        _scuffle_npc_id = str(_spawn_row.get("nid", "") or "").strip()
-        if not _scuffle_npc_id:
-            continue
-        _drop_id = str(NPC_CONFIG.get(_scuffle_npc_id, {}).get("drop_id", "") or "").strip()
-        _reward_rows = list(SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(_drop_id, []))
-        SCUFFLE_NPC_REWARD_CONFIG[(_scuffle_map_id, _scuffle_npc_id)] = {
-            "drop_id": _drop_id,
-            "show_reward_id": _drop_id,
-            "rewards": _reward_rows,
-        }
-        if not _reward_rows:
-            _scuffle_reward_data_gaps.append(
-                f"{_scuffle_map_id}/{_scuffle_npc_id} (DropID={_drop_id or 'missing'})")
-if _scuffle_reward_data_gaps:
-    print("[SCUFFLE NPC REWARD DATA MISSING] " + ", ".join(_scuffle_reward_data_gaps))
 
 # LIBERTY_CITY_CLIENT_LOADER_BEGIN
 # Client-table loader for map 101 (Liberty City / DSJ_zhuCheng).
@@ -10403,24 +10383,10 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                         if score_payload is not None:
                             send_rpc_push(636, score_payload)
             elif current_map in SCUFFLE_NPC_MAP_IDS:
-                npc_reward = SCUFFLE_NPC_REWARD_CONFIG.get(
-                    (current_map, str(npcid)))
-                reward_rows = list(npc_reward.get('rewards', [])) if npc_reward else []
-                if reward_rows:
-                    grant_item_rewards(
-                        picked_char, reward_rows, conn, send_rpc_push, save=False)
-                    if send_rpc_push:
-                        reward_popup = [
-                            encode_sproto([
-                                (0, item_id), (1, amount), (3, quality)
-                            ])
-                            for item_id, quality, amount in reward_rows
-                        ]
-                        send_rpc_push(638, encode_sproto([(0, reward_popup)]))
-                else:
-                    drop_id = npc_reward.get('drop_id', '') if npc_reward else ''
-                    print(f"[SCUFFLE NPC REWARD SKIP] map={current_map} npc={npcid} "
-                          f"DropID={drop_id or 'missing'} has no explicit ShowRewardData counts")
+                # Scuffle NpcData.DropID points to mission-tier ShowRewardData,
+                # not an individual kill drop. The selected OnlineMissionData
+                # reward is claimed once after the required kill count completes.
+                pass
             else:
                 npc_stats = get_npc_attr(
                     npcid, picked_char.get('level', 1)
@@ -11187,6 +11153,7 @@ def prison_create_shared_npc(slot, spec):
         "patrol_next_at": time.time(),
         "last_move_at": time.time(),
         "moving": False,
+        "broadcast_move_target": None,
     })
     PRISON_NPC_SHARED_BY_INSTANCE[inst_id] = slot["slot"]
     return inst_id, attr
@@ -11406,6 +11373,7 @@ def _prison_npc_move_toward(
             return
         current_x, current_z = slot.get("position", (slot["x"], slot["z"]))
         is_survival_map = str(slot.get("map_id", "")) in SURVIVE_BATTLE_NPC_MAP_IDS
+        was_moving = bool(slot.get("moving"))
         dx, dz = float(target_x) - current_x, float(target_z) - current_z
         distance = math.hypot(dx, dz)
         if distance <= 1:
@@ -11422,10 +11390,19 @@ def _prison_npc_move_toward(
         move_x, move_z = (
             (int(target_x), int(target_z))
             if is_survival_map else (next_x, next_z))
-    # The Survival NPC client holds one waypoint and continually reapplies it;
-    # send the destination instead of a short predicted point every AI tick.
-    _prison_npc_broadcast_move(
-        slot_key, inst_id, move_x, move_z, heading, walk=walk)
+        if is_survival_map:
+            move_target = (move_x, move_z)
+            broadcast_move = (
+                not was_moving
+                or slot.get("broadcast_move_target") != move_target)
+            slot["broadcast_move_target"] = move_target
+        else:
+            broadcast_move = True
+    # The Survival client replaces its NPC waypoint on each move packet.
+    # Re-send only when movement starts or the destination changes.
+    if broadcast_move:
+        _prison_npc_broadcast_move(
+            slot_key, inst_id, move_x, move_z, heading, walk=walk)
 
 
 def _prison_npc_stop(slot_key, inst_id, now):
@@ -11437,6 +11414,7 @@ def _prison_npc_stop(slot_key, inst_id, now):
         heading = int(slot.get("heading", 0) or 0)
         slot["moving"] = False
         slot["last_move_at"] = now
+        slot["broadcast_move_target"] = None
     _prison_npc_broadcast_move(
         slot_key, inst_id, x, z, heading, stop=True, walk=False)
 
@@ -11563,7 +11541,8 @@ def _prison_npc_ai_tick():
                     patrol_distance = min(
                         max(0, int(ai_cfg.get("patrol_distance", 0) or 0)) / 100.0,
                         max(0.0, float(npc_cfg.get("patrol_radius", 0) or 0)))
-                    if not patrol_type or patrol_distance <= 0:
+                    # The APK random-walks only CIRCLE patrols and waits 2 seconds on arrival.
+                    if patrol_type != 1 or patrol_distance <= 0:
                         _prison_npc_stop(slot_key, inst_id, now)
                         continue
 
@@ -11573,11 +11552,11 @@ def _prison_npc_ai_tick():
                         if (int(live_slot.get("inst_id") or 0) == inst_id
                                 and not patrol_target
                                 and now >= float(live_slot.get("patrol_next_at", 0) or 0)):
-                            angle = random.uniform(0, math.tau)
-                            radius = random.uniform(patrol_distance * 0.35, patrol_distance)
+                            offset_x = random.uniform(-patrol_distance, patrol_distance)
+                            offset_z = random.uniform(-patrol_distance, patrol_distance)
                             patrol_target = (
-                                home_x + int(math.cos(angle) * radius * 100),
-                                home_z + int(math.sin(angle) * radius * 100))
+                                home_x + int(offset_x * 100),
+                                home_z + int(offset_z * 100))
                             live_slot["patrol_target"] = patrol_target
 
                     if patrol_target:
@@ -11588,8 +11567,7 @@ def _prison_npc_ai_tick():
                                 live_slot = PRISON_NPC_SHARED_SLOTS.get(slot_key, {})
                                 if int(live_slot.get("inst_id") or 0) == inst_id:
                                     live_slot["patrol_target"] = None
-                                    live_slot["patrol_next_at"] = now + max(
-                                        0.3, int(ai_cfg.get("wait_time", 300) or 300) / 1000.0)
+                                    live_slot["patrol_next_at"] = now + 2.0
                             _prison_npc_stop(slot_key, inst_id, now)
                         else:
                             walk_speed = max(
