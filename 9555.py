@@ -367,6 +367,7 @@ ITEM_PACKAGE_FIXED_REWARDS = {
 DIRECT_REWARD_RESOURCE_IDS = frozenset(('1001', '1002', '1003', '1004', '2001', '2002', '2003', '2004'))
 FUNCTION_DATA = {} # funcId -> {class, condition, is_download, first_open, unlock_type, side_mission}
 SIGN_IN_WEEK_CONFIG = {} # day -> profession reward and shared reward tuples
+SIGN_IN_MONTH_CONFIG = {} # day -> item/count and replenishment currency/cost
 
 
 def load_sign_in_week_config(path):
@@ -418,6 +419,52 @@ def load_sign_in_week_config(path):
         print(f"[SIGN WEEK CONFIG] missing reward days: {missing_days}")
     else:
         debug_log(f"[SIGN WEEK CONFIG] loaded {len(config)} reward days")
+    return config
+
+
+def load_sign_in_month_config(path):
+    """Load the client's 30-day sign rewards and replenishment prices."""
+    config = {}
+    if not os.path.isfile(path):
+        print(f"[SIGN MONTH CONFIG] missing client table: {path}")
+        return config
+
+    with open(path, "r", encoding="utf-8-sig") as table_file:
+        for line_number, line in enumerate(table_file, 1):
+            parts = line.rstrip("\r\n").split(",")
+            if len(parts) < 6 or parts[0] != "*" or not parts[1].isdigit():
+                continue
+            try:
+                day = int(parts[1])
+                item_id = parts[2].strip()
+                item_count = int(parts[3])
+                price_type = int(parts[4])
+                price_cost = int(parts[5])
+                if not 1 <= day <= 31:
+                    raise ValueError(f"day out of range: {day}")
+                if not item_id or item_count <= 0:
+                    raise ValueError(f"invalid reward for day {day}")
+                if not 0 <= price_type <= 5 or price_cost < 0:
+                    raise ValueError(f"invalid replenishment price for day {day}")
+                if day in config:
+                    raise ValueError(f"duplicate day: {day}")
+                config[day] = {
+                    "item_id": item_id,
+                    "item_count": item_count,
+                    "price_type": price_type,
+                    "price_cost": price_cost,
+                }
+            except (IndexError, ValueError) as config_error:
+                print(
+                    f"[SIGN MONTH CONFIG] invalid row {line_number} "
+                    f"in {path}: {config_error}"
+                )
+
+    missing_days = sorted(set(range(1, 31)) - set(config))
+    if missing_days:
+        print(f"[SIGN MONTH CONFIG] missing reward days: {missing_days}")
+    else:
+        debug_log(f"[SIGN MONTH CONFIG] loaded {len(config)} reward days")
     return config
 
 EQUIP_CONFIG = {} # equipId -> {name, lv, class, job, position, base_stat, base_val, model, ...}
@@ -2361,6 +2408,9 @@ try:
 
     SIGN_IN_WEEK_CONFIG.update(
         load_sign_in_week_config(os.path.join(text_asset_root, "SignInWeekData"))
+    )
+    SIGN_IN_MONTH_CONFIG.update(
+        load_sign_in_month_config(os.path.join(text_asset_root, "SignInMonthData"))
     )
 
     # Load EquipData (equipment definitions)
@@ -15398,6 +15448,129 @@ def resolve_sign_week_state(character):
     character['sign_week_complete'] = False
     character['sign_week_day'] = 0
     return 1, True, False
+
+
+SIGN_IN_MONTH_DAYS = 30
+SIGN_IN_MONTH_STATE_FIELDS = (
+    'sign_30_cycle_origin',
+    'sign_30_cycle_index',
+    'sign_30_claimed_days',
+    'sign_30_replenished_days',
+    'sign_30_day',
+    'sign_30_claimed_date',
+    'sign_30_claimed',
+)
+
+
+def snapshot_sign_30_state(character):
+    return {
+        key: (key in character, copy.deepcopy(character.get(key)))
+        for key in SIGN_IN_MONTH_STATE_FIELDS
+    }
+
+
+def restore_sign_30_state(character, snapshot):
+    for key, (was_present, previous_value) in snapshot.items():
+        if was_present:
+            character[key] = previous_value
+        else:
+            character.pop(key, None)
+
+
+def resolve_sign_30_state(character, now=None):
+    """Resolve the client's 30-day cycle and its sequential free/refill claims."""
+    now = float(time.time() if now is None else now)
+    origin_value = character.get('sign_30_cycle_origin')
+    if origin_value is None:
+        origin_value = character.get('createtime')
+    try:
+        origin = int(float(origin_value))
+    except (TypeError, ValueError):
+        origin = int(now)
+    if origin <= 0 or origin > now:
+        origin = int(now)
+
+    changed = character.get('sign_30_cycle_origin') != origin
+    character['sign_30_cycle_origin'] = origin
+
+    # Match the game's existing 03:00 daily reset when counting elapsed days.
+    origin_reset_day = int((origin - 3 * 3600) // 86400)
+    current_reset_day = int((now - 3 * 3600) // 86400)
+    elapsed_days = max(0, current_reset_day - origin_reset_day)
+    cycle_index = elapsed_days // SIGN_IN_MONTH_DAYS
+    system_day = elapsed_days % SIGN_IN_MONTH_DAYS + 1
+
+    had_cycle_state = 'sign_30_cycle_index' in character
+    try:
+        stored_cycle_index = int(character.get('sign_30_cycle_index'))
+    except (TypeError, ValueError):
+        stored_cycle_index = None
+
+    if stored_cycle_index != cycle_index:
+        legacy_claimed_today = (
+            not had_cycle_state
+            and bool(character.get('sign_30_claimed'))
+            and character.get('sign_30_claimed_date')
+            == time.strftime('%Y-%m-%d', time.gmtime(now - 3 * 3600))
+        )
+        character['sign_30_cycle_index'] = cycle_index
+        character['sign_30_claimed_days'] = [system_day] if legacy_claimed_today else []
+        character['sign_30_replenished_days'] = []
+        changed = True
+    else:
+        for key in ('sign_30_claimed_days', 'sign_30_replenished_days'):
+            raw_days = character.get(key, [])
+            if not isinstance(raw_days, (list, tuple, set)):
+                raw_days = []
+            valid_days = set()
+            for value in raw_days:
+                try:
+                    day = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if 1 <= day <= system_day:
+                    valid_days.add(day)
+            normalized_days = sorted(valid_days)
+            if character.get(key) != normalized_days:
+                character[key] = normalized_days
+                changed = True
+
+    claimed_days = set(character.get('sign_30_claimed_days', []))
+    replenished_days = character.get('sign_30_replenished_days', [])
+    claimed_prefix = 0
+    while claimed_prefix < system_day and claimed_prefix + 1 in claimed_days:
+        claimed_prefix += 1
+
+    first_missing_day = claimed_prefix + 1 if claimed_prefix < system_day else None
+    can_replenish = (
+        first_missing_day is not None and first_missing_day < system_day
+    )
+    can_claim_today = first_missing_day == system_day
+    current_day_claimed = system_day in claimed_days
+    cur_sign = claimed_prefix if can_replenish else system_day
+    return {
+        'cur_sign': cur_sign,
+        'replenish': len(replenished_days),
+        'sys_sign': system_day,
+        'cur_sign_state': bool(can_claim_today and not current_day_claimed),
+        'replenish_sign_state': bool(can_replenish),
+        'count': SIGN_IN_MONTH_DAYS,
+        'str': '#'.join(str(day) for day in replenished_days),
+        'next_missing_day': first_missing_day,
+        'changed': changed,
+    }
+
+
+def sign_30_state_payload(state, cur_sign=None, cur_sign_state=None):
+    return encode_sproto([
+        (0, state['cur_sign'] if cur_sign is None else int(cur_sign)),
+        (1, state['replenish']),
+        (2, state['sys_sign']),
+        (3, state['cur_sign_state'] if cur_sign_state is None else bool(cur_sign_state)),
+        (4, state['replenish_sign_state']),
+        (5, state['count']),
+        (6, state['str']),
+    ])
 
 
 def sign_week_payload(day, can_claim, complete):
@@ -31535,29 +31708,173 @@ def client_handler(conn, addr):
                                     )
 
                 elif msg == 252 and picked_char: # request_sign_30_day_info
-                    sign_calendar = current_sign_calendar()
-                    cur_day = min(30, int(sign_calendar['month_day']))
-                    claimed = (picked_char.get('sign_30_claimed_date') == sign_calendar['date']
-                               or int(sign_calendar['month_day']) > 30)
-                    send_rpc_push(640, encode_sproto([(0, cur_day), (1, cur_day), (2, 0), (3, not claimed), (4, False), (5, 30), (6, "")]))
+                    with get_character_transaction_lock(picked_char):
+                        if is_current_character_connection(conn, picked_char):
+                            month_state = resolve_sign_30_state(picked_char)
+                            if month_state['changed'] and not save_chars(all_accounts_chars):
+                                print(
+                                    f"[SIGN MONTH] state persistence failed "
+                                    f"player={picked_char.get('id')}"
+                                )
+                            send_rpc_push(640, sign_30_state_payload(month_state))
 
                 elif msg == 254 and picked_char: # sign_30_day
                     with get_character_transaction_lock(picked_char):
-                        sign_calendar = current_sign_calendar()
-                        cur_day = min(30, int(sign_calendar['month_day']))
-                        already_claimed = (picked_char.get('sign_30_claimed_date') == sign_calendar['date']
-                                           or int(sign_calendar['month_day']) > 30)
-                        if not already_claimed:
-                            picked_char['sign_30_day'] = cur_day
-                            picked_char['sign_30_claimed_date'] = sign_calendar['date']
-                            picked_char['sign_30_claimed'] = True
-                            picked_char['cash'] = picked_char.get('cash', 0) + 20000
-                            save_chars(all_accounts_chars)
-                            send_rpc_push(642, encode_sproto([(0, cur_day), (1, cur_day), (2, 0), (3, False), (4, False), (5, 30), (6, "")]))
-                            send_rpc_push(611, sync_inventory_data(picked_char))
-                            sync_char_attrs_rpc(conn, picked_char)
+                        if not is_current_character_connection(conn, picked_char):
+                            print(
+                                f"[SIGN MONTH] stale claim rejected "
+                                f"player={picked_char.get('id')}"
+                            )
                         else:
-                            print(f"[REWARD SECURITY] duplicate 30-day sign rejected player={picked_char.get('id')}")
+                            previous_sign_state = snapshot_sign_30_state(picked_char)
+                            month_state = resolve_sign_30_state(picked_char)
+
+                            def reject_month_claim(reason):
+                                if month_state['changed'] and not save_chars(all_accounts_chars):
+                                    print(
+                                        f"[SIGN MONTH] state persistence failed "
+                                        f"player={picked_char.get('id')}"
+                                    )
+                                print(
+                                    f"[SIGN MONTH] claim rejected player={picked_char.get('id')} "
+                                    f"reason={reason}"
+                                )
+                                send_rpc_push(640, sign_30_state_payload(month_state))
+
+                            if not (
+                                month_state['cur_sign_state']
+                                or month_state['replenish_sign_state']
+                            ):
+                                reject_month_claim("nothing claimable")
+                            else:
+                                claim_day = month_state['next_missing_day']
+                                reward_config = SIGN_IN_MONTH_CONFIG.get(claim_day)
+                                replenish_config = None
+                                if month_state['replenish_sign_state']:
+                                    replenish_config = SIGN_IN_MONTH_CONFIG.get(
+                                        month_state['replenish'] + 1
+                                    )
+
+                                if not reward_config:
+                                    reject_month_claim(
+                                        f"missing reward config day={claim_day}"
+                                    )
+                                elif (
+                                    month_state['replenish_sign_state']
+                                    and not replenish_config
+                                ):
+                                    reject_month_claim(
+                                        f"missing replenish price index={month_state['replenish'] + 1}"
+                                    )
+                                else:
+                                    item_id = str(reward_config['item_id'])
+                                    quality = int(
+                                        ITEM_CONFIG.get(item_id, {}).get('quality', 0)
+                                    )
+                                    rewards = [(
+                                        item_id,
+                                        quality,
+                                        int(reward_config['item_count']),
+                                    )]
+                                    price_type = (
+                                        int(replenish_config['price_type'])
+                                        if replenish_config else None
+                                    )
+                                    price_cost = (
+                                        int(replenish_config['price_cost'])
+                                        if replenish_config else 0
+                                    )
+                                    if (
+                                        replenish_config
+                                        and get_currency_balance(picked_char, price_type)
+                                        < price_cost
+                                    ):
+                                        reject_month_claim("insufficient replenishment currency")
+                                    elif not can_add_reward_list_to_inventory(
+                                        picked_char, rewards
+                                    ):
+                                        reject_month_claim("reward inventory full or invalid")
+                                    else:
+                                        reward_snapshot = snapshot_character_reward_state(
+                                            picked_char
+                                        )
+                                        if replenish_config:
+                                            set_currency_balance(
+                                                picked_char,
+                                                price_type,
+                                                get_currency_balance(
+                                                    picked_char, price_type
+                                                ) - price_cost,
+                                            )
+                                        grant_item_rewards(
+                                            picked_char, rewards, save=False
+                                        )
+                                        claimed_days = set(
+                                            picked_char.get('sign_30_claimed_days', [])
+                                        )
+                                        claimed_days.add(claim_day)
+                                        picked_char['sign_30_claimed_days'] = sorted(
+                                            claimed_days
+                                        )
+                                        if replenish_config:
+                                            replenished_days = set(
+                                                picked_char.get(
+                                                    'sign_30_replenished_days', []
+                                                )
+                                            )
+                                            replenished_days.add(claim_day)
+                                            picked_char['sign_30_replenished_days'] = sorted(
+                                                replenished_days
+                                            )
+                                        picked_char['sign_30_day'] = claim_day
+                                        picked_char['sign_30_claimed'] = True
+                                        month_state_after = resolve_sign_30_state(
+                                            picked_char
+                                        )
+                                        if save_chars(all_accounts_chars):
+                                            send_rpc_push(
+                                                642,
+                                                sign_30_state_payload(
+                                                    month_state_after,
+                                                    cur_sign=claim_day,
+                                                    cur_sign_state=False,
+                                                ),
+                                            )
+                                            if (
+                                                month_state_after['cur_sign'] != claim_day
+                                                or month_state_after['cur_sign_state']
+                                            ):
+                                                send_rpc_push(
+                                                    640,
+                                                    sign_30_state_payload(
+                                                        month_state_after
+                                                    ),
+                                                )
+                                            sync_all_backpacks(
+                                                picked_char, send_rpc_push
+                                            )
+                                            sync_char_attrs_rpc(conn, picked_char)
+                                            print(
+                                                f"[SIGN MONTH CLAIMED] player={picked_char.get('id')} "
+                                                f"day={claim_day} "
+                                                f"replenished={bool(replenish_config)} "
+                                                f"price={price_cost if replenish_config else 0}"
+                                            )
+                                        else:
+                                            restore_character_reward_state(
+                                                picked_char, reward_snapshot
+                                            )
+                                            restore_sign_30_state(
+                                                picked_char, previous_sign_state
+                                            )
+                                            print(
+                                                f"[SIGN MONTH] persistence failed "
+                                                f"day={claim_day} player={picked_char.get('id')}"
+                                            )
+                                            send_rpc_push(
+                                                640,
+                                                sign_30_state_payload(month_state),
+                                            )
 
                 elif msg == 452 and picked_char: # watch_video_info / daily reward button
                     granted = False
