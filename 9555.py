@@ -15281,8 +15281,12 @@ def scuffle_copy_scene_for_level(level):
     _, copy_id, cfg = max(eligible, key=lambda row: row[0])
     return str(copy_id), cfg
 
-def scuffle_online_mission_candidates(level):
+def scuffle_online_mission_candidates(level, picked_char):
     candidates = []
+    completed_missions = {
+        str(mission_id)
+        for mission_id in (picked_char.get('completed_side_missions') or [])
+    }
     for online_id, cfg in ONLINE_MISSION_CONFIG.items():
         mission_id = str(cfg.get('mission_id', ''))
         mission = missions_data.get(mission_id, {})
@@ -15292,7 +15296,8 @@ def scuffle_online_mission_candidates(level):
         except (TypeError, ValueError):
             continue
         if (eligible_level and weight > 0
-                and int(mission.get('class', 0) or 0) == 7):
+                and int(mission.get('class', 0) or 0) == 7
+                and mission_id not in completed_missions):
             candidates.append((str(online_id), weight))
     return candidates
 
@@ -15316,7 +15321,7 @@ def scuffle_online_mission_offer(picked_char, copy_id):
         return active[1]
 
     level = int(picked_char.get('level', 1) or 1)
-    candidates = scuffle_online_mission_candidates(level)
+    candidates = scuffle_online_mission_candidates(level, picked_char)
     if not candidates:
         return ''
 
@@ -15334,6 +15339,33 @@ def scuffle_online_mission_offer(picked_char, copy_id):
         k=1,
     )[0]
 
+def rotate_scuffle_mission_offer_after_completion(picked_char):
+    level = int(picked_char.get('level', 1) or 1)
+    copy_id, _ = scuffle_copy_scene_for_level(level)
+    if not copy_id:
+        return False
+
+    candidates = scuffle_online_mission_candidates(level, picked_char)
+    copy_state = ensure_daily_copy_state(picked_char)
+    offers = copy_state.setdefault('scuffle_online_missions', {})
+    if not candidates:
+        offers.pop(copy_id, None)
+        return False
+
+    old_offer = str(offers.get(copy_id, '') or '')
+    alternatives = [
+        (candidate_id, weight)
+        for candidate_id, weight in candidates
+        if candidate_id != old_offer
+    ]
+    pool = alternatives or candidates
+    offers[copy_id] = random.choices(
+        [candidate_id for candidate_id, _ in pool],
+        weights=[weight for _, weight in pool],
+        k=1,
+    )[0]
+    return True
+
 def refresh_scuffle_mission_offer(picked_char, all_characters):
     level = int(picked_char.get('level', 1) or 1)
     copy_id, copy_cfg = scuffle_copy_scene_for_level(level)
@@ -15344,7 +15376,7 @@ def refresh_scuffle_mission_offer(picked_char, all_characters):
     if copy_attempts_remaining(picked_char, copy_id, copy_cfg) <= 0:
         return False, "attempts_exhausted"
 
-    candidates = scuffle_online_mission_candidates(level)
+    candidates = scuffle_online_mission_candidates(level, picked_char)
     if not candidates:
         return False, "no_eligible_missions"
     old_balance = get_currency_balance(picked_char, 1)
@@ -25483,6 +25515,9 @@ def client_handler(conn, addr):
                                 except: pass
 
                             del picked_char['active_missions'][mid]
+                            if int(m_cfg.get('class', 0) or 0) == 7:
+                                rotate_scuffle_mission_offer_after_completion(
+                                    picked_char)
                             if int(m_cfg.get('class', 0) or 0) in (4, 5):
                                 remove_gotham_escort_npc(picked_char, conn)
                             # Main-chain level goals may be accepted after the
