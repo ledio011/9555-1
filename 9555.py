@@ -30884,7 +30884,6 @@ def client_handler(conn, addr):
                             exp_state.get('char_refs', {}).pop(cid, None)
                             team = TEAM_STATES.get(int(exp_state.get('team_id') or 0))
                             if team:
-                                team_remove_member(team, cid)
                                 if not exp_state['members']:
                                     exp_state['ai_active'] = False
                                     for timer_key in ('ai_timer', 'timeout_timer'):
@@ -30893,7 +30892,7 @@ def client_handler(conn, addr):
                                     clear_exp_active_monsters(exp_state, lambda tag, data: exp_send_push(exp_state, tag, data))
                                     team['active_run'] = None; team['pending_run'] = None
                                 else:
-                                    exp_state['owner_id'] = int(team.get('leader_id', exp_state.get('owner_id', 0)))
+                                    exp_state['owner_id'] = int(exp_state['members'][0])
                                     team['active_run'] = exp_state
                         else:
                             finish_exp_stage(conn, send_rpc_push, picked_char, exp_state, win=False, force_terminal=True)
@@ -30911,6 +30910,8 @@ def client_handler(conn, addr):
                         if saved_pos: picked_char['pos'] = saved_pos
                         picked_char['map_id'] = saved_map
                         start_map_transition(conn, picked_char, saved_map, send_rpc_push, override_pos=saved_pos)
+                        if exp_state and exp_state.get('team_id'):
+                            send_team_update(exp_state['team_id'])
                         print(f"[RELIFE] Player {picked_char['id']} returned from EXP to map={saved_map}")
                     mark_pvp_relived(picked_char)
                     save_chars(all_accounts_chars)
@@ -33206,7 +33207,9 @@ def client_handler(conn, addr):
                     if in_equipment_stage:
                         equipment_state = picked_char.get('equipment_stage_state')
                         equipment_team = TEAM_STATES.get(int((equipment_state or {}).get('team_id') or 0))
-                        detach_equipment_stage_member(equipment_team, int(picked_char.get('id', 0)))
+                        detach_equipment_stage_member(
+                            equipment_team, int(picked_char.get('id', 0)),
+                            remove_from_team=False)
                         print('[LEAVE COPY] Removed player from equipment stage')
                         if session is not None:
                             ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -33216,30 +33219,15 @@ def client_handler(conn, addr):
                     if picked_char.get('exp_stage_state'):
                         exp_st = picked_char['exp_stage_state']
                         if exp_st.get('team_id'):
-                            cid = int(picked_char.get('id', 0))
-                            exp_st['members'] = [x for x in exp_st.get('members', []) if int(x) != cid]
-                            exp_st.get('char_refs', {}).pop(cid, None)
-                            team = TEAM_STATES.get(int(exp_st.get('team_id') or 0))
-                            if team:
-                                team_remove_member(team, cid)
-                                send_team_update(team['id'])
-                                if not exp_st['members']:
-                                    exp_st['ai_active'] = False
-                                    for timer_key in ('ai_timer', 'timeout_timer'):
-                                        run_timer = exp_st.get(timer_key)
-                                        if run_timer is not None: run_timer.cancel()
-                                    clear_exp_active_monsters(exp_st, send_rpc_push)
-                                    team['active_run'] = None
-                                    team['pending_run'] = None
-                                else:
-                                    exp_st['owner_id'] = int(team.get('leader_id', exp_st.get('owner_id', 0)))
-                                    team['active_run'] = exp_st
-                            else:
-                                exp_st['ai_active'] = False
-                                for timer_key in ('ai_timer', 'timeout_timer'):
-                                    run_timer = exp_st.get(timer_key)
-                                    if run_timer is not None: run_timer.cancel()
-                                clear_exp_active_monsters(exp_st, send_rpc_push)
+                            exp_team = TEAM_STATES.get(int(exp_st.get('team_id') or 0))
+                            detach_exp_team_member(
+                                exp_team, int(picked_char.get('id', 0)),
+                                remove_from_team=False)
+                            print('[LEAVE COPY] Removed player from EXP run')
+                            if session is not None:
+                                ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                                conn.sendall(struct.pack(">H", len(pf)) + pf)
+                            continue
                         else:
                             exp_st['ai_active'] = False
                             for timer_key in ('ai_timer', 'timeout_timer'):
@@ -34381,8 +34369,8 @@ def stop_team_match(team, goal_id, goal_type):
         if not queue: TEAM_MATCH_QUEUE.pop(copy_id,None)
         send_team_match_state(list(team.get('members',[])),copy_id,goal_type,1)
 
-def detach_equipment_stage_member(team, member_id):
-    """Remove one teammate from an equipment run without affecting survivors."""
+def detach_equipment_stage_member(team, member_id, remove_from_team=True):
+    """Detach a player from an equipment run, optionally leaving the team too."""
     cid = int(member_id)
     state = team.get('active_run') if team else None
     if not state or state.get('stage_kind') != 'equipment':
@@ -34419,7 +34407,7 @@ def detach_equipment_stage_member(team, member_id):
         else:
             state['members'] = [x for x in state.get('members', []) if int(x) != cid]
             state.get('char_refs', {}).pop(cid, None)
-    if team:
+    if team and remove_from_team:
         team_remove_member(team, cid)
     if not state.get('members'):
         state['ai_active'] = False
@@ -34433,18 +34421,23 @@ def detach_equipment_stage_member(team, member_id):
             team['active_run'] = None
             team['pending_run'] = None
     elif team:
-        state['owner_id'] = int(team.get('leader_id', state.get('owner_id', 0)))
+        state['owner_id'] = int(state['members'][0])
         team['active_run'] = None if state.get('_finish_handled') else state
     if team and team.get('members'):
         send_team_update(team['id'])
     save_chars(all_accounts_chars)
     return True
 
-def detach_exp_team_member(team, member_id):
+def detach_exp_team_member(team, member_id, remove_from_team=True):
     if team and (team.get('active_run') or {}).get('stage_kind') == 'equipment':
-        detach_equipment_stage_member(team, member_id)
+        detach_equipment_stage_member(
+            team, member_id, remove_from_team=remove_from_team)
         return
-    cid=int(member_id); state=team.get('active_run') if team else None
+    cid=int(member_id)
+    conn,char=ALL_CONNECTIONS.get(cid,(None,None))
+    if char is None and team: char=team.get('char_refs',{}).get(cid)
+    state=(team.get('active_run') if team else None)
+    if not state and char: state=char.get('exp_stage_state')
     if team and team.get('matching'): stop_team_match(team,team.get('goal_id',''),1)
     if team and team.get('pending_run'):
         for other_id in team.get('members',[]):
@@ -34452,8 +34445,6 @@ def detach_exp_team_member(team, member_id):
         team['pending_run']=None
         ready_timer=team.pop('_ready_timer',None)
         if ready_timer: ready_timer.cancel()
-    conn,char=ALL_CONNECTIONS.get(cid,(None,None))
-    if char is None and team: char=team.get('char_refs',{}).get(cid)
     if state and cid in exp_member_ids(state):
         if char and char.get('exp_stage_state') is state:
             if conn and is_exp_map(char.get('map_id')): broadcast_aoi_remove(cid,char.get('map_id'))
@@ -34461,7 +34452,10 @@ def detach_exp_team_member(team, member_id):
             state['members']=[x for x in state.get('members',[]) if int(x)!=cid]
             state.get('char_refs',{}).pop(cid,None)
             char.pop('exp_stage_state',None); char['active_copy_id']=None; char['exp_team_id']=None
+            char.pop('exp_members',None); char['exp_defer_start']=False
             char.pop('pre_copy_pos',None); char.pop('pre_copy_map',None)
+            if str(mid) == str(char.get('map_id', '')) or _guild_boss_map_id(mid):
+                mid='11'; pos=None
             if conn:
                 start_map_transition(conn,char,mid,lambda tag,data,who=cid:send_push_to_char(who,tag,data),override_pos=pos)
             else:
@@ -34470,18 +34464,21 @@ def detach_exp_team_member(team, member_id):
         else:
             state['members']=[x for x in state.get('members',[]) if int(x)!=cid]
             state.get('char_refs',{}).pop(cid,None)
-    team_remove_member(team,cid)
+    if team and remove_from_team:
+        team_remove_member(team,cid)
     if state:
         if state.get('members'):
-            team['active_run']=state
-            state['owner_id']=int(team.get('leader_id',state.get('owner_id',0)))
+            state['owner_id']=int(state['members'][0])
+            if team:
+                team['active_run']=state
         else:
             state['ai_active']=False
             for timer_key in ('ai_timer','timeout_timer'):
                 run_timer=state.get(timer_key)
                 if run_timer is not None: run_timer.cancel()
             clear_exp_active_monsters(state, lambda tag, data: exp_send_push(state, tag, data))
-            if team: team['active_run']=None; team['pending_run']=None
+            if team:
+                team['active_run']=None; team['pending_run']=None
     if team and team.get('members'): send_team_update(team['id'])
     save_chars(all_accounts_chars)
 
