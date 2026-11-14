@@ -12618,6 +12618,28 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                                 for _ in range(s['num']): send_npc_create(s['nid'], f"Quest_{s['nid']}", s['x'], s['z'], 0)
 
 def sync_mission_data(picked_char):
+    active_missions = picked_char.get("active_missions", {})
+    main_mission = active_missions.get("1014", {})
+    if (int(main_mission.get("state", 0) or 0) == 1
+            and not any(
+                int(missions_data.get(str(mid), {}).get("class", 0) or 0) == 0
+                and int(entry.get("state", 0) or 0) in (1, 2)
+                for mid, entry in active_missions.items()
+            )):
+        daily_mid, assigned_daily = ensure_daily_mission_for_guide(picked_char)
+        if assigned_daily:
+            if save_chars(all_accounts_chars):
+                mission1014_log(
+                    picked_char,
+                    f"assigned task={daily_mid} before mission sync",
+                )
+            else:
+                active_missions.pop(daily_mid, None)
+                mission1014_log(
+                    picked_char,
+                    f"could not persist task={daily_mid}; removed before mission sync",
+                )
+
     last_main = str(picked_char.get('last_main_mission_id', "-1") or "-1")
     if last_main in ("", "None"):
         last_main = "-1"
