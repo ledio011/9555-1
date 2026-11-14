@@ -136,7 +136,8 @@ NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 NPC_AOI_TRACK = {}  # connection identity -> {inst_id: {'nid': ..., 'x': ..., 'z': ...}}
 SURVIVE_BATTLE_NPC_MAP_IDS = frozenset(("1101", "1102"))
 SURVIVAL_PLAYER_MODEL_RADIUS_CM = 30  # CharacterModelData IDs 100, 104, and 105.
-PRISON_NPC_AOI_MAP_IDS = frozenset(("1201", "1202")) | SURVIVE_BATTLE_NPC_MAP_IDS
+SCUFFLE_NPC_MAP_IDS = frozenset(("1201", "1202"))
+PRISON_NPC_AOI_MAP_IDS = SCUFFLE_NPC_MAP_IDS | SURVIVE_BATTLE_NPC_MAP_IDS
 PRISON_NPC_AOI_TRACK = {}  # connection identity -> {shared spawn key: instance ID}
 PRISON_NPC_SHARED_SLOTS = {}
 PRISON_NPC_SHARED_BY_INSTANCE = {}
@@ -325,6 +326,9 @@ MOUNT_CONFIG = {} # garage vehicle id -> client MountData definition
 COLOR_CONFIG = {} # color id -> authoritative PriceType/PriceCost from ColorData
 WILD_BOSS_CONFIG = {} # ID -> configured world boss and required level band
 COPY_SCENE_CONFIG = {} # daily-copy id -> CopySceneData fields used by the APK
+SCUFFLE_CONFIG = {} # scuffle ID -> ScuffleData fields used by the APK
+ONLINE_MISSION_CONFIG = {} # online mission ID -> rank mission selection and reward references
+SCUFFLE_REFRESH_GOLD_COST = 20
 TOWER_CONFIG = {} # floor index -> TowerData fields used by the APK
 TOWER_MAP_TO_FLOOR = {} # map ID -> TowerData floor index
 SHOW_REWARD_CONFIG = {} # ShowRewardData id -> exact visible item list
@@ -455,6 +459,7 @@ LEVEL_REWARD_CONFIG = {} # LevelRewardData ID -> milestone claim definitions
 LEVEL_PACKAGE_CONFIG = {} # LevelPackageData ID -> level-up item bundle
 DAILY_ACTIVE_CONFIG = {} # DailyActiveData ID -> activity score/count/unlock values
 DAILY_ACTIVE_REWARD_CONFIG = {} # DailyActiveRewardData ID -> level/score/drop definition
+DAILY_MISSION_CONFIG = {} # DailyMissionData ID -> level eligibility
 SURVIVE_BATTLE_CONFIG = {} # SurviveBattleData ID -> schedule, maps, scores and rank drops
 SURVIVE_BATTLE_RANK_REWARDS = {
     '32301': {'honor': 300, 'random_badges': 5},
@@ -500,6 +505,7 @@ try:
                         'target_id': parts[11],
                         'pre_id': parts[12],
                         'next_id': parts[14],
+                        'map_id': parts[20] if len(parts) > 20 else '',
                         'min_level': int(parts[23]) if parts[23].isdigit() else 1,
                         'reward_ids': [parts[25] if len(parts)>25 else "", parts[27] if len(parts)>27 else "", parts[29] if len(parts)>29 else ""]
                     }
@@ -1093,7 +1099,7 @@ try:
                         'ai_type': parts[18] if len(parts) > 18 and parts[18] else '',
                         'ai_data_id': parts[19] if len(parts) > 19 and parts[19] else '',
                         'drop_id': parts[20] if len(parts) > 20 and parts[20] else '',
-                        'walk_speed': int(parts[21]) if len(parts) > 21 and parts[21].isdigit() else 5,
+                        'walk_speed': int(parts[21]) if len(parts) > 21 and parts[21].isdigit() else 0,
                         # NpcData.MoveSpeed defaults to 50 in the APK when the table cell is blank.
                         'move_speed': int(parts[22]) if len(parts) > 22 and parts[22].isdigit() else 50,
                         'atk_coe': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 10000,
@@ -1749,6 +1755,45 @@ try:
                     }
         debug_log(f"[COPY SCENE CONFIG LOADED] daily_copies={len(COPY_SCENE_CONFIG)}")
 
+    scuffle_path = os.path.join(text_asset_root, "ScuffleData")
+    if os.path.exists(scuffle_path):
+        with open(scuffle_path, "r", encoding="utf-8") as scuffle_file:
+            for line in scuffle_file:
+                parts = line.strip().split(",")
+                if len(parts) < 6 or parts[0] != "*" or not parts[1].isdigit():
+                    continue
+                try:
+                    SCUFFLE_CONFIG[parts[1]] = {
+                        "map_id": parts[2].strip(),
+                        "map_id2": parts[3].strip(),
+                        "max_player": int(parts[4]),
+                        "unlock_level": int(parts[5]),
+                    }
+                except (TypeError, ValueError):
+                    continue
+        debug_log(f"[SCUFFLE CONFIG LOADED] areas={len(SCUFFLE_CONFIG)}")
+
+    online_mission_path = os.path.join(text_asset_root, "OnlineMissionData")
+    if os.path.exists(online_mission_path):
+        with open(online_mission_path, "r", encoding="utf-8") as online_mission_file:
+            for line in online_mission_file:
+                parts = line.strip().split(",")
+                if len(parts) < 9 or parts[0] != "*" or not parts[1].isdigit():
+                    continue
+                try:
+                    ONLINE_MISSION_CONFIG[parts[1]] = {
+                        "mission_id": parts[2].strip(),
+                        "level_min": int(parts[3]),
+                        "level_max": int(parts[4]),
+                        "mission_star": int(parts[5]),
+                        "drop_id": parts[6].strip(),
+                        "show_reward": parts[7].strip(),
+                        "weight": int(parts[8]),
+                    }
+                except (TypeError, ValueError):
+                    continue
+        debug_log(f"[ONLINE MISSION CONFIG LOADED] rows={len(ONLINE_MISSION_CONFIG)}")
+
     tower_path = os.path.join(text_asset_root, "TowerData")
     if os.path.exists(tower_path):
         tower_columns = {}
@@ -2208,6 +2253,19 @@ try:
                     "Desc": row[9].strip(),
                 }
         debug_log(f"[DAILY ACTIVE CONFIG LOADED] count={len(DAILY_ACTIVE_CONFIG)}")
+
+    daily_mission_path = os.path.join(text_asset_root, "DailyMissionData")
+    if os.path.exists(daily_mission_path):
+        with open(daily_mission_path, "r", encoding="utf-8") as table_file:
+            for row in (line.strip().split(",") for line in table_file if line.strip()):
+                if (len(row) < 4 or row[0] != "*" or not row[1].strip().isdigit()
+                        or not row[2].strip().isdigit() or not row[3].strip().isdigit()):
+                    continue
+                DAILY_MISSION_CONFIG[row[1].strip()] = {
+                    "level_max": int(row[2]),
+                    "level_min": int(row[3]),
+                }
+        debug_log(f"[DAILY MISSION CONFIG LOADED] count={len(DAILY_MISSION_CONFIG)}")
 
     daily_active_reward_path = os.path.join(text_asset_root, "DailyActiveRewardData")
     if os.path.exists(daily_active_reward_path):
@@ -8604,6 +8662,7 @@ def start_tower_floor(conn, char, floor_id, send_rpc_push, continuation=False):
         start_map_transition(conn, char, config["map_id"], send_rpc_push)
     sync_char_attrs_rpc(conn, char)
     tower_info_response(char, send_rpc_push)
+    advance_missions(char, send_rpc_push, "dungeon", target_id="107")
     return True
 
 
@@ -10180,7 +10239,9 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
     if is_tower_map(current_map) and inst_id:
         tower_npc_killed(picked_char, inst_id, conn, send_rpc_push)
     if valid_kill and not is_exp_map(current_map) and not is_equipment_copy_map(current_map):
-        advance_missions(picked_char, send_rpc_push, 'kill', target_id=npcid)
+        advance_missions(
+            picked_char, send_rpc_push, 'kill', target_id=npcid,
+            map_id=current_map)
 
     if exp_state and inst_id:
         active_monsters = exp_state.get('active_monsters', [])
@@ -10321,6 +10382,23 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                         score_payload = survive_battle_top_payload(picked_char)
                         if score_payload is not None:
                             send_rpc_push(636, score_payload)
+            elif current_map in SCUFFLE_NPC_MAP_IDS:
+                # Match the existing per-NPC EXP/cash calculation; the
+                # ShowRewardData mission tier is not an individual kill drop.
+                npc_stats = get_npc_attr(npcid, 1)
+                exp_kill, cash_kill = calculate_npc_kill_rewards(
+                    picked_char.get('level', 1), npc_stats.get('lv', 1))
+                rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
+                grant_item_rewards(
+                    picked_char, rewards, conn, send_rpc_push, save=False)
+                send_rpc_push(638, encode_sproto([(0, [
+                    encode_sproto([
+                        (0, "2001"), (1, exp_kill), (3, 0)
+                    ]),
+                    encode_sproto([
+                        (0, "1001"), (1, cash_kill), (3, 0)
+                    ]),
+                ])]))
             else:
                 npc_stats = get_npc_attr(
                     npcid, picked_char.get('level', 1)
@@ -11087,6 +11165,7 @@ def prison_create_shared_npc(slot, spec):
         "patrol_next_at": time.time(),
         "last_move_at": time.time(),
         "moving": False,
+        "broadcast_move_target": None,
     })
     PRISON_NPC_SHARED_BY_INSTANCE[inst_id] = slot["slot"]
     return inst_id, attr
@@ -11305,7 +11384,12 @@ def _prison_npc_move_toward(
                 or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
             return
         current_x, current_z = slot.get("position", (slot["x"], slot["z"]))
-        is_survival_map = str(slot.get("map_id", "")) in SURVIVE_BATTLE_NPC_MAP_IDS
+        map_id = str(slot.get("map_id", ""))
+        is_survival_map = map_id in SURVIVE_BATTLE_NPC_MAP_IDS
+        use_client_waypoint = (
+            is_survival_map
+            or (map_id in SCUFFLE_NPC_MAP_IDS and walk))
+        was_moving = bool(slot.get("moving"))
         dx, dz = float(target_x) - current_x, float(target_z) - current_z
         distance = math.hypot(dx, dz)
         if distance <= 1:
@@ -11321,11 +11405,20 @@ def _prison_npc_move_toward(
         slot["moving"] = True
         move_x, move_z = (
             (int(target_x), int(target_z))
-            if is_survival_map else (next_x, next_z))
-    # The Survival NPC client holds one waypoint and continually reapplies it;
-    # send the destination instead of a short predicted point every AI tick.
-    _prison_npc_broadcast_move(
-        slot_key, inst_id, move_x, move_z, heading, walk=walk)
+            if use_client_waypoint else (next_x, next_z))
+        if use_client_waypoint:
+            move_target = (move_x, move_z)
+            broadcast_move = (
+                not was_moving
+                or slot.get("broadcast_move_target") != move_target)
+            slot["broadcast_move_target"] = move_target
+        else:
+            broadcast_move = True
+    # Survival and Scuffle clients path toward the supplied waypoint; re-send
+    # only when movement starts or the destination changes.
+    if broadcast_move:
+        _prison_npc_broadcast_move(
+            slot_key, inst_id, move_x, move_z, heading, walk=walk)
 
 
 def _prison_npc_stop(slot_key, inst_id, now):
@@ -11337,6 +11430,7 @@ def _prison_npc_stop(slot_key, inst_id, now):
         heading = int(slot.get("heading", 0) or 0)
         slot["moving"] = False
         slot["last_move_at"] = now
+        slot["broadcast_move_target"] = None
     _prison_npc_broadcast_move(
         slot_key, inst_id, x, z, heading, stop=True, walk=False)
 
@@ -11352,7 +11446,7 @@ def prison_npc_retarget_on_hit(inst_id, attacker):
         return False
     with PRISON_NPC_LOCK:
         slot = PRISON_NPC_SHARED_SLOTS.get(str(slot_key))
-        if (not slot or str(slot.get("map_id", "")) not in SURVIVE_BATTLE_NPC_MAP_IDS
+        if (not slot or str(slot.get("map_id", "")) not in PRISON_NPC_AOI_MAP_IDS
                 or int(slot.get("inst_id") or 0) != inst_id
                 or slot.get("dead_at")
                 or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
@@ -11457,15 +11551,14 @@ def _prison_npc_ai_tick():
                             live_slot["patrol_target"] = None
                     _prison_npc_move_toward(
                         slot_key, inst_id, home_x, home_z, speed, now)
-                elif str(snapshot.get("map_id", "")) not in SURVIVE_BATTLE_NPC_MAP_IDS:
-                    _prison_npc_stop(slot_key, inst_id, now)
                 else:
                     patrol_type = int(ai_cfg.get("patrol_type", 0) or 0)
                     # AIData distances are centi-units; PatrolRadius is in meters.
                     patrol_distance = min(
                         max(0, int(ai_cfg.get("patrol_distance", 0) or 0)) / 100.0,
                         max(0.0, float(npc_cfg.get("patrol_radius", 0) or 0)))
-                    if not patrol_type or patrol_distance <= 0:
+                    # The APK random-walks only CIRCLE patrols and waits 2 seconds on arrival.
+                    if patrol_type != 1 or patrol_distance <= 0:
                         _prison_npc_stop(slot_key, inst_id, now)
                         continue
 
@@ -11475,11 +11568,11 @@ def _prison_npc_ai_tick():
                         if (int(live_slot.get("inst_id") or 0) == inst_id
                                 and not patrol_target
                                 and now >= float(live_slot.get("patrol_next_at", 0) or 0)):
-                            angle = random.uniform(0, math.tau)
-                            radius = random.uniform(patrol_distance * 0.35, patrol_distance)
+                            offset_x = random.uniform(-patrol_distance, patrol_distance)
+                            offset_z = random.uniform(-patrol_distance, patrol_distance)
                             patrol_target = (
-                                home_x + int(math.cos(angle) * radius * 100),
-                                home_z + int(math.sin(angle) * radius * 100))
+                                home_x + int(offset_x * 100),
+                                home_z + int(offset_z * 100))
                             live_slot["patrol_target"] = patrol_target
 
                     if patrol_target:
@@ -11490,12 +11583,16 @@ def _prison_npc_ai_tick():
                                 live_slot = PRISON_NPC_SHARED_SLOTS.get(slot_key, {})
                                 if int(live_slot.get("inst_id") or 0) == inst_id:
                                     live_slot["patrol_target"] = None
-                                    live_slot["patrol_next_at"] = now + max(
-                                        0.3, int(ai_cfg.get("wait_time", 300) or 300) / 1000.0)
+                                    live_slot["patrol_next_at"] = now + 2.0
                             _prison_npc_stop(slot_key, inst_id, now)
                         else:
+                            default_walk_speed = (
+                                10 if str(snapshot.get("map_id", ""))
+                                in SCUFFLE_NPC_MAP_IDS else 5)
                             walk_speed = max(
-                                0.1, float(npc_cfg.get("walk_speed", 5) or 5) / 10.0)
+                                0.1,
+                                float(npc_cfg.get("walk_speed")
+                                      or default_walk_speed) / 10.0)
                             _prison_npc_move_toward(
                                 slot_key, inst_id, patrol_target[0], patrol_target[1],
                                 walk_speed, now)
@@ -12603,7 +12700,47 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                             if str(s['map']) == map_str:
                                 for _ in range(s['num']): send_npc_create(s['nid'], f"Quest_{s['nid']}", s['x'], s['z'], 0)
 
+def mission_rank_for_active_entry(mid, mission_entry):
+    mission_cfg = missions_data.get(str(mid), {})
+    if int(mission_cfg.get('class', 0) or 0) != 7:
+        return 0
+    parm = mission_entry.get('parm', []) if isinstance(mission_entry, dict) else []
+    try:
+        online_id = str(int(parm[1]))
+    except (IndexError, TypeError, ValueError):
+        return 0
+    online_cfg = ONLINE_MISSION_CONFIG.get(online_id, {})
+    if str(online_cfg.get('mission_id', '')) != str(mid):
+        return 0
+    try:
+        return max(0, int(online_cfg.get('mission_star', 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
 def sync_mission_data(picked_char):
+    active_missions = picked_char.get("active_missions", {})
+    main_mission = active_missions.get("1014", {})
+    if (int(main_mission.get("state", 0) or 0) == 1
+            and not any(
+                int(missions_data.get(str(mid), {}).get("class", 0) or 0) == 0
+                and int(entry.get("state", 0) or 0) in (1, 2)
+                for mid, entry in active_missions.items()
+            )):
+        daily_mid, assigned_daily = ensure_daily_mission_for_guide(picked_char)
+        if assigned_daily:
+            if save_chars(all_accounts_chars):
+                mission1014_log(
+                    picked_char,
+                    f"assigned task={daily_mid} before mission sync",
+                )
+            else:
+                active_missions.pop(daily_mid, None)
+                mission1014_log(
+                    picked_char,
+                    f"could not persist task={daily_mid}; removed before mission sync",
+                )
+
     last_main = str(picked_char.get('last_main_mission_id', "-1") or "-1")
     if last_main in ("", "None"):
         last_main = "-1"
@@ -12624,7 +12761,7 @@ def sync_mission_data(picked_char):
         m_bytes = encode_sproto([
             (0, str(mid)),
             (1, int(mdata['state'])),
-            (2, 0), # missionquality
+            (2, mission_rank_for_active_entry(mid, mdata)),
             (3, [int(x) for x in parm])
         ])
         own_missions_list.append(m_bytes)
@@ -15123,8 +15260,118 @@ def ensure_daily_copy_state(picked_char):
     if state.get('day') != stamp:
         state['day'] = stamp
         state['remaining'] = {}
+        state['scuffle_online_missions'] = {}
         # Do NOT reset best_times on daily reset - best times are persistent records
     return state
+
+def scuffle_copy_scene_for_level(level):
+    eligible = []
+    for copy_id, cfg in COPY_SCENE_CONFIG.items():
+        if int(cfg.get('subtype', -1)) != 20:
+            continue
+        if not int(cfg.get('min_level', 1)) <= int(level) <= int(cfg.get('max_level', 80)):
+            continue
+        try:
+            numeric_id = int(copy_id)
+        except (TypeError, ValueError):
+            numeric_id = 0
+        eligible.append(((int(cfg.get('min_level', 1)), -numeric_id), copy_id, cfg))
+    if not eligible:
+        return None, None
+    _, copy_id, cfg = max(eligible, key=lambda row: row[0])
+    return str(copy_id), cfg
+
+def scuffle_online_mission_candidates(level):
+    candidates = []
+    for online_id, cfg in ONLINE_MISSION_CONFIG.items():
+        mission_id = str(cfg.get('mission_id', ''))
+        mission = missions_data.get(mission_id, {})
+        try:
+            eligible_level = int(cfg.get('level_min', 0)) <= int(level) <= int(cfg.get('level_max', 0))
+            weight = int(cfg.get('weight', 0))
+        except (TypeError, ValueError):
+            continue
+        if (eligible_level and weight > 0
+                and int(mission.get('class', 0) or 0) == 7):
+            candidates.append((str(online_id), weight))
+    return candidates
+
+def active_scuffle_mission(picked_char):
+    for mission_id, entry in (picked_char.get('active_missions') or {}).items():
+        if int(missions_data.get(str(mission_id), {}).get('class', 0) or 0) != 7:
+            continue
+        try:
+            state = int(entry.get('state', 0) or 0)
+            parm = entry.get('parm', [])
+            online_id = str(int(parm[1]))
+        except (AttributeError, IndexError, TypeError, ValueError):
+            continue
+        if state in (1, 2, 3):
+            return str(mission_id), online_id
+    return None
+
+def scuffle_online_mission_offer(picked_char, copy_id):
+    active = active_scuffle_mission(picked_char)
+    if active:
+        return active[1]
+
+    level = int(picked_char.get('level', 1) or 1)
+    candidates = scuffle_online_mission_candidates(level)
+    if not candidates:
+        return ''
+
+    state = ensure_daily_copy_state(picked_char)
+    offers = state.setdefault('scuffle_online_missions', {})
+    online_id = str(offers.get(str(copy_id), '') or '')
+    if any(candidate_id == online_id for candidate_id, _ in candidates):
+        return online_id
+
+    seed = f"{picked_char.get('id', '')}:{state.get('day', '')}:{copy_id}"
+    chooser = random.Random(seed)
+    return chooser.choices(
+        [candidate_id for candidate_id, _ in candidates],
+        weights=[weight for _, weight in candidates],
+        k=1,
+    )[0]
+
+def refresh_scuffle_mission_offer(picked_char, all_characters):
+    level = int(picked_char.get('level', 1) or 1)
+    copy_id, copy_cfg = scuffle_copy_scene_for_level(level)
+    if not copy_id or not copy_cfg:
+        return False, "scuffle_unavailable"
+    if active_scuffle_mission(picked_char):
+        return False, "mission_active"
+    if copy_attempts_remaining(picked_char, copy_id, copy_cfg) <= 0:
+        return False, "attempts_exhausted"
+
+    candidates = scuffle_online_mission_candidates(level)
+    if not candidates:
+        return False, "no_eligible_missions"
+    old_balance = get_currency_balance(picked_char, 1)
+    if old_balance < SCUFFLE_REFRESH_GOLD_COST:
+        return False, "insufficient_gold"
+
+    new_offer = random.choices(
+        [candidate_id for candidate_id, _ in candidates],
+        weights=[weight for _, weight in candidates],
+        k=1,
+    )[0]
+    copy_state = ensure_daily_copy_state(picked_char)
+    offers = copy_state.setdefault('scuffle_online_missions', {})
+    had_old_offer = copy_id in offers
+    old_offer = offers.get(copy_id)
+    offers[copy_id] = new_offer
+    set_currency_balance(
+        picked_char, 1, old_balance - SCUFFLE_REFRESH_GOLD_COST)
+    if save_chars(all_characters):
+        return True, "ok"
+
+    set_currency_balance(picked_char, 1, old_balance)
+    if had_old_offer:
+        offers[copy_id] = old_offer
+    else:
+        offers.pop(copy_id, None)
+    return False, "persistence_failed"
 
 def calculate_npc_kill_rewards(player_level, npc_level=1):
     """Calculates balanced EXP and Cash rewards for killing/hitting an NPC based on BaseLvData."""
@@ -15162,6 +15409,69 @@ def copy_attempts_remaining(picked_char, copy_id, cfg):
     if copy_id not in remaining:
         remaining[copy_id] = int(cfg.get('max_plays', 3))
     return max(0, int(remaining[copy_id]))
+
+def start_scuffle_battle(conn, char, scuffle_id, floor_id, send_rpc_push):
+    scuffle_id = str(scuffle_id or "")
+    try:
+        floor_id = int(floor_id)
+    except (TypeError, ValueError):
+        floor_id = -1
+    scuffle = SCUFFLE_CONFIG.get(scuffle_id)
+    copy_cfg = COPY_SCENE_CONFIG.get(scuffle_id)
+    if (not char or not is_current_character_connection(conn, char)
+            or not scuffle or not copy_cfg
+            or int(copy_cfg.get("subtype", -1)) != 20
+            or floor_id not in (0, 1)):
+        print(f"[SCUFFLE] entry rejected player={char.get('id') if char else '-'} "
+              f"id={scuffle_id} floor={floor_id} reason=invalid_request")
+        return False
+
+    floor_maps = (str(scuffle.get("map_id") or ""),
+                  str(scuffle.get("map_id2") or ""))
+    target_map = floor_maps[floor_id]
+    current_map = str(char.get("map_id") or "11")
+    in_scuffle = current_map in floor_maps
+    level = int(char.get("level", 1) or 1)
+    min_level = max(
+        int(scuffle.get("unlock_level", 1) or 1),
+        int(copy_cfg.get("min_level", 1) or 1))
+    max_level = int(copy_cfg.get("max_level", 80) or 80)
+    active_copy_id = str(char.get("active_copy_id") or "")
+    if (not target_map or target_map not in MAP_CONFIG
+            or (not in_scuffle and floor_id != 0)
+            or (in_scuffle and active_copy_id not in ("", scuffle_id))
+            or (not in_scuffle and active_copy_id)
+            or level < min_level or level > max_level):
+        print(f"[SCUFFLE] entry rejected player={char.get('id')} id={scuffle_id} "
+              f"floor={floor_id} map={current_map} level={level} "
+              f"reason=invalid_state_or_level")
+        return False
+
+    new_entry = not in_scuffle
+    remaining = None
+    if new_entry:
+        remaining = copy_attempts_remaining(char, scuffle_id, copy_cfg)
+        if remaining <= 0:
+            print(f"[SCUFFLE] entry rejected player={char.get('id')} "
+                  f"id={scuffle_id} reason=daily_attempts_exhausted")
+            return False
+        if char.get("pre_copy_pos") is None:
+            char["pre_copy_pos"] = list(
+                char.get("pos") or default_map_spawn_position(current_map))
+            char["pre_copy_map"] = current_map
+        copy_state = ensure_daily_copy_state(char)
+        copy_state["remaining"][scuffle_id] = remaining - 1
+
+    char["active_copy_id"] = scuffle_id
+    start_map_transition(conn, char, target_map, send_rpc_push)
+    save_chars(all_accounts_chars)
+    if new_entry:
+        send_rpc_push(555, sync_copy_scenes(char))
+        advance_missions(char, send_rpc_push, "dungeon", target_id="108")
+    print(f"[SCUFFLE] entered id={scuffle_id} floor={floor_id} "
+          f"player={char.get('id')} remaining="
+          f"{max(0, remaining - 1) if remaining is not None else 'unchanged'}")
+    return True
 
 
 def is_cash_stage_copy(copy_id):
@@ -15551,7 +15861,7 @@ def start_cash_stage_run(conn, char, copy_id, cfg, use_time_item, send_rpc_push)
     if ticket_used:
         sync_all_backpacks(char, send_rpc_push)
     send_rpc_push(555, sync_copy_scenes(char))
-    advance_missions(char, send_rpc_push, 'dungeon', target_id=copy_id)
+    advance_missions(char, send_rpc_push, 'dungeon', target_id='106')
     start_map_transition(conn, char, map_id, send_rpc_push)
     print(f"[CASH STAGE] entered id={copy_id} map={map_id} "
           f"remaining={cash_stage_attempts_remaining(char)} ticket={ticket_used}")
@@ -16993,24 +17303,32 @@ def sync_copy_scenes(picked_char):
         # copyscene_info: ID, CurNum, BestGrade, Type, str, enable, state, Type2.
         # Type=1 marks a daily copy.  The client finds the Street Race entry
         # through CopySceneData.SubType == 7, rather than a server-made ID.
-        state = ensure_daily_copy_state(picked_char)
-        best_grade = state.get('best_times', {}).get(copy_id)
-        best_str = state.get('best_times_str', {}).get(copy_id)
+        copy_state = ensure_daily_copy_state(picked_char)
+        best_grade = copy_state.get('best_times', {}).get(copy_id)
+        best_str = copy_state.get('best_times_str', {}).get(copy_id)
+        is_scuffle = int(cfg.get('subtype', -1)) == 20
+        scuffle_active = active_scuffle_mission(picked_char) if is_scuffle else None
+        scuffle_offer = (
+            scuffle_active[1] if scuffle_active
+            else scuffle_online_mission_offer(picked_char, copy_id)
+        ) if is_scuffle else ''
 
         info_fields = [
             (0, str(copy_id)),
             (1, copy_scene_current_num(picked_char, copy_id, cfg, now)),
             (3, 1),
             (5, True),
-            (6, 0),
+            (6, 1 if scuffle_active else 0),
             (7, cfg['subtype'])
         ]
-        best_copy_grade = state.get('best_grades', {}).get(copy_id)
+        best_copy_grade = copy_state.get('best_grades', {}).get(copy_id)
         if best_copy_grade is not None:
             info_fields.append((2, int(best_copy_grade)))
         elif best_grade is not None:
             info_fields.append((2, int(best_grade)))
-        if best_str:
+        if is_scuffle and scuffle_offer:
+            info_fields.append((4, str(scuffle_offer)))
+        elif best_str:
             info_fields.append((4, str(best_str)))
 
         copies[str(copy_id)] = encode_sproto(info_fields)
@@ -17103,13 +17421,61 @@ def give_mission_rewards(picked_char, mid):
     """Resolves rewards by profession and calculates level ups using BaseLvData."""
     try:
         m = missions_data.get(mid)
-        if not m or not m.get('reward_ids'): return 0, 0, [], [], False
+        if not m:
+            return 0, 0, [], [], False
 
-        prof = picked_char.get('prof', 0)
-        rids = m['reward_ids']
-        rid = rids[prof] if prof < len(rids) else rids[0]
-        reward = rewards_data.get(rid)
-        if not reward: return 0, 0, [], [], False
+        online_reward_rows = None
+        if int(m.get('class', 0) or 0) == 7:
+            active_entry = picked_char.get('active_missions', {}).get(mid, {})
+            parm = active_entry.get('parm', []) if isinstance(active_entry, dict) else []
+            try:
+                online_id = str(int(parm[1]))
+            except (IndexError, TypeError, ValueError):
+                print(f"[SCUFFLE MISSION REWARD MISSING] mission={mid} online_id unavailable")
+                return 0, 0, [], [], False
+            online_cfg = ONLINE_MISSION_CONFIG.get(online_id, {})
+            show_reward_id = str(online_cfg.get('show_reward', '') or '').strip()
+            if str(online_cfg.get('mission_id', '')) != str(mid) or not show_reward_id:
+                print(f"[SCUFFLE MISSION REWARD MISSING] mission={mid} online_id={online_id}")
+                return 0, 0, [], [], False
+            online_reward_rows = list(
+                SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(show_reward_id, []))
+            if not online_reward_rows:
+                print(f"[SCUFFLE MISSION REWARD MISSING] mission={mid} "
+                      f"online_id={online_id} ShowRewardID={show_reward_id}")
+                return 0, 0, [], [], False
+            unsupported_resources = [
+                item_id for item_id, _quality, _amount in online_reward_rows
+                if item_id in DIRECT_REWARD_RESOURCE_IDS
+                and item_id not in ('1001', '2001')
+            ]
+            if unsupported_resources:
+                print(f"[SCUFFLE MISSION REWARD UNSUPPORTED] mission={mid} "
+                      f"ShowRewardID={show_reward_id} items={unsupported_resources}")
+                return 0, 0, [], [], False
+            reward_items = [
+                (item_id, quality, amount)
+                for item_id, quality, amount in online_reward_rows
+                if item_id not in ('1001', '2001')
+            ]
+            reward = {
+                'exp': sum(amount for item_id, _quality, amount in online_reward_rows
+                           if item_id == '2001'),
+                'cash': sum(amount for item_id, _quality, amount in online_reward_rows
+                            if item_id == '1001'),
+                'items': [item_id for item_id, _quality, _amount in reward_items],
+                'item_amounts': [amount for _item_id, _quality, amount in reward_items],
+                'item_qualities': [quality for _item_id, quality, _amount in reward_items],
+            }
+        else:
+            if not m.get('reward_ids'):
+                return 0, 0, [], [], False
+            prof = picked_char.get('prof', 0)
+            rids = m['reward_ids']
+            rid = rids[prof] if prof < len(rids) else rids[0]
+            reward = rewards_data.get(rid)
+            if not reward:
+                return 0, 0, [], [], False
 
         added_exp = reward.get('exp', 0)
         added_cash = reward.get('cash', 0)
@@ -17142,18 +17508,28 @@ def give_mission_rewards(picked_char, mid):
 
         # Send original reward popup (Tag 638)
         # Sproto item schema: itemId(0), itemCount(1), quality(2).
-        popup_items = [
-            encode_sproto([(0, "2001"), (1, added_exp), (2, 0)]),
-            encode_sproto([(0, "1001"), (1, added_cash), (2, 0)])
-        ]
+        if online_reward_rows is None:
+            popup_items = [
+                encode_sproto([(0, "2001"), (1, added_exp), (2, 0)]),
+                encode_sproto([(0, "1001"), (1, added_cash), (2, 0)])
+            ]
+        else:
+            popup_items = [
+                encode_sproto([(0, item_id), (1, amount), (2, quality)])
+                for item_id, quality, amount in online_reward_rows
+            ]
 
         items, amts = reward.get('items', []), reward.get('item_amounts', [])
+        qualities = reward.get('item_qualities', [])
         granted_items = []
         for i in range(len(items)):
             if items[i]:
                 amt = amts[i] if i < len(amts) else 1
-                popup_items.append(encode_sproto([(0, items[i]), (1, amt), (2, 0)]))
-                add_to_inventory(picked_char, items[i], amt)
+                quality = qualities[i] if i < len(qualities) else None
+                if online_reward_rows is None:
+                    popup_items.append(encode_sproto([
+                        (0, items[i]), (1, amt), (2, quality or 0)]))
+                add_to_inventory(picked_char, items[i], amt, quality=quality)
                 granted_items.append((items[i], amt))
 
         # The caller sends TAG 638 after ret_complete_mission (521).  The APK
@@ -17164,11 +17540,28 @@ def give_mission_rewards(picked_char, mid):
         traceback.print_exc()
         return 0, 0, [], [], False
 
-def accept_mission_logic(picked_char, mid):
+def accept_mission_logic(picked_char, mid, online_id=None):
     if mid not in missions_data:
         print(f"[accept_mission_logic] FAILED: {mid} not in missions_data")
         return False
     m = missions_data[mid]
+    is_scuffle_mission = int(m.get('class', 0) or 0) == 7
+    online_id = str(online_id or '').strip()
+    if is_scuffle_mission:
+        online_cfg = ONLINE_MISSION_CONFIG.get(online_id)
+        if (not online_cfg
+                or str(online_cfg.get('mission_id')) != str(mid)
+                or not int(online_cfg.get('level_min', 0) or 0)
+                    <= int(picked_char.get('level', 1) or 1)
+                    <= int(online_cfg.get('level_max', 0) or 0)):
+            print(f"[accept_mission_logic] FAILED: invalid Scuffle selection mission={mid} online_id={online_id}")
+            return False
+        copy_id, _ = scuffle_copy_scene_for_level(
+            int(picked_char.get('level', 1) or 1))
+        if (not copy_id
+                or online_id != scuffle_online_mission_offer(picked_char, copy_id)):
+            print(f"[accept_mission_logic] FAILED: stale Scuffle offer mission={mid} online_id={online_id}")
+            return False
     # Main-chain completion may activate the next mission before the client
     # sends its follow-up accept request. Treat that retry as an acknowledgement
     # and preserve the existing state/progress instead of rejecting or resetting it.
@@ -17177,6 +17570,15 @@ def accept_mission_logic(picked_char, mid):
         active_missions = {}
         picked_char['active_missions'] = active_missions
     if mid in active_missions:
+        if is_scuffle_mission:
+            active_entry = active_missions[mid]
+            parm = active_entry.setdefault('parm', [0] * 8)
+            if len(parm) < 8:
+                parm.extend([0] * (8 - len(parm)))
+            if int(parm[1] or 0) not in (0, int(online_id)):
+                print(f"[accept_mission_logic] FAILED: Scuffle selection changed mission={mid}")
+                return False
+            parm[1] = int(online_id)
         print(f"[accept_mission_logic] {mid} already active; acknowledging existing state")
         return True
 
@@ -17223,9 +17625,95 @@ def accept_mission_logic(picked_char, mid):
             print(f"[accept_mission_logic] Gotham activity unavailable or exhausted: {mid}")
         return activity_accept
 
-    parm = [0]*8; parm[7] = int(time.time())
+    parm = [0]*8
+    if is_scuffle_mission:
+        parm[1] = int(online_id)
+        copy_state = ensure_daily_copy_state(picked_char)
+        copy_state.setdefault('scuffle_online_missions', {})[copy_id] = online_id
+    parm[7] = int(time.time())
     picked_char['active_missions'][mid] = {'state': 1, 'parm': parm, 'accept_time': int(time.time())}
     return True
+
+def mission1014_log(picked_char, message):
+    print(f"[MISSION1014] player={picked_char.get('id', '?')} {message}")
+
+def ensure_daily_mission_for_guide(picked_char):
+    active_missions = picked_char.get('active_missions', {})
+    main_mission = active_missions.get('1014')
+    if not main_mission:
+        mission1014_log(picked_char, "daily-task check skipped: mission 1014 is not active")
+        return None, False
+    main_state = int(main_mission.get('state', 0) or 0)
+    if main_state != 1:
+        mission1014_log(picked_char, f"daily-task check skipped: mission 1014 state={main_state}")
+        return None, False
+
+    active_daily_ids = sorted(
+        (str(mid) for mid, entry in active_missions.items()
+         if int(missions_data.get(str(mid), {}).get('class', 0) or 0) == 0
+         and int(entry.get('state', 0) or 0) in (1, 2)),
+        key=int,
+    )
+    if active_daily_ids:
+        daily_id = active_daily_ids[0]
+        daily_entry = active_missions[daily_id]
+        daily_cfg = missions_data.get(daily_id, {})
+        daily_parm = daily_entry.get('parm') or [0]
+        required = int(daily_cfg.get('require_num') or 1)
+        mission1014_log(
+            picked_char,
+            f"using active daily task={daily_id} state={daily_entry.get('state')} "
+            f"progress={daily_parm[0] if daily_parm else 0}/{required} "
+            f"logic={daily_cfg.get('logic_type')} target={daily_cfg.get('target_id')}",
+        )
+        return daily_id, False
+
+    level = int(picked_char.get('level', 1) or 1)
+    completed_ids = {str(mid) for mid in picked_char.get('completed_side_missions', [])}
+    eligible_ids = sorted(
+        (str(mid) for mid, level_range in DAILY_MISSION_CONFIG.items()
+         if level_range['level_min'] <= level <= level_range['level_max']
+         and int(missions_data.get(str(mid), {}).get('class', 0) or 0) == 0
+         and str(mid) not in completed_ids),
+        key=int,
+    )
+    for mid in eligible_ids:
+        if accept_mission_logic(picked_char, mid):
+            daily_cfg = missions_data.get(mid, {})
+            required = int(daily_cfg.get('require_num') or 1)
+            mission1014_log(
+                picked_char,
+                f"assigned daily task={mid} level={level} "
+                f"logic={daily_cfg.get('logic_type')} target={daily_cfg.get('target_id')} "
+                f"required={required}",
+            )
+            return mid, True
+        mission1014_log(picked_char, f"daily-task candidate={mid} rejected by mission acceptance")
+
+    mission1014_log(
+        picked_char,
+        f"no eligible daily task at level={level}; configured={len(DAILY_MISSION_CONFIG)} "
+        f"candidates={len(eligible_ids)}",
+    )
+    return None, False
+
+def push_daily_mission_task(picked_char, send_rpc_push, mission_id):
+    mission = picked_char.get('active_missions', {}).get(str(mission_id))
+    if not mission:
+        return
+    parm = mission.get('parm', [0]*8)
+    if len(parm) < 8: parm += [0]*(8-len(parm))
+    own_bytes = encode_sproto([
+        (0, str(mission_id)),
+        (1, int(mission.get('state', 1))),
+        (2, 0),
+        (3, [int(x) for x in parm])
+    ])
+    mission1014_log(
+        picked_char,
+        f"push tag=530 daily_task={mission_id} state={mission.get('state')} progress={parm[0]}",
+    )
+    send_rpc_push(530, encode_sproto([(0, own_bytes)]))
 
 def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type=0,
                      map_id=None):
@@ -17259,6 +17747,11 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                     for s in KILL_TARGET_SPAWNS[spawn_key]:
                         spawn_nids.add(str(s['nid']))
                 matched = target == target_value or target_value in spawn_nids
+            if int(cfg.get('class', 0) or 0) == 7:
+                    mission_map = str(cfg.get('map_id', '') or '').strip()
+                    event_map = str(map_id or picked_char.get('map_id', '') or '').strip()
+                    if mission_map:
+                        matched = matched and event_map == mission_map
         elif logic_type == 19 and event == 'car':
             # The client sends type 2 for a normal car robbery without an
             # NPC/car id, so its event type is the authoritative discriminator.
@@ -17279,7 +17772,8 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             # Collect Item / Monster Drop matches on logic_id (item ID)
             matched = str(cfg.get('logic_id')) == target_value
         elif logic_type == 25 and event in ['capture', 'kill']:
-            # LogicType 25 (Capture/Boss Kill) - match target NPC or KillTargetMissionData spawns
+            # Capture-success missions match the Domin district in logic_id;
+            # target_id is the map NPC used to open that district.
             logic_id = str(cfg.get('logic_id', ''))
             spawn_key = logic_id if logic_id in KILL_TARGET_SPAWNS else str(mid)
             spawn_nids = set()
@@ -17295,7 +17789,9 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                        and target_value == '101')
         elif logic_type == 103 and event == 'daily_mission':
             matched = int(cfg.get('class', 0) or 0) == 1
-        elif logic_type in [102, 105, 106, 107, 108, 110, 113, 114, 117, 119, 120, 132] and event in ['dungeon', 'car_copy']:
+        elif logic_type == 110 and event == 'rank_pvp':
+            matched = target_value == '110' or str(cfg.get('logic_id', '')) == '110'
+        elif logic_type in [102, 105, 106, 107, 108, 113, 114, 117, 119, 120, 132] and event in ['dungeon', 'car_copy']:
             # Dungeon/Guide entry missions advance on specific 'dungeon' or 'car_copy' events
             logic_id_str = str(cfg.get('logic_id'))
             target_id_str = str(target_id) if target_id is not None else ''
@@ -17309,9 +17805,9 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                         target_id_str in race_copy_ids
                         or target_id_str in ['102', '飙车副本']
                 )
-            elif logic_type == 105:
-                # Mission 1019 (EXP copy) stores its discriminator in Target=105;
-                # LogicID is #N/A in this client's MissionData row.
+            elif logic_type in (105, 106):
+                # EXP and Cash Stage missions use activity discriminators
+                # (105/106), not their configured CopySceneData IDs.
                 matched = target == target_id_str or logic_id_str == target_id_str
             else:
                 matched = logic_id_str == target_id_str
@@ -17321,6 +17817,20 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             matched = target == str(map_id)
 
         if not matched:
+            main_mission = picked_char.get('active_missions', {}).get('1014', {})
+            if (int(cfg.get('class', 0) or 0) == 0
+                    and int(main_mission.get('state', 0) or 0) == 1
+                    and event in ('kill', 'pickup', 'interact', 'car', 'car_copy',
+                                  'dungeon', 'dance', 'world_boss', 'map')):
+                parm = mdata.get('parm') or [0]
+                mission1014_log(
+                    picked_char,
+                    f"objective check task={mid} event={event} matched=false "
+                    f"expected_target={target or str(cfg.get('logic_id', ''))} "
+                    f"actual_target={target_value} "
+                    f"progress={parm[0] if parm else 0}/"
+                    f"{int(cfg.get('count') or cfg.get('require_num') or 1)}",
+                )
             continue
 
         required = int(cfg.get('count') or cfg.get('require_num') or 1)
@@ -17346,6 +17856,15 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             mdata['parm'][0] = min(required, int(mdata['parm'][0]) + 1)
             progress = mdata['parm'][0]
 
+        if (int(cfg.get('class', 0) or 0) == 0
+                and int(picked_char.get('active_missions', {}).get('1014', {})
+                        .get('state', 0) or 0) == 1):
+            mission1014_log(
+                picked_char,
+                f"objective progress task={mid} event={event} matched=true "
+                f"target={target_value} progress={progress}/{required}",
+            )
+
         # Bug 3: Send TAG 524 only if progress actually changed
         old_progress = mdata.get('_last_progress', 0)
         if progress != old_progress:
@@ -17359,6 +17878,19 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                 send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
             if int(cfg.get('class', 0) or 0) == 0:
                 daily_mission_completed = True
+                main_state = int(
+                    picked_char.get('active_missions', {}).get('1014', {})
+                    .get('state', 0) or 0
+                )
+                mission1014_log(
+                    picked_char,
+                    f"daily task={mid} complete; mission 1014 state={main_state}",
+                )
+            elif str(mid) == '1014':
+                mission1014_log(
+                    picked_char,
+                    f"mission 1014 state changed to complete after event={event}",
+                )
         updated = True
 
     if daily_mission_completed:
@@ -22996,6 +23528,7 @@ def client_handler(conn, addr):
         result = _rank_pvp_finalize_state(picked_char, bool(win), reason)
         if not result:
             return False
+        advance_missions(picked_char, send_rpc_push, 'rank_pvp', target_id='110')
         timeout_timer = picked_char.pop("_rank_pvp_timer", None)
         if timeout_timer is not None:
             timeout_timer.cancel()
@@ -24800,12 +25333,43 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, p_raw)]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif msg == 309: # refresh_online_misison
+                refresh_success = False
+                refresh_reason = "invalid_character"
+                if (picked_char
+                        and is_current_character_connection(conn, picked_char)):
+                    with get_character_transaction_lock(picked_char):
+                        refresh_success, refresh_reason = refresh_scuffle_mission_offer(
+                            picked_char, all_accounts_chars)
+                if refresh_success:
+                    sync_char_attrs_rpc(conn, picked_char)
+                    send_rpc_push(555, sync_copy_scenes(picked_char))
+                else:
+                    print(f"[SCUFFLE REFRESH] rejected player="
+                          f"{picked_char.get('id') if picked_char else '-'} "
+                          f"reason={refresh_reason}")
+                send_rpc_response(session)
+
             elif msg == 112: # accept_mission
                 if picked_char:
                     mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
-                    res = accept_mission_logic(picked_char, mid)
+                    online_id = body.get(1, b'')
+                    online_id = (
+                        online_id.decode('utf-8')
+                        if isinstance(online_id, bytes) else str(online_id or '')
+                    )
+                    res = accept_mission_logic(picked_char, mid, online_id)
                     print(f"[MISSION ACCEPT REQ] mid={mid} result={res}")
+                    if mid == '1014':
+                        mission1014_log(
+                            picked_char,
+                            f"accept request tag=112 result={res} "
+                            f"state={picked_char.get('active_missions', {}).get('1014', {}).get('state')}",
+                        )
                     if res:
+                        daily_mid_to_push = None
+                        if mid == '1014':
+                            daily_mid_to_push, _ = ensure_daily_mission_for_guide(picked_char)
                         save_chars(all_accounts_chars)
                         print(f"[MISSION ACCEPT] mission_id={mid}")
                         m_entry = picked_char.get('active_missions', {}).get(mid, {})
@@ -24814,7 +25378,7 @@ def client_handler(conn, addr):
                         own_bytes = encode_sproto([
                             (0, str(mid)),
                             (1, int(m_entry.get('state', 1))),
-                            (2, 0),
+                            (2, mission_rank_for_active_entry(mid, m_entry)),
                             (3, [int(x) for x in parm])
                         ])
                         send_rpc_push(520, encode_sproto([
@@ -24823,6 +25387,10 @@ def client_handler(conn, addr):
                             (2, 0),
                             (3, own_bytes)
                         ]))
+                        if int(missions_data.get(mid, {}).get('class', 0) or 0) == 7:
+                            send_rpc_push(555, sync_copy_scenes(picked_char))
+                        if daily_mid_to_push:
+                            push_daily_mission_task(picked_char, send_rpc_push, daily_mid_to_push)
                         if m_entry.get('activity_id'):
                             spawn_gotham_escort_npc(conn, picked_char)
                             send_rpc_push(619, activity_info_payload(picked_char))
@@ -24836,6 +25404,7 @@ def client_handler(conn, addr):
                     mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
                     claim_mission = False
                     completion_snapshot = None
+                    daily_mid_to_push = None
                     with get_character_transaction_lock(picked_char):
                         m_entry = picked_char.get('active_missions', {}).get(mid)
                         try:
@@ -24857,6 +25426,13 @@ def client_handler(conn, addr):
                             m_entry['state'] = 3
                             claim_mission = True
                     print(f"[MISSION COMPLETE REQ] mid={mid} entry_exists={m_entry is not None} state={m_entry['state'] if m_entry else 'N/A'}")
+                    if mid == '1014':
+                        mission1014_log(
+                            picked_char,
+                            f"claim request tag=113 entry_exists={m_entry is not None} "
+                            f"state={mission_state} allowed={claim_mission} "
+                            f"current_main={current_main_mission}",
+                        )
                     if claim_mission:
                         m_cfg = missions_data.get(mid)
                         if m_cfg:
@@ -24872,6 +25448,11 @@ def client_handler(conn, addr):
                                 else:
                                     picked_char.pop('_skip_mission_save', None)
                             print(f"[MISSION REWARD] mission={mid} exp={exp_add} cash={cash_add} items={items_add}")
+                            if mid == '1014':
+                                mission1014_log(
+                                    picked_char,
+                                    f"claim reward granted exp={exp_add} cash={cash_add} items={items_add}",
+                                )
 
                             # Mission Chain and Unlocking logic
                             is_chained = False
@@ -24884,6 +25465,13 @@ def client_handler(conn, addr):
                                     res = accept_mission_logic(picked_char, str(next_mid))
                                     print(f"[MISSION NEXT] previous={mid} next={next_mid} accepted={res}")
                                     is_chained = res
+                                    if res and str(next_mid) == '1014':
+                                        daily_mid_to_push, _ = ensure_daily_mission_for_guide(picked_char)
+                                        mission1014_log(
+                                            picked_char,
+                                            f"auto-chain activated 1014 from mission={mid} "
+                                            f"daily_task={daily_mid_to_push}",
+                                        )
                             else:
                                 try:
                                     imid = int(mid)
@@ -24914,6 +25502,8 @@ def client_handler(conn, addr):
                                             picked_char.pop('_skip_mission_save', None)
                             if not save_chars(all_accounts_chars):
                                 restore_character_reward_state(picked_char, completion_snapshot)
+                                if mid == '1014':
+                                    mission1014_log(picked_char, "claim persistence failed; mission state rolled back")
                                 print(f"[MISSION COMPLETE] persistence failed; rolled back mission={mid} player={picked_char.get('id')}")
                                 if session is not None:
                                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -24945,6 +25535,9 @@ def client_handler(conn, addr):
                                     (2, 0),
                                     (3, next_own_bytes)
                                 ]))
+                                if daily_mid_to_push:
+                                    push_daily_mission_task(
+                                        picked_char, send_rpc_push, daily_mid_to_push)
                             # The level-up UI reads WelfareData's level-package
                             # cache as soon as the attribute update triggers its
                             # animation, so refresh that cache first.
@@ -24961,6 +25554,8 @@ def client_handler(conn, addr):
                                 )
                                 send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
                             send_rpc_push(519, sync_mission_data(picked_char))   # Mission UI update
+                            if int(m_cfg.get('class', 0) or 0) == 7:
+                                send_rpc_push(555, sync_copy_scenes(picked_char))
                             if popup_items:
                                 send_rpc_push(638, encode_sproto([(0, popup_items)]))
                             if items_add:
@@ -24990,6 +25585,8 @@ def client_handler(conn, addr):
                     save_chars(all_accounts_chars)
                     send_rpc_push(522, encode_sproto([(0, mid), (1, 0)]))
                     send_rpc_push(519, sync_mission_data(picked_char))
+                    if int(m_cfg.get('class', 0) or 0) == 7:
+                        send_rpc_push(555, sync_copy_scenes(picked_char))
                     if picked_char.get('map_id') == GOTHAM_MAP_ID:
                         send_rpc_push(619, activity_info_payload(picked_char))
                     print(f"[MISSION ABANDON] mission_id={mid}")
@@ -24999,6 +25596,16 @@ def client_handler(conn, addr):
 
             elif msg == 121: # request_daily_mission
                 if picked_char:
+                    mission1014_log(
+                        picked_char,
+                        f"daily request tag=121 main_state="
+                        f"{picked_char.get('active_missions', {}).get('1014', {}).get('state')}",
+                    )
+                    daily_mid, assigned_daily = ensure_daily_mission_for_guide(picked_char)
+                    if assigned_daily:
+                        save_chars(all_accounts_chars)
+                    if daily_mid:
+                        push_daily_mission_task(picked_char, send_rpc_push, daily_mid)
                     for dmid, dmdata in picked_char.get('active_missions', {}).items():
                         mcfg = missions_data.get(dmid, {})
                         if mcfg.get('class') == 4:
@@ -27878,7 +28485,7 @@ def client_handler(conn, addr):
 
                             cash_stage_state = picked_char.get('cash_stage_state') if picked_char else None
                             if (applied_damage > 0
-                                    and cur_map in SURVIVE_BATTLE_NPC_MAP_IDS):
+                                    and cur_map in PRISON_NPC_AOI_MAP_IDS):
                                 prison_npc_retarget_on_hit(target_id, picked_char)
                             if (not is_stage_combat and isinstance(cash_stage_state, dict)
                                     and str(cash_stage_state.get('copy_id'))
@@ -28055,27 +28662,14 @@ def client_handler(conn, addr):
                                         send_rpc_push(510, encode_sproto([(0, aoi_attr)]))
 
                                     did = picked_char.get('active_domin_id', '1')
-                                    debug_log(f"[M1003 DEBUG] Boss {target_id} killed by client dmg. Winning did={did}")
+                                    debug_log(f"[CAPTURE] boss {target_id} defeated; winning district={did}")
                                     capture_enemy = picked_char.get('_domin_capture_enemy') or {}
                                     is_player_rival = capture_enemy.get('kind') == 'player'
-                                    capture_mission = missions_data.get('1003', {})
-                                    capture_entry = picked_char.get(
-                                        'active_missions', {}).get('1003')
-                                    capture_story_current = _domin_capture_story_current(
-                                        picked_char, did
-                                    )
                                     _domin_capture_assign_owner(picked_char, did)
                                     notify_domin_result("win", "opponent_defeated")
-                                    if (not is_player_rival and capture_story_current
-                                            and capture_entry
-                                            and int(capture_entry.get('state', 0)) == 1):
-                                        cap_target = did
-                                        for act_m, act_mdata in list(picked_char.get('active_missions', {}).items()):
-                                            cap_cfg = missions_data.get(act_m, {})
-                                            if cap_cfg.get('logic_type') == 25:
-                                                cap_target = str(cap_cfg.get('target_id', did))
-                                                break
-                                        advance_missions(picked_char, send_rpc_push, 'capture', target_id=cap_target)
+                                    advance_missions(
+                                        picked_char, send_rpc_push, 'capture',
+                                        target_id=did)
                                     _domin_capture_clear_enemy_instance(target_id)
                                     picked_char['boss_inst_id'] = None
                                     picked_char.pop('_domin_capture_enemy', None)
@@ -28805,6 +29399,17 @@ def client_handler(conn, addr):
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
+            elif msg == 273: # enter_scuffle_batttle
+                if picked_char:
+                    with get_character_transaction_lock(picked_char):
+                        start_scuffle_battle(
+                            conn, picked_char, field_text(body, 0, ''),
+                            get_val_int(body, 1, -1), send_rpc_push)
+                if session is not None:
+                    ph = encode_sproto([(1, session)])
+                    pf = sproto_pack(ph + encode_sproto([]))
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+
             elif msg in (107, 276): # enter_copy_scene / enter_single_exp_scene
                 copy_id = field_text(body, 0)
                 if picked_char and not is_current_character_connection(conn, picked_char):
@@ -29004,6 +29609,13 @@ def client_handler(conn, addr):
                             else:
                                 send_rpc_push(555, sync_copy_scenes(picked_char))
                                 print(f"[STREET RACE] denied id={copy_id}; daily attempts exhausted and no valid TimeInc ticket")
+                elif (picked_char and msg == 107 and cfg
+                      and int(cfg.get('subtype', -1)) == 20):
+                    # Prison Killing entry must use MSG 273, which charges and
+                    # syncs the daily attempt counter before entering the map.
+                    send_rpc_push(555, sync_copy_scenes(picked_char))
+                    print(f"[SCUFFLE] denied uncharged copy entry id={copy_id}; "
+                          "use MSG 273")
                 elif picked_char and msg != 276 and copy_id not in DAILY_EXP_CONFIG:
                     # Save current map and position before entering any copy scene
                     if picked_char.get('pre_copy_pos') is None:
