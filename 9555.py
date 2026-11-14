@@ -14269,6 +14269,79 @@ def random_badge_reward_list(badge_level, badge_count, badge_type=None):
     return [(reward_id, quality, count)
             for (reward_id, quality), count in sorted(totals.items())]
 
+def convert_legacy_backpack_items(character):
+    """Convert legacy display/currency item stacks once before the backpack sync."""
+    ensure_backpack_state(character)
+    inventory = character.get('inventory', [])
+    entries = []
+    cash_amount = 0
+    gold_amount = 0
+    badge_count = 0
+    try:
+        level = max(1, int(character.get('level', 1) or 1))
+    except (TypeError, ValueError):
+        level = 1
+
+    for item in inventory:
+        item_id = str(item.get('id', ''))
+        if item_id not in ('8801', '1001', '1002'):
+            continue
+        try:
+            amount = int(item.get('amount', 0) or 0)
+        except (TypeError, ValueError):
+            print(f"[ITEM CONVERSION] invalid stack skipped player={character.get('id')} item={item_id}")
+            continue
+        if amount <= 0:
+            continue
+        entries.append(item)
+        if item_id == '8801':
+            badge_count += amount
+        elif item_id == '1001':
+            cash_amount += amount * level
+        else:
+            gold_amount += amount * 1000
+
+    if not entries:
+        return False
+
+    badge_rewards = random_badge_reward_list(1, badge_count) if badge_count else []
+    if badge_count and not badge_rewards:
+        print(f"[ITEM CONVERSION] level-1 badges unavailable; migration skipped player={character.get('id')}")
+        return False
+
+    snapshot = snapshot_character_reward_state(character)
+    converted_ids = {id(item) for item in entries}
+    character['inventory'] = [
+        item for item in inventory if id(item) not in converted_ids
+    ]
+    if badge_rewards and not can_add_reward_list_to_inventory(character, badge_rewards):
+        restore_character_reward_state(character, snapshot)
+        print(f"[ITEM CONVERSION] backpack full; migration skipped player={character.get('id')}")
+        return False
+
+    set_currency_balance(
+        character, 0, get_currency_balance(character, 0) + cash_amount
+    )
+    set_currency_balance(
+        character, 1, get_currency_balance(character, 1) + gold_amount
+    )
+    for item_id, quality, amount in badge_rewards:
+        if not add_to_inventory(character, item_id, amount, quality):
+            restore_character_reward_state(character, snapshot)
+            print(f"[ITEM CONVERSION] badge grant failed; migration skipped player={character.get('id')}")
+            return False
+
+    if not save_chars(all_accounts_chars):
+        restore_character_reward_state(character, snapshot)
+        print(f"[ITEM CONVERSION] persistence failed; migration skipped player={character.get('id')}")
+        return False
+
+    print(
+        f"[ITEM CONVERSION] player={character.get('id')} badges={badge_count} "
+        f"cash={cash_amount} gold={gold_amount}"
+    )
+    return True
+
 def resolve_item_package_rewards(item_id, package_count=1, character=None):
     """Return exact client package rewards when their source data exists."""
     item_id = str(item_id)
@@ -24807,6 +24880,7 @@ def client_handler(conn, addr):
                         expiry_changed, _expiry_updates, _equipped_expired, _weapon_expired = (
                             persist_timed_inventory_expiry(picked_char)
                         )
+                        convert_legacy_backpack_items(picked_char)
                     if expiry_changed:
                         print(
                             f"[ITEM EXPIRY] reconciled on login "
