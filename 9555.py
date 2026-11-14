@@ -32043,6 +32043,10 @@ def client_handler(conn, addr):
                     claimed_items = []
                     claim_save_failed = False
                     failure_reason = 'invalid, unavailable, or already claimed recovery'
+                    post_claim_backpack_sync = False
+                    post_claim_attrs_sync = False
+                    post_claim_tvshow_item_ids = set()
+                    pending_reward_pushes = []
                     if is_current_character_connection(conn, picked_char):
                         with get_character_transaction_lock(picked_char):
                             cfg = RETRIEVE_CONFIG.get(retrieve_id, {})
@@ -32105,7 +32109,6 @@ def client_handler(conn, addr):
                                     )
                                     retrieve_state_snapshot = copy.deepcopy(state)
                                     level_before = int(picked_char.get('level', 1) or 1)
-                                    pending_reward_pushes = []
 
                                     def queue_reward_push(tag, payload):
                                         pending_reward_pushes.append((tag, payload))
@@ -32164,24 +32167,15 @@ def client_handler(conn, addr):
                                             (0, item_id), (1, amount), (3, quality)
                                         ]) for item_id, quality, amount in rewards]
                                         claimed = True
-                                        for tag, payload in pending_reward_pushes:
-                                            send_rpc_push(tag, payload)
-                                        if any(
+                                        post_claim_backpack_sync = any(
                                             str(item_id) not in DIRECT_REWARD_RESOURCE_IDS
                                             for item_id, _quality, _amount in rewards
-                                        ):
-                                            sync_all_backpacks(
-                                                picked_char, send_rpc_push
-                                            )
-                                        sync_char_attrs_rpc(conn, picked_char)
-                                        tvshow_item_ids = {
+                                        )
+                                        post_claim_attrs_sync = True
+                                        post_claim_tvshow_item_ids = {
                                             str(item_id) for item_id, _quality, _amount in rewards
                                             if ITEM_CONFIG.get(str(item_id), {}).get('tvshow')
                                         }
-                                        if tvshow_item_ids:
-                                            gotham_broadcast_tvshow_items(
-                                                picked_char, tvshow_item_ids
-                                            )
                                         print(f"[RETRIEVE] claimed player={picked_char.get('id')} id={retrieve_id} "
                                               f"level={level} type={requested_type} cost={cost} rewards={rewards}")
                                     else:
@@ -32201,14 +32195,25 @@ def client_handler(conn, addr):
                     if not claimed:
                         print(f"[RETRIEVE] rejected player={picked_char.get('id')} id={retrieve_id} "
                               f"type={requested_type} reason={failure_reason}")
-                    send_rpc_response(session)
                     # The APK's commercial-reward handler closes the 279 wait box
                     # and shows item rows for any non-daily-active reward type.
                     send_rpc_push(650, encode_sproto([
                         (0, claimed_items), (1, 8), (3, retrieve_id),
                         (7, 0 if claimed else 1)
                     ]))
+                    send_rpc_response(session)
                     send_rpc_push(658, retrieve_info_payload(picked_char))
+                    if claimed:
+                        for tag, payload in pending_reward_pushes:
+                            send_rpc_push(tag, payload)
+                        if post_claim_backpack_sync:
+                            sync_all_backpacks(picked_char, send_rpc_push)
+                        if post_claim_attrs_sync:
+                            sync_char_attrs_rpc(conn, picked_char)
+                        if post_claim_tvshow_item_ids:
+                            gotham_broadcast_tvshow_items(
+                                picked_char, post_claim_tvshow_item_ids
+                            )
 
                 elif msg == 245: # request_survive_top
                     if (picked_char
