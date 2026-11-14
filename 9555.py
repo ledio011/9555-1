@@ -5381,16 +5381,26 @@ def team_payload(team):
         if int(cid) == leader_id: continue
         char = ALL_CONNECTIONS.get(int(cid), (None, team.get('char_refs', {}).get(int(cid))))[1]
         if char is not None: others[int(cid)] = team_member_blob(char, team['id'])
-    return encode_sproto([(0, int(team['id'])), (1, team_member_blob(leader, team['id'])), (2, len(team['members'])),
+    return encode_sproto([(0, int(team['id'])), (1, team_member_blob(leader, team['id'])), (2, 1 + len(others)),
                           (3, int(team.get('verify', 0))), (4, others), (5, str(team.get('goal_id', ''))),
-                          (6, int(team.get('min_level', 1))), (7, int(team.get('max_level', 80))), (8, int(team.get('recruit', 0)))])
+                          (6, int(team.get('min_level', 1))), (7, int(team.get('max_level', 80)))])
 
 def send_team_update(team_id, only_ids=None):
     team = TEAM_STATES.get(int(team_id))
     payload = team_payload(team)
     if payload is None: return
     data = encode_sproto([(0, payload)])
-    for cid in list(team.get('members', []) if only_ids is None else only_ids):
+    if only_ids is None:
+        recipients = set(int(cid) for cid in team.get('members', []))
+        recipients.update(int(cid) for cid in team.get('char_refs', {}))
+        recipients.update(
+            int(cid) for cid, mapped_team_id in CHAR_TEAM.items()
+            if int(mapped_team_id) == int(team_id)
+        )
+        recipients.add(int(team.get('leader_id', 0)))
+    else:
+        recipients = set(int(cid) for cid in only_ids)
+    for cid in sorted(recipients):
         send_push_to_char(cid, 518, data)
 
 def urge_team_leader(char):
@@ -31570,11 +31580,16 @@ def client_handler(conn, addr):
                     team=get_team_for_char(cid)
                     if team and team.get('leader_id')==cid and not team.get('active_run') and not team.get('pending_run'):
                         goal=get_val_str(body,0,team.get('goal_id',''))
-                        if team.get('matching'): stop_team_match(team,team.get('goal_id',''),1)
+                        requested_verify=get_val_int(body,3,team.get('verify',0))
+                        if team.get('matching') and (
+                                str(team.get('goal_id','')) != goal or requested_verify != 0):
+                            stop_team_match(team,team.get('goal_id',''),1)
+                        elif str(team.get('goal_id','')) != goal:
+                            stop_team_match(team,team.get('goal_id',''),1)
                         team['goal_id']=goal
                         team['min_level'],team['max_level']=team_goal_level_bounds(
                             goal,get_val_int(body,1,team.get('min_level',1)),get_val_int(body,2,team.get('max_level',80)))
-                        team['verify']=get_val_int(body,3,team.get('verify',0))
+                        team['verify']=requested_verify
                         team['recruit']=get_val_int(body,4,team.get('recruit',team.get('recruit',0)))
                         for member_id in team.get('members',[]):
                             member=ALL_CONNECTIONS.get(int(member_id),(None,team.get('char_refs',{}).get(int(member_id))))[1]
@@ -31584,6 +31599,13 @@ def client_handler(conn, addr):
                                     copy_update=sync_copy_scenes(member)
                                     if int(member_id)==cid: send_rpc_push(555,copy_update)
                                     else: send_push_to_char(member_id,555,copy_update)
+                        if team['verify'] == 0:
+                            if not queue_team_match(team, goal, 1):
+                                team['verify']=1
+                                send_team_match_state(
+                                    list(team.get('members',[])),goal,1,1)
+                        else:
+                            stop_team_match(team, goal, 1)
                         send_team_update(team['id'])
                 elif picked_char and msg==164:
                     team=get_team_for_char(cid); target=get_val_int(body,0)
@@ -31592,24 +31614,42 @@ def client_handler(conn, addr):
                             detach_exp_team_member(team,target)
                             send_push_to_char(target,518,encode_sproto([]))
                 elif picked_char and msg==166:
-                    team=get_team_for_char(cid)
-                    if team:
-                        disband_team(team)
+                    requested_team_id=get_val_int(body,0,0)
+                    requested_character_id=get_val_int(body,1,cid)
+                    if requested_character_id != cid:
+                        print(f"[TEAM] leave rejected character mismatch player={cid} request={requested_character_id}")
                     else:
-                        stale_teams = [
-                            candidate for candidate in list(TEAM_STATES.values())
-                            if int(candidate.get('leader_id', 0)) == cid
-                            or cid in {int(member_id)
-                                       for member_id in candidate.get('members', [])}
-                            or CHAR_TEAM.get(cid) == int(candidate.get('id', 0))
-                        ]
-                        for stale_team in stale_teams:
-                            disband_team(stale_team)
-                        CHAR_TEAM.pop(cid,None)
-                        picked_char.pop('team_goal_copy',None)
-                        send_rpc_push(518,encode_sproto([]))
-                    if team:
-                        send_rpc_push(518,encode_sproto([]))
+                        team=get_team_for_char(cid)
+                        if team and requested_team_id and requested_team_id != int(team.get('id',0)):
+                            print(f"[TEAM] stale leave team id player={cid} request={requested_team_id} current={team.get('id')}")
+                            send_team_update(team['id'])
+                        else:
+                            if team is None:
+                                team=next((
+                                    candidate for candidate in list(TEAM_STATES.values())
+                                    if int(candidate.get('leader_id',0)) == cid
+                                    or cid in {int(member_id) for member_id in candidate.get('members',[])}
+                                    or cid in {int(member_id) for member_id in candidate.get('char_refs',{})}
+                                    or CHAR_TEAM.get(cid) == int(candidate.get('id',0))
+                                ),None)
+                            if team and int(team.get('leader_id',0)) == cid:
+                                disband_team(team)
+                            elif team:
+                                if (team.get('active_run') or {}).get('stage_kind') == 'equipment':
+                                    detach_equipment_stage_member(team,cid)
+                                elif team.get('active_run'):
+                                    detach_exp_team_member(team,cid)
+                                else:
+                                    team_remove_member(team,cid)
+                                    if team.get('members'):
+                                        send_team_update(team['id'])
+                                CHAR_TEAM.pop(cid,None)
+                                picked_char.pop('team_goal_copy',None)
+                                send_rpc_push(518,encode_sproto([]))
+                            else:
+                                CHAR_TEAM.pop(cid,None)
+                                picked_char.pop('team_goal_copy',None)
+                                send_rpc_push(518,encode_sproto([]))
                 elif picked_char and msg==214:
                     goal=get_val_str(body,0,''); goal_type=get_val_int(body,1,1)
                     if is_team_battle_copy(goal):
@@ -34282,11 +34322,16 @@ def queue_team_match(team, goal_id, goal_type):
     max_members=min(4,int(cfg.get('max_member',4))); min_members=max(2,int(cfg.get('min_member',2)))
     if len(team.get('members',[]))>=min_members:
         team['matching']=False
+        team['verify']=1
+        queue=TEAM_MATCH_QUEUE.get(copy_id,[])
+        if team['id'] in queue: queue.remove(team['id'])
+        if not queue: TEAM_MATCH_QUEUE.pop(copy_id,None)
         send_team_match_state(list(team.get('members',[])),copy_id,goal_type,1)
         return True
     queue=TEAM_MATCH_QUEUE.setdefault(copy_id,[])
     if team['id'] not in queue: queue.append(team['id'])
     team['matching']=True
+    team['verify']=0
     send_team_match_state(list(team.get('members',[])),copy_id,goal_type,0)
     while len(team.get('members',[])) < min_members:
         other_id=next((tid for tid in queue if tid!=team['id']),None)
@@ -34319,7 +34364,9 @@ def queue_team_match(team, goal_id, goal_type):
         send_team_update(team['id'])
         if len(team['members'])>=min_members:
             team['matching']=False
+            team['verify']=1
             if team['id'] in queue: queue.remove(team['id'])
+            if not queue: TEAM_MATCH_QUEUE.pop(copy_id,None)
             send_team_match_state(list(team['members']),copy_id,goal_type,1)
             break
     return True
@@ -34328,6 +34375,7 @@ def stop_team_match(team, goal_id, goal_type):
     copy_id=str(goal_id)
     if team:
         team['matching']=False
+        team['verify']=1
         queue=TEAM_MATCH_QUEUE.get(copy_id,[])
         if team['id'] in queue: queue.remove(team['id'])
         if not queue: TEAM_MATCH_QUEUE.pop(copy_id,None)
@@ -34450,11 +34498,10 @@ def disband_team(team):
     )
     if int(team.get('leader_id', 0)):
         member_ids.add(int(team['leader_id']))
-    member_ids = sorted(member_ids)
     if team.get('matching'):
         stop_team_match(team, team.get('goal_id', ''), 1)
     if team.get('pending_run'):
-        for cid in member_ids:
+        for cid in sorted(member_ids):
             send_push_to_char(cid, 603, encode_sproto([(0, cid), (1, 1)]))
         team['pending_run'] = None
     ready_timer = team.pop('_ready_timer', None)
@@ -34463,11 +34510,15 @@ def disband_team(team):
 
     state = team.get('active_run')
     if not state:
-        for cid in member_ids:
+        for cid in sorted(member_ids):
             char = ALL_CONNECTIONS.get(cid, (None, team.get('char_refs', {}).get(cid)))[1]
             state = (char.get('equipment_stage_state') or char.get('exp_stage_state')) if char else None
             if state:
                 break
+    if state:
+        member_ids.update(exp_member_ids(state))
+        member_ids.update(int(cid) for cid in state.get('char_refs', {}))
+    member_ids = sorted(member_ids)
     if state and state.get('stage_kind') == 'equipment':
         for cid in member_ids:
             detach_equipment_stage_member(team, cid)
