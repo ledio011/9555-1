@@ -7316,6 +7316,7 @@ def _activate_guild_dance_for_online_dancers(guild_id, now=None):
             runtime['reward_dance_id'] = dance_id
             runtime['reward_level'] = max(1, min(80, int(char.get('level', 1))))
             run_id = int(runtime.get('dance_run_id', 0))
+            record_retrieve_participation(char, '9', persist=False)
             save_chars(all_accounts_chars)
         schedule_personal_dance_reward(char, run_id)
 
@@ -7623,21 +7624,38 @@ def daily_active_rewards_for_level(drop_key, level):
     ]
 
 def ensure_retrieve_state(char):
-    """Keep client RetrieveData claim state daily while retaining its price count."""
+    """Keep Retrieve claims daily and carry forward yesterday's activity eligibility."""
     stamp = current_daily_stamp()
     state = char.get('retrieve_state')
     if not isinstance(state, dict):
-        state = {'date': stamp, 'entries': {}}
+        state = {'date': stamp, 'entries': {}, 'participated': {}}
         char['retrieve_state'] = state
     entries = state.get('entries')
     if not isinstance(entries, dict):
         entries = {}
         state['entries'] = entries
     if state.get('date') != stamp:
-        for entry in entries.values():
+        try:
+            yesterday = (
+                datetime.date.fromisoformat(stamp) - datetime.timedelta(days=1)
+            ).isoformat()
+        except (TypeError, ValueError):
+            yesterday = None
+        previous_participation = state.get('participated')
+        yesterday_ids = {
+            str(retrieve_id)
+            for retrieve_id, participated in previous_participation.items()
+            if participated
+        } if (state.get('date') == yesterday
+              and isinstance(previous_participation, dict)) else set()
+        for retrieve_id in RETRIEVE_CONFIG:
+            entry = entries.setdefault(retrieve_id, {'state': 0, 'count': 0})
             if isinstance(entry, dict):
-                entry['state'] = 0
+                entry['state'] = 1 if retrieve_id in yesterday_ids else 0
         state['date'] = stamp
+        state['participated'] = {}
+    elif not isinstance(state.get('participated'), dict):
+        state['participated'] = {}
     for retrieve_id, entry in list(entries.items()):
         if not isinstance(entry, dict):
             entries[retrieve_id] = {'state': 0, 'count': 0}
@@ -7648,6 +7666,26 @@ def ensure_retrieve_state(char):
         except (TypeError, ValueError):
             entry.update({'state': 0, 'count': 0})
     return state
+
+def record_retrieve_participation(char, retrieve_id, persist=True):
+    """Record a server-verified activity so it cannot be recovered the next day."""
+    if not isinstance(char, dict):
+        return False
+    retrieve_id = str(retrieve_id)
+    if retrieve_id not in RETRIEVE_CONFIG:
+        return False
+    with get_character_transaction_lock(char):
+        state = ensure_retrieve_state(char)
+        participated = state.setdefault('participated', {})
+        if participated.get(retrieve_id):
+            return False
+        participated[retrieve_id] = True
+        if persist and not save_chars(all_accounts_chars):
+            participated.pop(retrieve_id, None)
+            print(f"[RETRIEVE] participation persistence failed "
+                  f"player={char.get('id')} id={retrieve_id}")
+            return False
+    return True
 
 def retrieve_info_payload(char):
     """Build tag 658's per-ID retrieve_info map from client RetrieveData."""
@@ -7720,6 +7758,7 @@ def record_daily_active_event(char, activity_type, send_rpc_push):
                 counts[active_id] = current + 1
                 changed = True
         if changed:
+            record_retrieve_participation(char, '7', persist=False)
             save_chars(all_accounts_chars)
             payload = daily_active_snapshot(char)
     if changed and send_rpc_push and payload is not None:
@@ -15228,6 +15267,7 @@ def accept_gotham_escort_mission(char, mid):
             'accept_time': now,
             'activity_id': activity_id,
         }
+    record_retrieve_participation(char, '6')
     return True
 
 def video_reward_state(char):
@@ -18373,6 +18413,10 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                 )
             continue
 
+        if int(cfg.get('class', 0) or 0) == 0:
+            record_retrieve_participation(
+                picked_char, '1', persist=False)
+
         required = int(cfg.get('count') or cfg.get('require_num') or 1)
         logic_id = str(cfg.get('logic_id', ''))
 
@@ -19146,6 +19190,17 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
             f"equip_state={bool(picked_char.get('equipment_stage_state'))} "
             f"conn_id={id(conn)}"
         )
+
+    if target_map_id in SCUFFLE_NPC_MAP_IDS:
+        record_retrieve_participation(picked_char, '3', persist=False)
+    if is_exp_map(target_map_id):
+        record_retrieve_participation(picked_char, '2', persist=False)
+    if is_tower_map(target_map_id):
+        record_retrieve_participation(picked_char, '5', persist=False)
+    if street_race_config_for_map(target_map_id):
+        record_retrieve_participation(picked_char, '8', persist=False)
+    if is_cash_stage_map(target_map_id):
+        record_retrieve_participation(picked_char, '10', persist=False)
 
     save_chars(all_accounts_chars)
     # TAG 503: enter_map
@@ -27762,6 +27817,11 @@ def client_handler(conn, addr):
                                         runtime['running_source'] = 'free'
                                     else:
                                         runtime['running_source'] = 'speaker'
+                                    record_retrieve_participation(
+                                        picked_char, '4', persist=False)
+                                    if runtime['running_source'] == 'guild_speaker':
+                                        record_retrieve_participation(
+                                            picked_char, '9', persist=False)
                                     if runtime['running_source'] == 'free':
                                         runtime['free_started_at'] = now
                                     runtime['dance_id'] = dance_id
@@ -31981,6 +32041,7 @@ def client_handler(conn, addr):
                     requested_type = get_val_int(body, 1, -1)
                     claimed = False
                     claimed_items = []
+                    claim_save_failed = False
                     failure_reason = 'invalid, unavailable, or already claimed recovery'
                     if is_current_character_connection(conn, picked_char):
                         with get_character_transaction_lock(picked_char):
@@ -32039,23 +32100,104 @@ def client_handler(conn, addr):
                                 elif not can_add_reward_list_to_inventory(picked_char, rewards):
                                     failure_reason = 'recovery reward would exceed backpack capacity'
                                 else:
+                                    reward_snapshot = snapshot_character_reward_state(
+                                        picked_char
+                                    )
+                                    retrieve_state_snapshot = copy.deepcopy(state)
+                                    level_before = int(picked_char.get('level', 1) or 1)
+                                    pending_reward_pushes = []
+
+                                    def queue_reward_push(tag, payload):
+                                        pending_reward_pushes.append((tag, payload))
+
                                     set_currency_balance(
                                         picked_char, money_type,
                                         get_currency_balance(picked_char, money_type) - cost
                                     )
-                                    grant_item_rewards(picked_char, rewards, conn, send_rpc_push, save=False)
+                                    grant_item_rewards(
+                                        picked_char, rewards, save=False
+                                    )
                                     record['state'] = 2 if option_index == 1 else 1
                                     record['count'] = retrieve_count + 1
-                                    save_chars(all_accounts_chars)
-                                    sync_char_attrs_rpc(conn, picked_char)
-                                    claimed_items = [encode_sproto([
-                                        (0, item_id), (1, amount), (3, quality)
-                                    ]) for item_id, quality, amount in rewards]
-                                    claimed = True
-                                    print(f"[RETRIEVE] claimed player={picked_char.get('id')} id={retrieve_id} "
-                                          f"level={level} type={requested_type} cost={cost} rewards={rewards}")
-                            else:
-                                save_chars(all_accounts_chars)
+                                    if int(picked_char.get('level', 1) or 1) > level_before:
+                                        queue_reward_push(
+                                            614, function_unlock_payload(picked_char)
+                                        )
+                                        had_skip_mission_save = (
+                                            '_skip_mission_save' in picked_char
+                                        )
+                                        previous_skip_mission_save = picked_char.get(
+                                            '_skip_mission_save'
+                                        )
+                                        picked_char['_skip_mission_save'] = True
+                                        try:
+                                            advance_missions(
+                                                picked_char,
+                                                queue_reward_push,
+                                                'level'
+                                            )
+                                        finally:
+                                            if had_skip_mission_save:
+                                                picked_char['_skip_mission_save'] = (
+                                                    previous_skip_mission_save
+                                                )
+                                            else:
+                                                picked_char.pop(
+                                                    '_skip_mission_save', None
+                                                )
+                                        new_level = int(picked_char.get('level', 1))
+                                        skill_map = build_skills_map(
+                                            picked_char.get('prof', 0), new_level,
+                                            picked_char.get('skill_levels', {}),
+                                            picked_char.get('equipped_equip', []),
+                                            picked_char.get('skill_positions', {})
+                                        )
+                                        queue_reward_push(
+                                            540,
+                                            encode_sproto([(0, skill_map), (1, False)])
+                                        )
+                                        queue_reward_push(
+                                            644, level_package_state_payload(picked_char)
+                                        )
+                                    if save_chars(all_accounts_chars):
+                                        claimed_items = [encode_sproto([
+                                            (0, item_id), (1, amount), (3, quality)
+                                        ]) for item_id, quality, amount in rewards]
+                                        claimed = True
+                                        for tag, payload in pending_reward_pushes:
+                                            send_rpc_push(tag, payload)
+                                        if any(
+                                            str(item_id) not in DIRECT_REWARD_RESOURCE_IDS
+                                            for item_id, _quality, _amount in rewards
+                                        ):
+                                            sync_all_backpacks(
+                                                picked_char, send_rpc_push
+                                            )
+                                        sync_char_attrs_rpc(conn, picked_char)
+                                        tvshow_item_ids = {
+                                            str(item_id) for item_id, _quality, _amount in rewards
+                                            if ITEM_CONFIG.get(str(item_id), {}).get('tvshow')
+                                        }
+                                        if tvshow_item_ids:
+                                            gotham_broadcast_tvshow_items(
+                                                picked_char, tvshow_item_ids
+                                            )
+                                        print(f"[RETRIEVE] claimed player={picked_char.get('id')} id={retrieve_id} "
+                                              f"level={level} type={requested_type} cost={cost} rewards={rewards}")
+                                    else:
+                                        restore_character_reward_state(
+                                            picked_char, reward_snapshot
+                                        )
+                                        picked_char['retrieve_state'] = retrieve_state_snapshot
+                                        claim_save_failed = True
+                                        failure_reason = 'recovery claim persistence failed'
+
+                            if not claimed and not claim_save_failed:
+                                if not save_chars(all_accounts_chars):
+                                    print(
+                                        f"[RETRIEVE] state persistence failed "
+                                        f"player={picked_char.get('id')} id={retrieve_id}"
+                                    )
                     if not claimed:
                         print(f"[RETRIEVE] rejected player={picked_char.get('id')} id={retrieve_id} "
                               f"type={requested_type} reason={failure_reason}")
