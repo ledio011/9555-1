@@ -32947,9 +32947,11 @@ def client_handler(conn, addr):
                             f"id={invest_id} reason={failure_reason}"
                         )
                     reward_items = [encode_sproto([
-                        (0, str(item_id)), (1, int(amount)), (2, int(quality))
+                        (0, str(item_id)), (1, int(amount)), (3, int(quality))
                     ]) for item_id, quality, amount in rewards] if claimed else []
-                    send_rpc_push(618, encode_sproto([
+                    # Investment uses the commercial-reward popup (type 1);
+                    # TAG 618 is reserved for the revive prompt.
+                    send_rpc_push(650, encode_sproto([
                         (0, reward_items), (1, 1), (3, invest_id),
                         (7, 0 if claimed else 1)
                     ]))
