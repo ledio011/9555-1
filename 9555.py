@@ -1164,7 +1164,8 @@ try:
                         'ai_type': parts[18] if len(parts) > 18 and parts[18] else '',
                         'ai_data_id': parts[19] if len(parts) > 19 and parts[19] else '',
                         'drop_id': parts[20] if len(parts) > 20 and parts[20] else '',
-                        'walk_speed': int(parts[21]) if len(parts) > 21 and parts[21].isdigit() else 0,
+                        # NpcData.WalkSpeed defaults to 10 in the client when blank.
+                        'walk_speed': int(parts[21]) if len(parts) > 21 and parts[21].isdigit() else 10,
                         # NpcData.MoveSpeed defaults to 50 in the APK when the table cell is blank.
                         'move_speed': int(parts[22]) if len(parts) > 22 and parts[22].isdigit() else 50,
                         'atk_coe': int(parts[26]) if len(parts) > 26 and parts[26].isdigit() else 10000,
@@ -12417,20 +12418,39 @@ def _gotham_npc_ai_tick():
                 lock_cm = min(lock_cm, search_cm)
             lock_distance = max(0.5, lock_cm / 100.0)
             return_distance = max(lock_distance, int(ai_cfg.get("return_distance", 0) or 0) / 100.0)
-            speed = max(0.1, float(npc_cfg.get("move_speed", 50) or 50) / 10.0)
+            walk_speed = max(0.1, float(npc_cfg.get("walk_speed", 10)) / 10.0)
+            run_speed = max(0.1, float(npc_cfg.get("move_speed", 50)) / 10.0)
+            # AIData cooldown values are milliseconds, like its skill cooldown fields.
+            target_switch_interval = max(
+                0, int(ai_cfg.get("change_target_cd", 0) or 0)
+            ) / 1000.0
             mx_cm, mz_cm = snapshot.get("position") or (snapshot["x"], snapshot["z"])
             mx, mz = float(mx_cm) / 100.0, float(mz_cm) / 100.0
             target = None
             prior_target = int(snapshot.get("target_id", 0) or 0)
+            target_switch_due = now >= float(
+                snapshot.get("next_target_change_at", 0) or 0
+            )
             if prior_target:
                 target = next((p for p in players if p[0] == prior_target), None)
                 if target and math.hypot((target[3] / 100.0) - mx,
                                          (target[4] / 100.0) - mz) > return_distance:
                     target = None
+                    target_switch_due = True
                     with GOTHAM_NPC_LOCK:
                         if GOTHAM_SHARED_NPC_SLOTS.get(slot_key, {}).get("inst_id") == inst_id:
                             GOTHAM_SHARED_NPC_SLOTS[slot_key]["target_id"] = 0
-            if target is None:
+                elif target is None:
+                    target_switch_due = True
+                    with GOTHAM_NPC_LOCK:
+                        if GOTHAM_SHARED_NPC_SLOTS.get(slot_key, {}).get("inst_id") == inst_id:
+                            GOTHAM_SHARED_NPC_SLOTS[slot_key]["target_id"] = 0
+                elif target_switch_due:
+                    target = None
+                    with GOTHAM_NPC_LOCK:
+                        if GOTHAM_SHARED_NPC_SLOTS.get(slot_key, {}).get("inst_id") == inst_id:
+                            GOTHAM_SHARED_NPC_SLOTS[slot_key]["target_id"] = 0
+            if target is None and int(ai_cfg.get("lock_type", 0) or 0) == 1:
                 possible = [
                     (math.hypot((p[3] / 100.0) - mx, (p[4] / 100.0) - mz), p)
                     for p in players
@@ -12439,8 +12459,12 @@ def _gotham_npc_ai_tick():
                 if possible:
                     target = min(possible, key=lambda entry: entry[0])[1]
                     with GOTHAM_NPC_LOCK:
-                        if GOTHAM_SHARED_NPC_SLOTS.get(slot_key, {}).get("inst_id") == inst_id:
-                            GOTHAM_SHARED_NPC_SLOTS[slot_key]["target_id"] = target[0]
+                        live_slot = GOTHAM_SHARED_NPC_SLOTS.get(slot_key, {})
+                        if live_slot.get("inst_id") == inst_id:
+                            live_slot["target_id"] = target[0]
+                            live_slot["next_target_change_at"] = (
+                                now + target_switch_interval
+                            )
 
             if target is None:
                 dx = mx_cm - int(snapshot["x"])
@@ -12449,7 +12473,7 @@ def _gotham_npc_ai_tick():
                 if distance_from_home > return_distance:
                     _gotham_npc_move_toward(
                         GOTHAM_SHARED_NPC_SLOTS[slot_key], inst_id,
-                        int(snapshot["x"]), int(snapshot["z"]), speed, now)
+                        int(snapshot["x"]), int(snapshot["z"]), walk_speed, now)
                     continue
                 patrol_type = int(ai_cfg.get("patrol_type", 0) or 0)
                 patrol_distance = min(
@@ -12474,7 +12498,8 @@ def _gotham_npc_ai_tick():
                                     0.3, int(ai_cfg.get("wait_time", 300) or 300) / 1000.0)
                         else:
                             _gotham_npc_move_toward(
-                                live_slot, inst_id, patrol_target[0], patrol_target[1], speed, now)
+                                live_slot, inst_id, patrol_target[0], patrol_target[1],
+                                walk_speed, now)
                 continue
 
             target_id, target_conn, target_char, px_cm, pz_cm = target
@@ -12492,7 +12517,7 @@ def _gotham_npc_ai_tick():
                     _gotham_npc_move_toward(
                         GOTHAM_SHARED_NPC_SLOTS[slot_key], inst_id,
                         px_cm - int(dx / distance * max_range * 100),
-                        pz_cm - int(dz / distance * max_range * 100), speed, now)
+                        pz_cm - int(dz / distance * max_range * 100), run_speed, now)
                 continue
             if ready_at > now:
                 continue
@@ -12573,6 +12598,7 @@ def gotham_create_shared_npc(slot, spec):
         "heading": int(spec.get("o", 0)),
         "damage": {},
         "target_id": 0,
+        "next_target_change_at": 0,
         "next_attack_at": 0,
         "skill_ready_at": {},
         "patrol_target": None,
