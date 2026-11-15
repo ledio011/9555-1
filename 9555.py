@@ -12347,19 +12347,21 @@ def _gotham_npc_skills(npc_cfg, attack_distance):
     return skills
 
 
-def _gotham_send_npc_move(slot_key, inst_id, from_x, from_z, to_x, to_z, heading):
-    dx, dz = int(to_x) - int(from_x), int(to_z) - int(from_z)
+def _gotham_send_npc_move(slot_key, inst_id, x, z, heading, walk):
     pos_data = encode_sproto([
-        (0, int(to_x)), (1, 0), (2, int(to_z)), (3, int(heading))
+        (0, int(x)), (1, 0), (2, int(z)), (3, int(heading))
     ])
     movement_data = encode_sproto([(0, pos_data)])
-    character_data = encode_sproto([(0, int(inst_id)), (1, movement_data), (2, True)])
+    character_data = encode_sproto([
+        (0, int(inst_id)), (1, movement_data), (2, bool(walk))
+    ])
     payload = encode_sproto([(0, character_data)])
     for peer_conn, _peer_char in gotham_npc_visible_connections(slot_key, inst_id):
         send_rpc_push_safe(peer_conn, 507, payload)
 
 
-def _gotham_npc_move_toward(slot, inst_id, target_x, target_z, speed, now):
+def _gotham_npc_move_toward(
+        slot, inst_id, target_x, target_z, speed, now, walk=True):
     with GOTHAM_NPC_LOCK:
         if slot.get("inst_id") != int(inst_id) or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0:
             return
@@ -12375,8 +12377,12 @@ def _gotham_npc_move_toward(slot, inst_id, target_x, target_z, speed, now):
         slot["position"] = (next_x, next_z)
         slot["heading"] = heading
         slot["last_move_at"] = now
-    _gotham_send_npc_move(slot["slot"], inst_id, current_x, current_z,
-                          next_x, next_z, heading)
+        waypoint = (int(target_x), int(target_z), bool(walk))
+        if slot.get("move_waypoint") == waypoint:
+            return
+        slot["move_waypoint"] = waypoint
+    _gotham_send_npc_move(
+        slot["slot"], inst_id, target_x, target_z, heading, walk)
 
 
 def _gotham_npc_ai_tick():
@@ -12467,6 +12473,8 @@ def _gotham_npc_ai_tick():
                             )
 
             if target is None:
+                if snapshot.get("is_boss"):
+                    continue
                 dx = mx_cm - int(snapshot["x"])
                 dz = mz_cm - int(snapshot["z"])
                 distance_from_home = math.hypot(dx, dz) / 100.0
@@ -12476,9 +12484,9 @@ def _gotham_npc_ai_tick():
                         int(snapshot["x"]), int(snapshot["z"]), walk_speed, now)
                     continue
                 patrol_type = int(ai_cfg.get("patrol_type", 0) or 0)
-                patrol_distance = min(
-                    max(0, int(ai_cfg.get("patrol_distance", 0) or 0)) / 100.0,
-                    max(0, int(npc_cfg.get("patrol_radius", 0) or 0)) / 100.0)
+                patrol_distance = (
+                    max(0, int(ai_cfg.get("patrol_distance", 0) or 0)) / 100.0
+                )
                 if patrol_type and patrol_distance > 0:
                     live_slot = GOTHAM_SHARED_NPC_SLOTS.get(slot_key, {})
                     patrol_target = live_slot.get("patrol_target")
@@ -12491,11 +12499,10 @@ def _gotham_npc_ai_tick():
                         with GOTHAM_NPC_LOCK:
                             live_slot["patrol_target"] = patrol_target
                     if patrol_target:
-                        if math.hypot(patrol_target[0] - mx_cm, patrol_target[1] - mz_cm) <= 60:
+                        if math.hypot(patrol_target[0] - mx_cm, patrol_target[1] - mz_cm) < 50:
                             with GOTHAM_NPC_LOCK:
                                 live_slot["patrol_target"] = None
-                                live_slot["patrol_next_at"] = now + max(
-                                    0.3, int(ai_cfg.get("wait_time", 300) or 300) / 1000.0)
+                                live_slot["patrol_next_at"] = now + 2.0
                         else:
                             _gotham_npc_move_toward(
                                 live_slot, inst_id, patrol_target[0], patrol_target[1],
@@ -12513,11 +12520,12 @@ def _gotham_npc_ai_tick():
             ]
             if not ready_skills:
                 max_range = max(skill_range for _skill_id, skill_range in skills)
-                if distance > max_range:
+                if distance > max_range and not snapshot.get("is_boss"):
                     _gotham_npc_move_toward(
                         GOTHAM_SHARED_NPC_SLOTS[slot_key], inst_id,
                         px_cm - int(dx / distance * max_range * 100),
-                        pz_cm - int(dz / distance * max_range * 100), run_speed, now)
+                        pz_cm - int(dz / distance * max_range * 100),
+                        run_speed, now, walk=False)
                 continue
             if ready_at > now:
                 continue
@@ -12599,6 +12607,7 @@ def gotham_create_shared_npc(slot, spec):
         "damage": {},
         "target_id": 0,
         "next_target_change_at": 0,
+        "move_waypoint": None,
         "next_attack_at": 0,
         "skill_ready_at": {},
         "patrol_target": None,
