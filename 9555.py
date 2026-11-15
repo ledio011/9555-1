@@ -13986,6 +13986,7 @@ def snapshot_character_reward_state(picked_char, include_mails=False):
     keys.update(MONEY_FIELDS)
     keys.update(('next_item_index', 'exp', 'level', 'hp', 'title_exp', 'level_rank_reached_at',
                  'active_missions', 'last_main_mission_id', 'completed_side_missions',
+                 'invest_pack_claims',
                  'daily_active_state', 'big_sale_purchases', 'shop_purchases'))
     if include_mails:
         keys.add('mails')
@@ -18141,6 +18142,7 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None,
             )
             send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
             send_rpc_push(644, level_package_state_payload(picked_char))
+            send_rpc_push(645, invest_pack_state_payload(picked_char))
 
     for field, amount in currency_gains.items():
         if amount > 0:
@@ -19262,6 +19264,7 @@ def claim_mail_reward_entries(picked_char, mail_entries, all_chars, conn, send_r
         )
         send_rpc_push(540, encode_sproto([(0, skill_map), (1, False)]))
         send_rpc_push(644, level_package_state_payload(picked_char))
+        send_rpc_push(645, invest_pack_state_payload(picked_char))
     sync_char_attrs_rpc(conn, picked_char)
     sync_all_backpacks(picked_char, send_rpc_push)
     for mail in mail_entries:
@@ -19448,6 +19451,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         # Level-package state is character-wide. Send it again after reconnect
         # and scene transitions so level-up gift availability is never stale.
         send_rpc_push(644, level_package_state_payload(picked_char))
+        send_rpc_push(645, invest_pack_state_payload(picked_char))
 
         # TAG 505: aoi_add (NPCs)
         if is_equipment_copy_map(target_map_id):
@@ -20400,13 +20404,71 @@ def daily_buy_state_payload():
     }
     return encode_sproto([(0, daily_buys)])
 
-def invest_pack_state_payload():
-    """Return configured investment offer and milestone state without payment grants."""
-    investments = {
-        invest_id: encode_sproto([(0, invest_id), (1, 0)])
-        for invest_id in sorted(INVEST_CONFIG, key=lambda value: int(value))
-    }
+def invest_pack_state_payload(char):
+    """Build free Investment reward states from player level and claim history."""
+    claims = char.get('invest_pack_claims')
+    if not isinstance(claims, dict):
+        claims = {}
+        char['invest_pack_claims'] = claims
+    try:
+        player_level = normalize_player_level(char)
+    except (TypeError, ValueError):
+        player_level = 1
+    investments = {}
+    for invest_id, cfg in sorted(
+            INVEST_CONFIG.items(), key=lambda entry: int(entry[0])):
+        try:
+            target_level = int(cfg.get('level_target', 0))
+        except (AttributeError, TypeError, ValueError):
+            target_level = 0
+        claimed = bool(claims.get(invest_id, False))
+        state = 2 if claimed else (
+            1 if target_level > 0 and player_level >= target_level else 0
+        )
+        investments[invest_id] = encode_sproto([(0, invest_id), (1, state)])
     return encode_sproto([(0, investments)])
+
+
+def claim_invest_reward(char, invest_id):
+    """Grant one free, level-gated Investment reward exactly once."""
+    invest_id = str(invest_id or '').strip()
+    cfg = INVEST_CONFIG.get(invest_id)
+    if not cfg:
+        return False, [], 'unknown investment reward'
+    try:
+        target_level = int(cfg.get('level_target', 0))
+        item_id = str(cfg.get('item_id', '') or '').strip()
+        amount = int(cfg.get('item_count', 0))
+        quality = int(cfg.get('quality', 0))
+    except (AttributeError, TypeError, ValueError):
+        return False, [], 'invalid investment reward configuration'
+    if (not item_id or amount <= 0
+            or (item_id not in DIRECT_REWARD_RESOURCE_IDS
+                and item_id not in ITEM_CONFIG)):
+        return False, [], 'invalid investment reward item'
+
+    rewards = [(item_id, quality, amount)]
+    with get_character_transaction_lock(char):
+        player_level = normalize_player_level(char)
+        if target_level <= 0 or player_level < target_level:
+            return False, [], f'level {player_level} below target {target_level}'
+        claims = char.get('invest_pack_claims')
+        if not isinstance(claims, dict):
+            claims = {}
+            char['invest_pack_claims'] = claims
+        if claims.get(invest_id):
+            return False, [], 'already claimed'
+        if not can_add_reward_list_to_inventory(char, rewards):
+            return False, [], 'insufficient inventory capacity'
+
+        snapshot = snapshot_character_reward_state(char)
+        grant_item_rewards(char, rewards, save=False)
+        claims[invest_id] = True
+        if not save_chars(all_accounts_chars):
+            restore_character_reward_state(char, snapshot)
+            return False, [], 'character save failed'
+    return True, rewards, ''
+
 
 def _shop_purchase_count(char, item_id, row):
     purchases = char.setdefault('shop_purchases', {})
@@ -25378,6 +25440,7 @@ def client_handler(conn, addr):
                         # cache here so the APK can show packages earned at a
                         # level-up during this login session.
                         send_rpc_push(644, level_package_state_payload(picked_char))
+                        send_rpc_push(645, invest_pack_state_payload(picked_char))
 
                         # Refresh the client's cached dance activity state on every map entry.
                         # SceneManager only requests tag 313 on the first scene load; without
@@ -26408,6 +26471,7 @@ def client_handler(conn, addr):
                             if mission_leveled_up:
                                 send_rpc_push(614, function_unlock_payload(picked_char))
                                 send_rpc_push(644, level_package_state_payload(picked_char))
+                                send_rpc_push(645, invest_pack_state_payload(picked_char))
                             sync_char_attrs_rpc(conn, picked_char)               # Stats update
                             # Sync skills if leveled up from mission rewards
                             if mission_leveled_up:
@@ -32606,6 +32670,7 @@ def client_handler(conn, addr):
                                         )
                                         send_rpc_push(540, encode_sproto([(0, smap), (1, False)]))
                                         send_rpc_push(644, level_package_state_payload(picked_char))
+                                        send_rpc_push(645, invest_pack_state_payload(picked_char))
                                     if current_attributes != previous_attributes:
                                         sync_char_attrs_rpc(conn, picked_char)
                                     if any(
@@ -32813,8 +32878,46 @@ def client_handler(conn, addr):
                 elif msg == 257 and picked_char: # request_invest_pack
                     _send_tab_reply(
                         send_rpc_push, send_rpc_response, session,
-                        645, invest_pack_state_payload()
+                        645, invest_pack_state_payload(picked_char)
                     )
+
+                elif msg == 263 and picked_char: # require_invest_reward
+                    invest_id = get_val_str(body, 0, '').strip()
+                    claimed = False
+                    rewards = []
+                    failure_reason = 'stale character connection'
+                    if is_current_character_connection(conn, picked_char):
+                        claimed, rewards, failure_reason = claim_invest_reward(
+                            picked_char, invest_id
+                        )
+                    else:
+                        print(
+                            f"[INVEST] claim rejected player={picked_char.get('id')} "
+                            f"id={invest_id} reason={failure_reason}"
+                        )
+                    if claimed:
+                        sync_char_attrs_rpc(conn, picked_char)
+                        if any(item_id not in DIRECT_REWARD_RESOURCE_IDS
+                               for item_id, _quality, _amount in rewards):
+                            sync_all_backpacks(picked_char, send_rpc_push)
+                        print(
+                            f"[INVEST] claimed player={picked_char.get('id')} "
+                            f"id={invest_id} level={picked_char.get('level')} "
+                            f"items={len(rewards)}"
+                        )
+                    elif failure_reason != 'stale character connection':
+                        print(
+                            f"[INVEST] claim rejected player={picked_char.get('id')} "
+                            f"id={invest_id} reason={failure_reason}"
+                        )
+                    reward_items = [encode_sproto([
+                        (0, str(item_id)), (1, int(amount)), (2, int(quality))
+                    ]) for item_id, quality, amount in rewards] if claimed else []
+                    send_rpc_push(618, encode_sproto([
+                        (0, reward_items), (1, 1), (3, invest_id),
+                        (7, 0 if claimed else 1)
+                    ]))
+                    send_rpc_response(session)
 
                 elif msg == 256 and picked_char: # request_level_pack
                     send_rpc_push(644, level_package_state_payload(picked_char))
