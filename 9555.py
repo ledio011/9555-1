@@ -3379,6 +3379,53 @@ def _flush_pvp_hp_save():
                 timer.start()
 
 
+BACKPACK_SALE_SAVE_LOCK = threading.Lock()
+BACKPACK_SALE_SAVE_TIMER = None
+BACKPACK_SALE_SAVE_DIRTY = False
+BACKPACK_SALE_SAVE_WRITING = False
+BACKPACK_SALE_SAVE_INTERVAL_SECONDS = 0.25
+
+
+def schedule_backpack_sale_save():
+    """Bound full character DB writes during the client's per-item recycle RPCs."""
+    global BACKPACK_SALE_SAVE_TIMER, BACKPACK_SALE_SAVE_DIRTY
+    with BACKPACK_SALE_SAVE_LOCK:
+        BACKPACK_SALE_SAVE_DIRTY = True
+        if BACKPACK_SALE_SAVE_TIMER is not None or BACKPACK_SALE_SAVE_WRITING:
+            return
+        timer = threading.Timer(
+            BACKPACK_SALE_SAVE_INTERVAL_SECONDS, _flush_backpack_sale_save)
+        timer.daemon = True
+        BACKPACK_SALE_SAVE_TIMER = timer
+        timer.start()
+
+
+def _flush_backpack_sale_save():
+    global BACKPACK_SALE_SAVE_TIMER, BACKPACK_SALE_SAVE_DIRTY
+    global BACKPACK_SALE_SAVE_WRITING
+    with BACKPACK_SALE_SAVE_LOCK:
+        if BACKPACK_SALE_SAVE_TIMER is not threading.current_thread():
+            return
+        BACKPACK_SALE_SAVE_TIMER = None
+        if not BACKPACK_SALE_SAVE_DIRTY:
+            return
+        BACKPACK_SALE_SAVE_DIRTY = False
+        BACKPACK_SALE_SAVE_WRITING = True
+    try:
+        if not save_chars(all_accounts_chars):
+            print("[BACKPACK] coalesced recycle save failed")
+    finally:
+        with BACKPACK_SALE_SAVE_LOCK:
+            BACKPACK_SALE_SAVE_WRITING = False
+            if BACKPACK_SALE_SAVE_DIRTY and BACKPACK_SALE_SAVE_TIMER is None:
+                timer = threading.Timer(
+                    BACKPACK_SALE_SAVE_INTERVAL_SECONDS,
+                    _flush_backpack_sale_save)
+                timer.daemon = True
+                BACKPACK_SALE_SAVE_TIMER = timer
+                timer.start()
+
+
 def _save_chars_atomic(data):
     """Crash-safe atomic writer to prevent character loss during kill -9."""
     if not isinstance(data, dict):
@@ -7986,6 +8033,35 @@ def sync_char_attrs_rpc(conn, picked_char, conn_id=None):
             conn.sendall(pkt)
     except: pass
     sync_social_profile_if_changed(picked_char, stats)
+
+def sync_currency_attrs_rpc(conn, picked_char, conn_id=None):
+    """Send only the currency portion of TAG 510 after an inventory sale."""
+    prop = encode_sproto([
+        (13, get_currency_balance(picked_char, 0)),
+        (14, get_currency_balance(picked_char, 1)),
+        (15, get_currency_balance(picked_char, 2)),
+        (16, get_currency_balance(picked_char, 3)),
+        (17, get_currency_balance(picked_char, 4)),
+        (18, get_currency_balance(picked_char, 5))
+    ])
+    aoi_attr = encode_sproto([(0, picked_char['id']), (5, prop)])
+    try:
+        ph_p = encode_sproto([(0, 510)])
+        pf_p = sproto_pack(ph_p + encode_sproto([(0, aoi_attr)]))
+        pkt = struct.pack(">H", len(pf_p)) + pf_p
+        c_lock = CONNECTION_LOCKS.get(conn_id) if conn_id is not None else None
+        if c_lock is None:
+            c_lock = get_connection_send_lock(conn)
+        if c_lock:
+            with c_lock:
+                conn.sendall(pkt)
+        else:
+            conn.sendall(pkt)
+    except Exception as sync_error:
+        print(
+            f"[PLAYER SYNC] currency update failed "
+            f"player={picked_char.get('id', 0)} error={sync_error}"
+        )
 
 def send_combat_power_gain_tip(send_rpc_push, previous_power, current_power):
     """Open the APK's combat-power increase popup only for a real power gain."""
@@ -27811,7 +27887,7 @@ def client_handler(conn, addr):
                             # bag, and fashion items in the fashion backpack.
                             sellable_in_container = (
                                     (container_type == 0 and item_type == 2)
-                                    or (container_type == 2 and item_type in (3, 4, 15, 20, 21))
+                                    or (container_type == 2 and item_type in (3, 4, 15, 20, 21, 27))
                                     or (container_type == 5 and item_type == 16)
                             )
                             if not sellable_in_container:
@@ -27838,8 +27914,8 @@ def client_handler(conn, addr):
                                     push_backpack_item_update(send_rpc_push, container_type,
                                                               None if item not in bag else item,
                                                               index_id if item not in bag else None)
-                                    save_chars(all_accounts_chars)
-                                    sync_char_attrs_rpc(conn, picked_char)
+                                    schedule_backpack_sale_save()
+                                    sync_currency_attrs_rpc(conn, picked_char)
                                     sold = True
                                     print(f"[BACKPACK] sold item={item['id']} count={item_count} price={cost} currency={money_type}")
                 if not sold:
@@ -27848,11 +27924,6 @@ def client_handler(conn, addr):
                         f"[BACKPACK] recycle rejected player={player_id} index={index_id} "
                         f"count={item_count} container={container_type} reason={failure_reason}"
                     )
-                    if current_character:
-                        send_rpc_push(529, encode_sproto([
-                            (0, f'Cannot recycle item: {failure_reason}.'),
-                            (1, True)
-                        ]))
                 send_rpc_response(session)
 
             elif msg == 199: # badge_merge (RPC; state 0 means the merge succeeded)
