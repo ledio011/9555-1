@@ -12385,6 +12385,39 @@ def _gotham_npc_move_toward(
         slot["slot"], inst_id, target_x, target_z, heading, walk)
 
 
+def gotham_npc_retarget_on_hit(inst_id, attacker):
+    try:
+        inst_id = int(inst_id)
+        attacker_id = int(attacker.get("id", 0) or 0)
+        attacker_hp = int(attacker.get("hp", 0) or 0)
+        attacker_map = str(attacker.get("map_id", ""))
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if (attacker_id <= 0
+            or attacker_map != GOTHAM_MAP_ID
+            or attacker_hp <= 0):
+        return False
+    slot_key = GOTHAM_SHARED_NPC_BY_INSTANCE.get(inst_id)
+    if slot_key is None:
+        return False
+    now = time.time()
+    with GOTHAM_NPC_LOCK:
+        slot = GOTHAM_SHARED_NPC_SLOTS.get(slot_key)
+        if (not slot or int(slot.get("inst_id") or 0) != inst_id
+                or inst_id in DEAD_NPC_SET
+                or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
+            return False
+        npc_cfg = NPC_CONFIG.get(str(slot.get("nid", "")), {})
+        ai_cfg = AI_DATA_CONFIG.get(str(npc_cfg.get("ai_data_id") or ""), {})
+        switch_interval = max(
+            0, int(ai_cfg.get("change_target_cd", 0) or 0)
+        ) / 1000.0
+        slot["target_id"] = attacker_id
+        slot["next_target_change_at"] = now + switch_interval
+        slot["patrol_target"] = None
+    return True
+
+
 def _gotham_npc_ai_tick():
     if not GOTHAM_AI_LOCK.acquire(False):
         return True
@@ -29517,6 +29550,10 @@ def client_handler(conn, addr):
                             if (applied_damage > 0
                                     and cur_map in PRISON_NPC_AOI_MAP_IDS):
                                 prison_npc_retarget_on_hit(target_id, picked_char)
+                            if (applied_damage > 0
+                                    and cur_map == GOTHAM_MAP_ID
+                                    and target_id in GOTHAM_SHARED_NPC_BY_INSTANCE):
+                                gotham_npc_retarget_on_hit(target_id, picked_char)
                             if (not is_stage_combat and isinstance(cash_stage_state, dict)
                                     and str(cash_stage_state.get('copy_id'))
                                     == str(picked_char.get('active_copy_id') or '')
