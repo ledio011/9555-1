@@ -27789,11 +27789,20 @@ def client_handler(conn, addr):
                 item_count = get_val_int(body, 1, 0)
                 container_type = get_val_int(body, 2, -1)
                 sold = False
-                if (picked_char and is_current_character_connection(conn, picked_char)
-                        and container_type in (0, 2, 5) and item_count > 0):
+                current_character = bool(
+                    picked_char and is_current_character_connection(conn, picked_char)
+                )
+                failure_reason = ''
+                if not current_character:
+                    failure_reason = 'stale character connection'
+                elif container_type not in (0, 2, 5) or item_count <= 0:
+                    failure_reason = 'invalid container or item count'
+                else:
                     with get_character_transaction_lock(picked_char):
                         found = find_backpack_item(picked_char, index_id, container_type)
-                        if found:
+                        if not found:
+                            failure_reason = 'item index not found in requested backpack'
+                        else:
                             item = found['item']
                             item_cfg = ITEM_CONFIG.get(str(item['id']), {})
                             item_type = int(item_cfg.get('type', -1))
@@ -27805,8 +27814,13 @@ def client_handler(conn, addr):
                                     or (container_type == 2 and item_type in (3, 4, 15, 20, 21))
                                     or (container_type == 5 and item_type == 16)
                             )
-                            if (sellable_in_container
-                                    and item_count <= int(item.get('amount', 0))):
+                            if not sellable_in_container:
+                                failure_reason = (
+                                    f'item type {item_type} is not recyclable from container {container_type}'
+                                )
+                            elif item_count > int(item.get('amount', 0)):
+                                failure_reason = 'requested count exceeds item stack'
+                            else:
                                 raw_prices = str(item_cfg.get('price', '0')).split('#')
                                 prices = [int(v) for v in raw_prices if v.strip().lstrip('-').isdigit()]
                                 quality = int(item.get('quality', item_cfg.get('quality', 0)))
@@ -27815,7 +27829,9 @@ def client_handler(conn, addr):
                                 money_type = int(item_cfg.get('price_type', 0))
                                 cost = price * item_count
                                 bag = picked_char[found['bucket']]
-                                if cost >= 0 and 0 <= money_type < len(MONEY_FIELDS):
+                                if cost < 0 or not 0 <= money_type < len(MONEY_FIELDS):
+                                    failure_reason = 'invalid recycle price configuration'
+                                else:
                                     bag.remove(item) if item_count == int(item.get('amount', 0)) else item.update({'amount': int(item['amount']) - item_count})
                                     set_currency_balance(picked_char, money_type,
                                                          get_currency_balance(picked_char, money_type) + cost)
@@ -27826,6 +27842,17 @@ def client_handler(conn, addr):
                                     sync_char_attrs_rpc(conn, picked_char)
                                     sold = True
                                     print(f"[BACKPACK] sold item={item['id']} count={item_count} price={cost} currency={money_type}")
+                if not sold:
+                    player_id = picked_char.get('id', 0) if picked_char else 0
+                    print(
+                        f"[BACKPACK] recycle rejected player={player_id} index={index_id} "
+                        f"count={item_count} container={container_type} reason={failure_reason}"
+                    )
+                    if current_character:
+                        send_rpc_push(529, encode_sproto([
+                            (0, f'Cannot recycle item: {failure_reason}.'),
+                            (1, True)
+                        ]))
                 send_rpc_response(session)
 
             elif msg == 199: # badge_merge (RPC; state 0 means the merge succeeded)
