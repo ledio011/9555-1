@@ -27789,20 +27789,21 @@ def client_handler(conn, addr):
                 item_count = get_val_int(body, 1, 0)
                 container_type = get_val_int(body, 2, -1)
                 sold = False
-                if picked_char and is_current_character_connection(conn, picked_char) and container_type in (0, 2) and item_count > 0:
+                if (picked_char and is_current_character_connection(conn, picked_char)
+                        and container_type in (0, 2, 5) and item_count > 0):
                     with get_character_transaction_lock(picked_char):
                         found = find_backpack_item(picked_char, index_id, container_type)
                         if found:
                             item = found['item']
                             item_cfg = ITEM_CONFIG.get(str(item['id']), {})
                             item_type = int(item_cfg.get('type', -1))
-                            # Match ItemData.CanSell: equipment only in the
-                            # equipment bag; potions, enhancement materials,
-                            # boxes, and their keys in the item bag. Fashion
-                            # items are not sellable by the client.
+                            # Match the client containers: equipment is in the
+                            # equipment bag, consumables/packages in the item
+                            # bag, and fashion items in the fashion backpack.
                             sellable_in_container = (
                                     (container_type == 0 and item_type == 2)
                                     or (container_type == 2 and item_type in (3, 4, 15, 20, 21))
+                                    or (container_type == 5 and item_type == 16)
                             )
                             if (sellable_in_container
                                     and item_count <= int(item.get('amount', 0))):
@@ -31600,13 +31601,6 @@ def client_handler(conn, addr):
                                     copy_update=sync_copy_scenes(member)
                                     if int(member_id)==cid: send_rpc_push(555,copy_update)
                                     else: send_push_to_char(member_id,555,copy_update)
-                        if team['verify'] == 0:
-                            if not queue_team_match(team, goal, 1):
-                                team['verify']=1
-                                send_team_match_state(
-                                    list(team.get('members',[])),goal,1,1)
-                        else:
-                            stop_team_match(team, goal, 1)
                         send_team_update(team['id'])
                 elif picked_char and msg==164:
                     team=get_team_for_char(cid); target=get_val_int(body,0)
