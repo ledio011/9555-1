@@ -24373,6 +24373,8 @@ def client_handler(conn, addr):
     map101_last_rx_msg = None
     map101_last_rx_session = None
     map101_last_rx_body_keys = None
+    invest_trace_until = 0.0
+    invest_trace_count = 0
     # ALL_CONNECTIONS will be updated when character is picked
     send_lock = threading.Lock()
 
@@ -24903,6 +24905,13 @@ def client_handler(conn, addr):
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
             debug_log(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
+            if (invest_trace_count < 20
+                    and time.monotonic() < invest_trace_until):
+                invest_trace_count += 1
+                print(
+                    f"[INVEST RX TRACE] player={picked_char.get('id') if picked_char else None} "
+                    f"msg={msg} session={session} body_tags={sorted(body)}"
+                )
             if msg == 279:
                 print(f"[RETRIEVE RX] player={picked_char.get('id') if picked_char else None} "
                       f"session={session} fields={body}")
@@ -32858,9 +32867,24 @@ def client_handler(conn, addr):
 
                 elif msg == 257 and picked_char: # request_invest_pack
                     player_level = normalize_player_level(picked_char)
+                    invest_trace_until = time.monotonic() + 30.0
+                    invest_trace_count = 0
+                    claims = picked_char.get('invest_pack_claims')
+                    if not isinstance(claims, dict):
+                        claims = {}
+                    claimable_ids = []
+                    for row_id, row_cfg in INVEST_CONFIG.items():
+                        try:
+                            target_level = int(row_cfg.get('level_target', 0))
+                        except (AttributeError, TypeError, ValueError):
+                            continue
+                        if (target_level > 0 and player_level >= target_level
+                                and not claims.get(row_id, False)):
+                            claimable_ids.append(row_id)
                     print(
                         f"[INVEST] state request player={picked_char.get('id')} "
-                        f"level={player_level} rows={len(INVEST_CONFIG)}"
+                        f"level={player_level} rows={len(INVEST_CONFIG)} "
+                        f"claimable={sorted(claimable_ids, key=int)} session={session}"
                     )
                     _send_tab_reply(
                         send_rpc_push, send_rpc_response, session,
