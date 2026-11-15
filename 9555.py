@@ -1058,6 +1058,7 @@ try:
                     }
                 except (TypeError, ValueError):
                     continue
+        print(f"[INVEST CONFIG LOADED] count={len(INVEST_CONFIG)}")
     guild_boss_path = os.path.join(text_asset_root, "GuildBossData")
     if os.path.exists(guild_boss_path):
         with open(guild_boss_path, "r", encoding="utf-8") as table_file:
@@ -5996,6 +5997,25 @@ def normalize_player_level(character):
     return level
 
 
+def _guild_city_attribute_bonuses(guild_id):
+    """Aggregate the configured GuildCaptureData stat bonuses for one guild."""
+    bonuses = {}
+    for capture_id, owner in GUILD_CITY_OWNERS.items():
+        if not isinstance(owner, dict):
+            continue
+        try:
+            if int(owner.get('guild_id', 0) or 0) != int(guild_id):
+                continue
+            city_cfg = GUILD_CAPTURE_CONFIG.get(str(capture_id), {})
+            attribute_id = int(city_cfg.get('base_status', 0) or 0)
+            value = int(city_cfg.get('base_value', 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if attribute_id > 0 and value > 0:
+            bonuses[attribute_id] = bonuses.get(attribute_id, 0) + value
+    return sorted(bonuses.items())
+
+
 def get_character_stats(c):
     """Calculate player attributes from BaseLvData and currently equipped items."""
     lv = normalize_player_level(c)
@@ -6202,6 +6222,13 @@ def get_character_stats(c):
                     add_item_attribute(attribute_id, value)
                     star_power_score += attribute_combat_value(attribute_id, value)
                 power_attribute_score += math.floor(star_power_score)
+
+        # GuildCaptureData defines the stat bonus for each owned city.
+        for attribute_id, value in _guild_city_attribute_bonuses(guild_id):
+            add_item_attribute(attribute_id, value)
+            power_attribute_score += math.floor(
+                attribute_combat_value(attribute_id, value)
+            )
 
     # The APK displays TitleData bonuses in Chara > Title. Apply the owned
     # title's configured attributes through the same percentage/stat path as
@@ -12659,6 +12686,7 @@ def gotham_respawn_shared_npc(slot_key, expected_respawn_at):
 def spawn_gotham_map_npcs(conn, char):
     start_gotham_npc_runtime()
     update_gotham_npc_aoi(conn, char)
+    _spawn_guild_city_vehicle(conn, GOTHAM_MAP_ID)
 
 
 def spawn_gotham_escort_npc(conn, char):
@@ -23113,7 +23141,11 @@ def _guild_city_finish_capture(capture_id):
         winner = GUILD_STATES.get(str(ranked[0].get('id', 0)))
         if not winner:
             return None
+        previous_owner_id = int(
+            GUILD_CITY_OWNERS.get(str(capture_id), {}).get('guild_id', 0) or 0
+        )
         event['finished'] = True
+        event['previous_guild_id'] = previous_owner_id
         GUILD_CITY_OWNERS[str(capture_id)] = {
             'guild_id': int(winner.get('id', 0)), 'name': str(winner.get('name', '')),
             'icon': int(winner.get('icon', 0)), 'last_event_start': int(event['event_start']),
@@ -23188,6 +23220,12 @@ def _guild_capture_activity_map(now=None, char=None):
 def _guild_city_broadcast_result(capture_id, winner):
     winner_name = str((winner or {}).get('name', ''))
     now = int(time.time())
+    event = GUILD_CITY_EVENT_STATE.get(str(capture_id), {})
+    affected_guild_ids = {
+        int((winner or {}).get('id', 0) or 0),
+        int(event.get('previous_guild_id', 0) or 0)
+    }
+    affected_guild_ids.discard(0)
     result_chat = encode_sproto([
         (5, 6), (7, [19, 1]), (8, [winner_name, str(capture_id)])
     ])
@@ -23195,6 +23233,8 @@ def _guild_city_broadcast_result(capture_id, winner):
     for _char_id, (peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
         if not peer_conn or not peer_char:
             continue
+        if _guild_id_for_character(peer_char) in affected_guild_ids:
+            sync_char_attrs_rpc(peer_conn, peer_char)
         send_rpc_push_safe(peer_conn, 528, chat_payload)
         send_rpc_push_safe(peer_conn, 689, encode_sproto([
             (0, _guild_capture_activity_map(now, peer_char))
@@ -32817,6 +32857,11 @@ def client_handler(conn, addr):
                     )
 
                 elif msg == 257 and picked_char: # request_invest_pack
+                    player_level = normalize_player_level(picked_char)
+                    print(
+                        f"[INVEST] state request player={picked_char.get('id')} "
+                        f"level={player_level} rows={len(INVEST_CONFIG)}"
+                    )
                     _send_tab_reply(
                         send_rpc_push, send_rpc_response, session,
                         645, invest_pack_state_payload(picked_char)
@@ -32824,6 +32869,18 @@ def client_handler(conn, addr):
 
                 elif msg == 263 and picked_char: # require_invest_reward
                     invest_id = get_val_str(body, 0, '').strip()
+                    player_level = normalize_player_level(picked_char)
+                    try:
+                        target_level = int(
+                            INVEST_CONFIG.get(invest_id, {}).get('level_target', 0) or 0
+                        )
+                    except (AttributeError, TypeError, ValueError):
+                        target_level = 0
+                    print(
+                        f"[INVEST] claim request player={picked_char.get('id')} "
+                        f"id={invest_id!r} level={player_level} target={target_level} "
+                        f"raw_id={body.get(0)!r}"
+                    )
                     claimed = False
                     rewards = []
                     failure_reason = 'stale character connection'
@@ -32872,6 +32929,7 @@ def client_handler(conn, addr):
                         (0, reward_items), (1, 1), (3, invest_id),
                         (7, 0 if claimed else 1)
                     ]))
+                    send_rpc_push(645, invest_pack_state_payload(picked_char))
                     send_rpc_response(session)
 
                 elif msg == 256 and picked_char: # request_level_pack
