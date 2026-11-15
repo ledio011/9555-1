@@ -12385,6 +12385,12 @@ def _gotham_npc_move_toward(
         slot["slot"], inst_id, target_x, target_z, heading, walk)
 
 
+def _gotham_target_switch_interval(slot, ai_cfg):
+    if slot.get("is_boss"):
+        return random.uniform(4.0, 5.0)
+    return max(0, int(ai_cfg.get("change_target_cd", 0) or 0)) / 1000.0
+
+
 def gotham_npc_retarget_on_hit(inst_id, attacker):
     try:
         inst_id = int(inst_id)
@@ -12409,11 +12415,16 @@ def gotham_npc_retarget_on_hit(inst_id, attacker):
             return False
         npc_cfg = NPC_CONFIG.get(str(slot.get("nid", "")), {})
         ai_cfg = AI_DATA_CONFIG.get(str(npc_cfg.get("ai_data_id") or ""), {})
-        switch_interval = max(
-            0, int(ai_cfg.get("change_target_cd", 0) or 0)
-        ) / 1000.0
+        current_target = int(slot.get("target_id", 0) or 0)
+        if slot.get("is_boss"):
+            if current_target == attacker_id:
+                return True
+            if (current_target
+                    and now < float(slot.get("next_target_change_at", 0) or 0)):
+                return False
         slot["target_id"] = attacker_id
-        slot["next_target_change_at"] = now + switch_interval
+        slot["next_target_change_at"] = (
+            now + _gotham_target_switch_interval(slot, ai_cfg))
         slot["patrol_target"] = None
     return True
 
@@ -12459,10 +12470,6 @@ def _gotham_npc_ai_tick():
             return_distance = max(lock_distance, int(ai_cfg.get("return_distance", 0) or 0) / 100.0)
             walk_speed = max(0.1, float(npc_cfg.get("walk_speed", 10)) / 10.0)
             run_speed = max(0.1, float(npc_cfg.get("move_speed", 50)) / 10.0)
-            # AIData cooldown values are milliseconds, like its skill cooldown fields.
-            target_switch_interval = max(
-                0, int(ai_cfg.get("change_target_cd", 0) or 0)
-            ) / 1000.0
             mx_cm, mz_cm = snapshot.get("position") or (snapshot["x"], snapshot["z"])
             mx, mz = float(mx_cm) / 100.0, float(mz_cm) / 100.0
             target = None
@@ -12502,7 +12509,8 @@ def _gotham_npc_ai_tick():
                         if live_slot.get("inst_id") == inst_id:
                             live_slot["target_id"] = target[0]
                             live_slot["next_target_change_at"] = (
-                                now + target_switch_interval
+                                now + _gotham_target_switch_interval(
+                                    snapshot, ai_cfg)
                             )
 
             if target is None:
@@ -12570,14 +12578,18 @@ def _gotham_npc_ai_tick():
                 if int(SKILL_CONFIG[sid].get("priority", 0) or 0) == top_priority])
             skill_cfg = SKILL_CONFIG[skill_id]
             cooldown = max(0, int(skill_cfg.get("cooldown_ms", 0) or 0)) / 1000.0
-            min_cd = max(0, int(ai_cfg.get("skill_cd_min", 1000) or 1000))
-            max_cd = max(min_cd, int(ai_cfg.get("skill_cd_max", 3000) or 3000))
             with GOTHAM_NPC_LOCK:
                 live_slot = GOTHAM_SHARED_NPC_SLOTS.get(slot_key, {})
                 if live_slot.get("inst_id") != inst_id:
                     continue
                 live_slot.setdefault("skill_ready_at", {})[skill_id] = now + cooldown
-                live_slot["next_attack_at"] = now + random.uniform(min_cd, max_cd) / 1000.0
+                if snapshot.get("is_boss"):
+                    live_slot["next_attack_at"] = now + random.uniform(4.0, 5.0)
+                else:
+                    min_cd = max(0, int(ai_cfg.get("skill_cd_min", 1000) or 1000))
+                    max_cd = max(min_cd, int(ai_cfg.get("skill_cd_max", 3000) or 3000))
+                    live_slot["next_attack_at"] = (
+                        now + random.uniform(min_cd, max_cd) / 1000.0)
 
             damage, hit, critical = get_combat_damage(
                 get_npc_attr(npc_id), get_character_stats(target_char), skill_id, 0,
