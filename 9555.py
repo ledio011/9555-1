@@ -3302,7 +3302,7 @@ def _json_default_handler(obj):
     return str(obj)  # Last resort: convert to string
 
 def _serializable_character_data(value, seen=None):
-    """Copy save data while omitting live EXP state and breaking object cycles."""
+    """Copy save data while omitting runtime state and breaking object cycles."""
     if seen is None:
         seen = set()
     if isinstance(value, dict):
@@ -3313,7 +3313,9 @@ def _serializable_character_data(value, seen=None):
         result = {
             key: _serializable_character_data(item, seen)
             for key, item in value.items()
-            if key not in ('exp_stage_state', 'equipment_stage_state', 'equipment_team_id')
+            if key not in (
+                    'exp_stage_state', 'equipment_stage_state', 'equipment_team_id',
+                    '_last_pos_save')
                and not isinstance(item, threading.Timer)
         }
         seen.remove(marker)
@@ -3334,96 +3336,59 @@ def save_chars(data):
         return _save_chars_atomic(data)
 
 
-PVP_HP_SAVE_LOCK = threading.Lock()
-PVP_HP_SAVE_TIMER = None
-PVP_HP_SAVE_DIRTY = False
-PVP_HP_SAVE_WRITING = False
-PVP_HP_SAVE_INTERVAL_SECONDS = 0.25
+CHARACTER_DB_SAVE_LOCK = threading.Lock()
+CHARACTER_DB_SAVE_TIMER = None
+CHARACTER_DB_SAVE_DIRTY = False
+CHARACTER_DB_SAVE_WRITING = False
+CHARACTER_DB_SAVE_INTERVAL_SECONDS = 0.25
+
+
+def schedule_character_db_save():
+    """Coalesce deferred character changes outside latency-sensitive handlers."""
+    global CHARACTER_DB_SAVE_TIMER, CHARACTER_DB_SAVE_DIRTY
+    with CHARACTER_DB_SAVE_LOCK:
+        CHARACTER_DB_SAVE_DIRTY = True
+        if CHARACTER_DB_SAVE_TIMER is not None or CHARACTER_DB_SAVE_WRITING:
+            return
+        timer = threading.Timer(
+            CHARACTER_DB_SAVE_INTERVAL_SECONDS, _flush_character_db_save)
+        timer.daemon = True
+        CHARACTER_DB_SAVE_TIMER = timer
+        timer.start()
+
+
+def _flush_character_db_save():
+    global CHARACTER_DB_SAVE_TIMER, CHARACTER_DB_SAVE_DIRTY
+    global CHARACTER_DB_SAVE_WRITING
+    with CHARACTER_DB_SAVE_LOCK:
+        if CHARACTER_DB_SAVE_TIMER is not threading.current_thread():
+            return
+        CHARACTER_DB_SAVE_TIMER = None
+        if not CHARACTER_DB_SAVE_DIRTY:
+            return
+        CHARACTER_DB_SAVE_DIRTY = False
+        CHARACTER_DB_SAVE_WRITING = True
+    try:
+        if not save_chars(all_accounts_chars):
+            print("[CHARACTER SAVE] coalesced character save failed")
+    finally:
+        with CHARACTER_DB_SAVE_LOCK:
+            CHARACTER_DB_SAVE_WRITING = False
+            if CHARACTER_DB_SAVE_DIRTY and CHARACTER_DB_SAVE_TIMER is None:
+                timer = threading.Timer(
+                    CHARACTER_DB_SAVE_INTERVAL_SECONDS,
+                    _flush_character_db_save)
+                timer.daemon = True
+                CHARACTER_DB_SAVE_TIMER = timer
+                timer.start()
 
 
 def schedule_pvp_hp_save():
-    """Coalesce frequent PvP HP updates into bounded-rate character DB writes."""
-    global PVP_HP_SAVE_TIMER, PVP_HP_SAVE_DIRTY
-    with PVP_HP_SAVE_LOCK:
-        PVP_HP_SAVE_DIRTY = True
-        if PVP_HP_SAVE_TIMER is not None or PVP_HP_SAVE_WRITING:
-            return
-        timer = threading.Timer(
-            PVP_HP_SAVE_INTERVAL_SECONDS, _flush_pvp_hp_save)
-        timer.daemon = True
-        PVP_HP_SAVE_TIMER = timer
-        timer.start()
-
-
-def _flush_pvp_hp_save():
-    global PVP_HP_SAVE_TIMER, PVP_HP_SAVE_DIRTY, PVP_HP_SAVE_WRITING
-    with PVP_HP_SAVE_LOCK:
-        if PVP_HP_SAVE_TIMER is not threading.current_thread():
-            return
-        PVP_HP_SAVE_TIMER = None
-        if not PVP_HP_SAVE_DIRTY:
-            return
-        PVP_HP_SAVE_DIRTY = False
-        PVP_HP_SAVE_WRITING = True
-    try:
-        if not save_chars(all_accounts_chars):
-            print("[PVP HP SAVE] coalesced character save failed")
-    finally:
-        with PVP_HP_SAVE_LOCK:
-            PVP_HP_SAVE_WRITING = False
-            if PVP_HP_SAVE_DIRTY and PVP_HP_SAVE_TIMER is None:
-                timer = threading.Timer(
-                    PVP_HP_SAVE_INTERVAL_SECONDS, _flush_pvp_hp_save)
-                timer.daemon = True
-                PVP_HP_SAVE_TIMER = timer
-                timer.start()
-
-
-BACKPACK_SALE_SAVE_LOCK = threading.Lock()
-BACKPACK_SALE_SAVE_TIMER = None
-BACKPACK_SALE_SAVE_DIRTY = False
-BACKPACK_SALE_SAVE_WRITING = False
-BACKPACK_SALE_SAVE_INTERVAL_SECONDS = 0.25
+    schedule_character_db_save()
 
 
 def schedule_backpack_sale_save():
-    """Bound full character DB writes during the client's per-item recycle RPCs."""
-    global BACKPACK_SALE_SAVE_TIMER, BACKPACK_SALE_SAVE_DIRTY
-    with BACKPACK_SALE_SAVE_LOCK:
-        BACKPACK_SALE_SAVE_DIRTY = True
-        if BACKPACK_SALE_SAVE_TIMER is not None or BACKPACK_SALE_SAVE_WRITING:
-            return
-        timer = threading.Timer(
-            BACKPACK_SALE_SAVE_INTERVAL_SECONDS, _flush_backpack_sale_save)
-        timer.daemon = True
-        BACKPACK_SALE_SAVE_TIMER = timer
-        timer.start()
-
-
-def _flush_backpack_sale_save():
-    global BACKPACK_SALE_SAVE_TIMER, BACKPACK_SALE_SAVE_DIRTY
-    global BACKPACK_SALE_SAVE_WRITING
-    with BACKPACK_SALE_SAVE_LOCK:
-        if BACKPACK_SALE_SAVE_TIMER is not threading.current_thread():
-            return
-        BACKPACK_SALE_SAVE_TIMER = None
-        if not BACKPACK_SALE_SAVE_DIRTY:
-            return
-        BACKPACK_SALE_SAVE_DIRTY = False
-        BACKPACK_SALE_SAVE_WRITING = True
-    try:
-        if not save_chars(all_accounts_chars):
-            print("[BACKPACK] coalesced recycle save failed")
-    finally:
-        with BACKPACK_SALE_SAVE_LOCK:
-            BACKPACK_SALE_SAVE_WRITING = False
-            if BACKPACK_SALE_SAVE_DIRTY and BACKPACK_SALE_SAVE_TIMER is None:
-                timer = threading.Timer(
-                    BACKPACK_SALE_SAVE_INTERVAL_SECONDS,
-                    _flush_backpack_sale_save)
-                timer.daemon = True
-                BACKPACK_SALE_SAVE_TIMER = timer
-                timer.start()
+    schedule_character_db_save()
 
 
 def _save_chars_atomic(data):
@@ -8035,7 +8000,7 @@ def sync_char_attrs_rpc(conn, picked_char, conn_id=None):
     sync_social_profile_if_changed(picked_char, stats)
 
 def sync_currency_attrs_rpc(conn, picked_char, conn_id=None):
-    """Send only the currency portion of TAG 510 after an inventory sale."""
+    """Send only the currency portion of TAG 510 after a currency change."""
     prop = encode_sproto([
         (13, get_currency_balance(picked_char, 0)),
         (14, get_currency_balance(picked_char, 1)),
@@ -24953,7 +24918,7 @@ def client_handler(conn, addr):
                 map101_last_rx_body_keys = sorted(str(k) for k in body.keys())
                 if msg == 101:
                     map101_post_ready_move_count += 1
-                if map101_post_ready_rx_count <= 25 or msg == 101:
+                if map101_post_ready_rx_count <= 25:
                     payload0 = body.get(0)
                     payload0_size = (
                         len(payload0) if isinstance(payload0, (bytes, bytearray, str))
@@ -26135,30 +26100,6 @@ def client_handler(conn, addr):
                         or stage_move_valid
                     )
                 )
-                if move_map == '101':
-                    if not p_raw:
-                        move_reject_reason = 'missing_body_field_0'
-                    elif not picked_char:
-                        move_reject_reason = 'no_picked_character'
-                    elif stale_race_socket:
-                        move_reject_reason = 'stale_race_socket'
-                    elif (is_exp_move_map or is_equipment_move_map) and not stage_move_valid:
-                        move_reject_reason = 'stage_move_validation_failed'
-                    else:
-                        move_reject_reason = 'accepted'
-                    payload_size = (
-                        len(p_raw) if isinstance(p_raw, (bytes, bytearray, str))
-                        else None
-                    )
-                    print(
-                        f"[MAP101 MOVE CHECK] player={picked_char.get('id') if picked_char else None} "
-                        f"phase={'after_ready' if map101_ready_at is not None else 'before_ready'} "
-                        f"payload_present={p_raw is not None} payload_type={type(p_raw).__name__} "
-                        f"payload_size={payload_size} body_keys={sorted(str(k) for k in body.keys())} "
-                        f"accepted={move_packet_accepted} reason={move_reject_reason} "
-                        f"current_socket={is_current_character_connection(conn, picked_char) if picked_char else False} "
-                        f"conn_id={conn_id}"
-                    )
                 if move_packet_accepted:
                     pd = decode_sproto(p_raw)
                     new_pos = [get_val_int(pd, 0), get_val_int(pd, 1), get_val_int(pd, 2), get_val_int(pd, 3)]
@@ -26178,8 +26119,8 @@ def client_handler(conn, addr):
                     # map transition, disconnect, mission completion, etc.
                     last_pos_save = picked_char.get('_last_pos_save', 0)
                     if int(time.time()) - last_pos_save >= 30:
-                        save_chars(all_accounts_chars)
                         picked_char['_last_pos_save'] = int(time.time())
+                        schedule_character_db_save()
                     # Broadcast movement to other players on the same map (TAG 507)
                     broadcast_aoi_move(picked_char)
                     # Update NPC AOI for Liberty City (map 101) — throttle to every 2 seconds
@@ -32896,14 +32837,28 @@ def client_handler(conn, addr):
                             f"id={invest_id} reason={failure_reason}"
                         )
                     if claimed:
-                        sync_char_attrs_rpc(conn, picked_char)
+                        has_stat_reward = any(
+                            str(item_id) in ('2001', '2002')
+                            for item_id, _quality, _amount in rewards
+                        )
+                        has_currency_reward = any(
+                            str(item_id) in (
+                                '1001', '1002', '1003', '1004', '2003', '2004'
+                            )
+                            for item_id, _quality, _amount in rewards
+                        )
+                        if has_stat_reward:
+                            sync_char_attrs_rpc(conn, picked_char)
+                        elif has_currency_reward:
+                            sync_currency_attrs_rpc(conn, picked_char)
                         if any(item_id not in DIRECT_REWARD_RESOURCE_IDS
                                for item_id, _quality, _amount in rewards):
                             sync_all_backpacks(picked_char, send_rpc_push)
                         print(
                             f"[INVEST] claimed player={picked_char.get('id')} "
                             f"id={invest_id} level={picked_char.get('level')} "
-                            f"items={len(rewards)}"
+                            f"rewards={[(item_id, amount) for item_id, _quality, amount in rewards]} "
+                            f"diamonds={get_currency_balance(picked_char, 2)}"
                         )
                     elif failure_reason != 'stale character connection':
                         print(
