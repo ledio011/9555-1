@@ -12990,12 +12990,13 @@ def finish_gotham_escort_mission(char, conn, mission_id, success):
             encode_sproto([(0, item_id), (1, amount), (3, quality)])
             for item_id, quality, amount in activity_items
         ]
-        send_rpc_push_safe(conn, 620, encode_sproto([
-            (0, 1), (1, bool(success)), (2, item_payloads)
+        result_sent = send_rpc_push_safe(conn, 620, encode_sproto([
+            (0, 1), (2, bool(success)), (3, item_payloads)
         ]))
         send_rpc_push_safe(conn, 519, sync_mission_data(char))
         send_rpc_push_safe(conn, 619, activity_info_payload(char))
-    print(f"[GOTHAM ESCORT] mission={mission_id} success={bool(success)}")
+    print(f"[GOTHAM ESCORT] mission={mission_id} success={bool(success)} "
+          f"items={len(activity_items)} result_sent={result_sent if conn else False}")
     return True
 
 
