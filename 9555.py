@@ -3347,6 +3347,7 @@ CHARACTER_DB_SAVE_TIMER = None
 CHARACTER_DB_SAVE_DIRTY = False
 CHARACTER_DB_SAVE_WRITING = False
 CHARACTER_DB_SAVE_INTERVAL_SECONDS = 0.25
+CHARACTER_DB_SAVE_RETRY_SECONDS = 5.0
 
 
 def schedule_character_db_save():
@@ -3374,15 +3375,20 @@ def _flush_character_db_save():
             return
         CHARACTER_DB_SAVE_DIRTY = False
         CHARACTER_DB_SAVE_WRITING = True
+    save_succeeded = False
     try:
-        if not save_chars(all_accounts_chars):
+        save_succeeded = save_chars(all_accounts_chars)
+        if not save_succeeded:
             print("[CHARACTER SAVE] coalesced character save failed")
     finally:
         with CHARACTER_DB_SAVE_LOCK:
             CHARACTER_DB_SAVE_WRITING = False
+            if not save_succeeded:
+                CHARACTER_DB_SAVE_DIRTY = True
             if CHARACTER_DB_SAVE_DIRTY and CHARACTER_DB_SAVE_TIMER is None:
                 timer = threading.Timer(
-                    CHARACTER_DB_SAVE_INTERVAL_SECONDS,
+                    (CHARACTER_DB_SAVE_INTERVAL_SECONDS if save_succeeded
+                     else CHARACTER_DB_SAVE_RETRY_SECONDS),
                     _flush_character_db_save)
                 timer.daemon = True
                 CHARACTER_DB_SAVE_TIMER = timer
@@ -10826,6 +10832,11 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                 collected_exp = exp_state.setdefault('collected_exp_by_member', {})
                 char_id = int(picked_char.get('id', 0))
                 collected_exp[char_id] = int(collected_exp.get(char_id, 0)) + exp_kill
+                send_rpc_push(638, encode_sproto([(0, [
+                    encode_sproto([
+                        (0, "2001"), (1, exp_kill), (3, 0)
+                    ]),
+                ])]))
         else:
             if survival_activity:
                 with get_character_transaction_lock(picked_char):
@@ -10889,6 +10900,14 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                 rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
                 grant_item_rewards(
                     picked_char, rewards, conn, send_rpc_push, save=False)
+                send_rpc_push(638, encode_sproto([(0, [
+                    encode_sproto([
+                        (0, "2001"), (1, exp_kill), (3, 0)
+                    ]),
+                    encode_sproto([
+                        (0, "1001"), (1, cash_kill), (3, 0)
+                    ]),
+                ])]))
 
 def start_exp_stage_runtime(conn, owner, state):
     if not state or state.get('runtime_started') or state.get('defer_start'): return
@@ -18708,7 +18727,10 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
         if logic_type == 7 and event == 'level':
             mdata['parm'][0] = max(mdata['parm'][0], int(picked_char.get('level', 1)))
             matched = True
-        elif logic_type in [1, 4, 11, 17, 23] and event == 'kill':
+        elif (logic_type in [1, 11, 17, 23]
+              or (str(mid) == '26' and logic_type == 4)) and event == 'kill':
+            # Mission 26 uses the existing confirmed kill-reward path by
+            # explicit server behavior; retain drop-item handling elsewhere.
             if logic_type == 17:
                 matched = True
             else:
@@ -18720,11 +18742,10 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                     for s in KILL_TARGET_SPAWNS[spawn_key]:
                         spawn_nids.add(str(s['nid']))
                 matched = target == target_value or target_value in spawn_nids
-            if int(cfg.get('class', 0) or 0) == 7:
-                    mission_map = str(cfg.get('map_id', '') or '').strip()
-                    event_map = str(map_id or picked_char.get('map_id', '') or '').strip()
-                    if mission_map:
-                        matched = matched and event_map == mission_map
+            mission_map = str(cfg.get('map_id', '') or '').strip()
+            event_map = str(map_id or picked_char.get('map_id', '') or '').strip()
+            if mission_map:
+                matched = matched and event_map == mission_map
         elif logic_type == 19 and event == 'car':
             # The client sends type 2 for a normal car robbery without an
             # NPC/car id, so its event type is the authoritative discriminator.
@@ -18742,8 +18763,15 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             else:
                 matched = not target or target == target_value or str(cfg.get('logic_id', '')) == target_value
         elif logic_type in [3, 4] and event == 'pickup':
-            # Collect Item / Monster Drop matches on logic_id (item ID)
-            matched = str(cfg.get('logic_id')) == target_value
+            # Monster-drop missions count the acquired item from
+            # MissionRequireData, not the requirement-table key in logic_id.
+            logic_id = str(cfg.get('logic_id', ''))
+            required_item = str(
+                MISSION_REQUIRE_DATA.get(logic_id, {}).get('item_id', '')
+                or (logic_id if logic_type == 3 else '')
+            )
+            matched = (str(mid) != '26' and bool(required_item)
+                       and required_item == target_value)
         elif logic_type == 25 and event in ['capture', 'kill']:
             # Capture-success missions match the Domin district in logic_id;
             # target_id is the map NPC used to open that district.
@@ -19403,25 +19431,29 @@ def claim_mail_reward_entries(picked_char, mail_entries, all_chars, conn, send_r
     rewards = []
     for mail in mail_entries:
         for item in mail.get('items', []):
+            if not isinstance(item, dict):
+                return 'invalid_attachment'
             try:
                 item_id = str(item.get('itemId', 0))
                 quality = int(item.get('quality', 0) or 0)
                 count = int(item.get('count', 1))
             except (TypeError, ValueError):
-                return False
+                return 'invalid_attachment'
             if count <= 0 or (
                     item_id not in DIRECT_REWARD_RESOURCE_IDS
                     and item_id not in ITEM_CONFIG):
-                return False
+                return 'invalid_attachment'
             rewards.append((item_id, quality, count))
 
-    if not rewards or not can_add_reward_list_to_inventory(picked_char, rewards):
-        return False
+    if not rewards:
+        return 'no_rewards'
+    if not can_add_reward_list_to_inventory(picked_char, rewards):
+        return 'inventory_full'
     try:
         snapshot = snapshot_character_reward_state(picked_char, include_mails=True)
     except Exception as snapshot_error:
         print(f"[MAIL] claim snapshot failed char={picked_char.get('id')}: {snapshot_error}")
-        return False
+        return 'snapshot_failed'
 
     old_level = int(picked_char.get('level', 1))
     for mail in mail_entries:
@@ -19433,7 +19465,7 @@ def claim_mail_reward_entries(picked_char, mail_entries, all_chars, conn, send_r
     if not save_chars(all_chars):
         restore_character_reward_state(picked_char, snapshot)
         print(f"[MAIL] claim persistence failed char={picked_char.get('id')}")
-        return False
+        return 'persistence_failed'
 
     if int(picked_char.get('level', 1)) > old_level:
         new_level = picked_char.get('level', 1)
@@ -19450,7 +19482,16 @@ def claim_mail_reward_entries(picked_char, mail_entries, all_chars, conn, send_r
     sync_all_backpacks(picked_char, send_rpc_push)
     for mail in mail_entries:
         send_rpc_push(531, build_mail_update(mail))
-    return True
+    return None
+
+
+MAIL_CLAIM_FAILURE_MESSAGES = {
+    'invalid_attachment': 'Mail attachment data is invalid. Please contact support.',
+    'no_rewards': 'This mail has no claimable rewards.',
+    'inventory_full': 'Not enough backpack space to claim mail attachments.',
+    'snapshot_failed': 'Mail rewards could not be saved. Please try again.',
+    'persistence_failed': 'Mail rewards could not be saved. Please try again.',
+}
 
 def broadcast_aoi_add(target_conn, target_char, sender_conn=None, sender_char=None):
     """Reconcile nearby player AOI after a player enters or changes maps."""
@@ -26434,16 +26475,19 @@ def client_handler(conn, addr):
                         if isinstance(online_id, bytes) else str(online_id or '')
                     )
                     with get_character_transaction_lock(picked_char):
-                        is_delivery = (
-                            missions_data.get(mid, {}).get('logic_type') == 2)
+                        mission_cfg = missions_data.get(mid, {})
+                        requires_npc_accept = (
+                            mission_cfg.get('logic_type') == 2
+                            or int(mission_cfg.get('class', 0) or 0) == 1
+                        )
                         already_active = (
                             mid in picked_char.get('active_missions', {}))
                         contact_ok, contact_reason = (
                             validate_mission_npc_contact(
                                 picked_char, mid, 'accept')
-                            if is_delivery and not already_active
+                            if requires_npc_accept and not already_active
                             else (True, 'active_ack' if already_active
-                                  else 'not_delivery')
+                                  else 'not_required')
                         )
                         res = (
                             accept_mission_logic(picked_char, mid, online_id)
@@ -26503,16 +26547,21 @@ def client_handler(conn, addr):
                         except (AttributeError, TypeError, ValueError):
                             mission_state = 0
                         m_cfg = missions_data.get(mid, {})
-                        delivery_contact_ok = True
-                        delivery_contact_reason = 'not_delivery'
-                        if m_entry and m_cfg.get('logic_type') == 2:
-                            delivery_contact_ok, delivery_contact_reason = (
+                        submit_contact_ok = True
+                        submit_contact_reason = 'not_configured'
+                        requires_npc_submit = bool(
+                            m_entry
+                            and (m_cfg.get('logic_type') == 2
+                                 or int(m_cfg.get('class', 0) or 0) == 1)
+                        )
+                        if requires_npc_submit:
+                            submit_contact_ok, submit_contact_reason = (
                                 validate_mission_npc_contact(
                                     picked_char, mid, 'submit')
                             )
                         if (m_entry and mission_state == 1
                                 and m_cfg.get('logic_type') == 2
-                                and delivery_contact_ok):
+                                and submit_contact_ok):
                             # Older active Delivery missions were left accepted,
                             # although the client completes them immediately.
                             mission_state = 2
@@ -26524,7 +26573,7 @@ def client_handler(conn, addr):
                             str(picked_char.get('last_main_mission_id', ''))
                         )
                         if (m_entry and mission_state == 2
-                                and delivery_contact_ok
+                                and submit_contact_ok
                                 and current_main_mission):
                             # Mark before granting: duplicate/reconnected
                             # sessions cannot both claim the same objective.
@@ -26539,10 +26588,9 @@ def client_handler(conn, addr):
                             f"state={mission_state} allowed={claim_mission} "
                             f"current_main={current_main_mission}",
                         )
-                    if (m_entry and m_cfg.get('logic_type') == 2
-                            and not delivery_contact_ok):
-                        print(f"[MISSION SECURITY] rejected Delivery turn-in "
-                              f"mission={mid} contact={delivery_contact_reason}")
+                    if requires_npc_submit and not submit_contact_ok:
+                        print(f"[MISSION SECURITY] rejected mission turn-in "
+                              f"mission={mid} contact={submit_contact_reason}")
                     if claim_mission:
                         m_cfg = missions_data.get(mid)
                         if m_cfg:
@@ -28189,7 +28237,12 @@ def client_handler(conn, addr):
                 next_item_id = get_val_str(body, 1, '')
                 merge_count = get_val_int(body, 2, 0)
                 state = 1
+                merge_rolled_back = False
+                merge_failure_message = None
                 if picked_char and is_current_character_connection(conn, picked_char) and merge_count > 0:
+                    merge_failure_message = (
+                        'Badge fusion failed. Check badge count, cash, and backpack space, then try again.'
+                    )
                     with get_character_transaction_lock(picked_char):
                         found = find_backpack_item(picked_char, index_id, 3)
                         if found:
@@ -28214,26 +28267,49 @@ def client_handler(conn, addr):
                                     and get_currency_balance(picked_char, money_type) >= cost
                                     and can_add_to_inventory(picked_char, next_item_id, merge_count,
                                                              extra_free_slots=1 if frees_badge_slot else 0)):
-                                source['amount'] = int(source['amount']) - required
-                                if source['amount'] <= 0:
-                                    picked_char['badge_inventory'].remove(source)
-                                    push_backpack_item_update(send_rpc_push, 3, None, source['index_id'])
+                                try:
+                                    snapshot = snapshot_character_reward_state(picked_char)
+                                except Exception as snapshot_error:
+                                    print(f"[BADGE] merge snapshot failed "
+                                          f"player={picked_char.get('id')}: {snapshot_error}")
+                                    merge_failure_message = 'Badge fusion could not be saved. Please try again.'
                                 else:
-                                    push_backpack_item_update(send_rpc_push, 3, source)
-                                set_currency_balance(picked_char, money_type,
-                                                     get_currency_balance(picked_char, money_type) - cost)
-                                # Capacity was preflighted above (including the
-                                # source slot if this merge consumes its stack).
-                                # Therefore this add cannot partially mutate or fail.
-                                add_to_inventory(picked_char, next_item_id, merge_count)
-                                for result in picked_char['badge_inventory']:
-                                    if result['id'] == next_item_id:
-                                        push_backpack_item_update(send_rpc_push, 3, result)
-                                save_chars(all_accounts_chars)
-                                sync_char_attrs_rpc(conn, picked_char)
-                                state = 0
+                                    source['amount'] = int(source['amount']) - required
+                                    if source['amount'] <= 0:
+                                        picked_char['badge_inventory'].remove(source)
+                                    set_currency_balance(
+                                        picked_char, money_type,
+                                        get_currency_balance(picked_char, money_type) - cost
+                                    )
+                                    if add_to_inventory(picked_char, next_item_id, merge_count):
+                                        if save_chars(all_accounts_chars):
+                                            sync_char_attrs_rpc(conn, picked_char)
+                                            state = 0
+                                        else:
+                                            restore_character_reward_state(picked_char, snapshot)
+                                            merge_rolled_back = True
+                                            print(f"[BADGE] merge persistence failed "
+                                                  f"player={picked_char.get('id')}")
+                                            merge_failure_message = (
+                                                'Badge fusion could not be saved. Please try again.'
+                                            )
+                                    else:
+                                        restore_character_reward_state(picked_char, snapshot)
+                                        merge_rolled_back = True
+                                        print(f"[BADGE] merge inventory add failed "
+                                              f"player={picked_char.get('id')} target={next_item_id}")
+                                        merge_failure_message = (
+                                            'Badge fusion failed because backpack space changed. Please try again.'
+                                        )
                 if state == 0:
                     sync_all_backpacks(picked_char, send_rpc_push)
+                elif merge_rolled_back:
+                    sync_char_attrs_rpc(conn, picked_char)
+                    sync_all_backpacks(picked_char, send_rpc_push)
+                if state != 0 and merge_failure_message:
+                    send_rpc_push(529, encode_sproto([
+                        (0, merge_failure_message), (1, True)
+                    ]))
                 send_rpc_response(session, encode_sproto([(0, state)]))
 
             elif msg == 227: # request_dance_info
@@ -33807,24 +33883,35 @@ def client_handler(conn, addr):
                                 and mi.get('mailState', 0) != 3
                                 and mi.get('items')
                             ), None)
-                            if target_mail and not claim_mail_reward_entries(
-                                    picked_char, [target_mail], all_accounts_chars, conn, send_rpc_push):
-                                send_rpc_push(529, encode_sproto([
-                                    (0, 'Mail rewards could not be claimed or saved.'),
-                                    (1, True)
-                                ]))
+                            if target_mail:
+                                failure = claim_mail_reward_entries(
+                                    picked_char, [target_mail], all_accounts_chars, conn, send_rpc_push)
+                                if failure:
+                                    print(f"[MAIL] claim rejected char={picked_char.get('id')} "
+                                          f"mail={target_mail.get('mailId')} reason={failure}")
+                                    send_rpc_push(529, encode_sproto([
+                                        (0, MAIL_CLAIM_FAILURE_MESSAGES.get(
+                                            failure, 'Mail rewards could not be claimed or saved.')),
+                                        (1, True)
+                                    ]))
                     elif operation == 3: # get all items
                         with get_character_transaction_lock(picked_char):
                             claimable_mails = [
                                 mi for mi in picked_char.get('mails', [])
                                 if mi.get('mailState', 0) != 3 and mi.get('items')
                             ]
-                            if claimable_mails and not claim_mail_reward_entries(
-                                    picked_char, claimable_mails, all_accounts_chars, conn, send_rpc_push):
-                                send_rpc_push(529, encode_sproto([
-                                    (0, 'Mail rewards could not be claimed or saved.'),
-                                    (1, True)
-                                ]))
+                            if claimable_mails:
+                                failure = claim_mail_reward_entries(
+                                    picked_char, claimable_mails, all_accounts_chars, conn, send_rpc_push)
+                                if failure:
+                                    mail_ids = [mail.get('mailId') for mail in claimable_mails]
+                                    print(f"[MAIL] claim-all rejected char={picked_char.get('id')} "
+                                          f"mails={mail_ids} reason={failure}")
+                                    send_rpc_push(529, encode_sproto([
+                                        (0, MAIL_CLAIM_FAILURE_MESSAGES.get(
+                                            failure, 'Mail rewards could not be claimed or saved.')),
+                                        (1, True)
+                                    ]))
                     elif operation == 4: # delete all
                         picked_char['mails'] = []
                         save_chars(all_accounts_chars)
