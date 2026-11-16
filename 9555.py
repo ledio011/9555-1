@@ -12142,10 +12142,9 @@ def _prison_npc_ai_tick():
                         slot_key, inst_id, home_x, home_z, speed, now)
                 else:
                     patrol_type = int(ai_cfg.get("patrol_type", 0) or 0)
-                    # AIData distances are centi-units; PatrolRadius is in meters.
-                    patrol_distance = min(
-                        max(0, int(ai_cfg.get("patrol_distance", 0) or 0)) / 100.0,
-                        max(0.0, float(npc_cfg.get("patrol_radius", 0) or 0)))
+                    # PatrolState uses AIData.PatrolDistanceMeter directly.
+                    patrol_distance = (
+                        max(0, int(ai_cfg.get("patrol_distance", 0) or 0)) / 100.0)
                     # The APK random-walks only CIRCLE patrols and waits 2 seconds on arrival.
                     if patrol_type != 1 or patrol_distance <= 0:
                         _prison_npc_stop(slot_key, inst_id, now)
