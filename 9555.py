@@ -4711,7 +4711,7 @@ def broadcast_aoi_stop_move(char):
     except Exception as e:
         print(f"[AOI] Failed to broadcast aoi_stop_move for id={char_id}: {e}")
 
-def broadcast_aoi_attribute(char):
+def broadcast_aoi_attribute(char, stats=None):
     """Broadcast TAG 510 (aoi_update_attribute) to all other players on the same map.
     Used to sync a player's HP/stats after PvP damage."""
     if not char:
@@ -4721,7 +4721,8 @@ def broadcast_aoi_attribute(char):
     move_stage = char.get('exp_stage_state') or char.get('equipment_stage_state')
     if is_single_player_map(map_id) and not (move_stage or {}).get('team_id'):
         return
-    stats = get_character_stats(char)
+    if stats is None:
+        stats = get_character_stats(char)
     try:
         hp_cur = current_character_hp(char, stats)
         attr_oth = encode_sproto(character_attribute_other_fields(char, stats, hp_cur))
@@ -5481,11 +5482,11 @@ def broadcast_aoi_visual(char):
             except Exception:
                 pass
 
-def sync_equipment_status_to_peers(char):
+def sync_equipment_status_to_peers(char, stats=None):
     """Refresh remote attributes and team power after an equipment change."""
     if not char:
         return
-    broadcast_aoi_attribute(char)
+    broadcast_aoi_attribute(char, stats)
     team = get_team_for_char(int(char.get('id', 0)))
     if team:
         send_team_update(team['id'])
@@ -7982,9 +7983,10 @@ def sync_social_profile_if_changed(character, stats=None):
         # Social refresh is supplementary to the authoritative attribute sync.
         pass
 
-def sync_char_attrs_rpc(conn, picked_char, conn_id=None):
+def sync_char_attrs_rpc(conn, picked_char, conn_id=None, stats=None):
     """Sends TAG 510 (aoi_update_attribute) to sync all stats."""
-    stats = get_character_stats(picked_char)
+    if stats is None:
+        stats = get_character_stats(picked_char)
     hp_cur = current_character_hp(picked_char, stats)
 
     # attribute_other (Tag 1 in character_aoi_attribute)
@@ -26943,7 +26945,6 @@ def client_handler(conn, addr):
                 power_before = None
                 if picked_char and is_current_character_connection(conn, picked_char):
                     with get_character_transaction_lock(picked_char):
-                        ensure_backpack_state(picked_char)
                         power_before = get_character_stats(picked_char)['power']
                         if msg == 116:
                             found = find_backpack_item(picked_char, index_id, 0)
@@ -27023,13 +27024,13 @@ def client_handler(conn, addr):
                                 push_backpack_item_update(send_rpc_push, 0, item)
                                 changed = True
                         if changed:
-                            save_chars(all_accounts_chars)
-                            sync_char_attrs_rpc(conn, picked_char)
+                            schedule_character_db_save()
+                            stats_after = get_character_stats(picked_char)
+                            sync_char_attrs_rpc(conn, picked_char, stats=stats_after)
                             send_combat_power_gain_tip(
-                                send_rpc_push, power_before,
-                                get_character_stats(picked_char)['power']
+                                send_rpc_push, power_before, stats_after['power']
                             )
-                            sync_equipment_status_to_peers(picked_char)
+                            sync_equipment_status_to_peers(picked_char, stats_after)
                             sync_main_player_visual(picked_char, send_rpc_push)
                             if weapon_skills_changed:
                                 smap = build_skills_map(
@@ -27550,7 +27551,6 @@ def client_handler(conn, addr):
                 power_before = None
                 if picked_char and is_current_character_connection(conn, picked_char):
                     with get_character_transaction_lock(picked_char):
-                        ensure_backpack_state(picked_char)
                         power_before = get_character_stats(picked_char)['power']
                         if msg == 197:
                             position = get_val_int(body, 1, -1)
@@ -27603,13 +27603,13 @@ def client_handler(conn, addr):
                                 push_backpack_item_update(send_rpc_push, 3, item)
                                 changed = True
                         if changed:
-                            save_chars(all_accounts_chars)
-                            sync_char_attrs_rpc(conn, picked_char)
+                            schedule_character_db_save()
+                            stats_after = get_character_stats(picked_char)
+                            sync_char_attrs_rpc(conn, picked_char, stats=stats_after)
                             send_combat_power_gain_tip(
-                                send_rpc_push, power_before,
-                                get_character_stats(picked_char)['power']
+                                send_rpc_push, power_before, stats_after['power']
                             )
-                            sync_equipment_status_to_peers(picked_char)
+                            sync_equipment_status_to_peers(picked_char, stats_after)
                 send_rpc_response(session)
 
             elif msg in (221, 222): # equip_fashion_item / unequip_fashion_item
