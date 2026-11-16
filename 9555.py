@@ -6018,7 +6018,7 @@ def _guild_city_attribute_bonuses(guild_id):
     return sorted(bonuses.items())
 
 
-def get_character_stats(c):
+def get_character_stats(c, backpack_state_ready=False):
     """Calculate player attributes from BaseLvData and currently equipped items."""
     lv = normalize_player_level(c)
     prof = c.get('prof', 0)
@@ -6036,7 +6036,8 @@ def get_character_stats(c):
     # The APK's CharacterAttributeData is populated by server attribute packets.
     # Sum the exact EquipData, QualityData, EquipmentUpgradeData and BadgeData
     # contributions so the Character panel and combat runtime follow bag actions.
-    ensure_backpack_state(c)
+    if not backpack_state_ready:
+        ensure_backpack_state(c)
     attr_fields = {
         1001: 'atk', 1002: 'hp_max', 1003: 'def', 1004: 'hit', 1005: 'eva',
         1006: 'cri', 1007: 'res', 1008: 'exd', 1009: 'exr', 1010: 'rec',
@@ -13828,8 +13829,9 @@ def allocate_backpack_index(picked_char):
     picked_char['next_item_index'] = index_id + 1
     return index_id
 
-def find_backpack_item(picked_char, index_id, container_type=None):
-    ensure_backpack_state(picked_char)
+def find_backpack_item(picked_char, index_id, container_type=None, backpack_state_ready=False):
+    if not backpack_state_ready:
+        ensure_backpack_state(picked_char)
     if container_type in BACKPACKS:
         buckets = [(container_type, BACKPACKS[container_type][0])]
     elif container_type == 1:
@@ -24465,6 +24467,10 @@ def client_handler(conn, addr):
     invest_trace_count = 0
     # ALL_CONNECTIONS will be updated when character is picked
     send_lock = threading.Lock()
+    try:
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    except OSError as error:
+        print(f"[NETWORK] Could not disable TCP Nagle for {addr}: {error}")
 
     def send_rpc_push(tag, data):
         try:
@@ -26945,9 +26951,12 @@ def client_handler(conn, addr):
                 power_before = None
                 if picked_char and is_current_character_connection(conn, picked_char):
                     with get_character_transaction_lock(picked_char):
-                        power_before = get_character_stats(picked_char)['power']
+                        ensure_backpack_state(picked_char)
+                        power_before = get_character_stats(
+                            picked_char, backpack_state_ready=True)['power']
                         if msg == 116:
-                            found = find_backpack_item(picked_char, index_id, 0)
+                            found = find_backpack_item(
+                                picked_char, index_id, 0, backpack_state_ready=True)
                             if found:
                                 item = found['item']
                                 item_id = str(item['id'])
@@ -27014,7 +27023,8 @@ def client_handler(conn, addr):
                                         changed = True
                                         weapon_skills_changed = subtype == 0
                         else:
-                            found = find_backpack_item(picked_char, index_id, 1)
+                            found = find_backpack_item(
+                                picked_char, index_id, 1, backpack_state_ready=True)
                             if found and len(picked_char['equip_inventory']) < 100:
                                 item = found['item']
                                 weapon_skills_changed = equipment_subtype(item) == 0
@@ -27025,7 +27035,8 @@ def client_handler(conn, addr):
                                 changed = True
                         if changed:
                             schedule_character_db_save()
-                            stats_after = get_character_stats(picked_char)
+                            stats_after = get_character_stats(
+                                picked_char, backpack_state_ready=True)
                             sync_char_attrs_rpc(conn, picked_char, stats=stats_after)
                             send_combat_power_gain_tip(
                                 send_rpc_push, power_before, stats_after['power']
@@ -27551,10 +27562,13 @@ def client_handler(conn, addr):
                 power_before = None
                 if picked_char and is_current_character_connection(conn, picked_char):
                     with get_character_transaction_lock(picked_char):
-                        power_before = get_character_stats(picked_char)['power']
+                        ensure_backpack_state(picked_char)
+                        power_before = get_character_stats(
+                            picked_char, backpack_state_ready=True)['power']
                         if msg == 197:
                             position = get_val_int(body, 1, -1)
-                            found = find_backpack_item(picked_char, index_id, 3)
+                            found = find_backpack_item(
+                                picked_char, index_id, 3, backpack_state_ready=True)
                             if found and 0 <= position < 5:
                                 source = found['item']
                                 cfg = ITEM_CONFIG.get(str(source['id']), {})
@@ -27594,7 +27608,8 @@ def client_handler(conn, addr):
                                     push_backpack_item_update(send_rpc_push, 4, item)
                                     changed = True
                         else:
-                            found = find_backpack_item(picked_char, index_id, 4)
+                            found = find_backpack_item(
+                                picked_char, index_id, 4, backpack_state_ready=True)
                             if found and len(picked_char['badge_inventory']) < 100:
                                 item = found['item']
                                 picked_char['equipped_badges'].remove(item)
@@ -27604,7 +27619,8 @@ def client_handler(conn, addr):
                                 changed = True
                         if changed:
                             schedule_character_db_save()
-                            stats_after = get_character_stats(picked_char)
+                            stats_after = get_character_stats(
+                                picked_char, backpack_state_ready=True)
                             sync_char_attrs_rpc(conn, picked_char, stats=stats_after)
                             send_combat_power_gain_tip(
                                 send_rpc_push, power_before, stats_after['power']
