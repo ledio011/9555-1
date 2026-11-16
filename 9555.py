@@ -1753,6 +1753,8 @@ try:
                         "duration": int(parts[8]),
                         "normal_group": int(parts[9]) if parts[9].isdigit() else 0,
                         "special_group": int(parts[10]) if parts[10].isdigit() else 0,
+                        "special_scale": max(0, int(parts[11])) if parts[11].isdigit() else 100,
+                        "failure_scale": max(0, int(parts[12])) if parts[12].isdigit() else 0,
                         "max_plays": max(0, int(parts[13])),
                         "unlock_level": max(1, int(parts[14])),
                         "random_index": int(parts[15]) if parts[15].isdigit() else 0,
@@ -12810,9 +12812,16 @@ def spawn_gotham_escort_npc(conn, char):
     if path_complete and finish_at <= int(time.time()):
         finish_gotham_escort_mission(char, conn, mission_id, success=True)
         return False
+    bonus_active = mission_state.get("escort_bonus_active")
+    if bonus_active is None:
+        bonus_active, _next_start = escort_activity_clock(
+            activity.get("start_time", 0), activity.get("duration", 0))
     try:
         owner_id = int(char.get("id", 0) or 0)
-        group_id = int(activity.get("normal_group", 0) or 0)
+        group_id = int(mission_state.get(
+            "escort_group",
+            activity.get("special_group" if bonus_active else "normal_group", 0)
+        ) or 0)
     except (TypeError, ValueError):
         return False
     placement = next((row for row in MONSTER_DATA.get(GOTHAM_MAP_ID, [])
@@ -12836,22 +12845,41 @@ def spawn_gotham_escort_npc(conn, char):
         inst_id = 0
     if (not inst_id or int(GOTHAM_ESCORT_NPC_OWNER.get(inst_id, 0) or 0) != owner_id
             or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
+        player_level = normalize_player_level(char)
         inst_id, attr = build_npc_attr_sproto(
             "23101", NPC_CONFIG.get("23101", {}).get("name", "Member of Parliament"),
-            spawn_x, spawn_z, int(placement.get("o", 0)))
+            spawn_x, spawn_z, int(placement.get("o", 0)),
+            player_level=player_level)
         NPC_INSTANCE_MAP[inst_id] = GOTHAM_MAP_ID
         GOTHAM_ESCORT_NPC_OWNER[inst_id] = owner_id
         mission_state["npc_runtime_id"] = inst_id
     else:
+        player_level = normalize_player_level(char)
         inst_id, attr = build_npc_attr_sproto(
             "23101", NPC_CONFIG.get("23101", {}).get("name", "Member of Parliament"),
             spawn_x, spawn_z, int(placement.get("o", 0)),
-            existing_inst_id=inst_id)
+            existing_inst_id=inst_id, player_level=player_level)
     if attr is None:
         return False
 
     send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
-    sync_npc_attrs_rpc(conn, inst_id, get_npc_attr("23101"), NPC_HP_MAP.get(inst_id, 0))
+    sync_npc_attrs_rpc(
+        conn, inst_id, get_npc_attr("23101", player_level),
+        NPC_HP_MAP.get(inst_id, 0))
+    try:
+        map_info_id = int(activity.get("activity_map_id", 0) or 0)
+    except (TypeError, ValueError):
+        map_info_id = 0
+    if map_info_id > 0:
+        parm = mission_state.setdefault("parm", [0] * 8)
+        if len(parm) < 8:
+            parm.extend([0] * (8 - len(parm)))
+        parm[1:4] = [int(inst_id), 0, map_info_id]
+        save_chars(all_accounts_chars)
+        send_rpc_push_safe(conn, 621, encode_sproto([
+            (0, int(inst_id)), (1, 0), (2, str(map_info_id))
+        ]))
+        send_rpc_push_safe(conn, 519, sync_mission_data(char))
     path_id = str(placement.get("path_id") or "")
     path = list(getattr(LIBERTY_CITY, "paths", {}).get(path_id, []))
     if len(path) >= 2:
@@ -12911,16 +12939,33 @@ def finish_gotham_escort_mission(char, conn, mission_id, success):
         activity = ESCORT_ACTIVITY_CONFIG.get(str(mission_state.get("activity_id", "")), {})
         if int(activity.get("type", 0) or 0) != 1:
             return False
-        if success:
-            activity_items = daily_active_rewards_for_level(
-                "_drop_hs", char.get("level", 1))
-            if not activity_items:
+        activity_items = daily_active_rewards_for_level(
+            "_drop_hs", char.get("level", 1))
+        if not activity_items and success:
+            print(f"[GOTHAM ESCORT] missing client reward data mission={mission_id}")
+            return False
+        if activity_items:
+            try:
+                bonus_scale = max(0, int(
+                    mission_state.get("escort_bonus_scale", 100)))
+            except (TypeError, ValueError):
+                bonus_scale = 100
+            reward_scale = bonus_scale
+            if not success:
+                try:
+                    failure_scale = max(0, int(activity.get("failure_scale", 0)))
+                except (TypeError, ValueError):
+                    failure_scale = 0
+                reward_scale = reward_scale * failure_scale // 100
+            activity_items = scale_escort_rewards(activity_items, reward_scale)
+            if activity_items:
+                grant_item_rewards(
+                    char, activity_items, conn,
+                    lambda tag, data: send_rpc_push_safe(conn, tag, data),
+                    save=False)
+            elif success:
                 print(f"[GOTHAM ESCORT] missing client reward data mission={mission_id}")
                 return False
-            grant_item_rewards(
-                char, activity_items, conn,
-                lambda tag, data: send_rpc_push_safe(conn, tag, data),
-                save=False)
         char["active_missions"].pop(str(mission_id), None)
         save_chars(all_accounts_chars)
 
@@ -14759,7 +14804,7 @@ def current_daily_stamp():
     return time.strftime('%Y-%m-%d', time.gmtime(adjusted_time))
 
 def escort_activity_clock(start_time, duration, now=None):
-    """Return whether a UTC daily activity window is open and its next start."""
+    """Return whether the configured UTC double-reward window is open and its next start."""
     now = int(time.time() if now is None else now)
     utc = time.gmtime(now)
     seconds_today = utc.tm_hour * 3600 + utc.tm_min * 60 + utc.tm_sec
@@ -14771,6 +14816,19 @@ def escort_activity_clock(start_time, duration, now=None):
     if seconds_today >= start_time + duration:
         next_start += 86400
     return active, next_start
+
+def scale_escort_rewards(rewards, scale_percent):
+    """Apply an EscortData percentage to the configured reward item counts."""
+    try:
+        scale_percent = max(0, int(scale_percent))
+    except (TypeError, ValueError):
+        scale_percent = 0
+    scaled = []
+    for item_id, quality, amount in rewards:
+        scaled_amount = max(0, int(amount) * scale_percent // 100)
+        if scaled_amount:
+            scaled.append((str(item_id), int(quality), scaled_amount))
+    return scaled
 
 def ensure_escort_activity_state(char):
     stamp = current_daily_stamp()
@@ -14794,13 +14852,15 @@ def escort_activity_info_payload(char, now=None):
         if (int(cfg.get('type', 0) or 0) == 1
                 and int(cfg.get('random_index', 0) or 0) > 0):
             continue
-        active, next_start = escort_activity_clock(
+        bonus_active, next_start = escort_activity_clock(
             cfg.get('start_time', 0), cfg.get('duration', 0), now)
+        if bonus_active:
+            next_start += 86400
         used = max(0, int(state['attempts'].get(activity_id, 0) or 0))
         remaining = max(0, int(cfg.get('max_plays', 0)) - used)
         activities[activity_id] = encode_sproto([
             (0, activity_id), (1, remaining), (2, int(cfg.get('type', 0))),
-            (3, 1 if active else 0), (4, next_start), (5, ''),
+            (3, 1), (4, next_start), (5, ''),
             (6, 0), (7, now), (8, next_start)
         ])
     return activities
@@ -15552,10 +15612,8 @@ def accept_gotham_escort_mission(char, mid):
             == (4 if activity_type == 1 else 5)
             for mission_id, mission_state in char.get('active_missions', {}).items()):
         return False
-    active, _next_start = escort_activity_clock(
+    bonus_active, _next_start = escort_activity_clock(
         cfg.get('start_time', 0), cfg.get('duration', 0), now)
-    if not active:
-        return False
     with get_character_transaction_lock(char):
         state = ensure_escort_activity_state(char)
         activity_id = str(cfg.get('id', ''))
@@ -15568,6 +15626,13 @@ def accept_gotham_escort_mission(char, mid):
             'parm': [0, 0, 0, 0, 0, 0, 0, now],
             'accept_time': now,
             'activity_id': activity_id,
+            'escort_bonus_scale': (
+                max(0, int(cfg.get('special_scale', 100))) if bonus_active else 100
+            ),
+            'escort_bonus_active': bool(bonus_active),
+            'escort_group': int(
+                cfg.get('special_group' if bonus_active else 'normal_group', 0) or 0
+            ),
         }
     record_retrieve_participation(char, '6')
     return True
