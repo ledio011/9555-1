@@ -55,6 +55,7 @@ NPC_ATTR_MAP = {} # runtime NPC payloads for reconnect replay
 GOTHAM_MAP_ID = "109"
 SLUM_DISTRICT_MAP_ID = "102"
 SLUM_NPC_RESPAWN_SECONDS = 5
+SLUM_NPC_EXP_REWARD_SCALE = 0.03
 GOTHAM_BOSS_DEFAULT_RESPAWN_SECONDS = 3 * 60 * 60
 GOTHAM_BOSS_RESPAWN_PATH = os.path.join(SCRIPT_DIR, "gotham_boss_respawns.json")
 GOTHAM_BOSS_RESPAWN_LOCK = threading.RLock()
@@ -10954,8 +10955,9 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                 # Match the existing per-NPC EXP/cash calculation; the
                 # ShowRewardData mission tier is not an individual kill drop.
                 npc_stats = get_npc_attr(npcid, 1)
-                exp_kill, cash_kill = calculate_npc_kill_rewards(
-                    picked_char.get('level', 1), npc_stats.get('lv', 1))
+                exp_kill, cash_kill = calculate_npc_kill_rewards_for_map(
+                    picked_char.get('level', 1), npc_stats.get('lv', 1),
+                    current_map)
                 rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
                 grant_item_rewards(
                     picked_char, rewards, conn, send_rpc_push, save=False)
@@ -10971,8 +10973,9 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                 npc_stats = get_npc_attr(
                     npcid, picked_char.get('level', 1)
                     if is_tower_map(picked_char.get('map_id')) else 1)
-                exp_kill, cash_kill = calculate_npc_kill_rewards(
-                    picked_char.get('level', 1), npc_stats.get('lv', 1))
+                exp_kill, cash_kill = calculate_npc_kill_rewards_for_map(
+                    picked_char.get('level', 1), npc_stats.get('lv', 1),
+                    current_map)
                 rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
                 grant_item_rewards(
                     picked_char, rewards, conn, send_rpc_push, save=False)
@@ -16791,6 +16794,13 @@ def calculate_npc_kill_rewards(player_level, npc_level=1):
     # Cash reward scales smoothly with effective level
     cash_reward = max(10, effective_lv * 15 + 10)
 
+    return exp_reward, cash_reward
+
+
+def calculate_npc_kill_rewards_for_map(player_level, npc_level, map_id):
+    exp_reward, cash_reward = calculate_npc_kill_rewards(player_level, npc_level)
+    if str(map_id) == SLUM_DISTRICT_MAP_ID:
+        exp_reward = max(1, int(exp_reward * SLUM_NPC_EXP_REWARD_SCALE))
     return exp_reward, cash_reward
 
 def copy_attempts_remaining(picked_char, copy_id, cfg):
@@ -30733,7 +30743,8 @@ def client_handler(conn, addr):
                             npc_lv_m11 = npc_stats_m11.get('lv', 1)
                             char_lv_m11 = picked_char.get('level', 1)
 
-                            exp_kill_m11, cash_kill_m11 = calculate_npc_kill_rewards(char_lv_m11, npc_lv_m11)
+                            exp_kill_m11, cash_kill_m11 = calculate_npc_kill_rewards_for_map(
+                                char_lv_m11, npc_lv_m11, cur_map)
                             kill_rewards_m11 = [("2001", 0, exp_kill_m11), ("1001", 0, cash_kill_m11)]
                             grant_item_rewards(picked_char, kill_rewards_m11, conn, send_rpc_push)
 
@@ -31207,7 +31218,8 @@ def client_handler(conn, addr):
                         player_level = int(picked_char.get('level', 1))
                         # Preserve the pre-existing MSG 298 reward amounts;
                         # this change adds the missing ground-drop packet.
-                        exp_drop, cash_drop = calculate_npc_kill_rewards(player_level, npc_level=1)
+                        exp_drop, cash_drop = calculate_npc_kill_rewards_for_map(
+                            player_level, npc_level=1, map_id=cur_map)
                         collision_rewards = [("2001", 0, exp_drop), ("1001", 0, cash_drop)]
                         grant_item_rewards(picked_char, collision_rewards, conn, send_rpc_push, save=False)
                         send_rpc_push(638, encode_sproto([(0, [
