@@ -10504,13 +10504,9 @@ def gotham_boss_reward_plan(rank):
     return 0, 1
 
 
-def gotham_boss_weapon_rewards(char, count, rank):
+def gotham_boss_weapon_rewards(count, rank):
     """Roll eligible regular weapons across all professions, never paid BigSale skins."""
-    try:
-        profession = int(char.get("prof", -1))
-    except (TypeError, ValueError):
-        return None
-    if profession not in (0, 1, 2) or count < 0 or rank < 1:
+    if count < 0 or rank < 1:
         return None
 
     rank_tier = 1 if rank <= 2 else 3 if rank <= 6 else 7
@@ -10591,7 +10587,7 @@ def gotham_boss_rank_mail(slot):
             pending = True
             continue
         enhancer_count, weapon_count = gotham_boss_reward_plan(rank)
-        weapon_rewards = gotham_boss_weapon_rewards(char, weapon_count, rank)
+        weapon_rewards = gotham_boss_weapon_rewards(weapon_count, rank)
         if weapon_rewards is None:
             print(f"[GOTHAM BOSS REWARD PENDING] no configured weapon rewards "
                   f"for character={char_id} rank={rank}")
