@@ -53,6 +53,7 @@ NPC_INSTANCE_MAP = {} # inst_id -> map ID, to reject cross-map forged death repo
 NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_ATTR_MAP = {} # runtime NPC payloads for reconnect replay
 GOTHAM_MAP_ID = "109"
+SLUM_DISTRICT_MAP_ID = "102"
 GOTHAM_BOSS_DEFAULT_RESPAWN_SECONDS = 3 * 60 * 60
 GOTHAM_BOSS_RESPAWN_PATH = os.path.join(SCRIPT_DIR, "gotham_boss_respawns.json")
 GOTHAM_BOSS_RESPAWN_LOCK = threading.RLock()
@@ -152,6 +153,10 @@ PRISON_NPC_AI_TASK = None
 PRISON_NPC_AI_LOCK = threading.Lock()
 PRISON_NPC_TASK_LOCK = threading.Lock()
 PRISON_NPC_DEATH_ANIMATION_SECONDS = 4.5
+SLUM_NPC_AI_STATES = {}
+SLUM_NPC_AI_LOCK = threading.RLock()
+SLUM_NPC_AI_TASK = None
+SLUM_NPC_AI_TASK_LOCK = threading.Lock()
 PLAYER_AOI_TRACK = {}  # character ID -> set of visible character IDs
 NPC_PATROL_CONNECTIONS = {}  # connection identity -> (socket, character) with active Liberty patrols
 NPC_PATROL_WORKER = None
@@ -10794,6 +10799,8 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
              and int(inst_id) in GOTHAM_SHARED_NPC_BY_INSTANCE)
             or (current_map in PRISON_NPC_AOI_MAP_IDS
                 and int(inst_id) in PRISON_NPC_SHARED_BY_INSTANCE)):
+        with SLUM_NPC_AI_LOCK:
+            SLUM_NPC_AI_STATES.pop(int(inst_id), None)
         NPC_HP_MAP.pop(inst_id, None)
         NPC_INST_MAP.pop(inst_id, None)
         NPC_INSTANCE_MAP.pop(inst_id, None)
@@ -12236,6 +12243,354 @@ def start_prison_npc_runtime():
         PRISON_NPC_AI_TASK = RepeatingTask(0.2, _prison_npc_ai_tick).start()
 
 
+def register_slum_npc_ai(conn, char, inst_id, npc_id, x, z, heading):
+    if not conn or not char or str(char.get("map_id", "")) != SLUM_DISTRICT_MAP_ID:
+        return
+    try:
+        owner_id = int(char.get("id", 0) or 0)
+        inst_id = int(inst_id)
+        if owner_id <= 0 or inst_id <= 0:
+            return
+    except (TypeError, ValueError):
+        return
+
+    now = time.time()
+    with SLUM_NPC_AI_LOCK:
+        SLUM_NPC_AI_STATES[inst_id] = {
+            "owner_id": owner_id,
+            "owner_conn_id": id(conn),
+            "nid": str(npc_id),
+            "home_x": int(x),
+            "home_z": int(z),
+            "position": (int(x), int(z)),
+            "heading": int(heading),
+            "target_id": 0,
+            "attack_until": 0,
+            "next_attack_at": 0,
+            "skill_ready_at": {},
+            "patrol_target": None,
+            "patrol_next_at": now,
+            "moving": False,
+            "last_move_at": now,
+            "move_waypoint": None,
+        }
+    start_slum_npc_runtime()
+
+
+def slum_npc_retarget_on_hit(inst_id, attacker, conn):
+    try:
+        inst_id = int(inst_id)
+        attacker_id = int(attacker.get("id", 0) or 0)
+        attacker_hp = int(attacker.get("hp", 0) or 0)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if (attacker_id <= 0
+            or str(attacker.get("map_id", "")) != SLUM_DISTRICT_MAP_ID
+            or attacker_hp <= 0):
+        return False
+    active_conn, active_char = ALL_CONNECTIONS.get(attacker_id, (None, None))
+    if (active_conn is not conn or active_char is not attacker
+            or not is_current_character_connection(conn, attacker)):
+        return False
+
+    now = time.time()
+    with SLUM_NPC_AI_LOCK:
+        state = SLUM_NPC_AI_STATES.get(inst_id)
+        if (not state or state["owner_id"] != attacker_id
+                or state["owner_conn_id"] != id(conn)
+                or inst_id in DEAD_NPC_SET
+                or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
+            return False
+        if (state.get("target_id") != attacker_id
+                or float(state.get("attack_until", 0) or 0) <= now):
+            npc_cfg = NPC_CONFIG.get(str(state["nid"]), {})
+            ai_cfg = AI_DATA_CONFIG.get(str(npc_cfg.get("ai_data_id") or ""), {})
+            min_action = max(0, int(ai_cfg.get("action_min_time", 5000) or 5000))
+            max_action = max(min_action, int(ai_cfg.get("action_max_time", 6000) or 6000))
+            state["attack_until"] = now + random.uniform(min_action, max_action) / 1000.0
+        state["target_id"] = attacker_id
+        state["patrol_target"] = None
+    return True
+
+
+def _slum_npc_send_move(conn, inst_id, x, z, heading, stop=False, walk=True):
+    pos_data = encode_sproto([
+        (0, int(x)), (1, 0), (2, int(z)), (3, int(heading))
+    ])
+    move_data = encode_sproto([(0, pos_data)])
+    character_data = encode_sproto([
+        (0, int(inst_id)), (1, move_data), (2, bool(walk))
+    ])
+    send_rpc_push_safe(conn, 513 if stop else 507,
+                       encode_sproto([(0, character_data)]))
+
+
+def _slum_npc_move_toward(inst_id, target_x, target_z, speed, now, walk):
+    with SLUM_NPC_AI_LOCK:
+        state = SLUM_NPC_AI_STATES.get(int(inst_id))
+        if (not state or inst_id in DEAD_NPC_SET
+                or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
+            return
+        current_x, current_z = state["position"]
+        dx, dz = float(target_x) - current_x, float(target_z) - current_z
+        distance = math.hypot(dx, dz)
+        if distance <= 1:
+            return
+        elapsed = min(0.5, max(0.05, now - float(state.get("last_move_at", now) or now)))
+        step = min(max(0.1, float(speed)) * elapsed * 100.0, distance)
+        next_x = int(round(current_x + dx / distance * step))
+        next_z = int(round(current_z + dz / distance * step))
+        heading = int(round(math.degrees(math.atan2(dx, dz)) * 100)) % 36000
+        waypoint = (int(target_x), int(target_z), bool(walk))
+        previous = state.get("move_waypoint")
+        broadcast = (
+            not state.get("moving")
+            or previous is None
+            or previous[2] != waypoint[2]
+            or math.hypot(previous[0] - waypoint[0], previous[1] - waypoint[1]) >= 100
+        )
+        state["position"] = (next_x, next_z)
+        state["heading"] = heading
+        state["last_move_at"] = now
+        state["moving"] = True
+        if broadcast:
+            state["move_waypoint"] = waypoint
+        owner_id = state["owner_id"]
+        owner_conn_id = state["owner_conn_id"]
+    if broadcast:
+        conn, _char = ALL_CONNECTIONS.get(owner_id, (None, None))
+        if conn and id(conn) == owner_conn_id:
+            _slum_npc_send_move(
+                conn, inst_id, target_x, target_z, heading, walk=walk)
+
+
+def _slum_npc_stop(inst_id, now):
+    with SLUM_NPC_AI_LOCK:
+        state = SLUM_NPC_AI_STATES.get(int(inst_id))
+        if not state or not state.get("moving"):
+            return
+        x, z = state["position"]
+        heading = int(state.get("heading", 0) or 0)
+        state["moving"] = False
+        state["last_move_at"] = now
+        state["move_waypoint"] = None
+        owner_id = state["owner_id"]
+        owner_conn_id = state["owner_conn_id"]
+    conn, _char = ALL_CONNECTIONS.get(owner_id, (None, None))
+    if conn and id(conn) == owner_conn_id:
+        _slum_npc_send_move(conn, inst_id, x, z, heading, stop=True, walk=False)
+
+
+def _slum_npc_ai_tick():
+    if not SLUM_NPC_AI_LOCK.acquire(False):
+        return True
+    try:
+        now = time.time()
+        snapshots = [
+            (inst_id, dict(state))
+            for inst_id, state in SLUM_NPC_AI_STATES.items()
+        ]
+    finally:
+        SLUM_NPC_AI_LOCK.release()
+
+    try:
+        for inst_id, snapshot in snapshots:
+            inst_id = int(inst_id)
+            owner_id = int(snapshot["owner_id"])
+            conn, char = ALL_CONNECTIONS.get(owner_id, (None, None))
+            if (not conn or not char
+                    or id(conn) != snapshot["owner_conn_id"]
+                    or str(char.get("map_id", "")) != SLUM_DISTRICT_MAP_ID
+                    or not is_current_character_connection(conn, char)):
+                with SLUM_NPC_AI_LOCK:
+                    SLUM_NPC_AI_STATES.pop(inst_id, None)
+                continue
+            if (inst_id in DEAD_NPC_SET
+                    or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
+                with SLUM_NPC_AI_LOCK:
+                    SLUM_NPC_AI_STATES.pop(inst_id, None)
+                continue
+
+            npc_id = str(snapshot["nid"])
+            npc_cfg = NPC_CONFIG.get(npc_id, {})
+            ai_cfg = AI_DATA_CONFIG.get(str(npc_cfg.get("ai_data_id") or ""), {})
+            if not ai_cfg:
+                continue
+            attack_distance = max(
+                0.5,
+                (int(ai_cfg.get("around_min_distance", 100) or 100)
+                 + int(ai_cfg.get("around_max_distance", 200) or 200)) / 200.0)
+            skills = _prison_npc_skills(npc_cfg, attack_distance)
+            if not skills:
+                continue
+
+            mx_cm, mz_cm = snapshot.get("position") or (
+                snapshot["home_x"], snapshot["home_z"])
+            mx, mz = float(mx_cm) / 100.0, float(mz_cm) / 100.0
+            home_x, home_z = int(snapshot["home_x"]), int(snapshot["home_z"])
+            return_distance = max(
+                0, int(ai_cfg.get("return_distance", 500) or 0)) / 100.0
+            home_distance = math.hypot(mx_cm - home_x, mz_cm - home_z) / 100.0
+            walk_speed = max(
+                0.1, float(npc_cfg.get("walk_speed") or 10) / 10.0)
+            run_speed = max(
+                0.1, float(npc_cfg.get("move_speed") or 50) / 10.0)
+
+            target_id = int(snapshot.get("target_id", 0) or 0)
+            target_pos = char.get("pos") or default_map_spawn_position(
+                SLUM_DISTRICT_MAP_ID)
+            target_valid = (
+                target_id == owner_id
+                and int(char.get("hp", 0) or 0) > 0
+                and float(snapshot.get("attack_until", 0) or 0) > now
+            )
+            if not target_valid:
+                with SLUM_NPC_AI_LOCK:
+                    live_state = SLUM_NPC_AI_STATES.get(inst_id)
+                    if live_state:
+                        live_state["target_id"] = 0
+                        live_state["attack_until"] = 0
+                        live_state["patrol_target"] = None
+                        live_state["patrol_next_at"] = now
+                target_id = 0
+            elif return_distance > 0 and home_distance > return_distance:
+                with SLUM_NPC_AI_LOCK:
+                    live_state = SLUM_NPC_AI_STATES.get(inst_id)
+                    if live_state:
+                        live_state["target_id"] = 0
+                        live_state["patrol_target"] = None
+                target_id = 0
+                _slum_npc_move_toward(
+                    inst_id, home_x, home_z, walk_speed, now, walk=True)
+                continue
+
+            if target_id:
+                px_cm, pz_cm = int(target_pos[0]), int(target_pos[2])
+                dx, dz = px_cm / 100.0 - mx, pz_cm / 100.0 - mz
+                distance = math.hypot(dx, dz)
+                max_range = max(skill_range for _sid, skill_range, *_ in skills)
+                if distance > max_range:
+                    _slum_npc_move_toward(
+                        inst_id,
+                        px_cm - int(dx / distance * max_range * 100),
+                        pz_cm - int(dz / distance * max_range * 100),
+                        run_speed, now, walk=False)
+                    continue
+                _slum_npc_stop(inst_id, now)
+                if float(snapshot.get("next_attack_at", 0) or 0) > now:
+                    continue
+                ready_skills = [
+                    skill for skill in skills
+                    if distance <= skill[1]
+                    and float(snapshot.get("skill_ready_at", {}).get(skill[0], 0) or 0) <= now
+                ]
+                if not ready_skills:
+                    continue
+                top_priority = max(
+                    int(SKILL_CONFIG[skill[0]].get("priority", 0) or 0)
+                    for skill in ready_skills)
+                skill_id = random.choice([
+                    skill[0] for skill in ready_skills
+                    if int(SKILL_CONFIG[skill[0]].get("priority", 0) or 0)
+                    == top_priority
+                ])
+                skill_cfg = SKILL_CONFIG[skill_id]
+                effect_id = str(skill_cfg.get("eff0") or "10000")
+                cooldown = max(
+                    0, int(skill_cfg.get("cooldown_ms", 0) or 0)) / 1000.0
+                min_cd = max(0, int(ai_cfg.get("skill_cd_min", 1000) or 1000))
+                max_cd = max(min_cd, int(ai_cfg.get("skill_cd_max", 3000) or 3000))
+                with SLUM_NPC_AI_LOCK:
+                    live_state = SLUM_NPC_AI_STATES.get(inst_id, {})
+                    live_state.setdefault("skill_ready_at", {})[skill_id] = now + cooldown
+                    live_state["next_attack_at"] = (
+                        now + random.uniform(min_cd, max_cd) / 1000.0)
+
+                damage, hit, critical = get_combat_damage(
+                    get_npc_attr(npc_id), get_character_stats(char),
+                    skill_id, 0, effinfo_id=effect_id, attacker_is_npc=True)
+                if not hit or damage <= 0:
+                    continue
+                with get_character_transaction_lock(char):
+                    if int(char.get("hp", 0) or 0) <= 0:
+                        continue
+                    actual_damage = min(int(char["hp"]), int(damage))
+                    char["hp"] -= actual_damage
+                    target_hp = int(char["hp"])
+                attack_data = encode_sproto([
+                    (0, inst_id), (1, target_id), (2, skill_id),
+                    (3, [encode_sproto([(0, target_id), (1, actual_damage)])])
+                ])
+                damage_data = encode_sproto([(0, [
+                    encode_sproto([
+                        (0, target_id), (1, actual_damage), (2, skill_id),
+                        (3, effect_id), (4, critical)
+                    ])
+                ])])
+                send_rpc_push_safe(conn, 508, attack_data)
+                send_rpc_push_safe(conn, 511, damage_data)
+                sync_char_attrs_rpc(conn, char)
+                save_chars(all_accounts_chars)
+                if target_hp <= 0 and supports_normal_relife(SLUM_DISTRICT_MAP_ID):
+                    death_count = int(char.get("death_count", 0) or 0) + 1
+                    char["death_count"] = death_count
+                    relife_cfg = get_relife_config(death_count)
+                    offer = remember_relife_offer(
+                        char, relife_offer_type(SLUM_DISTRICT_MAP_ID),
+                        relife_cfg.get("use_count", 1), "9011")
+                    send_rpc_push_safe(conn, 618, offer)
+                    save_chars(all_accounts_chars)
+                continue
+
+            if return_distance > 0 and home_distance > return_distance:
+                with SLUM_NPC_AI_LOCK:
+                    live_state = SLUM_NPC_AI_STATES.get(inst_id, {})
+                    live_state["patrol_target"] = None
+                _slum_npc_move_toward(
+                    inst_id, home_x, home_z, walk_speed, now, walk=True)
+                continue
+
+            patrol_type = int(ai_cfg.get("patrol_type", 0) or 0)
+            patrol_distance = max(
+                0, int(ai_cfg.get("patrol_distance", 0) or 0)) / 100.0
+            if patrol_type != 1 or patrol_distance <= 0:
+                _slum_npc_stop(inst_id, now)
+                continue
+            with SLUM_NPC_AI_LOCK:
+                live_state = SLUM_NPC_AI_STATES.get(inst_id, {})
+                patrol_target = live_state.get("patrol_target")
+                if not patrol_target and now >= float(
+                        live_state.get("patrol_next_at", 0) or 0):
+                    patrol_target = (
+                        home_x + int(random.uniform(-patrol_distance, patrol_distance) * 100),
+                        home_z + int(random.uniform(-patrol_distance, patrol_distance) * 100))
+                    live_state["patrol_target"] = patrol_target
+            if patrol_target:
+                if math.hypot(
+                        patrol_target[0] - mx_cm,
+                        patrol_target[1] - mz_cm) <= 50:
+                    with SLUM_NPC_AI_LOCK:
+                        live_state = SLUM_NPC_AI_STATES.get(inst_id, {})
+                        live_state["patrol_target"] = None
+                        live_state["patrol_next_at"] = now + 2.0
+                    _slum_npc_stop(inst_id, now)
+                else:
+                    _slum_npc_move_toward(
+                        inst_id, patrol_target[0], patrol_target[1],
+                        walk_speed, now, walk=True)
+    except Exception as exc:
+        print(f"[SLUM NPC AI] tick failed: {exc}")
+    return True
+
+
+def start_slum_npc_runtime():
+    global SLUM_NPC_AI_TASK
+    with SLUM_NPC_AI_TASK_LOCK:
+        if SLUM_NPC_AI_TASK is not None and SLUM_NPC_AI_TASK.is_alive():
+            return
+        SLUM_NPC_AI_TASK = RepeatingTask(0.2, _slum_npc_ai_tick).start()
+
+
 def gotham_shared_npc_specs():
     specs = []
     for kind, entries in (("static", STATIC_NPC_DATA.get(GOTHAM_MAP_ID, [])),
@@ -13145,7 +13500,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
     if map_str in spawned_maps: return
     spawned_maps.add(map_str)
 
-    def send_npc_create(nid, name, x, z, o):
+    def send_npc_create(nid, name, x, z, o, slum_enemy=False):
         cash_state = picked_char.get('cash_stage_state') if picked_char else None
         is_cash_truck = bool(
             str(nid) == '22101'
@@ -13181,7 +13536,10 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             CASH_STAGE_NPC_OWNER[inst_id] = char_id
             cash_state['boss_inst_id'] = inst_id
             cash_state['boss_hp'] = NPC_HP_MAP[inst_id]
-        send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
+        sent = send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
+        if slum_enemy and sent:
+            register_slum_npc_ai(
+                conn, picked_char, inst_id, nid, x, z, o)
         return inst_id
 
     # For Liberty City (map 101), use distance-based AOI spawning so NPCs
@@ -13323,7 +13681,9 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             for i, m in enumerate(MONSTER_DATA[map_str]):
                 nid = m['nid']
                 cfg = NPC_CONFIG.get(nid, {'name': f"Monster_{nid}"})
-                send_npc_create(nid, cfg['name'], m['x'], m['z'], m['o'])
+                send_npc_create(
+                    nid, cfg['name'], m['x'], m['z'], m['o'],
+                    slum_enemy=(map_str == SLUM_DISTRICT_MAP_ID))
 
     # The active city-capture vehicle is configured by GuildCaptureData and
     # has one shared server instance across players in that map.
@@ -29762,6 +30122,10 @@ def client_handler(conn, addr):
                             if (applied_damage > 0
                                     and cur_map in PRISON_NPC_AOI_MAP_IDS):
                                 prison_npc_retarget_on_hit(target_id, picked_char)
+                            if (applied_damage > 0
+                                    and cur_map == SLUM_DISTRICT_MAP_ID):
+                                slum_npc_retarget_on_hit(
+                                    target_id, picked_char, conn)
                             if (applied_damage > 0
                                     and cur_map == GOTHAM_MAP_ID
                                     and target_id in GOTHAM_SHARED_NPC_BY_INSTANCE):
