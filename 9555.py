@@ -14874,7 +14874,7 @@ def escort_activity_info_payload(char, now=None):
         remaining = max(0, int(cfg.get('max_plays', 0)) - used)
         activities[activity_id] = encode_sproto([
             (0, activity_id), (1, remaining), (2, int(cfg.get('type', 0))),
-            (3, 1), (4, next_start), (5, ''),
+            (3, int(bonus_active)), (4, next_start), (5, ''),
             (6, 0), (7, now), (8, next_start)
         ])
     return activities
@@ -15611,20 +15611,33 @@ def accept_gotham_escort_mission(char, mid):
         return None
     now = int(time.time())
     if str(char.get('map_id', '')) != GOTHAM_MAP_ID:
+        print(f"[GOTHAM ACTIVITY REJECT] mission={mid} reason=wrong_map "
+              f"map={char.get('map_id')}")
         return False
     if int(char.get('level', 1) or 1) < int(cfg.get('unlock_level', 1)):
+        print(f"[GOTHAM ACTIVITY REJECT] mission={mid} reason=level "
+              f"level={char.get('level')} required={cfg.get('unlock_level')}")
         return False
     activity_type = int(cfg.get('type', 0) or 0)
     if activity_type != 1:
         print(f"[GOTHAM ACTIVITY] unsupported client objective type={activity_type} mission={mid}")
         return False
+    escort_mission_ids = {
+        str(row.get('mission_id'))
+        for row in ESCORT_ACTIVITY_CONFIG.values()
+        if str(row.get('map_id')) == GOTHAM_MAP_ID
+        and int(row.get('type', 0) or 0) == 1
+    }
+    active_missions = char.get('active_missions')
+    if not isinstance(active_missions, dict):
+        active_missions = {}
     if any(
             mission_id != str(mid)
+            and str(mission_id) in escort_mission_ids
             and isinstance(mission_state, dict)
             and mission_state.get('state') in (1, 2)
-            and int(missions_data.get(mission_id, {}).get('class', 0) or 0)
-            == (4 if activity_type == 1 else 5)
-            for mission_id, mission_state in char.get('active_missions', {}).items()):
+            for mission_id, mission_state in active_missions.items()):
+        print(f"[GOTHAM ACTIVITY REJECT] mission={mid} reason=other_escort_active")
         return False
     bonus_active, _next_start = escort_activity_clock(
         cfg.get('start_time', 0), cfg.get('duration', 0), now)
@@ -15633,21 +15646,26 @@ def accept_gotham_escort_mission(char, mid):
         activity_id = str(cfg.get('id', ''))
         attempts = max(0, int(state['attempts'].get(activity_id, 0) or 0))
         if attempts >= int(cfg.get('max_plays', 0)):
+            print(f"[GOTHAM ACTIVITY REJECT] mission={mid} reason=daily_limit "
+                  f"activity={activity_id} attempts={attempts} "
+                  f"max={cfg.get('max_plays')} day={state.get('day')}")
             return False
         state['attempts'][activity_id] = attempts + 1
+        reward_scale = max(0, int(cfg.get('special_scale', 100))) if bonus_active else 100
         char.setdefault('active_missions', {})[str(mid)] = {
             'state': 1,
             'parm': [0, 0, 0, 0, 0, 0, 0, now],
             'accept_time': now,
             'activity_id': activity_id,
-            'escort_bonus_scale': (
-                max(0, int(cfg.get('special_scale', 100))) if bonus_active else 100
-            ),
+            'escort_bonus_scale': reward_scale,
             'escort_bonus_active': bool(bonus_active),
             'escort_group': int(
                 cfg.get('special_group' if bonus_active else 'normal_group', 0) or 0
             ),
         }
+    print(f"[GOTHAM ACTIVITY ACCEPT] mission={mid} "
+          f"utc={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now))} "
+          f"bonus={int(bonus_active)} reward_scale={reward_scale}")
     record_retrieve_participation(char, '6')
     return True
 
