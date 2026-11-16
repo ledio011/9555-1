@@ -1749,6 +1749,8 @@ try:
                         "mission_id": parts[2],
                         "map_id": parts[3],
                         "type": int(parts[4]),
+                        "show_reward_id": parts[5].strip(),
+                        "reward_id": parts[6].strip(),
                         "start_time": int(parts[7]),
                         "duration": int(parts[8]),
                         "normal_group": int(parts[9]) if parts[9].isdigit() else 0,
@@ -8675,7 +8677,10 @@ def spawn_tower_map_npcs(conn, map_id, char):
         TOWER_NPC_SPAWN_INDEX[inst_id] = index
         if inst_id not in run['active_npcs']:
             run['active_npcs'].append(inst_id)
-        send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
+        if not send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
+            print(f"[GOTHAM ESCORT] target create push failed player={owner_id} "
+                  f"mission={mission_id} npc={inst_id}")
+            return False
         sync_npc_attrs_rpc(
             conn, inst_id, get_npc_attr(nid, player_level), NPC_HP_MAP.get(inst_id, 0))
 
@@ -12862,7 +12867,10 @@ def spawn_gotham_escort_npc(conn, char):
     if attr is None:
         return False
 
-    send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
+    if not send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
+        print(f"[GOTHAM ESCORT] target create push failed player={owner_id} "
+              f"mission={mission_id} npc={inst_id}")
+        return False
     sync_npc_attrs_rpc(
         conn, inst_id, get_npc_attr("23101", player_level),
         NPC_HP_MAP.get(inst_id, 0))
@@ -12876,9 +12884,12 @@ def spawn_gotham_escort_npc(conn, char):
             parm.extend([0] * (8 - len(parm)))
         parm[1:4] = [int(inst_id), 0, map_info_id]
         save_chars(all_accounts_chars)
-        send_rpc_push_safe(conn, 621, encode_sproto([
+        escort_info_sent = send_rpc_push_safe(conn, 621, encode_sproto([
             (0, int(inst_id)), (1, 0), (2, str(map_info_id))
         ]))
+        if not escort_info_sent:
+            print(f"[GOTHAM ESCORT] target binding push failed player={owner_id} "
+                  f"mission={mission_id} npc={inst_id}")
         send_rpc_push_safe(conn, 519, sync_mission_data(char))
     path_id = str(placement.get("path_id") or "")
     path = list(getattr(LIBERTY_CITY, "paths", {}).get(path_id, []))
@@ -12905,6 +12916,10 @@ def spawn_gotham_escort_npc(conn, char):
             "repeat_path": False,
         }
         _ensure_liberty_npc_patrol_worker(conn, char, conn_key)
+    else:
+        print(f"[GOTHAM ESCORT] target has no usable patrol path "
+              f"player={owner_id} mission={mission_id} path={path_id!r} "
+              f"points={len(path)}")
     return True
 
 
@@ -12940,7 +12955,7 @@ def finish_gotham_escort_mission(char, conn, mission_id, success):
         if int(activity.get("type", 0) or 0) != 1:
             return False
         activity_items = daily_active_rewards_for_level(
-            "_drop_hs", char.get("level", 1))
+            activity.get("reward_id", ""), char.get("level", 1))
         if not activity_items and success:
             print(f"[GOTHAM ESCORT] missing client reward data mission={mission_id}")
             return False
@@ -13102,7 +13117,6 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         clear_gotham_npc_aoi(conn)
     elif picked_char:
         spawn_gotham_map_npcs(conn, picked_char)
-        spawn_gotham_escort_npc(conn, picked_char)
         return
     if (is_cash_stage_map(map_str) and picked_char
             and not picked_char.get('_cash_stage_map_ready', False)):
@@ -19436,6 +19450,8 @@ def replay_map_aoi_after_reconnect(conn, char):
         update_prison_npc_aoi(conn, map_id, char)
     else:
         spawn_map_npcs(conn, map_id, char)
+        if map_id == GOTHAM_MAP_ID:
+            spawn_gotham_escort_npc(conn, char)
     if (not is_single_player_map(map_id)
             and not is_exp_map(map_id)
             and not is_equipment_copy_map(map_id)):
@@ -25661,6 +25677,8 @@ def client_handler(conn, addr):
                         record_pvp_position(picked_char)
                     if is_current_character_connection(conn, picked_char):
                         picked_char['_cash_stage_map_ready'] = True
+                        if mid == GOTHAM_MAP_ID:
+                            spawn_gotham_escort_npc(conn, picked_char)
                     print(
                         f"[MAP READY RECEIVED] map_id={mid} player={picked_char.get('id')} "
                         f"pos={picked_char.get('pos')} hp={picked_char.get('hp')} "
