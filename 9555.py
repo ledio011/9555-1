@@ -12417,11 +12417,12 @@ def gotham_npc_retarget_on_hit(inst_id, attacker):
         ai_cfg = AI_DATA_CONFIG.get(str(npc_cfg.get("ai_data_id") or ""), {})
         current_target = int(slot.get("target_id", 0) or 0)
         if slot.get("is_boss"):
-            if current_target == attacker_id:
-                return True
             if (current_target
                     and now < float(slot.get("next_target_change_at", 0) or 0)):
-                return False
+                return True
+            slot["target_id"] = 0
+            slot["next_target_change_at"] = 0
+            return True
         slot["target_id"] = attacker_id
         slot["next_target_change_at"] = (
             now + _gotham_target_switch_interval(slot, ai_cfg))
@@ -12502,8 +12503,17 @@ def _gotham_npc_ai_tick():
                     for p in players
                 ]
                 possible = [entry for entry in possible if entry[0] <= lock_distance]
+                if snapshot.get("is_boss"):
+                    possible = [
+                        entry for entry in possible
+                        if any(entry[0] <= skill_range
+                               for _skill_id, skill_range in skills)
+                    ]
                 if possible:
-                    target = min(possible, key=lambda entry: entry[0])[1]
+                    if snapshot.get("is_boss"):
+                        target = random.choice(possible)[1]
+                    else:
+                        target = min(possible, key=lambda entry: entry[0])[1]
                     with GOTHAM_NPC_LOCK:
                         live_slot = GOTHAM_SHARED_NPC_SLOTS.get(slot_key, {})
                         if live_slot.get("inst_id") == inst_id:
