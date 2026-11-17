@@ -100,6 +100,10 @@ GOTHAM_ACTIVITY_CONFIG = {}
 GOTHAM_AOI_TRACK = {}  # connection identity -> {shared slot: current instance ID}
 GOTHAM_AI_TASK = None
 GOTHAM_AI_LOCK = threading.Lock()
+GOTHAM_ESCORT_DAMAGE = {}  # NPC instance ID -> {character ID: applied damage}
+GOTHAM_ESCORT_DAMAGE_LOCK = threading.RLock()
+GOTHAM_ESCORT_OWNER_DISTANCE_CM = 1500  # EscortData rule: stop beyond 15 meters.
+GOTHAM_ESCORT_STEP_SECONDS = 0.5
 PVP_KILL_STREAK_LOCK = threading.RLock()
 PVP_COMBAT_HISTORY_LOCK = threading.RLock()
 PVP_POSITION_HISTORY = {}
@@ -8333,12 +8337,25 @@ def npc_damage_sat_type(npc_id):
         return 'satm'
 
 
-def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur):
+def sync_npc_attrs_rpc(conn, inst_id, stats, hp_cur, escort_owner=None):
     """Sends TAG 510 to sync NPC stats."""
     # The dominance zombie is initially added to camp 2 by tag 544.  Omitting
     # camp here makes the APK decode it as camp 0 and move it out of
     # DominSceneManager's CampList[2], so rank_pvp_start never enables its AI.
     attr_other_fields = [(0, hp_cur), (2, stats['lv']), (3, stats['power'])]
+    if escort_owner is not None and str(NPC_INST_MAP.get(inst_id, "")) == "23101":
+        try:
+            owner_id = int(escort_owner.get("id", 0) or 0)
+        except (AttributeError, TypeError, ValueError):
+            owner_id = 0
+        try:
+            owner_team_id = max(0, int(CHAR_TEAM.get(owner_id, 0) or 0))
+        except (TypeError, ValueError):
+            owner_team_id = 0
+        attr_other_fields.extend([
+            (6, _guild_id_for_character(escort_owner)),
+            (7, owner_team_id),
+        ])
     if NPC_INST_MAP.get(inst_id, '').startswith('BOSS_'):
         # TAG 510 arrives immediately after TAG 544.  Preserve the title
         # assigned in get_boss_char or the APK resets it to level 0.
@@ -11392,7 +11409,21 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
                     save_chars(all_accounts_chars)
     _schedule_guild_boss_tick(runtime_key, runtime)
 
-def _send_liberty_npc_patrol_move(conn, inst_id, from_x, from_z, target_x, target_z):
+def gotham_escort_map_ids():
+    return {
+        str(row.get("map_id", ""))
+        for row in ESCORT_ACTIVITY_CONFIG.values()
+        if int(row.get("type", 0) or 0) in (1, 2) and str(row.get("map_id", ""))
+    }
+
+
+def is_gotham_escort_map(map_id):
+    return str(map_id or "") in gotham_escort_map_ids()
+
+
+def _send_liberty_npc_patrol_move(
+        conn, inst_id, from_x, from_z, target_x, target_z,
+        broadcast_map_id=None, exclude_char_id=None):
     """Send one client-native walking waypoint for a Liberty City NPC (TAG 507)."""
     dx = int(target_x) - int(from_x)
     dz = int(target_z) - int(from_z)
@@ -11407,7 +11438,69 @@ def _send_liberty_npc_patrol_move(conn, inst_id, from_x, from_z, target_x, targe
     character_data = encode_sproto([
         (0, int(inst_id)), (1, movement_data), (2, True)
     ])
-    return send_rpc_push_safe(conn, 507, encode_sproto([(0, character_data)]))
+    payload = encode_sproto([(0, character_data)])
+    sent = send_rpc_push_safe(conn, 507, payload)
+    if broadcast_map_id is not None:
+        for peer_id, (peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
+            if (not peer_conn or not peer_char
+                    or str(peer_char.get("map_id", "")) != str(broadcast_map_id)
+                    or int(peer_id) == int(exclude_char_id or 0)):
+                continue
+            send_rpc_push_safe(peer_conn, 507, payload)
+    return sent
+
+
+def gotham_escort_next_step(owner_position, from_x, from_z, waypoint_x, waypoint_z,
+                            speed_mps):
+    """Return one short, route-aligned move that keeps the escort within 15 m."""
+    try:
+        if not isinstance(owner_position, (list, tuple)) or len(owner_position) < 3:
+            return None
+        owner_x = float(owner_position[0])
+        owner_z = float(owner_position[2])
+        from_x, from_z = int(from_x), int(from_z)
+        waypoint_x, waypoint_z = int(waypoint_x), int(waypoint_z)
+        speed_mps = max(0.1, float(speed_mps))
+    except (TypeError, ValueError):
+        return None
+
+    radius = GOTHAM_ESCORT_OWNER_DISTANCE_CM
+    offset_x, offset_z = from_x - owner_x, from_z - owner_z
+    if offset_x * offset_x + offset_z * offset_z > radius * radius:
+        return None
+
+    path_x, path_z = waypoint_x - from_x, waypoint_z - from_z
+    path_length = math.hypot(path_x, path_z)
+    if path_length <= 0:
+        return waypoint_x, waypoint_z, True
+
+    fraction = min(
+        1.0, speed_mps * 100.0 * GOTHAM_ESCORT_STEP_SECONDS / path_length)
+    a = path_x * path_x + path_z * path_z
+    b = 2.0 * (offset_x * path_x + offset_z * path_z)
+    c = offset_x * offset_x + offset_z * offset_z - radius * radius
+    end_x, end_z = waypoint_x - owner_x, waypoint_z - owner_z
+    if end_x * end_x + end_z * end_z > radius * radius:
+        discriminant = b * b - 4.0 * a * c
+        if discriminant <= 0:
+            return None
+        exit_fraction = (-b + math.sqrt(discriminant)) / (2.0 * a)
+        fraction = min(fraction, max(0.0, min(1.0, exit_fraction)))
+    if fraction <= 0:
+        return None
+
+    next_x = int(round(from_x + path_x * fraction))
+    next_z = int(round(from_z + path_z * fraction))
+    while ((next_x - owner_x) ** 2 + (next_z - owner_z) ** 2 > radius * radius
+           and (next_x != from_x or next_z != from_z)):
+        if next_x != from_x:
+            next_x += -1 if next_x > from_x else 1
+        if next_z != from_z:
+            next_z += -1 if next_z > from_z else 1
+    if next_x == from_x and next_z == from_z:
+        return None
+    reached_waypoint = next_x == waypoint_x and next_z == waypoint_z
+    return next_x, next_z, reached_waypoint
 
 
 def _liberty_npc_patrol_worker():
@@ -11423,7 +11516,8 @@ def _liberty_npc_patrol_worker():
             for conn_key, (conn, picked_char) in connections:
                 try:
                     patrol_map = str(picked_char.get('map_id', ''))
-                    if patrol_map not in ('101', GOTHAM_MAP_ID) or conn.fileno() < 0:
+                    if (patrol_map != '101' and not is_gotham_escort_map(patrol_map)
+                            or conn.fileno() < 0):
                         with NPC_PATROL_WORKER_LOCK:
                             NPC_PATROL_CONNECTIONS.pop(conn_key, None)
                         continue
@@ -11459,7 +11553,7 @@ def _liberty_npc_patrol_worker():
                         if now < float(tdata.get('path_next_at', 0)):
                             continue
                         mission_id = str(tdata.get('mission_id', ''))
-                        if patrol_map == GOTHAM_MAP_ID and mission_id:
+                        if is_gotham_escort_map(patrol_map) and mission_id:
                             finish_gotham_escort_mission(
                                 picked_char, conn, mission_id, success=True)
                         continue
@@ -11476,23 +11570,44 @@ def _liberty_npc_patrol_worker():
                     except (TypeError, ValueError, IndexError, KeyError):
                         continue
 
+                    shared_escort_target = bool(
+                        tdata.get('mission_id')
+                        and is_gotham_escort_map(patrol_map)
+                        and str(NPC_INST_MAP.get(inst_id, '')) == '23101')
+                    speed_mps = max(0.1, float(tdata.get('path_speed_mps', 1.0)))
+                    reached_waypoint = True
+                    if shared_escort_target:
+                        step = gotham_escort_next_step(
+                            picked_char.get('pos'), from_x, from_z,
+                            target_x, target_z, speed_mps)
+                        if step is None:
+                            tdata['path_next_at'] = now + GOTHAM_ESCORT_STEP_SECONDS
+                            continue
+                        target_x, target_z, reached_waypoint = step
                     if not _send_liberty_npc_patrol_move(
-                            conn, inst_id, from_x, from_z, target_x, target_z):
+                            conn, inst_id, from_x, from_z, target_x, target_z,
+                            broadcast_map_id=patrol_map if shared_escort_target else None,
+                            exclude_char_id=picked_char.get('id') if shared_escort_target else None):
                         send_failed = True
                         break
 
-                    speed_mps = max(0.1, float(tdata.get('path_speed_mps', 1.0)))
                     travel_seconds = math.hypot(
                         target_x - from_x, target_z - from_z) / 100.0 / speed_mps
-                    next_index = path_index + 1
-                    if next_index >= len(path) and not tdata.get('repeat_path', True):
-                        tdata['path_complete'] = True
-                        tdata['path_pos'] = (target_x, target_z)
+                    if reached_waypoint:
+                        next_index = path_index + 1
+                        if next_index >= len(path) and not tdata.get('repeat_path', True):
+                            tdata['path_complete'] = True
+                            tdata['path_pos'] = (target_x, target_z)
+                        else:
+                            tdata['path_index'] = next_index % len(path)
                     else:
-                        tdata['path_index'] = next_index % len(path)
+                        tdata['path_index'] = path_index
                     tdata['path_pos'] = (target_x, target_z)
-                    tdata['path_next_at'] = now + max(0.5, travel_seconds) + 2.0
-                    if patrol_map == GOTHAM_MAP_ID and not tdata.get('repeat_path', True):
+                    waypoint_pause = 2.0 if reached_waypoint else 0.0
+                    tdata['path_next_at'] = now + max(
+                        GOTHAM_ESCORT_STEP_SECONDS if shared_escort_target else 0.5,
+                        travel_seconds) + waypoint_pause
+                    if is_gotham_escort_map(patrol_map) and not tdata.get('repeat_path', True):
                         with get_character_transaction_lock(picked_char):
                             for mission_state in picked_char.get('active_missions', {}).values():
                                 if (isinstance(mission_state, dict)
@@ -11503,7 +11618,8 @@ def _liberty_npc_patrol_worker():
                                     if tdata.get('path_complete'):
                                         mission_state['escort_finish_at'] = (
                                             int(time.time()) + max(1, int(travel_seconds + 2.0)))
-                                    save_chars(all_accounts_chars)
+                                    if reached_waypoint:
+                                        save_chars(all_accounts_chars)
                                     break
 
                     # NpcData.WalkSpeed defaults to 10 -> WalkSpeedMeter 1 m/s.
@@ -13545,12 +13661,168 @@ def spawn_gotham_map_npcs(conn, char):
     _spawn_guild_city_vehicle(conn, GOTHAM_MAP_ID)
 
 
-def spawn_gotham_escort_npc(conn, char):
-    if not char or str(char.get("map_id", "")) != GOTHAM_MAP_ID:
+def gotham_escort_mission_for_npc(inst_id):
+    try:
+        owner_id = int(GOTHAM_ESCORT_NPC_OWNER.get(int(inst_id), 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    owner_char = _guild_char_by_id(owner_id)
+    if not owner_char:
+        return None
+    map_id = str(NPC_INSTANCE_MAP.get(int(inst_id), ""))
+    if str(owner_char.get("map_id", "")) != map_id:
+        return None
+    for mission_id, mission_state in owner_char.get("active_missions", {}).items():
+        if (not isinstance(mission_state, dict)
+                or mission_state.get("state") != 1
+                or int(mission_state.get("npc_runtime_id", 0) or 0) != int(inst_id)):
+            continue
+        activity = ESCORT_ACTIVITY_CONFIG.get(
+            str(mission_state.get("activity_id", "")), {})
+        if (int(activity.get("type", 0) or 0) == 1
+                and str(activity.get("map_id", "")) == map_id):
+            return owner_char, str(mission_id), mission_state, activity
+    return None
+
+
+def send_gotham_escort_npc_to_viewer(conn, viewer_char, owner_char, inst_id):
+    if (not conn or not viewer_char or not owner_char
+            or str(viewer_char.get("map_id", "")) != str(NPC_INSTANCE_MAP.get(inst_id, ""))
+            or str(owner_char.get("map_id", "")) != str(NPC_INSTANCE_MAP.get(inst_id, ""))
+            or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
         return False
+    active = gotham_escort_mission_for_npc(inst_id)
+    if not active or int(active[0].get("id", 0) or 0) != int(owner_char.get("id", 0) or 0):
+        return False
+    _owner, _mission_id, mission_state, activity = active
+    map_id = str(activity.get("map_id", ""))
+    try:
+        group_id = int(mission_state.get(
+            "escort_group", activity.get("normal_group", 0)) or 0)
+        player_level = normalize_player_level(owner_char)
+    except (TypeError, ValueError):
+        return False
+    placement = next((row for row in MONSTER_DATA.get(map_id, [])
+                      if int(row.get("group", 0) or 0) == group_id
+                      and str(row.get("nid", "")) == "23101"), None)
+    if placement is None:
+        return False
+    spawn_x, spawn_z = int(placement["x"]), int(placement["z"])
+    saved_position = mission_state.get("escort_pos")
+    if isinstance(saved_position, (list, tuple)) and len(saved_position) >= 2:
+        try:
+            spawn_x, spawn_z = int(saved_position[0]), int(saved_position[1])
+        except (TypeError, ValueError):
+            pass
+    _inst_id, attr = build_npc_attr_sproto(
+        "23101", NPC_CONFIG.get("23101", {}).get("name", "Member of Parliament"),
+        spawn_x, spawn_z, int(placement.get("o", 0)),
+        existing_inst_id=inst_id, player_level=player_level)
+    if attr is None or not send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
+        return False
+    sync_npc_attrs_rpc(
+        conn, inst_id, get_npc_attr("23101", player_level),
+        NPC_HP_MAP.get(inst_id, 0), escort_owner=owner_char)
+    return True
+
+
+def sync_gotham_escort_npcs_to_viewer(conn, char, exclude_inst_id=None):
+    if not conn or not char:
+        return
+    map_id = str(char.get("map_id", ""))
+    for inst_id, owner_id in list(GOTHAM_ESCORT_NPC_OWNER.items()):
+        if (int(inst_id) == int(exclude_inst_id or 0)
+                or str(NPC_INSTANCE_MAP.get(inst_id, "")) != map_id):
+            continue
+        owner_char = _guild_char_by_id(owner_id)
+        if owner_char:
+            send_gotham_escort_npc_to_viewer(conn, char, owner_char, int(inst_id))
+
+
+def broadcast_gotham_escort_npc_to_map(owner_char, inst_id):
+    if not owner_char:
+        return
+    map_id = str(NPC_INSTANCE_MAP.get(inst_id, ""))
+    owner_id = int(owner_char.get("id", 0) or 0)
+    for peer_id, (peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
+        if (int(peer_id) == owner_id or not peer_conn or not peer_char
+                or str(peer_char.get("map_id", "")) != map_id):
+            continue
+        send_gotham_escort_npc_to_viewer(
+            peer_conn, peer_char, owner_char, int(inst_id))
+
+
+def remove_gotham_escort_npc_instance(inst_id):
+    try:
+        inst_id = int(inst_id)
+    except (TypeError, ValueError):
+        return
+    map_id = str(NPC_INSTANCE_MAP.get(inst_id, ""))
+    owner_id = int(GOTHAM_ESCORT_NPC_OWNER.get(inst_id, 0) or 0)
+    if map_id:
+        remove_data = encode_sproto([(0, inst_id)])
+        for peer_id, (peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
+            if (peer_conn and peer_char
+                    and str(peer_char.get("map_id", "")) == map_id):
+                send_rpc_push_safe(peer_conn, 506, remove_data)
+    for tracked in NPC_AOI_TRACK.values():
+        tracked.pop(inst_id, None)
+    GOTHAM_ESCORT_NPC_OWNER.pop(inst_id, None)
+    GOTHAM_ESCORT_DAMAGE.pop(inst_id, None)
+    DEAD_NPC_SET.discard(inst_id)
+    NPC_HP_MAP.pop(inst_id, None)
+    NPC_INST_MAP.pop(inst_id, None)
+    NPC_INSTANCE_MAP.pop(inst_id, None)
+    NPC_ATTR_MAP.pop(inst_id, None)
+    return owner_id
+
+
+def expire_stale_gotham_activity_missions(char, conn=None):
+    if not isinstance(char, dict):
+        return False
+    today = current_daily_stamp()
+    expired_ids = []
+    expired_instances = []
+    with get_character_transaction_lock(char):
+        active_missions = char.get("active_missions", {})
+        if not isinstance(active_missions, dict):
+            return False
+        for mission_id, mission_state in list(active_missions.items()):
+            if not isinstance(mission_state, dict) or mission_state.get("state") != 1:
+                continue
+            activity = ESCORT_ACTIVITY_CONFIG.get(
+                str(mission_state.get("activity_id", "")), {})
+            if (int(activity.get("type", 0) or 0) not in (1, 2)
+                    or mission_state.get("activity_day") == today):
+                continue
+            expired_ids.append(str(mission_id))
+            try:
+                expired_instances.append(int(mission_state.get("npc_runtime_id", 0) or 0))
+            except (TypeError, ValueError):
+                pass
+            active_missions.pop(str(mission_id), None)
+        if expired_ids:
+            save_chars(all_accounts_chars)
+    if not expired_ids:
+        return False
+    for inst_id in expired_instances:
+        if inst_id:
+            remove_gotham_escort_npc_instance(inst_id)
+    if conn:
+        send_rpc_push_safe(conn, 519, sync_mission_data(char))
+        send_rpc_push_safe(conn, 619, activity_info_payload(char))
+    print(f"[GOTHAM ACTIVITY] expired missions={','.join(expired_ids)} "
+          f"player={char.get('id')} day={today}")
+    return True
+
+
+def spawn_gotham_escort_npc(conn, char):
+    if not char or not is_gotham_escort_map(char.get("map_id", "")):
+        return False
+    expire_stale_gotham_activity_missions(char, conn)
     active_missions = char.get("active_missions")
     if not isinstance(active_missions, dict):
-        return False
+        active_missions = {}
 
     selected = None
     for mission_id, mission_state in active_missions.items():
@@ -13558,12 +13830,13 @@ def spawn_gotham_escort_npc(conn, char):
             continue
         cfg = next((row for row in ESCORT_ACTIVITY_CONFIG.values()
                     if str(row.get("mission_id")) == str(mission_id)
-                    and str(row.get("map_id")) == GOTHAM_MAP_ID
+                    and str(row.get("map_id")) == str(char.get("map_id", ""))
                     and int(row.get("type", 0)) == 1), None)
         if cfg:
             selected = (str(mission_id), mission_state, cfg)
             break
     if selected is None:
+        sync_gotham_escort_npcs_to_viewer(conn, char)
         return False
 
     mission_id, mission_state, activity = selected
@@ -13589,7 +13862,8 @@ def spawn_gotham_escort_npc(conn, char):
         ) or 0)
     except (TypeError, ValueError):
         return False
-    placement = next((row for row in MONSTER_DATA.get(GOTHAM_MAP_ID, [])
+    map_id = str(activity.get("map_id", ""))
+    placement = next((row for row in MONSTER_DATA.get(map_id, [])
                       if int(row.get("group", 0) or 0) == group_id
                       and str(row.get("nid", "")) == "23101"), None)
     if placement is None:
@@ -13615,8 +13889,9 @@ def spawn_gotham_escort_npc(conn, char):
             "23101", NPC_CONFIG.get("23101", {}).get("name", "Member of Parliament"),
             spawn_x, spawn_z, int(placement.get("o", 0)),
             player_level=player_level)
-        NPC_INSTANCE_MAP[inst_id] = GOTHAM_MAP_ID
+        NPC_INSTANCE_MAP[inst_id] = map_id
         GOTHAM_ESCORT_NPC_OWNER[inst_id] = owner_id
+        GOTHAM_ESCORT_DAMAGE[inst_id] = {}
         mission_state["npc_runtime_id"] = inst_id
     else:
         player_level = normalize_player_level(char)
@@ -13633,7 +13908,7 @@ def spawn_gotham_escort_npc(conn, char):
         return False
     sync_npc_attrs_rpc(
         conn, inst_id, get_npc_attr("23101", player_level),
-        NPC_HP_MAP.get(inst_id, 0))
+        NPC_HP_MAP.get(inst_id, 0), escort_owner=char)
     try:
         map_info_id = int(activity.get("activity_map_id", 0) or 0)
     except (TypeError, ValueError):
@@ -13663,7 +13938,7 @@ def spawn_gotham_escort_npc(conn, char):
         conn_key = id(conn)
         NPC_AOI_TRACK.setdefault(conn_key, {})[inst_id] = {
             "nid": "23101",
-            "map_id": GOTHAM_MAP_ID,
+            "map_id": map_id,
             "path_id": path_id,
             "path": path,
             "path_index": path_index,
@@ -13680,6 +13955,8 @@ def spawn_gotham_escort_npc(conn, char):
         print(f"[GOTHAM ESCORT] target has no usable patrol path "
               f"player={owner_id} mission={mission_id} path={path_id!r} "
               f"points={len(path)}")
+    broadcast_gotham_escort_npc_to_map(char, inst_id)
+    sync_gotham_escort_npcs_to_viewer(conn, char, exclude_inst_id=inst_id)
     return True
 
 
@@ -13693,39 +13970,39 @@ def remove_gotham_escort_npc(char, conn=None):
     for inst_id, npc_owner in list(GOTHAM_ESCORT_NPC_OWNER.items()):
         if int(npc_owner or 0) != owner_id:
             continue
-        if conn:
-            send_rpc_push_safe(conn, 506, encode_sproto([(0, int(inst_id))]))
-            tracked = NPC_AOI_TRACK.get(id(conn), {})
-            tracked.pop(int(inst_id), None)
-        GOTHAM_ESCORT_NPC_OWNER.pop(int(inst_id), None)
-        NPC_HP_MAP.pop(int(inst_id), None)
-        NPC_INST_MAP.pop(int(inst_id), None)
-        NPC_INSTANCE_MAP.pop(int(inst_id), None)
-        NPC_ATTR_MAP.pop(int(inst_id), None)
+        remove_gotham_escort_npc_instance(int(inst_id))
 
 
 def finish_gotham_escort_mission(char, conn, mission_id, success):
-    """Resolve an escort only after its configured route finishes or its target dies."""
+    """Resolve an activity from its client-configured reward and completion state."""
     activity_items = []
     with get_character_transaction_lock(char):
         mission_state = char.get("active_missions", {}).get(str(mission_id))
         if not isinstance(mission_state, dict) or mission_state.get("state") != 1:
             return False
         activity = ESCORT_ACTIVITY_CONFIG.get(str(mission_state.get("activity_id", "")), {})
-        if int(activity.get("type", 0) or 0) != 1:
+        activity_type = int(activity.get("type", 0) or 0)
+        if activity_type not in (1, 2):
             return False
-        activity_items = daily_active_rewards_for_level(
-            activity.get("reward_id", ""), char.get("level", 1))
-        if not activity_items and success:
-            print(f"[GOTHAM ESCORT] missing client reward data mission={mission_id}")
-            return False
-        if activity_items:
+        if mission_state.get("activity_day") != current_daily_stamp():
+            char["active_missions"].pop(str(mission_id), None)
+            save_chars(all_accounts_chars)
+            expired = True
+        else:
+            expired = False
+        if not expired:
+            activity_items = daily_active_rewards_for_level(
+                activity.get("reward_id", ""), char.get("level", 1))
+            if not activity_items and success:
+                print(f"[GOTHAM ACTIVITY] missing client reward data mission={mission_id}")
+                return False
+        if not expired and activity_items:
+            bonus_active, _next_start = escort_activity_clock(
+                activity.get("start_time", 0), activity.get("duration", 0))
             try:
-                bonus_scale = max(0, int(
-                    mission_state.get("escort_bonus_scale", 100)))
+                reward_scale = max(0, int(activity.get("special_scale", 100))) if bonus_active else 100
             except (TypeError, ValueError):
-                bonus_scale = 100
-            reward_scale = bonus_scale
+                reward_scale = 100
             if not success:
                 try:
                     failure_scale = max(0, int(activity.get("failure_scale", 0)))
@@ -13739,25 +14016,100 @@ def finish_gotham_escort_mission(char, conn, mission_id, success):
                     lambda tag, data: send_rpc_push_safe(conn, tag, data),
                     save=False)
             elif success:
-                print(f"[GOTHAM ESCORT] missing client reward data mission={mission_id}")
+                print(f"[GOTHAM ACTIVITY] missing client reward data mission={mission_id}")
                 return False
-        char["active_missions"].pop(str(mission_id), None)
-        save_chars(all_accounts_chars)
+        if not expired:
+            char["active_missions"].pop(str(mission_id), None)
+            save_chars(all_accounts_chars)
 
-    remove_gotham_escort_npc(char, conn)
+    if activity_type == 1:
+        remove_gotham_escort_npc(char, conn)
+    result_sent = False
     if conn:
-        item_payloads = [
-            encode_sproto([(0, item_id), (1, amount), (3, quality)])
-            for item_id, quality, amount in activity_items
-        ]
-        result_sent = send_rpc_push_safe(conn, 620, encode_sproto([
-            (0, 1), (2, bool(success)), (3, item_payloads)
-        ]))
+        if not expired:
+            item_payloads = [
+                encode_sproto([(0, item_id), (1, amount), (3, quality)])
+                for item_id, quality, amount in activity_items
+            ]
+            result_sent = send_rpc_push_safe(conn, 620, encode_sproto([
+                (0, activity_type), (2, bool(success)), (3, item_payloads)
+            ]))
         send_rpc_push_safe(conn, 519, sync_mission_data(char))
         send_rpc_push_safe(conn, 619, activity_info_payload(char))
-    print(f"[GOTHAM ESCORT] mission={mission_id} success={bool(success)} "
+    if activity_type == 2 and success and not expired:
+        record_daily_active_event(
+            char, 4,
+            (lambda tag, data: send_rpc_push_safe(conn, tag, data)) if conn else None)
+    print(f"[GOTHAM ACTIVITY] mission={mission_id} type={activity_type} "
+          f"success={bool(success and not expired)} expired={expired} "
           f"items={len(activity_items)} result_sent={result_sent if conn else False}")
     return True
+
+
+def gotham_assassination_damage_winner(inst_id):
+    with GOTHAM_ESCORT_DAMAGE_LOCK:
+        damage_by_character = dict(GOTHAM_ESCORT_DAMAGE.get(int(inst_id), {}))
+    if not damage_by_character:
+        return None
+    highest_damage = max(damage_by_character.values())
+    leaders = [
+        char_id for char_id, damage in damage_by_character.items()
+        if int(damage) == int(highest_damage)
+    ]
+    return leaders[0] if len(leaders) == 1 else None
+
+
+def active_gotham_assassination_mission(char, map_id):
+    if not isinstance(char, dict):
+        return None
+    for mission_id, mission_state in char.get("active_missions", {}).items():
+        if not isinstance(mission_state, dict) or mission_state.get("state") != 1:
+            continue
+        activity = ESCORT_ACTIVITY_CONFIG.get(
+            str(mission_state.get("activity_id", "")), {})
+        if (int(activity.get("type", 0) or 0) == 2
+                and str(activity.get("map_id", "")) == str(map_id)
+                and mission_state.get("activity_day") == current_daily_stamp()):
+            return str(mission_id)
+    return None
+
+
+def resolve_gotham_escort_npc_death(attacker, conn, inst_id):
+    active = gotham_escort_mission_for_npc(inst_id)
+    owner_char = active[0] if active else _guild_char_by_id(
+        GOTHAM_ESCORT_NPC_OWNER.get(int(inst_id), 0))
+    map_id = str(NPC_INSTANCE_MAP.get(int(inst_id), ""))
+    winner_id = gotham_assassination_damage_winner(inst_id)
+    target_day_valid = bool(
+        active and active[2].get("activity_day") == current_daily_stamp())
+    if owner_char:
+        expire_stale_gotham_activity_missions(
+            owner_char, ALL_CONNECTIONS.get(int(owner_char.get("id", 0) or 0), (None, None))[0])
+        active = gotham_escort_mission_for_npc(inst_id)
+        if active:
+            owner_char = active[0]
+    try:
+        attacker_id = int(attacker.get("id", 0) or 0)
+    except (AttributeError, TypeError, ValueError):
+        attacker_id = 0
+    attacker_guild = _guild_id_for_character(attacker)
+    owner_guild = _guild_id_for_character(owner_char) if owner_char else 0
+    if (target_day_valid and attacker_id and winner_id == attacker_id and owner_char
+            and attacker_id != int(owner_char.get("id", 0) or 0)
+            and str(attacker.get("map_id", "")) == map_id
+            and not (attacker_guild > 0 and attacker_guild == owner_guild)
+            and not _same_player_team(attacker, owner_char)):
+        expire_stale_gotham_activity_missions(attacker, conn)
+        mission_id = active_gotham_assassination_mission(attacker, map_id)
+        if mission_id:
+            finish_gotham_escort_mission(attacker, conn, mission_id, success=True)
+    if active:
+        _owner, mission_id, _mission_state, _activity = active
+        gotham_mark_escort_npc_dead(owner_char, inst_id)
+        finish_gotham_escort_mission(owner_char, ALL_CONNECTIONS.get(
+            int(owner_char.get("id", 0) or 0), (None, None))[0], mission_id, success=False)
+    else:
+        remove_gotham_escort_npc_instance(inst_id)
 
 
 def gotham_mark_escort_npc_dead(char, inst_id):
@@ -15625,8 +15977,6 @@ def escort_activity_info_payload(char, now=None):
     state = ensure_escort_activity_state(char)
     activities = {}
     for activity_id, cfg in ESCORT_ACTIVITY_CONFIG.items():
-        if str(cfg.get('map_id')) != GOTHAM_MAP_ID:
-            continue
         # Keep the default Escort row visible; its other RandomIndex variants
         # remain configured and are still accepted as mission IDs.
         if (int(cfg.get('type', 0) or 0) == 1
@@ -16395,14 +16745,14 @@ def resolve_survive_battle_entry(char, request, now):
         return None, False, None, None, 'configured Survival Field instance has expired'
     return map_id, True, config, occurrence, None
 
-def accept_gotham_escort_mission(char, mid):
+def accept_gotham_escort_mission(char, mid, conn=None):
     cfg = next((row for row in ESCORT_ACTIVITY_CONFIG.values()
                 if str(row.get('mission_id')) == str(mid)
-                and str(row.get('map_id')) == GOTHAM_MAP_ID), None)
+                and str(row.get('map_id')) == str(char.get('map_id', ''))), None)
     if cfg is None:
         return None
     now = int(time.time())
-    if str(char.get('map_id', '')) != GOTHAM_MAP_ID:
+    if not is_gotham_escort_map(char.get('map_id', '')):
         print(f"[GOTHAM ACTIVITY REJECT] mission={mid} reason=wrong_map "
               f"map={char.get('map_id')}")
         return False
@@ -16411,18 +16761,23 @@ def accept_gotham_escort_mission(char, mid):
               f"level={char.get('level')} required={cfg.get('unlock_level')}")
         return False
     activity_type = int(cfg.get('type', 0) or 0)
-    if activity_type != 1:
+    if activity_type not in (1, 2):
         print(f"[GOTHAM ACTIVITY] unsupported client objective type={activity_type} mission={mid}")
         return False
+    expire_stale_gotham_activity_missions(char, conn)
     escort_mission_ids = {
         str(row.get('mission_id'))
         for row in ESCORT_ACTIVITY_CONFIG.values()
-        if str(row.get('map_id')) == GOTHAM_MAP_ID
-        and int(row.get('type', 0) or 0) == 1
+        if int(row.get('type', 0) or 0) == activity_type
     }
     active_missions = char.get('active_missions')
     if not isinstance(active_missions, dict):
         active_missions = {}
+    if (str(mid) in active_missions
+            and isinstance(active_missions[str(mid)], dict)
+            and active_missions[str(mid)].get('state') in (1, 2)):
+        print(f"[GOTHAM ACTIVITY REJECT] mission={mid} reason=already_active")
+        return False
     if any(
             mission_id != str(mid)
             and str(mission_id) in escort_mission_ids
@@ -16449,6 +16804,7 @@ def accept_gotham_escort_mission(char, mid):
             'parm': [0, 0, 0, 0, 0, 0, 0, now],
             'accept_time': now,
             'activity_id': activity_id,
+            'activity_day': state.get('day', current_daily_stamp()),
             'escort_bonus_scale': reward_scale,
             'escort_bonus_active': bool(bonus_active),
             'escort_group': int(
@@ -16458,7 +16814,8 @@ def accept_gotham_escort_mission(char, mid):
     print(f"[GOTHAM ACTIVITY ACCEPT] mission={mid} "
           f"utc={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now))} "
           f"bonus={int(bonus_active)} reward_scale={reward_scale}")
-    record_retrieve_participation(char, '6')
+    if activity_type == 1:
+        record_retrieve_participation(char, '6')
     return True
 
 def video_reward_state(char):
@@ -19399,7 +19756,7 @@ def accept_mission_logic(picked_char, mid, online_id=None):
         print(f"[accept_mission_logic] FAILED: opening mission 1001 already passed")
         return False
 
-    activity_accept = accept_gotham_escort_mission(picked_char, mid)
+    activity_accept = accept_gotham_escort_mission(picked_char, mid, conn)
     if activity_accept is not None:
         if not activity_accept:
             print(f"[accept_mission_logic] Gotham activity unavailable or exhausted: {mid}")
@@ -19593,6 +19950,8 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
         elif logic_type == 110 and event == 'rank_pvp':
             matched = target_value == '110' or str(cfg.get('logic_id', '')) == '110'
         elif logic_type == 117 and event == 'accept_escort':
+            matched = True
+        elif logic_type == 119 and event == 'accept_robbery':
             matched = True
         elif logic_type == 11 and event == 'copy_scene_complete':
             matched = str(cfg.get('logic_id', '')) == target_value
@@ -20320,7 +20679,7 @@ def replay_map_aoi_after_reconnect(conn, char):
         update_prison_npc_aoi(conn, map_id, char)
     else:
         spawn_map_npcs(conn, map_id, char)
-        if map_id == GOTHAM_MAP_ID:
+        if is_gotham_escort_map(map_id):
             spawn_gotham_escort_npc(conn, char)
     if (not is_single_player_map(map_id)
             and not is_exp_map(map_id)
@@ -20366,6 +20725,8 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
 
     src_map = str(picked_char.get('map_id') or '11')
     target_map_id = str(target_map_id) or '11'
+    if src_map != target_map_id and is_gotham_escort_map(src_map):
+        remove_gotham_escort_npc(picked_char, conn)
     if (survive_battle_config_for_map(src_map)
             and not survive_battle_config_for_map(target_map_id)):
         picked_char.pop('survival_battle_state', None)
@@ -26615,7 +26976,7 @@ def client_handler(conn, addr):
                         record_pvp_position(picked_char)
                     if is_current_character_connection(conn, picked_char):
                         picked_char['_cash_stage_map_ready'] = True
-                        if mid == GOTHAM_MAP_ID:
+                        if is_gotham_escort_map(mid):
                             spawn_gotham_escort_npc(conn, picked_char)
                     print(
                         f"[MAP READY RECEIVED] map_id={mid} player={picked_char.get('id')} "
@@ -27455,8 +27816,15 @@ def client_handler(conn, addr):
                         if m_entry.get('activity_id'):
                             spawn_gotham_escort_npc(conn, picked_char)
                             send_rpc_push(619, activity_info_payload(picked_char))
-                            mission_event_advanced = advance_missions(
-                                picked_char, send_rpc_push, 'accept_escort')
+                            activity_cfg = ESCORT_ACTIVITY_CONFIG.get(
+                                str(m_entry.get('activity_id')), {})
+                            activity_type = int(activity_cfg.get('type', 0) or 0)
+                            if activity_type == 1:
+                                mission_event_advanced = advance_missions(
+                                    picked_char, send_rpc_push, 'accept_escort')
+                            elif activity_type == 2:
+                                mission_event_advanced = advance_missions(
+                                    picked_char, send_rpc_push, 'accept_robbery')
                     if session is not None:
                         ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                         conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -27570,7 +27938,9 @@ def client_handler(conn, addr):
                             if int(m_cfg.get('class', 0) or 0) == 7:
                                 rotate_scuffle_mission_offer_after_completion(
                                     picked_char)
-                            if int(m_cfg.get('class', 0) or 0) in (4, 5):
+                            completed_activity = ESCORT_ACTIVITY_CONFIG.get(
+                                str((m_entry or {}).get('activity_id', '')), {})
+                            if int(completed_activity.get('type', 0) or 0) == 1:
                                 remove_gotham_escort_npc(picked_char, conn)
                             # Main-chain level goals may be accepted after the
                             # preceding mission's reward has already raised
@@ -27672,15 +28042,18 @@ def client_handler(conn, addr):
                 mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
                 if picked_char and mid in picked_char.get('active_missions', {}):
                     m_cfg = missions_data.get(mid, {})
+                    abandoned_entry = picked_char['active_missions'].get(mid, {})
+                    abandoned_activity = ESCORT_ACTIVITY_CONFIG.get(
+                        str(abandoned_entry.get('activity_id', '')), {})
                     del picked_char['active_missions'][mid]
-                    if int(m_cfg.get('class', 0) or 0) in (4, 5):
+                    if int(abandoned_activity.get('type', 0) or 0) == 1:
                         remove_gotham_escort_npc(picked_char, conn)
                     save_chars(all_accounts_chars)
                     send_rpc_push(522, encode_sproto([(0, mid), (1, 0)]))
                     send_rpc_push(519, sync_mission_data(picked_char))
                     if int(m_cfg.get('class', 0) or 0) == 7:
                         send_rpc_push(555, sync_copy_scenes(picked_char))
-                    if picked_char.get('map_id') == GOTHAM_MAP_ID:
+                    if is_gotham_escort_map(picked_char.get('map_id')):
                         send_rpc_push(619, activity_info_payload(picked_char))
                     print(f"[MISSION ABANDON] mission_id={mid}")
                 if session is not None:
@@ -30420,17 +30793,31 @@ def client_handler(conn, addr):
                                           f"player={picked_char.get('id')} map={cur_map}")
                                     continue
                             if str(target_nid) == "23101":
-                                owner_id = int(GOTHAM_ESCORT_NPC_OWNER.get(target_id, 0) or 0)
-                                active_escort = any(
-                                    isinstance(mission_state, dict)
-                                    and mission_state.get("state") == 1
-                                    and int(mission_state.get("npc_runtime_id", 0) or 0) == target_id
-                                    for mission_state in picked_char.get("active_missions", {}).values()
-                                )
-                                if (cur_map != GOTHAM_MAP_ID
-                                        or owner_id != int(picked_char.get("id", 0) or 0)
+                                active_escort = gotham_escort_mission_for_npc(target_id)
+                                if (not is_gotham_escort_map(cur_map)
+                                        or str(NPC_INSTANCE_MAP.get(target_id, "")) != cur_map
+                                        or int(NPC_HP_MAP.get(target_id, 0) or 0) <= 0
                                         or not active_escort):
-                                    print(f"[GOTHAM ESCORT] rejected unowned target={target_id} player={picked_char.get('id')}")
+                                    print(f"[GOTHAM ACTIVITY] rejected inactive target={target_id} "
+                                          f"player={picked_char.get('id')}")
+                                    continue
+                                owner_char = active_escort[0]
+                                owner_id = int(owner_char.get("id", 0) or 0)
+                                if owner_id == int(picked_char.get("id", 0) or 0):
+                                    print(f"[GOTHAM ESCORT] rejected owner hit target={target_id} "
+                                          f"player={owner_id}")
+                                    continue
+                                if active_escort[2].get("activity_day") != current_daily_stamp():
+                                    owner_conn = ALL_CONNECTIONS.get(owner_id, (None, None))[0]
+                                    expire_stale_gotham_activity_missions(owner_char, owner_conn)
+                                    print(f"[GOTHAM ACTIVITY] rejected expired target={target_id}")
+                                    continue
+                                attacker_guild = _guild_id_for_character(picked_char)
+                                owner_guild = _guild_id_for_character(owner_char)
+                                same_guild = attacker_guild > 0 and attacker_guild == owner_guild
+                                if (same_guild or _same_player_team(picked_char, owner_char)):
+                                    print(f"[GOTHAM ASSASSINATION] rejected allied hit "
+                                          f"target={target_id} player={picked_char.get('id')}")
                                     continue
                             if str(target_nid) == '22101':
                                 cash_state = picked_char.get('cash_stage_state')
@@ -30694,6 +31081,15 @@ def client_handler(conn, addr):
                                         world_npc_died = hp_after == 0
                                         if world_npc_died:
                                             DEAD_NPC_SET.add(target_id)
+                                        if (str(target_nid) == "23101"
+                                                and applied_damage > 0):
+                                            char_id = int(picked_char.get("id", 0) or 0)
+                                            with GOTHAM_ESCORT_DAMAGE_LOCK:
+                                                scores = GOTHAM_ESCORT_DAMAGE.setdefault(
+                                                    int(target_id), {})
+                                                scores[char_id] = (
+                                                    int(scores.get(char_id, 0) or 0)
+                                                    + int(applied_damage))
 
                             if exp_dead_target:
                                 stage_label = 'EQUIP' if is_equipment else 'EXP'
@@ -30750,6 +31146,18 @@ def client_handler(conn, addr):
                                                 max(0, NPC_HP_MAP.get(target_id, 0)))
                                 elif exp_state_hit and exp_state_hit.get('team_id'):
                                     exp_sync_npc_attrs(exp_state_hit, target_id, defender_stats, max(0, NPC_HP_MAP[target_id]))
+                                elif (str(target_nid) == "23101"
+                                      and is_gotham_escort_map(cur_map)
+                                      and target_id in GOTHAM_ESCORT_NPC_OWNER):
+                                    owner_char = _guild_char_by_id(
+                                        GOTHAM_ESCORT_NPC_OWNER.get(target_id, 0))
+                                    for _peer_id, (peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
+                                        if (peer_conn and peer_char
+                                                and str(peer_char.get('map_id', '')) == cur_map):
+                                            sync_npc_attrs_rpc(
+                                                peer_conn, target_id, defender_stats,
+                                                max(0, NPC_HP_MAP.get(target_id, 0)),
+                                                escort_owner=owner_char)
                                 elif (cur_map == GOTHAM_MAP_ID
                                       and target_id in GOTHAM_SHARED_NPC_BY_INSTANCE):
                                     for _peer_id, (peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
@@ -30811,16 +31219,8 @@ def client_handler(conn, addr):
                             if npc_died:
                                 print(f"[{stage_label} MSG111] NPC DEAD target_id={target_id} target_nid={target_nid} hp={NPC_HP_MAP[target_id]}")
                                 if str(target_nid) == "23101":
-                                    gotham_mark_escort_npc_dead(picked_char, target_id)
-                                    for mission_id, mission_state in list(
-                                            picked_char.get('active_missions', {}).items()):
-                                        if (isinstance(mission_state, dict)
-                                                and mission_state.get('state') == 1
-                                                and int(mission_state.get(
-                                                    'npc_runtime_id', 0) or 0) == target_id):
-                                            finish_gotham_escort_mission(
-                                                picked_char, conn, mission_id, success=False)
-                                            break
+                                    resolve_gotham_escort_npc_death(
+                                        picked_char, conn, target_id)
                                 if is_tower:
                                     tower_npc_killed(
                                         picked_char, target_id, conn, send_rpc_push)
@@ -30842,7 +31242,10 @@ def client_handler(conn, addr):
                                     finish_cash_stage(picked_char, True)
                                 elif not is_stage_combat:
                                     # Non-EXP despawns keep their existing AOI path.
-                                    if (cur_map in PRISON_NPC_AOI_MAP_IDS
+                                    if (str(target_nid) == "23101"
+                                            and is_gotham_escort_map(cur_map)):
+                                        pass
+                                    elif (cur_map in PRISON_NPC_AOI_MAP_IDS
                                             and target_id in PRISON_NPC_SHARED_BY_INSTANCE):
                                         record_prison_npc_death(target_id)
                                     else:
@@ -30926,7 +31329,10 @@ def client_handler(conn, addr):
                                             schedule_domin_return(
                                                 result="win", reason="opponent_defeated")
                                 else:
-                                    if is_equipment:
+                                    if (str(target_nid) == "23101"
+                                            and is_gotham_escort_map(cur_map)):
+                                        pass
+                                    elif is_equipment:
                                         on_equipment_npc_killed(exp_state_hit, target_id, target_nid)
                                     else:
                                         on_npc_killed(conn, send_rpc_push, picked_char, target_id, target_nid)
@@ -35698,6 +36104,7 @@ def client_handler(conn, addr):
             is_current_connection = bool(picked_char and ALL_CONNECTIONS.get(char_id, (None, None))[0] is conn)
             if picked_char:
                 if is_current_connection:
+                    remove_gotham_escort_npc(picked_char, conn)
                     if isinstance(picked_char.get('dance_runtime'), dict) and picked_char['dance_runtime'].get('running'):
                         settle_personal_dance(picked_char, stop=True)
                         if str(picked_char.get('map_id')) == '101':
