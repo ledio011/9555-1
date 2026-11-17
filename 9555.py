@@ -18092,12 +18092,20 @@ def _rank_pvp_random_opponent_payload(character):
         and not (isinstance(c.get("_rank_pvp_match"), dict)
                  and not c["_rank_pvp_match"].get("result_recorded"))
     ]
+    previous_offers = {
+        int(value) for value in state.get("offered_opponents", [])
+        if str(value).lstrip("-").isdigit()
+    }
+    fresh_candidates = [
+        c for c in candidates if int(c.get("id", 0)) not in previous_offers
+    ]
+    selection_candidates = fresh_candidates or candidates
     nearby = [
-        c for c in candidates
+        c for c in selection_candidates
         if abs(int(_rank_pvp_state(c).get("rank_pos", RANK_PVP_MAX_RANK + 1))
                - current_rank) <= 50
     ]
-    pool = nearby if nearby else candidates
+    pool = nearby if nearby else selection_candidates
     higher = [
         c for c in pool
         if int(_rank_pvp_state(c).get("rank_pos", RANK_PVP_MAX_RANK + 1)) < current_rank
@@ -18115,6 +18123,16 @@ def _rank_pvp_random_opponent_payload(character):
         chosen.extend(random.sample(
             remaining, min(RANK_PVP_CANDIDATE_COUNT - len(chosen), len(remaining))
         ))
+    # If the fresh pool had fewer options than cards, fill from all eligible
+    # candidates without repeating a card; repeat only when the roster itself
+    # has fewer entries than the client UI's fixed card count.
+    if len(chosen) < RANK_PVP_CANDIDATE_COUNT:
+        fallback = [c for c in candidates if c not in chosen]
+        if fallback:
+            chosen.extend(random.sample(
+                fallback,
+                min(RANK_PVP_CANDIDATE_COUNT - len(chosen), len(fallback))
+            ))
     chosen = chosen[:RANK_PVP_CANDIDATE_COUNT]
     # The client enables Refresh only after all three preview objects initialize.
     if chosen:
