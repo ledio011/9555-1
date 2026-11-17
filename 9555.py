@@ -55,9 +55,11 @@ NPC_ATTR_MAP = {} # runtime NPC payloads for reconnect replay
 GOTHAM_MAP_ID = "109"
 SLUM_DISTRICT_MAP_ID = "102"
 VEGAS_MAP_ID = "104"
+CHINATOWN_MAP_ID = "107"
 OPEN_WORLD_NPC_RESPAWN_SECONDS = 5
 SLUM_NPC_EXP_REWARD_SCALE = 0.01
-OPEN_WORLD_NPC_MAP_IDS = frozenset((SLUM_DISTRICT_MAP_ID, VEGAS_MAP_ID))
+OPEN_WORLD_NPC_MAP_IDS = frozenset((
+    SLUM_DISTRICT_MAP_ID, VEGAS_MAP_ID, CHINATOWN_MAP_ID))
 WAREHOUSE_SNEAK_BOSS_NPC_ID = "13101"
 WAREHOUSE_SNEAK_BOSS_EXP_REWARD_SCALE = 0.05
 GOTHAM_BOSS_DEFAULT_RESPAWN_SECONDS = 3 * 60 * 60
@@ -11985,7 +11987,9 @@ def prison_npc_specs(map_id, player_level=1, player_id=None,
             owner_id = int(player_id) if (
                 map_str == WAREHOUSE_SNEAK_COPY_ID and player_id is not None
             ) else None
-            path_id = str(row.get("path_id") or "") if map_str == VEGAS_MAP_ID else ""
+            path_id = (
+                str(row.get("path_id") or "")
+                if map_str in OPEN_WORLD_NPC_MAP_IDS else "")
             patrol_path = patrol_paths.get(path_id, []) if path_id else []
             specs.append({
                 "slot": (f"{map_str}:{owner_id}:{index}" if owner_id is not None
@@ -12633,10 +12637,12 @@ def _prison_npc_ai_tick():
                             _prison_npc_stop(slot_key, inst_id, now)
                         else:
                             default_walk_speed = (
-                                10 if (str(snapshot.get("map_id", ""))
-                                       in SCUFFLE_NPC_MAP_IDS
-                                       or str(snapshot.get("map_id", ""))
-                                       == VEGAS_MAP_ID) else 5)
+                                10 if (
+                                    str(snapshot.get("map_id", ""))
+                                    in SCUFFLE_NPC_MAP_IDS
+                                    or str(snapshot.get("map_id", ""))
+                                    in (VEGAS_MAP_ID, CHINATOWN_MAP_ID)
+                                ) else 5)
                             walk_speed = max(
                                 0.1,
                                 float(npc_cfg.get("walk_speed")
