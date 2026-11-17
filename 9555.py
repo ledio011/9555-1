@@ -19297,7 +19297,9 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             matched = int(cfg.get('class', 0) or 0) == 1
         elif logic_type == 110 and event == 'rank_pvp':
             matched = target_value == '110' or str(cfg.get('logic_id', '')) == '110'
-        elif logic_type in [102, 105, 106, 107, 108, 113, 114, 117, 119, 120, 132] and (
+        elif logic_type == 117 and event == 'accept_escort':
+            matched = True
+        elif logic_type in [102, 105, 106, 107, 108, 113, 114, 119, 120, 132] and (
                 event in ['dungeon', 'car_copy']
                 or (logic_type == 108 and event == 'kill')):
             # Dungeon/Guide entry missions advance on specific 'dungeon' or 'car_copy' events
@@ -27118,6 +27120,7 @@ def client_handler(conn, addr):
                             f"accept request tag=112 result={res} "
                             f"state={picked_char.get('active_missions', {}).get('1014', {}).get('state')}",
                         )
+                    mission_event_advanced = False
                     if res:
                         daily_mid_to_push = None
                         if mid == '1014':
@@ -27146,10 +27149,13 @@ def client_handler(conn, addr):
                         if m_entry.get('activity_id'):
                             spawn_gotham_escort_npc(conn, picked_char)
                             send_rpc_push(619, activity_info_payload(picked_char))
+                            mission_event_advanced = advance_missions(
+                                picked_char, send_rpc_push, 'accept_escort')
                     if session is not None:
                         ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                         conn.sendall(struct.pack(">H", len(pf)) + pf)
-                    send_rpc_push(519, sync_mission_data(picked_char))
+                    if not mission_event_advanced:
+                        send_rpc_push(519, sync_mission_data(picked_char))
 
             elif msg == 113: # complete_mission
                 if picked_char:
