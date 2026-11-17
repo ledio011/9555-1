@@ -146,9 +146,12 @@ NPC_AOI_TRACK = {}  # connection identity -> {inst_id: {'nid': ..., 'x': ..., 'z
 SURVIVE_BATTLE_NPC_MAP_IDS = frozenset(("1101", "1102"))
 SURVIVAL_PLAYER_MODEL_RADIUS_CM = 30  # CharacterModelData IDs 100, 104, and 105.
 SCUFFLE_NPC_MAP_IDS = frozenset(("1201", "1202"))
+WAREHOUSE_SNEAK_COPY_ID = "303"
+WAREHOUSE_SNEAK_STATE_KEY = "_warehouse_sneak_state"
+WAREHOUSE_SNEAK_LOCK = threading.RLock()
 PRISON_NPC_AOI_MAP_IDS = (
     SCUFFLE_NPC_MAP_IDS | SURVIVE_BATTLE_NPC_MAP_IDS
-    | frozenset((SLUM_DISTRICT_MAP_ID,)))
+    | frozenset((SLUM_DISTRICT_MAP_ID, WAREHOUSE_SNEAK_COPY_ID)))
 PRISON_NPC_AOI_TRACK = {}  # connection identity -> {shared spawn key: instance ID}
 PRISON_NPC_SHARED_SLOTS = {}
 PRISON_NPC_SHARED_BY_INSTANCE = {}
@@ -11016,6 +11019,10 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                     ]),
                 ])]))
 
+    if current_map == WAREHOUSE_SNEAK_COPY_ID and inst_id:
+        record_warehouse_sneak_npc_kill(
+            conn, send_rpc_push, picked_char, inst_id)
+
 def start_exp_stage_runtime(conn, owner, state):
     if not state or state.get('runtime_started') or state.get('defer_start'): return
     state['runtime_started'] = True
@@ -11654,11 +11661,35 @@ def update_npc_aoi(conn, map_id, picked_char):
 def clear_prison_npc_aoi(conn, send_remove=False):
     """Release one connection's visibility of shared prison NPC instances."""
     tracked = PRISON_NPC_AOI_TRACK.pop(id(conn), {})
+    owner_id = None
+    for current_conn, char in list(ALL_CONNECTIONS.values()):
+        if current_conn is conn and char:
+            try:
+                owner_id = int(char.get("id", 0) or 0)
+            except (TypeError, ValueError):
+                pass
+            break
     if send_remove:
         for inst_id in tracked.values():
             if inst_id is None:
                 continue
             send_rpc_push_safe(conn, 506, encode_sproto([(0, int(inst_id))]))
+    with PRISON_NPC_LOCK:
+        for slot_key, slot in list(PRISON_NPC_SHARED_SLOTS.items()):
+            if (str(slot.get("map_id", "")) != WAREHOUSE_SNEAK_COPY_ID
+                    or (owner_id is not None
+                        and int(slot.get("owner_id", 0) or 0) != owner_id)
+                    or (owner_id is None and slot_key not in tracked)):
+                continue
+            slot = PRISON_NPC_SHARED_SLOTS.pop(slot_key, {})
+            inst_id = int(slot.get("inst_id") or 0)
+            if inst_id:
+                PRISON_NPC_SHARED_BY_INSTANCE.pop(inst_id, None)
+                NPC_HP_MAP.pop(inst_id, None)
+                NPC_INST_MAP.pop(inst_id, None)
+                NPC_INSTANCE_MAP.pop(inst_id, None)
+                NPC_ATTR_MAP.pop(inst_id, None)
+                DEAD_NPC_SET.discard(inst_id)
 
 
 def reset_survive_battle_npcs_for_event(map_id, event_start):
@@ -11718,9 +11749,43 @@ def reset_survive_battle_npcs_for_event(map_id, event_start):
     return True
 
 
-def prison_npc_specs(map_id, player_level=1):
+def warehouse_sneak_state_for_char(picked_char, create=False):
+    if (not picked_char
+            or str(picked_char.get('active_copy_id') or '')
+            != WAREHOUSE_SNEAK_COPY_ID):
+        return None
+    try:
+        owner_id = int(picked_char.get('id', 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    state = picked_char.get(WAREHOUSE_SNEAK_STATE_KEY)
+    if isinstance(state, dict) and str(state.get('copy_id')) == WAREHOUSE_SNEAK_COPY_ID:
+        try:
+            if int(state.get('owner_id', 0) or 0) == owner_id:
+                return state
+        except (TypeError, ValueError):
+            pass
+    mission = picked_char.get('active_missions', {}).get('33', {})
+    if not create or int(mission.get('state', 0) or 0) != 1:
+        return None
+    state = {
+        'copy_id': WAREHOUSE_SNEAK_COPY_ID,
+        'owner_id': owner_id,
+        'phase': 'sneak',
+        'spawn_slots': [],
+        'killed_slots': [],
+        'result_recorded': False,
+    }
+    picked_char[WAREHOUSE_SNEAK_STATE_KEY] = state
+    return state
+
+
+def prison_npc_specs(map_id, player_level=1, player_id=None,
+                     warehouse_battle=False):
     specs = []
     map_str = str(map_id)
+    if map_str == WAREHOUSE_SNEAK_COPY_ID and not warehouse_battle:
+        return specs
     if map_str not in SURVIVE_BATTLE_NPC_MAP_IDS:
         player_level = 1
     try:
@@ -11742,10 +11807,15 @@ def prison_npc_specs(map_id, player_level=1):
             if (map_str == SLUM_DISTRICT_MAP_ID and index < monster_count
                     and rebirth_time < 0):
                 rebirth_time = SLUM_NPC_RESPAWN_SECONDS
+            owner_id = int(player_id) if (
+                map_str == WAREHOUSE_SNEAK_COPY_ID and player_id is not None
+            ) else None
             specs.append({
-                "slot": f"{map_str}:{index}",
+                "slot": (f"{map_str}:{owner_id}:{index}" if owner_id is not None
+                         else f"{map_str}:{index}"),
                 "map_id": map_str,
                 "spawn_index": index,
+                "owner_id": owner_id,
                 "is_static": map_str == SLUM_DISTRICT_MAP_ID and index >= monster_count,
                 "nid": nid,
                 "x": int(row.get("x", 0)),
@@ -11823,12 +11893,16 @@ def prison_shared_npc_for_spawn(spec):
 
 def prison_npc_visible_connections(slot_key, inst_id):
     visible = []
+    slot = PRISON_NPC_SHARED_SLOTS.get(str(slot_key), {})
+    owner_id = slot.get("owner_id")
     for conn_key, tracked in list(PRISON_NPC_AOI_TRACK.items()):
         if int(tracked.get(slot_key, 0) or 0) != int(inst_id):
             continue
         entry = next(((conn, char) for conn, char in ALL_CONNECTIONS.values()
                       if conn and id(conn) == conn_key), None)
-        if (entry and str(entry[1].get("map_id", "")) in PRISON_NPC_AOI_MAP_IDS
+        if (entry and (owner_id is None
+                       or int(entry[1].get("id", 0) or 0) == int(owner_id))
+                and str(entry[1].get("map_id", "")) in PRISON_NPC_AOI_MAP_IDS
                 and str(entry[1].get("map_id", "")) ==
                 str(PRISON_NPC_SHARED_SLOTS.get(slot_key, {}).get("map_id", ""))):
             visible.append(entry)
@@ -11930,12 +12004,25 @@ def update_prison_npc_aoi(conn, map_id, picked_char):
         player_level = int(picked_char.get("level", 1) or 1)
     except (TypeError, ValueError):
         player_level = 1
-    for spec in prison_npc_specs(map_str, player_level):
+    sneak_state = (
+        warehouse_sneak_state_for_char(picked_char, create=True)
+        if map_str == WAREHOUSE_SNEAK_COPY_ID else None
+    )
+    warehouse_battle = bool(
+        sneak_state and sneak_state.get("phase") == "battle"
+        and not sneak_state.get("result_recorded"))
+    try:
+        player_id = int(picked_char.get("id", 0) or 0)
+    except (TypeError, ValueError):
+        player_id = 0
+    for spec in prison_npc_specs(
+            map_str, player_level, player_id, warehouse_battle):
         slot_key = str(spec["slot"])
         slot = PRISON_NPC_SHARED_SLOTS.get(slot_key)
         position = (slot.get("position") if slot else None) or (spec["x"], spec["z"])
         dx, dz = px - int(position[0]), pz - int(position[1])
-        if (not survival_field and dx * dx + dz * dz > radius_sq):
+        if (not survival_field and map_str != WAREHOUSE_SNEAK_COPY_ID
+                and dx * dx + dz * dz > radius_sq):
             continue
         visible_slots.add(slot_key)
         if (slot and slot.get("inst_id") is not None
@@ -11960,6 +12047,109 @@ def update_prison_npc_aoi(conn, map_id, picked_char):
         if slot_key not in visible_slots:
             send_rpc_push_safe(conn, 506, encode_sproto([(0, int(inst_id))]))
             tracked.pop(slot_key, None)
+
+
+def start_warehouse_sneak_battle(conn, picked_char, send_rpc_push):
+    if (str(picked_char.get("map_id", "")) != WAREHOUSE_SNEAK_COPY_ID
+            or not is_current_character_connection(conn, picked_char)):
+        return False
+    state = warehouse_sneak_state_for_char(picked_char, create=True)
+    if not state or state.get("result_recorded"):
+        return False
+    if state.get("phase") == "battle":
+        update_prison_npc_aoi(conn, WAREHOUSE_SNEAK_COPY_ID, picked_char)
+        return True
+    if state.get("phase") != "sneak":
+        return False
+
+    try:
+        pos = picked_char.get("pos") or default_map_spawn_position(
+            WAREHOUSE_SNEAK_COPY_ID)
+        distance_sq = (
+            (int(pos[0]) - 200) ** 2 + (int(pos[2]) + 700) ** 2
+        )
+    except (TypeError, ValueError, IndexError):
+        return False
+    if distance_sq > 200 ** 2:
+        print(f"[SNEAK COPY] start denied before client-verified endpoint "
+              f"player={picked_char.get('id')} pos={pos}")
+        return False
+
+    player_id = int(picked_char.get("id", 0) or 0)
+    specs = prison_npc_specs(
+        WAREHOUSE_SNEAK_COPY_ID,
+        picked_char.get("level", 1),
+        player_id=player_id,
+        warehouse_battle=True,
+    )
+    if not specs:
+        print(f"[SNEAK COPY] no configured combat placements map="
+              f"{WAREHOUSE_SNEAK_COPY_ID}")
+        return False
+    with WAREHOUSE_SNEAK_LOCK:
+        if state.get("phase") != "sneak" or state.get("result_recorded"):
+            return False
+        state["phase"] = "battle"
+        state["spawn_slots"] = [spec["slot"] for spec in specs]
+        state["killed_slots"] = []
+        state["started_at"] = int(time.time())
+    update_prison_npc_aoi(conn, WAREHOUSE_SNEAK_COPY_ID, picked_char)
+    tracked = PRISON_NPC_AOI_TRACK.get(id(conn), {})
+    if not all(slot in tracked for slot in state["spawn_slots"]):
+        print(f"[SNEAK COPY] combat started with incomplete AOI spawn "
+              f"player={player_id} spawned={sum(slot in tracked for slot in state['spawn_slots'])}"
+              f"/{len(state['spawn_slots'])}")
+    save_chars(all_accounts_chars)
+    return True
+
+
+def warehouse_sneak_result_payload():
+    return encode_sproto([
+        (0, 8), (1, WAREHOUSE_SNEAK_COPY_ID), (2, True),
+        (3, 0), (4, 0), (5, []),
+    ])
+
+
+def record_warehouse_sneak_npc_kill(
+        conn, send_rpc_push, picked_char, inst_id):
+    try:
+        inst_id = int(inst_id)
+        player_id = int(picked_char.get("id", 0) or 0)
+    except (TypeError, ValueError, AttributeError):
+        return False
+    slot_key = PRISON_NPC_SHARED_BY_INSTANCE.get(inst_id)
+    slot = PRISON_NPC_SHARED_SLOTS.get(str(slot_key)) if slot_key else None
+    if (not slot or str(slot.get("map_id", "")) != WAREHOUSE_SNEAK_COPY_ID
+            or int(slot.get("owner_id", 0) or 0) != player_id):
+        return False
+
+    with WAREHOUSE_SNEAK_LOCK:
+        state = warehouse_sneak_state_for_char(picked_char)
+        if (not state or state.get("phase") != "battle"
+                or state.get("result_recorded")
+                or slot_key not in state.get("spawn_slots", [])):
+            return False
+        killed_slots = state.setdefault("killed_slots", [])
+        if slot_key not in killed_slots:
+            killed_slots.append(slot_key)
+        spawn_slots = set(state.get("spawn_slots", []))
+        if not spawn_slots or not spawn_slots.issubset(set(killed_slots)):
+            return False
+        state["phase"] = "complete"
+        state["result_recorded"] = True
+
+    advance_missions(
+        picked_char, send_rpc_push, "copy_scene_complete",
+        target_id=WAREHOUSE_SNEAK_COPY_ID,
+        map_id=WAREHOUSE_SNEAK_COPY_ID,
+    )
+    # CopySceneData 303 has no ShowRewardId, DropId, or star descriptions;
+    # mission 33's configured reward is claimed later from its submit NPC.
+    send_rpc_push(552, warehouse_sneak_result_payload())
+    save_chars(all_accounts_chars)
+    print(f"[SNEAK COPY] completed player={player_id} copy="
+          f"{WAREHOUSE_SNEAK_COPY_ID}")
+    return True
 
 
 def _prison_npc_skills(npc_cfg, attack_distance, include_model_radii=False):
@@ -12015,6 +12205,7 @@ def _prison_npc_move_toward(
         use_client_waypoint = (
             is_survival_map
             or map_id == SLUM_DISTRICT_MAP_ID
+            or map_id == WAREHOUSE_SNEAK_COPY_ID
             or (map_id in SCUFFLE_NPC_MAP_IDS and walk))
         was_moving = bool(slot.get("moving"))
         dx, dz = float(target_x) - current_x, float(target_z) - current_z
@@ -12075,6 +12266,8 @@ def prison_npc_retarget_on_hit(inst_id, attacker):
         slot = PRISON_NPC_SHARED_SLOTS.get(str(slot_key))
         if (not slot or str(slot.get("map_id", "")) not in PRISON_NPC_AOI_MAP_IDS
                 or int(slot.get("inst_id") or 0) != inst_id
+                or (slot.get("owner_id") is not None
+                    and int(slot.get("owner_id") or 0) != attacker_id)
                 or slot.get("is_static")
                 or (str(slot.get("map_id", "")) == SLUM_DISTRICT_MAP_ID
                     and is_slum_static_npc(slot.get("nid", "")))
@@ -12119,6 +12312,11 @@ def _prison_npc_ai_tick():
             npc_id = str(snapshot["nid"])
             npc_cfg = NPC_CONFIG.get(npc_id, {})
             map_id = str(snapshot.get("map_id", ""))
+            owner_id = snapshot.get("owner_id")
+            slot_players = [
+                player for player in players
+                if owner_id is None or player[0] == int(owner_id)
+            ]
             is_survival_map = map_id in SURVIVE_BATTLE_NPC_MAP_IDS
             is_slum_map = map_id == SLUM_DISTRICT_MAP_ID
             ai_cfg = AI_DATA_CONFIG.get(str(npc_cfg.get("ai_data_id") or ""), {})
@@ -12139,7 +12337,9 @@ def _prison_npc_ai_tick():
             around_max = max(around_min, int(ai_cfg.get("around_max_distance", 200) or 200))
             attack_distance = max(0.5, (around_min + around_max) / 200.0)
             skills = _prison_npc_skills(
-                npc_cfg, attack_distance, is_survival_map or is_slum_map)
+                npc_cfg, attack_distance,
+                is_survival_map or is_slum_map
+                or map_id == WAREHOUSE_SNEAK_COPY_ID)
             if not skills:
                 continue
             speed = max(0.1, float(npc_cfg.get("move_speed", 50) or 50) / 10.0)
@@ -12153,7 +12353,7 @@ def _prison_npc_ai_tick():
             target = None
             prior_target = int(snapshot.get("target_id", 0) or 0)
             if prior_target and not outside_survival_leash:
-                target = next((p for p in players if p[0] == prior_target), None)
+                target = next((p for p in slot_players if p[0] == prior_target), None)
                 if (target and not is_survival_map
                         and math.hypot(target[3] / 100.0 - mx,
                                        target[4] / 100.0 - mz) > return_distance):
@@ -12168,7 +12368,7 @@ def _prison_npc_ai_tick():
             if target is None and not outside_survival_leash:
                 candidates = [
                     (math.hypot(p[3] / 100.0 - mx, p[4] / 100.0 - mz), p)
-                    for p in players
+                    for p in slot_players
                 ]
                 candidates = [entry for entry in candidates if entry[0] <= lock_distance]
                 if candidates:
@@ -19317,6 +19517,8 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
             matched = target_value == '110' or str(cfg.get('logic_id', '')) == '110'
         elif logic_type == 117 and event == 'accept_escort':
             matched = True
+        elif logic_type == 11 and event == 'copy_scene_complete':
+            matched = str(cfg.get('logic_id', '')) == target_value
         elif logic_type in [102, 105, 106, 107, 108, 113, 114, 119, 120, 132] and (
                 event in ['dungeon', 'car_copy']
                 or (logic_type == 108 and event == 'kill')):
@@ -20143,6 +20345,8 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
             print(f"[AOI NPC] Cleaned up {len(tracked)} tracked NPCs for conn={conn_key} leaving map 101")
     if src_map in PRISON_NPC_AOI_MAP_IDS and src_map != target_map_id:
         clear_prison_npc_aoi(conn, send_remove=True)
+    if src_map == WAREHOUSE_SNEAK_COPY_ID and src_map != target_map_id:
+        picked_char.pop(WAREHOUSE_SNEAK_STATE_KEY, None)
     if src_map != target_map_id: broadcast_aoi_remove(picked_char.get('id', 0), src_map)
     NPC_SPAWNED_MAPS.setdefault(id(conn), set()).discard(target_map_id)
     picked_char['map_id'] = target_map_id
@@ -26436,6 +26640,13 @@ def client_handler(conn, addr):
                                 if event_start > 0 and int(time.time()) < event_end:
                                     reset_survive_battle_npcs_for_event(mid, event_start)
                         update_prison_npc_aoi(conn, mid, picked_char)
+                        sneak_state = (
+                            warehouse_sneak_state_for_char(picked_char)
+                            if mid == WAREHOUSE_SNEAK_COPY_ID else None
+                        )
+                        if sneak_state and sneak_state.get("result_recorded"):
+                            send_rpc_push(
+                                552, warehouse_sneak_result_payload())
                         if mid in SURVIVE_BATTLE_NPC_MAP_IDS:
                             survival_state = picked_char.get('survival_battle_state')
                             survival_config = survive_battle_config_for_map(mid)
@@ -30071,6 +30282,19 @@ def client_handler(conn, addr):
                                     or target_id not in NPC_HP_MAP):
                                 print(f"[COMBAT SECURITY] rejected unknown/cross-map NPC target={target_id} map={cur_map}")
                                 continue
+                            if cur_map == WAREHOUSE_SNEAK_COPY_ID:
+                                slot_key = PRISON_NPC_SHARED_BY_INSTANCE.get(target_id)
+                                slot = PRISON_NPC_SHARED_SLOTS.get(str(slot_key)) if slot_key else None
+                                sneak_state = warehouse_sneak_state_for_char(picked_char)
+                                if (not slot
+                                        or int(slot.get("owner_id", 0) or 0)
+                                        != int(picked_char.get("id", 0) or 0)
+                                        or not sneak_state
+                                        or sneak_state.get("phase") != "battle"
+                                        or slot_key not in sneak_state.get("spawn_slots", [])):
+                                    print(f"[SNEAK COPY] rejected unowned/inactive target={target_id} "
+                                          f"player={picked_char.get('id')}")
+                                    continue
                             if is_tower:
                                 tower_state = picked_char.get('tower_run')
                                 if (not isinstance(tower_state, dict)
@@ -30701,6 +30925,19 @@ def client_handler(conn, addr):
                         ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                         conn.sendall(struct.pack(">H", len(pf)) + pf)
                     continue
+                warehouse_owner_valid = True
+                if picked_char and cur_map == WAREHOUSE_SNEAK_COPY_ID:
+                    slot_key = PRISON_NPC_SHARED_BY_INSTANCE.get(inst_id)
+                    slot = PRISON_NPC_SHARED_SLOTS.get(str(slot_key)) if slot_key else None
+                    sneak_state = warehouse_sneak_state_for_char(picked_char)
+                    warehouse_owner_valid = bool(
+                        slot
+                        and int(slot.get("owner_id", 0) or 0)
+                        == int(picked_char.get("id", 0) or 0)
+                        and sneak_state
+                        and sneak_state.get("phase") in ("battle", "complete")
+                        and slot_key in sneak_state.get("spawn_slots", [])
+                    )
                 if picked_char and msg == 127:
                     # MSG 127 carries the NPC's serverId. Only accept instances
                     # that this server actually created, with the matching
@@ -30720,6 +30957,7 @@ def client_handler(conn, addr):
                     report_valid = bool(inst_id and expected_client_npcid == str(npcid)
                                         and str(NPC_INSTANCE_MAP.get(inst_id, '')) == cur_map
                                         and cash_owner_valid
+                                        and warehouse_owner_valid
                                         and int(NPC_HP_MAP.get(inst_id, 1)) <= 0)
                 elif picked_char and die_type in (2, 6):
                     # Car robbery packets carry no vehicle ID. Match the
@@ -30744,6 +30982,7 @@ def client_handler(conn, addr):
                     # has reached zero; a death report alone cannot mint kills.
                     report_valid = bool(str(NPC_INST_MAP.get(inst_id, '')) == str(npcid)
                                         and str(NPC_INSTANCE_MAP.get(inst_id, '')) == cur_map
+                                        and warehouse_owner_valid
                                         and int(NPC_HP_MAP.get(inst_id, 1)) <= 0)
 
                 if not report_valid:
@@ -31540,6 +31779,9 @@ def client_handler(conn, addr):
                     if str(picked_char.get('map_id') or '11') != str(copy_id):
                         snapshot_activity_return_location(picked_char)
                     picked_char['active_copy_id'] = copy_id
+                    if copy_id == WAREHOUSE_SNEAK_COPY_ID:
+                        warehouse_sneak_state_for_char(
+                            picked_char, create=True)
                     advance_missions(picked_char, send_rpc_push, 'dungeon', target_id=copy_id)
                     start_map_transition(conn, picked_char, copy_id, send_rpc_push)
                 if session is not None:
@@ -32001,6 +32243,9 @@ def client_handler(conn, addr):
                 if picked_char and is_current_character_connection(conn, picked_char) and picked_char.get('active_copy_id'):
                     copy_id = str(picked_char['active_copy_id'])
                     cfg = COPY_SCENE_CONFIG.get(copy_id)
+                    if copy_id == WAREHOUSE_SNEAK_COPY_ID:
+                        start_warehouse_sneak_battle(
+                            conn, picked_char, send_rpc_push)
                     cash_state = picked_char.get('cash_stage_state')
                     if (cfg and int(cfg.get('subtype', -1)) == 11
                             and isinstance(cash_state, dict)
