@@ -11759,6 +11759,14 @@ def prison_npc_specs(map_id, player_level=1):
     return specs
 
 
+def is_slum_static_npc(npc_id):
+    nid = str(npc_id)
+    return any(
+        str(spawn.get("nid") or "") == nid
+        for spawn in STATIC_NPC_DATA.get(SLUM_DISTRICT_MAP_ID, [])
+    )
+
+
 def prison_create_shared_npc(slot, spec):
     nid = str(spec["nid"])
     cfg = NPC_CONFIG[nid]
@@ -12067,6 +12075,9 @@ def prison_npc_retarget_on_hit(inst_id, attacker):
         slot = PRISON_NPC_SHARED_SLOTS.get(str(slot_key))
         if (not slot or str(slot.get("map_id", "")) not in PRISON_NPC_AOI_MAP_IDS
                 or int(slot.get("inst_id") or 0) != inst_id
+                or slot.get("is_static")
+                or (str(slot.get("map_id", "")) == SLUM_DISTRICT_MAP_ID
+                    and is_slum_static_npc(slot.get("nid", "")))
                 or slot.get("dead_at")
                 or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
             return False
@@ -12361,6 +12372,8 @@ def start_prison_npc_runtime():
 def register_slum_npc_ai(conn, char, inst_id, npc_id, x, z, heading):
     if not conn or not char or str(char.get("map_id", "")) != SLUM_DISTRICT_MAP_ID:
         return
+    if is_slum_static_npc(npc_id):
+        return
     if not any(str(spawn.get("nid") or "") == str(npc_id)
                for spawn in MONSTER_DATA.get(SLUM_DISTRICT_MAP_ID, [])):
         return
@@ -12416,6 +12429,7 @@ def slum_npc_retarget_on_hit(inst_id, attacker, conn):
         state = SLUM_NPC_AI_STATES.get(inst_id)
         if (not state or state["owner_id"] != attacker_id
                 or state["owner_conn_id"] != id(conn)
+                or is_slum_static_npc(state.get("nid", ""))
                 or inst_id in DEAD_NPC_SET
                 or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
             return False
@@ -12514,6 +12528,10 @@ def _slum_npc_ai_tick():
     try:
         for inst_id, snapshot in snapshots:
             inst_id = int(inst_id)
+            if is_slum_static_npc(snapshot.get("nid", "")):
+                with SLUM_NPC_AI_LOCK:
+                    SLUM_NPC_AI_STATES.pop(inst_id, None)
+                continue
             owner_id = int(snapshot["owner_id"])
             conn, char = ALL_CONNECTIONS.get(owner_id, (None, None))
             if (not conn or not char
