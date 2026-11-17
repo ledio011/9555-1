@@ -19675,7 +19675,7 @@ def validate_mission_npc_contact(picked_char, mission_id, role):
     return near_npc, 'accepted' if near_npc else 'too_far'
 
 
-def accept_mission_logic(picked_char, mid, online_id=None):
+def accept_mission_logic(picked_char, mid, online_id=None, conn=None):
     if mid not in missions_data:
         print(f"[accept_mission_logic] FAILED: {mid} not in missions_data")
         return False
@@ -27776,7 +27776,7 @@ def client_handler(conn, addr):
                                   else 'not_required')
                         )
                         res = (
-                            accept_mission_logic(picked_char, mid, online_id)
+                            accept_mission_logic(picked_char, mid, online_id, conn)
                             if contact_ok else False
                         )
                     print(f"[MISSION ACCEPT REQ] mid={mid} result={res} "
@@ -27917,7 +27917,8 @@ def client_handler(conn, addr):
                                 # Auto-chain to next Main Mission
                                 next_mid = m_cfg.get('next_id')
                                 if next_mid and str(next_mid) in missions_data:
-                                    res = accept_mission_logic(picked_char, str(next_mid))
+                                    res = accept_mission_logic(
+                                        picked_char, str(next_mid), conn=conn)
                                     print(f"[MISSION NEXT] previous={mid} next={next_mid} accepted={res}")
                                     is_chained = res
                                     if res and str(next_mid) == '1014':
