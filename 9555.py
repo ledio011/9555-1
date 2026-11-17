@@ -57,6 +57,8 @@ SLUM_DISTRICT_MAP_ID = "102"
 VEGAS_MAP_ID = "104"
 CITY_NPC_AI_MAP_IDS = frozenset((SLUM_DISTRICT_MAP_ID, VEGAS_MAP_ID))
 CITY_NPC_CHASE_SECONDS = 2.0
+VEGAS_NPC_RESPAWN_SECONDS = 5.0
+VEGAS_NPC_DEATH_ANIMATION_SECONDS = 4.5
 SLUM_NPC_RESPAWN_SECONDS = 5
 LOW_EXP_NPC_REWARD_SCALE = 0.01
 WAREHOUSE_SNEAK_BOSS_NPC_ID = "13101"
@@ -174,6 +176,10 @@ SLUM_NPC_AI_STATES = {}
 SLUM_NPC_AI_LOCK = threading.RLock()
 SLUM_NPC_AI_TASK = None
 SLUM_NPC_AI_TASK_LOCK = threading.Lock()
+VEGAS_SHARED_NPC_SLOTS = {}
+VEGAS_SHARED_NPC_BY_INSTANCE = {}
+VEGAS_NPC_LOCK = threading.RLock()
+VEGAS_NPC_AOI_TRACK = {}  # connection identity -> {shared slot: current instance ID}
 PLAYER_AOI_TRACK = {}  # character ID -> set of visible character IDs
 NPC_PATROL_CONNECTIONS = {}  # connection identity -> (socket, character) with active Liberty patrols
 NPC_PATROL_WORKER = None
@@ -10851,6 +10857,9 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
     # Keep stage progress in its existing batch/result flow to avoid double
     # crediting the same instance.
     current_map = str(picked_char.get('map_id', ''))
+    if (current_map == VEGAS_MAP_ID and inst_id
+            and int(inst_id) in VEGAS_SHARED_NPC_BY_INSTANCE):
+        vegas_mark_shared_npc_dead(inst_id)
     if is_tower_map(current_map) and inst_id:
         tower_npc_killed(picked_char, inst_id, conn, send_rpc_push)
     if valid_kill and not is_exp_map(current_map) and not is_equipment_copy_map(current_map):
@@ -10922,6 +10931,8 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
     if inst_id and not (
             (str(NPC_INSTANCE_MAP.get(inst_id, "")) == GOTHAM_MAP_ID
              and int(inst_id) in GOTHAM_SHARED_NPC_BY_INSTANCE)
+            or (current_map == VEGAS_MAP_ID
+                and int(inst_id) in VEGAS_SHARED_NPC_BY_INSTANCE)
             or (current_map in PRISON_NPC_AOI_MAP_IDS
                 and int(inst_id) in PRISON_NPC_SHARED_BY_INSTANCE)):
         with SLUM_NPC_AI_LOCK:
@@ -12739,6 +12750,275 @@ def start_prison_npc_runtime():
         PRISON_NPC_AI_TASK = RepeatingTask(0.2, _prison_npc_ai_tick).start()
 
 
+def vegas_npc_map_connections(extra=None):
+    with VEGAS_NPC_LOCK:
+        ready_conn_ids = set(VEGAS_NPC_AOI_TRACK)
+    peers = {}
+    for peer_conn, peer_char in list(ALL_CONNECTIONS.values()):
+        if (peer_conn and peer_char and id(peer_conn) in ready_conn_ids
+                and str(peer_char.get("map_id", "")) == VEGAS_MAP_ID):
+            peers[id(peer_conn)] = (peer_conn, peer_char)
+    if (extra and extra[0] and extra[1]
+            and str(extra[1].get("map_id", "")) == VEGAS_MAP_ID):
+        peers[id(extra[0])] = extra
+    return list(peers.values())
+
+
+def vegas_npc_visible_connections(slot_key, inst_id):
+    with VEGAS_NPC_LOCK:
+        visible_ids = {
+            conn_id for conn_id, tracked in VEGAS_NPC_AOI_TRACK.items()
+            if int(tracked.get(str(slot_key), 0) or 0) == int(inst_id)
+        }
+    return [
+        (peer_conn, peer_char)
+        for peer_conn, peer_char in vegas_npc_map_connections()
+        if id(peer_conn) in visible_ids
+    ]
+
+
+def clear_vegas_npc_aoi(conn, send_remove=False):
+    with VEGAS_NPC_LOCK:
+        tracked = VEGAS_NPC_AOI_TRACK.pop(id(conn), {})
+    if send_remove:
+        for inst_id in tracked.values():
+            send_rpc_push_safe(conn, 506, encode_sproto([(0, int(inst_id))]))
+
+
+def vegas_npc_specs():
+    specs = []
+    for kind, entries in (("static", STATIC_NPC_DATA.get(VEGAS_MAP_ID, [])),
+                          ("monster", MONSTER_DATA.get(VEGAS_MAP_ID, []))):
+        for index, row in enumerate(entries):
+            group = int(row.get("group", 9999) or 9999)
+            specs.append({
+                "slot": f"{kind}:{index}",
+                "nid": str(row.get("nid", "")),
+                "x": int(row.get("x", 0)),
+                "z": int(row.get("z", 0)),
+                "o": int(row.get("o", 0)),
+                "path_id": str(row.get("path_id") or ""),
+                "group": group,
+                "city_ai": kind == "monster" and 1 <= group <= 8,
+                "respawn_seconds": (
+                    VEGAS_NPC_RESPAWN_SECONDS
+                    if kind == "monster" and 1 <= group <= 8 else 0),
+            })
+    return specs
+
+
+def vegas_create_shared_npc(slot, spec):
+    nid = str(spec["nid"])
+    npc_cfg = NPC_CONFIG.get(nid, {"name": f"NPC_{nid}"})
+    inst_id, attr = build_npc_attr_sproto(
+        nid, npc_cfg.get("name", f"NPC_{nid}"),
+        int(spec["x"]), int(spec["z"]), int(spec.get("o", 0)))
+    NPC_INSTANCE_MAP[inst_id] = VEGAS_MAP_ID
+    slot.update({
+        **spec,
+        "inst_id": inst_id,
+        "position": (int(spec["x"]), int(spec["z"])),
+        "heading": int(spec.get("o", 0)),
+        "dead_at": 0.0,
+        "respawn_at": 0.0,
+    })
+    VEGAS_SHARED_NPC_BY_INSTANCE[inst_id] = str(spec["slot"])
+    return inst_id, attr
+
+
+def vegas_send_npc_create(inst_id, attr, npc_id, peers):
+    stats = get_npc_attr(npc_id)
+    for peer_conn, _peer_char in peers:
+        if send_rpc_push_safe(peer_conn, 509, encode_sproto([(0, attr)])):
+            sync_npc_attrs_rpc(
+                peer_conn, inst_id, stats,
+                NPC_HP_MAP.get(inst_id, stats["hp_max"]))
+
+
+def vegas_shared_npc_for_spawn(conn, char, spec):
+    slot_key = str(spec["slot"])
+    now = time.time()
+    created = False
+    with VEGAS_NPC_LOCK:
+        slot = VEGAS_SHARED_NPC_SLOTS.setdefault(
+            slot_key, {**spec, "inst_id": None, "respawn_at": 0.0})
+        if slot.get("retired"):
+            return None
+        inst_id = slot.get("inst_id")
+        alive = bool(
+            inst_id is not None
+            and int(NPC_HP_MAP.get(int(inst_id), 0) or 0) > 0
+            and int(inst_id) not in DEAD_NPC_SET
+        )
+        tracked = VEGAS_NPC_AOI_TRACK.setdefault(id(conn), {})
+        if alive:
+            inst_id = int(inst_id)
+            if int(tracked.get(slot_key, 0) or 0) == inst_id:
+                peers = []
+                attr = None
+            else:
+                attr = build_npc_attr_sproto(
+                    spec["nid"], NPC_CONFIG.get(str(spec["nid"]), {}).get(
+                        "name", f"NPC_{spec['nid']}"),
+                    int(slot.get("position", (spec["x"], spec["z"]))[0]),
+                    int(slot.get("position", (spec["x"], spec["z"]))[1]),
+                    int(slot.get("heading", spec.get("o", 0))),
+                    existing_inst_id=inst_id)
+                peers = [(conn, char)]
+                tracked[slot_key] = inst_id
+        elif now < float(slot.get("respawn_at", 0) or 0):
+            return None
+        else:
+            old_inst = int(inst_id or 0)
+            if old_inst:
+                VEGAS_SHARED_NPC_BY_INSTANCE.pop(old_inst, None)
+                NPC_HP_MAP.pop(old_inst, None)
+                NPC_INST_MAP.pop(old_inst, None)
+                NPC_INSTANCE_MAP.pop(old_inst, None)
+                NPC_ATTR_MAP.pop(old_inst, None)
+                DEAD_NPC_SET.discard(old_inst)
+                for tracked_by_conn in VEGAS_NPC_AOI_TRACK.values():
+                    if int(tracked_by_conn.get(slot_key, 0) or 0) == old_inst:
+                        tracked_by_conn.pop(slot_key, None)
+            inst_id, attr = vegas_create_shared_npc(slot, spec)
+            peers = vegas_npc_map_connections((conn, char))
+            for peer_conn, _peer_char in peers:
+                VEGAS_NPC_AOI_TRACK.setdefault(id(peer_conn), {})[slot_key] = inst_id
+            created = True
+
+    if attr is not None:
+        vegas_send_npc_create(inst_id, attr, spec["nid"], peers)
+    if spec.get("city_ai") and inst_id:
+        with SLUM_NPC_AI_LOCK:
+            ai_registered = int(inst_id) in SLUM_NPC_AI_STATES
+        if created or not ai_registered:
+            register_slum_npc_ai(
+                conn, char, inst_id, spec["nid"], spec["x"], spec["z"],
+                spec.get("o", 0), map_id=VEGAS_MAP_ID,
+                path_id=spec.get("path_id", ""))
+    return inst_id
+
+
+def vegas_npc_send_move(inst_id, x, z, heading, stop=False, walk=True):
+    slot_key = VEGAS_SHARED_NPC_BY_INSTANCE.get(int(inst_id))
+    if not slot_key:
+        return
+    pos_data = encode_sproto([
+        (0, int(x)), (1, 0), (2, int(z)), (3, int(heading))
+    ])
+    move_data = encode_sproto([(0, pos_data)])
+    character_data = encode_sproto([
+        (0, int(inst_id)), (1, move_data), (2, bool(walk))
+    ])
+    payload = encode_sproto([(0, character_data)])
+    for peer_conn, _peer_char in vegas_npc_visible_connections(slot_key, inst_id):
+        send_rpc_push_safe(peer_conn, 513 if stop else 507, payload)
+
+
+def vegas_remove_dead_npc(slot_key, inst_id, expected_dead_at):
+    slot_key = str(slot_key)
+    inst_id = int(inst_id)
+    with VEGAS_NPC_LOCK:
+        slot = VEGAS_SHARED_NPC_SLOTS.get(slot_key)
+        if (not slot or int(slot.get("inst_id") or 0) != inst_id
+                or float(slot.get("dead_at", 0) or 0) != float(expected_dead_at)):
+            return
+    remove_data = encode_sproto([(0, inst_id)])
+    for peer_conn, _peer_char in vegas_npc_visible_connections(slot_key, inst_id):
+        send_rpc_push_safe(peer_conn, 506, remove_data)
+    with VEGAS_NPC_LOCK:
+        slot = VEGAS_SHARED_NPC_SLOTS.get(slot_key)
+        if (not slot or int(slot.get("inst_id") or 0) != inst_id
+                or float(slot.get("dead_at", 0) or 0) != float(expected_dead_at)):
+            return
+        slot["inst_id"] = None
+        VEGAS_SHARED_NPC_BY_INSTANCE.pop(inst_id, None)
+        NPC_HP_MAP.pop(inst_id, None)
+        NPC_INST_MAP.pop(inst_id, None)
+        NPC_INSTANCE_MAP.pop(inst_id, None)
+        NPC_ATTR_MAP.pop(inst_id, None)
+        DEAD_NPC_SET.discard(inst_id)
+        for tracked in VEGAS_NPC_AOI_TRACK.values():
+            if int(tracked.get(slot_key, 0) or 0) == inst_id:
+                tracked.pop(slot_key, None)
+    with SLUM_NPC_AI_LOCK:
+        SLUM_NPC_AI_STATES.pop(inst_id, None)
+
+
+def vegas_respawn_shared_npc(slot_key, expected_respawn_at):
+    slot_key = str(slot_key)
+    with VEGAS_NPC_LOCK:
+        slot = VEGAS_SHARED_NPC_SLOTS.get(slot_key)
+        if (not slot or slot.get("inst_id") is not None
+                or float(slot.get("respawn_at", 0) or 0)
+                != float(expected_respawn_at)
+                or time.time() < float(expected_respawn_at)):
+            return
+        spec = dict(slot)
+        inst_id, attr = vegas_create_shared_npc(slot, spec)
+        peers = vegas_npc_map_connections()
+        for peer_conn, _peer_char in peers:
+            VEGAS_NPC_AOI_TRACK.setdefault(id(peer_conn), {})[slot_key] = inst_id
+    vegas_send_npc_create(inst_id, attr, spec["nid"], peers)
+    if spec.get("city_ai") and peers:
+        peer_conn, peer_char = peers[0]
+        register_slum_npc_ai(
+            peer_conn, peer_char, inst_id, spec["nid"], spec["x"], spec["z"],
+            spec.get("o", 0), map_id=VEGAS_MAP_ID,
+            path_id=spec.get("path_id", ""))
+
+
+def vegas_mark_shared_npc_dead(inst_id):
+    try:
+        inst_id = int(inst_id)
+    except (TypeError, ValueError):
+        return False
+    with VEGAS_NPC_LOCK:
+        slot_key = VEGAS_SHARED_NPC_BY_INSTANCE.get(inst_id)
+        slot = VEGAS_SHARED_NPC_SLOTS.get(slot_key) if slot_key else None
+        if not slot or int(slot.get("inst_id") or 0) != inst_id:
+            return False
+        if float(slot.get("dead_at", 0) or 0) > 0:
+            return True
+        dead_at = time.time()
+        try:
+            respawn_seconds = max(0.0, float(slot.get(
+                "respawn_seconds", VEGAS_NPC_RESPAWN_SECONDS)))
+        except (TypeError, ValueError):
+            respawn_seconds = VEGAS_NPC_RESPAWN_SECONDS
+        respawn_at = (
+            dead_at + respawn_seconds
+            if respawn_seconds > 0 else float("inf"))
+        slot["dead_at"] = dead_at
+        slot["respawn_at"] = respawn_at
+        slot["retired"] = respawn_seconds <= 0
+    with SLUM_NPC_AI_LOCK:
+        SLUM_NPC_AI_STATES.pop(inst_id, None)
+    remove_timer = threading.Timer(
+        VEGAS_NPC_DEATH_ANIMATION_SECONDS, vegas_remove_dead_npc,
+        args=(slot_key, inst_id, dead_at))
+    remove_timer.daemon = True
+    remove_timer.start()
+    if respawn_seconds > 0:
+        respawn_timer = threading.Timer(
+            respawn_seconds, vegas_respawn_shared_npc,
+            args=(slot_key, respawn_at))
+        respawn_timer.daemon = True
+        respawn_timer.start()
+    return True
+
+
+def spawn_vegas_map_npcs(conn, char):
+    if (not conn or not char
+            or str(char.get("map_id", "")) != VEGAS_MAP_ID):
+        return
+    with VEGAS_NPC_LOCK:
+        VEGAS_NPC_AOI_TRACK.setdefault(id(conn), {})
+    for spec in vegas_npc_specs():
+        vegas_shared_npc_for_spawn(conn, char, spec)
+    _spawn_guild_city_vehicle(conn, VEGAS_MAP_ID)
+
+
 def register_slum_npc_ai(
         conn, char, inst_id, npc_id, x, z, heading, map_id=None, path_id=""):
     map_id = str(map_id or (char.get("map_id", "") if char else ""))
@@ -12833,9 +13113,11 @@ def slum_npc_retarget_on_hit(inst_id, attacker, conn):
     now = time.time()
     with SLUM_NPC_AI_LOCK:
         state = SLUM_NPC_AI_STATES.get(inst_id)
-        if (not state or state["owner_id"] != attacker_id
-                or state["owner_conn_id"] != id(conn)
-                or str(state.get("map_id", SLUM_DISTRICT_MAP_ID)) != attacker_map
+        state_map = str(state.get("map_id", "")) if state else ""
+        if (not state or state_map != attacker_map
+                or (state_map != VEGAS_MAP_ID
+                    and (state["owner_id"] != attacker_id
+                         or state["owner_conn_id"] != id(conn)))
                 or (attacker_map == SLUM_DISTRICT_MAP_ID
                     and is_slum_static_npc(state.get("nid", "")))
                 or inst_id in DEAD_NPC_SET
@@ -12894,15 +13176,20 @@ def _slum_npc_move_toward(inst_id, target_x, target_z, speed, now, walk):
         state["heading"] = heading
         state["last_move_at"] = now
         state["moving"] = True
+        map_id = str(state.get("map_id", SLUM_DISTRICT_MAP_ID))
         if broadcast:
             state["move_waypoint"] = waypoint
         owner_id = state["owner_id"]
         owner_conn_id = state["owner_conn_id"]
     if broadcast:
-        conn, _char = ALL_CONNECTIONS.get(owner_id, (None, None))
-        if conn and id(conn) == owner_conn_id:
-            _slum_npc_send_move(
-                conn, inst_id, target_x, target_z, heading, walk=walk)
+        if map_id == VEGAS_MAP_ID:
+            vegas_npc_send_move(
+                inst_id, target_x, target_z, heading, walk=walk)
+        else:
+            conn, _char = ALL_CONNECTIONS.get(owner_id, (None, None))
+            if conn and id(conn) == owner_conn_id:
+                _slum_npc_send_move(
+                    conn, inst_id, target_x, target_z, heading, walk=walk)
 
 
 def _slum_npc_stop(inst_id, now):
@@ -12917,9 +13204,13 @@ def _slum_npc_stop(inst_id, now):
         state["move_waypoint"] = None
         owner_id = state["owner_id"]
         owner_conn_id = state["owner_conn_id"]
-    conn, _char = ALL_CONNECTIONS.get(owner_id, (None, None))
-    if conn and id(conn) == owner_conn_id:
-        _slum_npc_send_move(conn, inst_id, x, z, heading, stop=True, walk=False)
+        map_id = str(state.get("map_id", SLUM_DISTRICT_MAP_ID))
+    if map_id == VEGAS_MAP_ID:
+        vegas_npc_send_move(inst_id, x, z, heading, stop=True, walk=False)
+    else:
+        conn, _char = ALL_CONNECTIONS.get(owner_id, (None, None))
+        if conn and id(conn) == owner_conn_id:
+            _slum_npc_send_move(conn, inst_id, x, z, heading, stop=True, walk=False)
 
 
 def _slum_npc_ai_tick():
@@ -12943,13 +13234,29 @@ def _slum_npc_ai_tick():
                 with SLUM_NPC_AI_LOCK:
                     SLUM_NPC_AI_STATES.pop(inst_id, None)
                 continue
-            owner_id = int(snapshot["owner_id"])
-            conn, char = ALL_CONNECTIONS.get(owner_id, (None, None))
-            if (not conn or not char
-                    or id(conn) != snapshot["owner_conn_id"]
-                    or map_id not in CITY_NPC_AI_MAP_IDS
-                    or str(char.get("map_id", "")) != map_id
-                    or not is_current_character_connection(conn, char)):
+            if map_id == VEGAS_MAP_ID:
+                owner_id = int(snapshot.get("target_id", 0) or 0)
+                conn, char = ALL_CONNECTIONS.get(owner_id, (None, None))
+                target_connection_valid = bool(
+                    owner_id and conn and char
+                    and str(char.get("map_id", "")) == VEGAS_MAP_ID
+                    and is_current_character_connection(conn, char))
+                if not target_connection_valid:
+                    conn, char = None, None
+            else:
+                owner_id = int(snapshot["owner_id"])
+                conn, char = ALL_CONNECTIONS.get(owner_id, (None, None))
+                target_connection_valid = bool(
+                    conn and char
+                    and id(conn) == snapshot["owner_conn_id"]
+                    and map_id in CITY_NPC_AI_MAP_IDS
+                    and str(char.get("map_id", "")) == map_id
+                    and is_current_character_connection(conn, char))
+                if not target_connection_valid:
+                    with SLUM_NPC_AI_LOCK:
+                        SLUM_NPC_AI_STATES.pop(inst_id, None)
+                    continue
+            if map_id not in CITY_NPC_AI_MAP_IDS:
                 with SLUM_NPC_AI_LOCK:
                     SLUM_NPC_AI_STATES.pop(inst_id, None)
                 continue
@@ -12986,10 +13293,12 @@ def _slum_npc_ai_tick():
                 0.1, float(npc_cfg.get("move_speed") or 50) / 10.0)
 
             target_id = int(snapshot.get("target_id", 0) or 0)
-            target_pos = char.get("pos") or default_map_spawn_position(
-                map_id)
+            target_pos = (
+                char.get("pos") if char else None
+            ) or default_map_spawn_position(map_id)
             target_valid = (
                 target_id == owner_id
+                and target_connection_valid
                 and int(char.get("hp", 0) or 0) > 0
                 and float(snapshot.get("attack_until", 0) or 0) > now
             )
@@ -13092,8 +13401,18 @@ def _slum_npc_ai_tick():
                         (3, effect_id), (4, critical)
                     ])
                 ])])
-                send_rpc_push_safe(conn, 508, attack_data)
-                send_rpc_push_safe(conn, 511, damage_data)
+                if map_id == VEGAS_MAP_ID:
+                    slot_key = VEGAS_SHARED_NPC_BY_INSTANCE.get(inst_id)
+                    peers = vegas_npc_visible_connections(slot_key, inst_id)
+                    if not any(peer_conn is conn
+                               for peer_conn, _peer_char in peers):
+                        peers.append((conn, char))
+                    for peer_conn, _peer_char in peers:
+                        send_rpc_push_safe(peer_conn, 508, attack_data)
+                        send_rpc_push_safe(peer_conn, 511, damage_data)
+                else:
+                    send_rpc_push_safe(conn, 508, attack_data)
+                    send_rpc_push_safe(conn, 511, damage_data)
                 sync_char_attrs_rpc(conn, char)
                 save_chars(all_accounts_chars)
                 if target_hp <= 0 and supports_normal_relife(map_id):
@@ -14305,6 +14624,8 @@ def spawn_exp_team_stage_map(conn, map_id, char, force=False):
 
 def spawn_map_npcs(conn, map_id, picked_char=None):
     map_str = str(map_id)
+    if map_str != VEGAS_MAP_ID:
+        clear_vegas_npc_aoi(conn)
     if map_str in PRISON_NPC_AOI_MAP_IDS:
         # Prison enemies are created after map_ready and streamed to the client.
         return
@@ -14312,6 +14633,9 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         clear_gotham_npc_aoi(conn)
     elif picked_char:
         spawn_gotham_map_npcs(conn, picked_char)
+        return
+    if map_str == VEGAS_MAP_ID and picked_char:
+        spawn_vegas_map_npcs(conn, picked_char)
         return
     if (is_cash_stage_map(map_str) and picked_char
             and not picked_char.get('_cash_stage_map_ready', False)):
@@ -20928,6 +21252,8 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
             NPC_ATTR_MAP.pop(inst_id, None)
         if tracked:
             print(f"[AOI NPC] Cleaned up {len(tracked)} tracked NPCs for conn={conn_key} leaving map 101")
+    if src_map == VEGAS_MAP_ID and src_map != target_map_id:
+        clear_vegas_npc_aoi(conn)
     if src_map in PRISON_NPC_AOI_MAP_IDS and src_map != target_map_id:
         clear_prison_npc_aoi(conn, send_remove=True)
     if src_map == WAREHOUSE_SNEAK_COPY_ID and src_map != target_map_id:
@@ -31306,6 +31632,18 @@ def client_handler(conn, addr):
                                             sync_npc_attrs_rpc(
                                                 peer_conn, target_id, defender_stats,
                                                 max(0, NPC_HP_MAP.get(target_id, 0)))
+                                elif (cur_map == VEGAS_MAP_ID
+                                      and target_id in VEGAS_SHARED_NPC_BY_INSTANCE):
+                                    slot_key = VEGAS_SHARED_NPC_BY_INSTANCE[target_id]
+                                    visible = vegas_npc_visible_connections(
+                                        slot_key, target_id)
+                                    if not any(peer_conn is conn
+                                               for peer_conn, _peer_char in visible):
+                                        visible.append((conn, picked_char))
+                                    for peer_conn, _peer_char in visible:
+                                        sync_npc_attrs_rpc(
+                                            peer_conn, target_id, defender_stats,
+                                            max(0, NPC_HP_MAP.get(target_id, 0)))
                                 elif (cur_map in PRISON_NPC_AOI_MAP_IDS
                                       and target_id in PRISON_NPC_SHARED_BY_INSTANCE):
                                     slot_key = PRISON_NPC_SHARED_BY_INSTANCE[target_id]
@@ -31341,6 +31679,11 @@ def client_handler(conn, addr):
                                         and target_id in PRISON_NPC_SHARED_BY_INSTANCE):
                                     slot_key = PRISON_NPC_SHARED_BY_INSTANCE[target_id]
                                     peers = prison_npc_visible_connections(slot_key, target_id)
+                                elif (cur_map == VEGAS_MAP_ID
+                                      and target_id in VEGAS_SHARED_NPC_BY_INSTANCE):
+                                    slot_key = VEGAS_SHARED_NPC_BY_INSTANCE[target_id]
+                                    peers = vegas_npc_visible_connections(
+                                        slot_key, target_id)
                                 else:
                                     peers = [
                                         (peer_conn, peer_char)
@@ -31384,6 +31727,9 @@ def client_handler(conn, addr):
                                     # Non-EXP despawns keep their existing AOI path.
                                     if (str(target_nid) == "23101"
                                             and is_gotham_escort_map(cur_map)):
+                                        pass
+                                    elif (cur_map == VEGAS_MAP_ID
+                                          and target_id in VEGAS_SHARED_NPC_BY_INSTANCE):
                                         pass
                                     elif (cur_map in PRISON_NPC_AOI_MAP_IDS
                                             and target_id in PRISON_NPC_SHARED_BY_INSTANCE):
@@ -31632,7 +31978,8 @@ def client_handler(conn, addr):
                     else: DEAD_NPC_SET.add(inst_id)
 
                 if (inst_id and inst_id in NPC_HP_MAP
-                        and int(inst_id) not in PRISON_NPC_SHARED_BY_INSTANCE):
+                        and int(inst_id) not in PRISON_NPC_SHARED_BY_INSTANCE
+                        and int(inst_id) not in VEGAS_SHARED_NPC_BY_INSTANCE):
                     del NPC_HP_MAP[inst_id]
 
                 if picked_char and not is_duplicate:
@@ -36229,6 +36576,7 @@ def client_handler(conn, addr):
             conn_aoi_key = id(conn)
             clear_gotham_npc_aoi(conn)
             clear_prison_npc_aoi(conn)
+            clear_vegas_npc_aoi(conn)
             tracked_aoi = NPC_AOI_TRACK.pop(conn_aoi_key, {})
             for inst_id_aoi in tracked_aoi:
                 NPC_HP_MAP.pop(inst_id_aoi, None)
