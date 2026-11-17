@@ -56,6 +56,8 @@ GOTHAM_MAP_ID = "109"
 SLUM_DISTRICT_MAP_ID = "102"
 SLUM_NPC_RESPAWN_SECONDS = 5
 SLUM_NPC_EXP_REWARD_SCALE = 0.03
+WAREHOUSE_SNEAK_BOSS_NPC_ID = "13101"
+WAREHOUSE_SNEAK_BOSS_EXP_REWARD_SCALE = 0.05
 GOTHAM_BOSS_DEFAULT_RESPAWN_SECONDS = 3 * 60 * 60
 GOTHAM_BOSS_RESPAWN_PATH = os.path.join(SCRIPT_DIR, "gotham_boss_respawns.json")
 GOTHAM_BOSS_RESPAWN_LOCK = threading.RLock()
@@ -10982,13 +10984,34 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                         score_payload = survive_battle_top_payload(picked_char)
                         if score_payload is not None:
                             send_rpc_push(636, score_payload)
+            elif current_map == WAREHOUSE_SNEAK_COPY_ID:
+                npc_stats = get_npc_attr(npcid, 1)
+                exp_kill, cash_kill = calculate_npc_kill_rewards_for_map(
+                    picked_char.get('level', 1), npc_stats.get('lv', 1),
+                    current_map, npcid)
+                rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
+                if warehouse_sneak_record_kill_reward(
+                        picked_char, inst_id, rewards):
+                    grant_item_rewards(
+                        picked_char, rewards, conn, send_rpc_push, save=False)
+                    send_rpc_push(638, encode_sproto([(0, [
+                        encode_sproto([
+                            (0, "2001"), (1, exp_kill), (3, 0)
+                        ]),
+                        encode_sproto([
+                            (0, "1001"), (1, cash_kill), (3, 0)
+                        ]),
+                    ])]))
+                else:
+                    print(f"[SNEAK COPY REWARD] duplicate or unowned kill "
+                          f"ignored player={picked_char.get('id')} inst={inst_id}")
             elif current_map in SCUFFLE_NPC_MAP_IDS:
                 # Match the existing per-NPC EXP/cash calculation; the
                 # ShowRewardData mission tier is not an individual kill drop.
                 npc_stats = get_npc_attr(npcid, 1)
                 exp_kill, cash_kill = calculate_npc_kill_rewards_for_map(
                     picked_char.get('level', 1), npc_stats.get('lv', 1),
-                    current_map)
+                    current_map, npcid)
                 rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
                 grant_item_rewards(
                     picked_char, rewards, conn, send_rpc_push, save=False)
@@ -11006,7 +11029,7 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                     if is_tower_map(picked_char.get('map_id')) else 1)
                 exp_kill, cash_kill = calculate_npc_kill_rewards_for_map(
                     picked_char.get('level', 1), npc_stats.get('lv', 1),
-                    current_map)
+                    current_map, npcid)
                 rewards = [("2001", 0, exp_kill), ("1001", 0, cash_kill)]
                 grant_item_rewards(
                     picked_char, rewards, conn, send_rpc_push, save=False)
@@ -11749,7 +11772,7 @@ def reset_survive_battle_npcs_for_event(map_id, event_start):
     return True
 
 
-def warehouse_sneak_state_for_char(picked_char, create=False):
+def warehouse_sneak_state_for_char(picked_char, create=False, reset=False):
     if (not picked_char
             or str(picked_char.get('active_copy_id') or '')
             != WAREHOUSE_SNEAK_COPY_ID):
@@ -11758,6 +11781,8 @@ def warehouse_sneak_state_for_char(picked_char, create=False):
         owner_id = int(picked_char.get('id', 0) or 0)
     except (TypeError, ValueError):
         return None
+    if reset:
+        picked_char.pop(WAREHOUSE_SNEAK_STATE_KEY, None)
     state = picked_char.get(WAREHOUSE_SNEAK_STATE_KEY)
     if isinstance(state, dict) and str(state.get('copy_id')) == WAREHOUSE_SNEAK_COPY_ID:
         try:
@@ -11774,10 +11799,40 @@ def warehouse_sneak_state_for_char(picked_char, create=False):
         'phase': 'sneak',
         'spawn_slots': [],
         'killed_slots': [],
+        'rewarded_slots': [],
+        'reward_totals': {},
         'result_recorded': False,
     }
     picked_char[WAREHOUSE_SNEAK_STATE_KEY] = state
     return state
+
+
+def warehouse_sneak_record_kill_reward(picked_char, inst_id, rewards):
+    try:
+        inst_id = int(inst_id)
+        player_id = int(picked_char.get("id", 0) or 0)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    slot_key = PRISON_NPC_SHARED_BY_INSTANCE.get(inst_id)
+    slot = PRISON_NPC_SHARED_SLOTS.get(str(slot_key)) if slot_key else None
+    if (not slot or str(slot.get("map_id", "")) != WAREHOUSE_SNEAK_COPY_ID
+            or int(slot.get("owner_id", 0) or 0) != player_id):
+        return False
+
+    with WAREHOUSE_SNEAK_LOCK:
+        state = warehouse_sneak_state_for_char(picked_char)
+        if (not state or state.get("phase") != "battle"
+                or slot_key not in state.get("spawn_slots", [])):
+            return False
+        rewarded_slots = state.setdefault("rewarded_slots", [])
+        if slot_key in rewarded_slots:
+            return False
+        rewarded_slots.append(slot_key)
+        totals = state.setdefault("reward_totals", {})
+        for item_id, _quality, amount in rewards:
+            item_id = str(item_id)
+            totals[item_id] = int(totals.get(item_id, 0) or 0) + max(0, int(amount))
+    return True
 
 
 def prison_npc_specs(map_id, player_level=1, player_id=None,
@@ -12090,10 +12145,18 @@ def start_warehouse_sneak_battle(conn, picked_char, send_rpc_push):
     return True
 
 
-def warehouse_sneak_result_payload():
+def warehouse_sneak_result_payload(state):
+    reward_totals = state.get("reward_totals", {}) if isinstance(state, dict) else {}
+    items = [
+        encode_sproto([
+            (0, str(item_id)), (1, int(amount)), (3, 0)
+        ])
+        for item_id, amount in sorted(reward_totals.items())
+        if int(amount or 0) > 0
+    ]
     return encode_sproto([
         (0, 8), (1, WAREHOUSE_SNEAK_COPY_ID), (2, True),
-        (3, 0), (4, 0), (5, []),
+        (3, 0), (4, 0), (5, items),
     ])
 
 
@@ -12130,9 +12193,9 @@ def record_warehouse_sneak_npc_kill(
         target_id=WAREHOUSE_SNEAK_COPY_ID,
         map_id=WAREHOUSE_SNEAK_COPY_ID,
     )
-    # CopySceneData 303 has no ShowRewardId, DropId, or star descriptions;
-    # mission 33's configured reward is claimed later from its submit NPC.
-    send_rpc_push(552, warehouse_sneak_result_payload())
+    # CopySceneData 303 has no authored copy payout; this list only summarizes
+    # per-kill rewards already granted. Mission 33 rewards remain claimable at its submit NPC.
+    send_rpc_push(552, warehouse_sneak_result_payload(state))
     save_chars(all_accounts_chars)
     print(f"[SNEAK COPY] completed player={player_id} copy="
           f"{WAREHOUSE_SNEAK_COPY_ID}")
@@ -17036,10 +17099,19 @@ def calculate_npc_kill_rewards(player_level, npc_level=1):
     return exp_reward, cash_reward
 
 
-def calculate_npc_kill_rewards_for_map(player_level, npc_level, map_id):
+def calculate_npc_kill_rewards_for_map(player_level, npc_level, map_id,
+                                       npc_id=None):
     exp_reward, cash_reward = calculate_npc_kill_rewards(player_level, npc_level)
-    if str(map_id) == SLUM_DISTRICT_MAP_ID:
+    map_id = str(map_id)
+    if map_id == SLUM_DISTRICT_MAP_ID:
         exp_reward = max(1, int(exp_reward * SLUM_NPC_EXP_REWARD_SCALE))
+    elif map_id == WAREHOUSE_SNEAK_COPY_ID:
+        exp_scale = (
+            WAREHOUSE_SNEAK_BOSS_EXP_REWARD_SCALE
+            if str(npc_id) == WAREHOUSE_SNEAK_BOSS_NPC_ID
+            else SLUM_NPC_EXP_REWARD_SCALE
+        )
+        exp_reward = max(1, int(exp_reward * exp_scale))
     return exp_reward, cash_reward
 
 def copy_attempts_remaining(picked_char, copy_id, cfg):
@@ -26633,7 +26705,7 @@ def client_handler(conn, addr):
                         )
                         if sneak_state and sneak_state.get("result_recorded"):
                             send_rpc_push(
-                                552, warehouse_sneak_result_payload())
+                                552, warehouse_sneak_result_payload(sneak_state))
                         if mid in SURVIVE_BATTLE_NPC_MAP_IDS:
                             survival_state = picked_char.get('survival_battle_state')
                             survival_config = survive_battle_config_for_map(mid)
@@ -31768,7 +31840,7 @@ def client_handler(conn, addr):
                     picked_char['active_copy_id'] = copy_id
                     if copy_id == WAREHOUSE_SNEAK_COPY_ID:
                         warehouse_sneak_state_for_char(
-                            picked_char, create=True)
+                            picked_char, create=True, reset=True)
                     advance_missions(picked_char, send_rpc_push, 'dungeon', target_id=copy_id)
                     start_map_transition(conn, picked_char, copy_id, send_rpc_push)
                 if session is not None:
