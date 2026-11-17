@@ -54,8 +54,10 @@ NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_ATTR_MAP = {} # runtime NPC payloads for reconnect replay
 GOTHAM_MAP_ID = "109"
 SLUM_DISTRICT_MAP_ID = "102"
+VEGAS_MAP_ID = "104"
+CITY_NPC_AI_MAP_IDS = frozenset((SLUM_DISTRICT_MAP_ID, VEGAS_MAP_ID))
 SLUM_NPC_RESPAWN_SECONDS = 5
-SLUM_NPC_EXP_REWARD_SCALE = 0.03
+LOW_EXP_NPC_REWARD_SCALE = 0.01
 WAREHOUSE_SNEAK_BOSS_NPC_ID = "13101"
 WAREHOUSE_SNEAK_BOSS_EXP_REWARD_SCALE = 0.05
 GOTHAM_BOSS_DEFAULT_RESPAWN_SECONDS = 3 * 60 * 60
@@ -1176,7 +1178,8 @@ try:
                         'function_type': int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else 0,
                         'type': int(parts[13]) if len(parts) > 13 and parts[13].isdigit() else 0,
                         'is_abs': is_abs,
-                        'skill_group': parts[14] if len(parts) > 14 and parts[14] else '50001',
+                        'skill_group': parts[14].strip() if len(parts) > 14 and parts[14].strip() else '50001',
+                        'skill_group_configured': bool(parts[14].strip()) if len(parts) > 14 else False,
                         'buff': parts[15] if len(parts) > 15 and parts[15] else '',
                         'patrol_radius': int(parts[16]) if len(parts) > 16 and parts[16].isdigit() else 0,
                         'search_radius': int(parts[17]) if len(parts) > 17 and parts[17].isdigit() else 700,
@@ -12736,14 +12739,40 @@ def start_prison_npc_runtime():
         PRISON_NPC_AI_TASK = RepeatingTask(0.2, _prison_npc_ai_tick).start()
 
 
-def register_slum_npc_ai(conn, char, inst_id, npc_id, x, z, heading):
-    if not conn or not char or str(char.get("map_id", "")) != SLUM_DISTRICT_MAP_ID:
+def register_slum_npc_ai(
+        conn, char, inst_id, npc_id, x, z, heading, map_id=None, path_id=""):
+    map_id = str(map_id or (char.get("map_id", "") if char else ""))
+    if not conn or not char or map_id not in CITY_NPC_AI_MAP_IDS:
         return
-    if is_slum_static_npc(npc_id):
+    if str(char.get("map_id", "")) != map_id:
+        return
+    if map_id == SLUM_DISTRICT_MAP_ID and is_slum_static_npc(npc_id):
         return
     if not any(str(spawn.get("nid") or "") == str(npc_id)
-               for spawn in MONSTER_DATA.get(SLUM_DISTRICT_MAP_ID, [])):
+               and int(spawn.get("x", 0) or 0) == int(x)
+               and int(spawn.get("z", 0) or 0) == int(z)
+               for spawn in MONSTER_DATA.get(map_id, [])):
         return
+    npc_cfg = NPC_CONFIG.get(str(npc_id), {})
+    if map_id == VEGAS_MAP_ID:
+        skill_ids = [
+            skill_id.strip()
+            for skill_id in re.split(r"[;,]", str(npc_cfg.get("skill_group") or ""))
+            if skill_id.strip()
+        ]
+        if (not npc_cfg.get("skill_group_configured")
+                or not npc_cfg.get("ai_data_id")
+                or not skill_ids
+                or any(skill_id not in SKILL_CONFIG for skill_id in skill_ids)
+                or str(npc_cfg.get("ai_data_id")) not in AI_DATA_CONFIG):
+            return
+    path_id = str(path_id or "").strip()
+    path_points = (
+        list(getattr(LIBERTY_CITY, "paths", {}).get(path_id, []))
+        if map_id == VEGAS_MAP_ID and path_id else []
+    )
+    if path_id and len(path_points) < 2:
+        print(f"[CITY NPC AI] configured path missing map={map_id} nid={npc_id} path={path_id}")
     try:
         owner_id = int(char.get("id", 0) or 0)
         inst_id = int(inst_id)
@@ -12757,6 +12786,7 @@ def register_slum_npc_ai(conn, char, inst_id, npc_id, x, z, heading):
         SLUM_NPC_AI_STATES[inst_id] = {
             "owner_id": owner_id,
             "owner_conn_id": id(conn),
+            "map_id": map_id,
             "nid": str(npc_id),
             "home_x": int(x),
             "home_z": int(z),
@@ -12768,10 +12798,17 @@ def register_slum_npc_ai(conn, char, inst_id, npc_id, x, z, heading):
             "skill_ready_at": {},
             "patrol_target": None,
             "patrol_next_at": now,
+            "path_id": path_id,
+            "path": path_points,
+            "path_index": 0,
+            "path_next_at": now + 0.5,
             "moving": False,
             "last_move_at": now,
             "move_waypoint": None,
         }
+    if map_id == VEGAS_MAP_ID and path_id:
+        print(f"[CITY NPC AI] registered map={map_id} nid={npc_id} path={path_id} "
+              f"points={len(path_points)}")
     start_slum_npc_runtime()
 
 
@@ -12782,8 +12819,9 @@ def slum_npc_retarget_on_hit(inst_id, attacker, conn):
         attacker_hp = int(attacker.get("hp", 0) or 0)
     except (AttributeError, TypeError, ValueError):
         return False
+    attacker_map = str(attacker.get("map_id", ""))
     if (attacker_id <= 0
-            or str(attacker.get("map_id", "")) != SLUM_DISTRICT_MAP_ID
+            or attacker_map not in CITY_NPC_AI_MAP_IDS
             or attacker_hp <= 0):
         return False
     active_conn, active_char = ALL_CONNECTIONS.get(attacker_id, (None, None))
@@ -12796,7 +12834,9 @@ def slum_npc_retarget_on_hit(inst_id, attacker, conn):
         state = SLUM_NPC_AI_STATES.get(inst_id)
         if (not state or state["owner_id"] != attacker_id
                 or state["owner_conn_id"] != id(conn)
-                or is_slum_static_npc(state.get("nid", ""))
+                or str(state.get("map_id", SLUM_DISTRICT_MAP_ID)) != attacker_map
+                or (attacker_map == SLUM_DISTRICT_MAP_ID
+                    and is_slum_static_npc(state.get("nid", "")))
                 or inst_id in DEAD_NPC_SET
                 or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
             return False
@@ -12895,7 +12935,9 @@ def _slum_npc_ai_tick():
     try:
         for inst_id, snapshot in snapshots:
             inst_id = int(inst_id)
-            if is_slum_static_npc(snapshot.get("nid", "")):
+            map_id = str(snapshot.get("map_id", SLUM_DISTRICT_MAP_ID))
+            if (map_id == SLUM_DISTRICT_MAP_ID
+                    and is_slum_static_npc(snapshot.get("nid", ""))):
                 with SLUM_NPC_AI_LOCK:
                     SLUM_NPC_AI_STATES.pop(inst_id, None)
                 continue
@@ -12903,7 +12945,8 @@ def _slum_npc_ai_tick():
             conn, char = ALL_CONNECTIONS.get(owner_id, (None, None))
             if (not conn or not char
                     or id(conn) != snapshot["owner_conn_id"]
-                    or str(char.get("map_id", "")) != SLUM_DISTRICT_MAP_ID
+                    or map_id not in CITY_NPC_AI_MAP_IDS
+                    or str(char.get("map_id", "")) != map_id
                     or not is_current_character_connection(conn, char)):
                 with SLUM_NPC_AI_LOCK:
                     SLUM_NPC_AI_STATES.pop(inst_id, None)
@@ -12941,7 +12984,7 @@ def _slum_npc_ai_tick():
 
             target_id = int(snapshot.get("target_id", 0) or 0)
             target_pos = char.get("pos") or default_map_spawn_position(
-                SLUM_DISTRICT_MAP_ID)
+                map_id)
             target_valid = (
                 target_id == owner_id
                 and int(char.get("hp", 0) or 0) > 0
@@ -13034,12 +13077,12 @@ def _slum_npc_ai_tick():
                 send_rpc_push_safe(conn, 511, damage_data)
                 sync_char_attrs_rpc(conn, char)
                 save_chars(all_accounts_chars)
-                if target_hp <= 0 and supports_normal_relife(SLUM_DISTRICT_MAP_ID):
+                if target_hp <= 0 and supports_normal_relife(map_id):
                     death_count = int(char.get("death_count", 0) or 0) + 1
                     char["death_count"] = death_count
                     relife_cfg = get_relife_config(death_count)
                     offer = remember_relife_offer(
-                        char, relife_offer_type(SLUM_DISTRICT_MAP_ID),
+                        char, relife_offer_type(map_id),
                         relife_cfg.get("use_count", 1), "9011")
                     send_rpc_push_safe(conn, 618, offer)
                     save_chars(all_accounts_chars)
@@ -13056,6 +13099,25 @@ def _slum_npc_ai_tick():
             patrol_type = int(ai_cfg.get("patrol_type", 0) or 0)
             patrol_distance = max(
                 0, int(ai_cfg.get("patrol_distance", 0) or 0)) / 100.0
+            if patrol_type == 2:
+                path = snapshot.get("path") or []
+                if len(path) < 2:
+                    _slum_npc_stop(inst_id, now)
+                    continue
+                if now < float(snapshot.get("path_next_at", 0) or 0):
+                    continue
+                path_index = int(snapshot.get("path_index", 0) or 0) % len(path)
+                waypoint_x, waypoint_z = int(path[path_index][0]), int(path[path_index][1])
+                if math.hypot(waypoint_x - mx_cm, waypoint_z - mz_cm) <= 50:
+                    with SLUM_NPC_AI_LOCK:
+                        live_state = SLUM_NPC_AI_STATES.get(inst_id, {})
+                        live_state["path_index"] = (path_index + 1) % len(path)
+                        live_state["path_next_at"] = now + 2.0
+                    _slum_npc_stop(inst_id, now)
+                else:
+                    _slum_npc_move_toward(
+                        inst_id, waypoint_x, waypoint_z, walk_speed, now, walk=True)
+                continue
             if patrol_type != 1 or patrol_distance <= 0:
                 _slum_npc_stop(inst_id, now)
                 continue
@@ -14239,7 +14301,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
     if map_str in spawned_maps: return
     spawned_maps.add(map_str)
 
-    def send_npc_create(nid, name, x, z, o, slum_enemy=False):
+    def send_npc_create(nid, name, x, z, o, city_ai=False, path_id=""):
         cash_state = picked_char.get('cash_stage_state') if picked_char else None
         is_cash_truck = bool(
             str(nid) == '22101'
@@ -14276,9 +14338,10 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             cash_state['boss_inst_id'] = inst_id
             cash_state['boss_hp'] = NPC_HP_MAP[inst_id]
         sent = send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
-        if slum_enemy and sent:
+        if city_ai and sent:
             register_slum_npc_ai(
-                conn, picked_char, inst_id, nid, x, z, o)
+                conn, picked_char, inst_id, nid, x, z, o,
+                map_id=map_str, path_id=path_id)
         return inst_id
 
     # For Liberty City (map 101), use distance-based AOI spawning so NPCs
@@ -14422,7 +14485,8 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 cfg = NPC_CONFIG.get(nid, {'name': f"Monster_{nid}"})
                 send_npc_create(
                     nid, cfg['name'], m['x'], m['z'], m['o'],
-                    slum_enemy=(map_str == SLUM_DISTRICT_MAP_ID))
+                    city_ai=(map_str in CITY_NPC_AI_MAP_IDS),
+                    path_id=m.get('path_id', ''))
 
     # The active city-capture vehicle is configured by GuildCaptureData and
     # has one shared server instance across players in that map.
@@ -17524,13 +17588,13 @@ def calculate_npc_kill_rewards_for_map(player_level, npc_level, map_id,
                                        npc_id=None):
     exp_reward, cash_reward = calculate_npc_kill_rewards(player_level, npc_level)
     map_id = str(map_id)
-    if map_id == SLUM_DISTRICT_MAP_ID:
-        exp_reward = max(1, int(exp_reward * SLUM_NPC_EXP_REWARD_SCALE))
+    if map_id in CITY_NPC_AI_MAP_IDS:
+        exp_reward = max(1, int(exp_reward * LOW_EXP_NPC_REWARD_SCALE))
     elif map_id == WAREHOUSE_SNEAK_COPY_ID:
         exp_scale = (
             WAREHOUSE_SNEAK_BOSS_EXP_REWARD_SCALE
             if str(npc_id) == WAREHOUSE_SNEAK_BOSS_NPC_ID
-            else SLUM_NPC_EXP_REWARD_SCALE
+            else LOW_EXP_NPC_REWARD_SCALE
         )
         exp_reward = max(1, int(exp_reward * exp_scale))
     return exp_reward, cash_reward
@@ -31158,7 +31222,7 @@ def client_handler(conn, addr):
                                     and cur_map in PRISON_NPC_AOI_MAP_IDS):
                                 prison_npc_retarget_on_hit(target_id, picked_char)
                             if (applied_damage > 0
-                                    and cur_map == SLUM_DISTRICT_MAP_ID):
+                                    and cur_map in CITY_NPC_AI_MAP_IDS):
                                 slum_npc_retarget_on_hit(
                                     target_id, picked_char, conn)
                             if (applied_damage > 0
