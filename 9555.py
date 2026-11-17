@@ -28950,18 +28950,10 @@ def client_handler(conn, addr):
                                             break
                             else:
                                 duplicate_target_team = False
-                                if target_roll is None:
-                                    # As with weapon skills, a missing stat key
-                                    # selects an empty equipped affix slot.
-                                    same_inherit_key = True
-                                else:
-                                    try:
-                                        same_inherit_key = (
-                                                int(selected_value)
-                                                == int(_random_attr_field(target_roll, 1, 'id'))
-                                        )
-                                    except (TypeError, ValueError):
-                                        same_inherit_key = False
+                                # The client explicitly selects the equipped
+                                # stat to replace and the backpack stat to get;
+                                # unlike weapon skills, their IDs need not match.
+                                same_inherit_key = True
                             valid = (
                                     source_index != target_index
                                     and int(ITEM_CONFIG.get(source_id, {}).get('type', -1)) == 2
