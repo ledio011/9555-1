@@ -56,6 +56,7 @@ GOTHAM_MAP_ID = "109"
 SLUM_DISTRICT_MAP_ID = "102"
 VEGAS_MAP_ID = "104"
 CITY_NPC_AI_MAP_IDS = frozenset((SLUM_DISTRICT_MAP_ID, VEGAS_MAP_ID))
+CITY_NPC_CHASE_SECONDS = 2.0
 SLUM_NPC_RESPAWN_SECONDS = 5
 LOW_EXP_NPC_REWARD_SCALE = 0.01
 WAREHOUSE_SNEAK_BOSS_NPC_ID = "13101"
@@ -153,7 +154,7 @@ EXP_RUN_COUNTER = 900000
 NPC_SPAWNED_MAPS = {}  # connection identity -> maps already sent to that client
 NPC_AOI_TRACK = {}  # connection identity -> {inst_id: {'nid': ..., 'x': ..., 'z': ...}}
 SURVIVE_BATTLE_NPC_MAP_IDS = frozenset(("1101", "1102"))
-SURVIVAL_PLAYER_MODEL_RADIUS_CM = 30  # CharacterModelData IDs 100, 104, and 105.
+PLAYER_MODEL_RADIUS_CM = 30  # CharacterModelData IDs 100, 104, and 105.
 SCUFFLE_NPC_MAP_IDS = frozenset(("1201", "1202"))
 WAREHOUSE_SNEAK_COPY_ID = "303"
 WAREHOUSE_SNEAK_STATE_KEY = "_warehouse_sneak_state"
@@ -12341,10 +12342,9 @@ def _prison_npc_skills(npc_cfg, attack_distance, include_model_radii=False):
             ) / 100.0
             # Client CheckSkillDistance uses TraceDistance plus both model
             # radii; effect radii only determine secondary targets.
-            skill_range = max(
-                attack_distance,
-                trace_distance + npc_radius
-                + SURVIVAL_PLAYER_MODEL_RADIUS_CM / 100.0)
+            if trace_distance > 0:
+                skill_range = (
+                    trace_distance + npc_radius + PLAYER_MODEL_RADIUS_CM / 100.0)
         skills.append((skill_id, skill_range, area_type, param1, param2))
     return skills
 
@@ -12794,6 +12794,7 @@ def register_slum_npc_ai(
             "heading": int(heading),
             "target_id": 0,
             "attack_until": 0,
+            "chase_started_at": 0,
             "next_attack_at": 0,
             "skill_ready_at": {},
             "patrol_target": None,
@@ -12847,6 +12848,7 @@ def slum_npc_retarget_on_hit(inst_id, attacker, conn):
             min_action = max(0, int(ai_cfg.get("action_min_time", 5000) or 5000))
             max_action = max(min_action, int(ai_cfg.get("action_max_time", 6000) or 6000))
             state["attack_until"] = now + random.uniform(min_action, max_action) / 1000.0
+        state["chase_started_at"] = now
         state["target_id"] = attacker_id
         state["patrol_target"] = None
     return True
@@ -12966,7 +12968,8 @@ def _slum_npc_ai_tick():
                 0.5,
                 (int(ai_cfg.get("around_min_distance", 100) or 100)
                  + int(ai_cfg.get("around_max_distance", 200) or 200)) / 200.0)
-            skills = _prison_npc_skills(npc_cfg, attack_distance)
+            skills = _prison_npc_skills(
+                npc_cfg, attack_distance, include_model_radii=True)
             if not skills:
                 continue
 
@@ -12996,19 +12999,35 @@ def _slum_npc_ai_tick():
                     if live_state:
                         live_state["target_id"] = 0
                         live_state["attack_until"] = 0
+                        live_state["chase_started_at"] = 0
                         live_state["patrol_target"] = None
                         live_state["patrol_next_at"] = now
                 target_id = 0
             elif return_distance > 0 and home_distance > return_distance:
+                chase_started_at = float(
+                    snapshot.get("chase_started_at", 0) or 0)
+                if chase_started_at <= 0:
+                    with SLUM_NPC_AI_LOCK:
+                        live_state = SLUM_NPC_AI_STATES.get(inst_id)
+                        if live_state:
+                            live_state["chase_started_at"] = now
+                elif now - chase_started_at >= CITY_NPC_CHASE_SECONDS:
+                    with SLUM_NPC_AI_LOCK:
+                        live_state = SLUM_NPC_AI_STATES.get(inst_id)
+                        if live_state:
+                            live_state["target_id"] = 0
+                            live_state["attack_until"] = 0
+                            live_state["chase_started_at"] = 0
+                            live_state["patrol_target"] = None
+                    target_id = 0
+                    _slum_npc_move_toward(
+                        inst_id, home_x, home_z, walk_speed, now, walk=True)
+                    continue
+            elif target_id:
                 with SLUM_NPC_AI_LOCK:
                     live_state = SLUM_NPC_AI_STATES.get(inst_id)
                     if live_state:
-                        live_state["target_id"] = 0
-                        live_state["patrol_target"] = None
-                target_id = 0
-                _slum_npc_move_toward(
-                    inst_id, home_x, home_z, walk_speed, now, walk=True)
-                continue
+                        live_state["chase_started_at"] = 0
 
             if target_id:
                 px_cm, pz_cm = int(target_pos[0]), int(target_pos[2])
