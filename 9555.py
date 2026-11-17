@@ -19322,7 +19322,13 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
 
         if logic_type in [1, 4, 11, 17, 23]: # Kill
             spawn_key = logic_id if logic_id in KILL_TARGET_SPAWNS else str(mid)
-            if spawn_key in KILL_TARGET_SPAWNS:
+            if logic_type == 1 and logic_id in MISSION_REQUIRE_DATA:
+                # KILLMONSTER requirements come from MissionRequireData;
+                # KillTargetMissionData can reuse the same logic ID for a
+                # separate spawned-NPC objective with a different count.
+                required = MISSION_REQUIRE_DATA[logic_id].get(
+                    'require_num', required)
+            elif spawn_key in KILL_TARGET_SPAWNS:
                 required = KILL_TARGET_SPAWNS[spawn_key][0].get('require', 1)
         elif logic_type == 25: # Capture / Boss
             required = 1
