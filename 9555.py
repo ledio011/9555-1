@@ -11746,6 +11746,7 @@ def prison_npc_specs(map_id, player_level=1):
                 "slot": f"{map_str}:{index}",
                 "map_id": map_str,
                 "spawn_index": index,
+                "is_static": map_str == SLUM_DISTRICT_MAP_ID and index >= monster_count,
                 "nid": nid,
                 "x": int(row.get("x", 0)),
                 "z": int(row.get("z", 0)),
@@ -12097,6 +12098,8 @@ def _prison_npc_ai_tick():
             slots = [dict(slot) for slot in PRISON_NPC_SHARED_SLOTS.values()
                      if slot.get("inst_id") is not None and not slot.get("dead_at")]
         for snapshot in slots:
+            if snapshot.get("is_static"):
+                continue
             slot_key = str(snapshot["slot"])
             inst_id = int(snapshot["inst_id"])
             if (inst_id in DEAD_NPC_SET
@@ -12357,6 +12360,9 @@ def start_prison_npc_runtime():
 
 def register_slum_npc_ai(conn, char, inst_id, npc_id, x, z, heading):
     if not conn or not char or str(char.get("map_id", "")) != SLUM_DISTRICT_MAP_ID:
+        return
+    if not any(str(spawn.get("nid") or "") == str(npc_id)
+               for spawn in MONSTER_DATA.get(SLUM_DISTRICT_MAP_ID, [])):
         return
     try:
         owner_id = int(char.get("id", 0) or 0)
