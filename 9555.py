@@ -10586,6 +10586,36 @@ def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid, grant_reward
     )
 
 
+def grant_mission_drop_for_npc_kill(conn, send_rpc_push, picked_char, npcid):
+    """Grant an active kill-drop mission's required item for its target kill."""
+    for mid, mission_state in picked_char.get('active_missions', {}).items():
+        if mission_state.get('state') != 1 or str(mid) == '26':
+            continue
+        cfg = missions_data.get(str(mid), {})
+        if int(cfg.get('logic_type', -1)) != 4:
+            continue
+        logic_id = str(cfg.get('logic_id', ''))
+        requirement = MISSION_REQUIRE_DATA.get(logic_id, {})
+        item_id = str(requirement.get('item_id') or '')
+        mission_npc = str(requirement.get('npc_id') or '')
+        if (not item_id or mission_npc != str(npcid)
+                or str(cfg.get('target_id') or mission_npc) != str(npcid)):
+            continue
+        mission_map = str(cfg.get('map_id') or '').strip()
+        if mission_map and str(picked_char.get('map_id') or '') != mission_map:
+            continue
+        if not can_add_to_inventory(picked_char, item_id, 1):
+            print(f"[MISSION DROP] inventory full player={picked_char.get('id')} "
+                  f"mission={mid} item={item_id}")
+            return False
+        grant_item_rewards(
+            picked_char, [(item_id, 0, 1)], conn, send_rpc_push, save=False)
+        advance_missions(
+            picked_char, send_rpc_push, 'pickup', target_id=item_id)
+        return True
+    return False
+
+
 def gotham_boss_reward_plan(rank):
     """Return the rank-scaled enhancer and weapon counts for The Pain."""
     if rank <= 2:
@@ -10804,6 +10834,8 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
         advance_missions(
             picked_char, send_rpc_push, 'kill', target_id=npcid,
             map_id=current_map)
+        grant_mission_drop_for_npc_kill(
+            conn, send_rpc_push, picked_char, npcid)
 
     if exp_state and inst_id:
         active_monsters = exp_state.get('active_monsters', [])
