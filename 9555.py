@@ -12062,19 +12062,6 @@ def start_warehouse_sneak_battle(conn, picked_char, send_rpc_push):
     if state.get("phase") != "sneak":
         return False
 
-    try:
-        pos = picked_char.get("pos") or default_map_spawn_position(
-            WAREHOUSE_SNEAK_COPY_ID)
-        distance_sq = (
-            (int(pos[0]) - 200) ** 2 + (int(pos[2]) + 700) ** 2
-        )
-    except (TypeError, ValueError, IndexError):
-        return False
-    if distance_sq > 200 ** 2:
-        print(f"[SNEAK COPY] start denied before client-verified endpoint "
-              f"player={picked_char.get('id')} pos={pos}")
-        return False
-
     player_id = int(picked_char.get("id", 0) or 0)
     specs = prison_npc_specs(
         WAREHOUSE_SNEAK_COPY_ID,
