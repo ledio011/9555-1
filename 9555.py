@@ -112,6 +112,7 @@ PVP_ACCEPTED_HITS = {}
 PVP_REVIVE_PROTECTION = {}
 PVP_PENDING_RELIFE = {}
 ESCORT_ACTIVITY_CONFIG = {}
+GOTHAM_ASSASSINATION_ATTEMPT_KEY = "assassination"
 BAR_FIGHT_ACTIVITY_CONFIG = {}
 GOTHAM_ESCORT_NPC_OWNER = {} # instance ID -> character ID
 TOWER_NPC_OWNER = {} # inst_id -> character ID for private climbing-tower NPCs
@@ -15972,21 +15973,80 @@ def ensure_escort_activity_state(char):
         state['attempts'] = {}
     return state
 
+
+def escort_activity_attempts_used(state, cfg):
+    attempts = state.get('attempts', {})
+    attempt_key = (
+        GOTHAM_ASSASSINATION_ATTEMPT_KEY
+        if int(cfg.get('type', 0) or 0) == 2
+        else str(cfg.get('id', ''))
+    )
+    try:
+        used = max(0, int(attempts.get(attempt_key, 0) or 0))
+    except (TypeError, ValueError):
+        used = 0
+    if int(cfg.get('type', 0) or 0) == 2:
+        for activity_id, activity_cfg in ESCORT_ACTIVITY_CONFIG.items():
+            if int(activity_cfg.get('type', 0) or 0) != 2:
+                continue
+            try:
+                used = max(used, max(0, int(attempts.get(activity_id, 0) or 0)))
+            except (TypeError, ValueError):
+                continue
+    return used
+
+
+def gotham_assassination_activity_id(level):
+    candidates = [
+        (str(activity_id), cfg)
+        for activity_id, cfg in ESCORT_ACTIVITY_CONFIG.items()
+        if int(cfg.get('type', 0) or 0) == 2
+    ]
+    if not candidates:
+        return None
+    eligible = [
+        item for item in candidates
+        if int(item[1].get('unlock_level', 1) or 1) <= int(level)
+    ]
+    if eligible:
+        return max(
+            eligible,
+            key=lambda item: (
+                int(item[1].get('unlock_level', 1) or 1),
+                int(item[1].get('random_index', 0) or 0),
+                item[0],
+            ),
+        )[0]
+    return min(
+        candidates,
+        key=lambda item: (
+            int(item[1].get('unlock_level', 1) or 1),
+            int(item[1].get('random_index', 0) or 0),
+            item[0],
+        ),
+    )[0]
+
+
 def escort_activity_info_payload(char, now=None):
     now = int(time.time() if now is None else now)
     state = ensure_escort_activity_state(char)
     activities = {}
+    assassination_id = gotham_assassination_activity_id(
+        int(char.get('level', 1) or 1))
     for activity_id, cfg in ESCORT_ACTIVITY_CONFIG.items():
-        # Keep the default Escort row visible; its other RandomIndex variants
-        # remain configured and are still accepted as mission IDs.
+        # The client renders every row; keep only the default Escort and the
+        # Assassination tier appropriate to this player's level.
         if (int(cfg.get('type', 0) or 0) == 1
                 and int(cfg.get('random_index', 0) or 0) > 0):
+            continue
+        if (int(cfg.get('type', 0) or 0) == 2
+                and str(activity_id) != assassination_id):
             continue
         bonus_active, next_start = escort_activity_clock(
             cfg.get('start_time', 0), cfg.get('duration', 0), now)
         if bonus_active:
             next_start += 86400
-        used = max(0, int(state['attempts'].get(activity_id, 0) or 0))
+        used = escort_activity_attempts_used(state, cfg)
         remaining = max(0, int(cfg.get('max_plays', 0)) - used)
         activities[activity_id] = encode_sproto([
             (0, activity_id), (1, remaining), (2, int(cfg.get('type', 0))),
@@ -16791,13 +16851,17 @@ def accept_gotham_escort_mission(char, mid, conn=None):
     with get_character_transaction_lock(char):
         state = ensure_escort_activity_state(char)
         activity_id = str(cfg.get('id', ''))
-        attempts = max(0, int(state['attempts'].get(activity_id, 0) or 0))
+        attempts = escort_activity_attempts_used(state, cfg)
         if attempts >= int(cfg.get('max_plays', 0)):
             print(f"[GOTHAM ACTIVITY REJECT] mission={mid} reason=daily_limit "
                   f"activity={activity_id} attempts={attempts} "
                   f"max={cfg.get('max_plays')} day={state.get('day')}")
             return False
-        state['attempts'][activity_id] = attempts + 1
+        attempt_key = (
+            GOTHAM_ASSASSINATION_ATTEMPT_KEY
+            if int(cfg.get('type', 0) or 0) == 2 else activity_id
+        )
+        state['attempts'][attempt_key] = attempts + 1
         reward_scale = max(0, int(cfg.get('special_scale', 100))) if bonus_active else 100
         char.setdefault('active_missions', {})[str(mid)] = {
             'state': 1,
