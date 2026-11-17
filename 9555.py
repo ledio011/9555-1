@@ -10586,8 +10586,8 @@ def on_npc_killed(conn, send_rpc_push, picked_char, inst_id, npcid, grant_reward
     )
 
 
-def grant_mission_drop_for_npc_kill(conn, send_rpc_push, picked_char, npcid):
-    """Grant an active kill-drop mission's required item for its target kill."""
+def advance_mission_drop_for_npc_kill(send_rpc_push, picked_char, npcid):
+    """Advance a kill-drop mission without adding its unusable quest item."""
     for mid, mission_state in picked_char.get('active_missions', {}).items():
         if mission_state.get('state') != 1 or str(mid) == '26':
             continue
@@ -10604,12 +10604,8 @@ def grant_mission_drop_for_npc_kill(conn, send_rpc_push, picked_char, npcid):
         mission_map = str(cfg.get('map_id') or '').strip()
         if mission_map and str(picked_char.get('map_id') or '') != mission_map:
             continue
-        if not can_add_to_inventory(picked_char, item_id, 1):
-            print(f"[MISSION DROP] inventory full player={picked_char.get('id')} "
-                  f"mission={mid} item={item_id}")
-            return False
-        grant_item_rewards(
-            picked_char, [(item_id, 0, 1)], conn, send_rpc_push, save=False)
+        # MissionRequireData defines this item only as a progress token; the
+        # client data provides no usable action or verified currency value.
         advance_missions(
             picked_char, send_rpc_push, 'pickup', target_id=item_id)
         return True
@@ -10834,8 +10830,8 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
         advance_missions(
             picked_char, send_rpc_push, 'kill', target_id=npcid,
             map_id=current_map)
-        grant_mission_drop_for_npc_kill(
-            conn, send_rpc_push, picked_char, npcid)
+        advance_mission_drop_for_npc_kill(
+            send_rpc_push, picked_char, npcid)
 
     if exp_state and inst_id:
         active_monsters = exp_state.get('active_monsters', [])
