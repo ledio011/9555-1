@@ -18551,13 +18551,6 @@ def _rank_pvp_ensure_world():
                 )
             except (TypeError, ValueError):
                 played_matches = 0
-            if played_matches == 0:
-                unplayed_rank = RANK_PVP_MAX_RANK
-                for key in ("rank_pos", "best_rank_pos", "pre_rank_pos"):
-                    if state.get(key) != unplayed_rank:
-                        state[key] = unplayed_rank
-                        changed = True
-                continue
             if "rank_pos" not in state:
                 missing.append(character)
                 continue
@@ -18566,14 +18559,17 @@ def _rank_pvp_ensure_world():
             except (TypeError, ValueError):
                 rank_pos = RANK_PVP_MAX_RANK + 1
             if 1 <= rank_pos <= RANK_PVP_MAX_RANK:
-                if rank_pos in valid_positions:
+                # Rank 1000 was previously assigned to every unplayed
+                # character as a placeholder. Treat it as uninitialized so
+                # the ladder can give each player a unique client-visible rank.
+                if played_matches == 0 and rank_pos == RANK_PVP_MAX_RANK:
+                    missing.append(character)
+                elif rank_pos in valid_positions:
                     missing.append(character)
                 else:
                     valid_positions.add(rank_pos)
             else:
-                state["rank_pos"] = RANK_PVP_MAX_RANK + 1
-                state.setdefault("best_rank_pos", RANK_PVP_MAX_RANK + 1)
-                changed = True
+                missing.append(character)
 
         if not valid_positions and missing:
             # No ladder exists yet: seed it by the server's real combat-power formula.
