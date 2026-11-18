@@ -20,5 +20,3 @@ GITHUB_BACKUP_REPOSITORY: optional owner/repository override; defaults to ledio0
 GITHUB_BACKUP_BRANCH: optional branch override; defaults to the repository's default branch.
 
 The backup worker logs an error and retries the next day if the repository is unavailable or the token lacks access. The current development GitHub connection could not resolve ledio011/AutoTheftDatabase, so verify that the repository exists and that the Railway token can access it before relying on backups.
-
-.
