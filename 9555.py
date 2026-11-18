@@ -8,8 +8,10 @@ try:
 except ImportError:
     fcntl = None
 
-PORT = int(os.environ.get("PORT", 9555))
+PORT = int(os.environ.get("PORT", 15678))
 SERVER_DEBUG_LOGS = os.environ.get("GAME_SERVER_DEBUG", "").lower() in ("1", "true", "yes")
+RAILWAY_GAME_HOST = os.environ.get("GAME_PUBLIC_HOST", "yamanote.proxy.rlwy.net").strip()
+RAILWAY_GAME_PORT = int(os.environ.get("GAME_PUBLIC_PORT", "15589"))
 
 def debug_log(*args, **kwargs):
     if SERVER_DEBUG_LOGS:
@@ -2650,8 +2652,8 @@ try:
                         'new_char': int(parts[7]) if parts[7].isdigit() else 0,
                         'server_list': parts[8],
                         'display_name': parts[9],
-                        'ip': parts[10],
-                        'port': int(parts[11]) if parts[11].isdigit() else 9555,
+                        'ip': RAILWAY_GAME_HOST,
+                        'port': RAILWAY_GAME_PORT,
                         'rank': int(parts[12]) if parts[12].isdigit() else 0,
                         'weight': int(parts[13]) if parts[13].isdigit() else 1,
                         'new_server': int(parts[14]) if parts[14].isdigit() else 0,
@@ -33118,7 +33120,7 @@ def client_handler(conn, addr):
                 else:
                     # Fallback
                     server = encode_sproto([
-                        (0, 302), (1, "EU-001"), (2, "s16.serv00.com"), (3, 15678),
+                        (0, 302), (1, "EU-001"), (2, RAILWAY_GAME_HOST), (3, RAILWAY_GAME_PORT),
                         (4, 1), (5, -4), (6, 1), (7, 1), (8, 1), (9, 1), (10, 0)
                     ])
                     servers.append(server)
