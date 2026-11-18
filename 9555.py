@@ -1,7 +1,15 @@
 import socket, struct, copy, threading, random, json, os, time, traceback, math, re, uuid, shutil
 import datetime
+import base64
+import io
+import urllib.error
+import urllib.parse
+import urllib.request
+import zipfile
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Tuple
+
+from cryptography.fernet import Fernet
 
 try:
     import fcntl
@@ -43,8 +51,49 @@ class RepeatingTask:
 # Verified from the shipped APK: GameDefine.PLAYER_MAX_LEVEL = 80.
 PLAYER_MAX_LEVEL = 80
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-CHAR_DB = os.path.join(SCRIPT_DIR, "characters_final.json")
-BAK_DB = CHAR_DB + ".bak"
+STATE_DIR = os.path.abspath(
+    os.environ.get("DATA_DIR")
+    or os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+    or SCRIPT_DIR
+)
+try:
+    os.makedirs(STATE_DIR, exist_ok=True)
+except OSError as state_dir_error:
+    raise RuntimeError(f"Unable to create persistent data directory {STATE_DIR}") from state_dir_error
+
+if (os.environ.get("RAILWAY_ENVIRONMENT")
+        and not os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
+        and not os.environ.get("DATA_DIR")):
+    print("[PERSISTENCE WARNING] Railway volume not detected; server data may be lost on redeploy.")
+
+
+def persistent_state_path(filename):
+    path = os.path.join(STATE_DIR, filename)
+    legacy_path = os.path.join(SCRIPT_DIR, filename)
+    if (os.path.abspath(path) == os.path.abspath(legacy_path)
+            or os.path.exists(path)
+            or not os.path.isfile(legacy_path)):
+        return path
+
+    migration_path = f"{path}.migration-{os.getpid()}"
+    try:
+        shutil.copy2(legacy_path, migration_path)
+        os.replace(migration_path, path)
+    except OSError as migration_error:
+        if os.path.exists(migration_path):
+            try:
+                os.remove(migration_path)
+            except OSError as cleanup_error:
+                print(f"[PERSISTENCE] failed to remove migration temp file {migration_path}: {cleanup_error}")
+        raise RuntimeError(
+            f"Unable to migrate server data from {legacy_path} to {path}"
+        ) from migration_error
+    print(f"[PERSISTENCE] migrated {filename} to {STATE_DIR}")
+    return path
+
+
+CHAR_DB = persistent_state_path("characters_final.json")
+BAK_DB = persistent_state_path("characters_final.json.bak")
 TMP_DB = CHAR_DB + ".tmp"
 RESOURCE_ROOT = os.path.join(SCRIPT_DIR, "assets")
 server_session_counter = 8000
@@ -65,7 +114,7 @@ OPEN_WORLD_NPC_MAP_IDS = frozenset((
 WAREHOUSE_SNEAK_BOSS_NPC_ID = "13101"
 WAREHOUSE_SNEAK_BOSS_EXP_REWARD_SCALE = 0.05
 GOTHAM_BOSS_DEFAULT_RESPAWN_SECONDS = 3 * 60 * 60
-GOTHAM_BOSS_RESPAWN_PATH = os.path.join(SCRIPT_DIR, "gotham_boss_respawns.json")
+GOTHAM_BOSS_RESPAWN_PATH = persistent_state_path("gotham_boss_respawns.json")
 GOTHAM_BOSS_RESPAWN_LOCK = threading.RLock()
 def _load_gotham_boss_respawns():
     try:
@@ -1271,26 +1320,14 @@ try:
                     }
         debug_log(f"[AI DATA CONFIG LOADED] count={len(AI_DATA_CONFIG)}")
 
-    # Override map 11 mission monsters that need fixed level-1 stats.
-    # NPC 9901 is omitted so its NpcData level-9999 setting scales with player level.
-    # Covers 9902-9905 (mission targets), 9501-9505 (side missions), 9910-9916 (later missions)
+    # Map 11 mission enemies (9901-9905, 9910-9916) retain NpcData stats and skills.
+    # Keep separate fixed overrides for side missions and static NPCs.
     _map11_monsters = {
-        '9902': {'name': 'Hip Guy', 'model': 'NPC_Nan_022', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9903': {'name': 'PoliceMan', 'model': 'NPC_Nan_023', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9904': {'name': 'Beat Striker', 'model': 'NPC_Nan_036', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9905': {'name': 'Body Guard', 'model': 'NPC_Nan_017', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
         '9501': {'name': 'Hulk', 'model': 'NPC_Nan_013', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
         '9502': {'name': 'Hip Guy', 'model': 'NPC_Nan_022', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
         '9503': {'name': 'PoliceMan', 'model': 'NPC_Nan_023', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
         '9504': {'name': 'Beat Striker', 'model': 'NPC_Nan_036', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
         '9505': {'name': 'The Pain', 'model': 'BOSS_Nan_006', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9910': {'name': 'Hulk', 'model': 'NPC_Nan_013', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9911': {'name': 'Hip Guy', 'model': 'NPC_Nan_022', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9912': {'name': 'PoliceMan', 'model': 'NPC_Nan_023', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9913': {'name': 'Beat Striker', 'model': 'NPC_Nan_036', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9914': {'name': 'Body Guard', 'model': 'NPC_Nan_017', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9915': {'name': 'Gentle Fighter', 'model': 'NPC_Nan_018', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
-        '9916': {'name': 'Gang Member', 'model': 'NPC_Nan_022', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
         # Map 11 ambient civilians and auto-generated NPCs
         '2001': {'name': 'Civilian', 'model': 'NPC_Nan_002_Talk', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
         '2003': {'name': 'Civilian', 'model': 'NPC_Nan_005_Talk', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
@@ -3479,7 +3516,7 @@ all_accounts_chars = load_chars()
 # Guild data is persisted separately so it survives the leader logging out or
 # leaving the server. It contains only guild-owned state; character balances
 # and membership fields remain in the existing character database.
-GUILD_DB_PATH = os.path.join(SCRIPT_DIR, "guilds.json")
+GUILD_DB_PATH = persistent_state_path("guilds.json")
 GUILD_DB_LOCK = threading.RLock()
 GUILD_INVITE_LOCK = threading.Lock()
 GUILD_INVITES = {}  # (target character ID, guild ID) -> expiry epoch for accepted invite flow
@@ -3515,10 +3552,10 @@ print(f"[GUILD] loaded guilds={len(GUILD_STATES)} next_id={GUILD_ID_COUNTER}")
 # Guild-city ownership is guild state; active boss HP and damage stay in RAM
 # for the current scheduled event. The APK tables provide the five city maps,
 # vehicle IDs, schedules, and daily claim rewards.
-GUILD_CITY_OWNER_PATH = os.path.join(SCRIPT_DIR, "guild_city.json")
+GUILD_CITY_OWNER_PATH = persistent_state_path("guild_city.json")
 GUILD_CITY_LOCK = threading.RLock()
 GUILD_CITY_EVENT_STATE = {}
-WILD_BOSS_FINISHED_PATH = os.path.join(SCRIPT_DIR, "wild_boss_finished_events.json")
+WILD_BOSS_FINISHED_PATH = persistent_state_path("wild_boss_finished_events.json")
 WILD_BOSS_FINISHED_LOCK = threading.RLock()
 
 def _wild_boss_finished_event_key(boss_id, event_start):
@@ -3597,7 +3634,7 @@ WILD_BOSS_ENTRY_RESERVATIONS = {}
 WILD_BOSS_RANK_ROWS = 6
 GUILD_BOSS_LOCK = threading.RLock()
 GUILD_BOSS_ENTRY_RESERVATIONS = {}
-GUILD_BOSS_OVERRIDE_PATH = os.path.join(SCRIPT_DIR, "guild_boss_override.json")
+GUILD_BOSS_OVERRIDE_PATH = persistent_state_path("guild_boss_override.json")
 GUILD_BOSS_OVERRIDE_ERROR_LOGGED = set()
 GUILD_BOSS_INSTANCES = {}
 GUILD_BOSS_RUNTIMES = {}
@@ -3612,6 +3649,170 @@ except FileNotFoundError:
 except Exception as city_error:
     print(f"[GUILD CITY] failed to read {GUILD_CITY_OWNER_PATH}: {city_error}")
     GUILD_CITY_OWNERS = {}
+
+
+GITHUB_BACKUP_PATH = "backups/server-data.zip.fernet"
+GITHUB_BACKUP_INTERVAL_SECONDS = 24 * 60 * 60
+GITHUB_BACKUP_STATE_PATHS = (
+    CHAR_DB,
+    BAK_DB,
+    GUILD_DB_PATH,
+    GUILD_CITY_OWNER_PATH,
+    WILD_BOSS_FINISHED_PATH,
+    GOTHAM_BOSS_RESPAWN_PATH,
+    GUILD_BOSS_OVERRIDE_PATH,
+)
+
+
+def _create_github_backup_archive():
+    created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    archive_buffer = io.BytesIO()
+    included_files = []
+    with CHAR_DB_SAVE_LOCK:
+        with zipfile.ZipFile(
+                archive_buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for path in GITHUB_BACKUP_STATE_PATHS:
+                try:
+                    with open(path, "rb") as state_file:
+                        contents = state_file.read()
+                except FileNotFoundError:
+                    continue
+                archive.writestr(os.path.basename(path), contents)
+                included_files.append(os.path.basename(path))
+            if not included_files:
+                raise RuntimeError("No server state files are available to back up.")
+            manifest = {
+                "created_at": created_at,
+                "files": sorted(included_files),
+            }
+            archive.writestr(
+                "backup_manifest.json",
+                json.dumps(manifest, separators=(",", ":")).encode("utf-8"),
+            )
+    return created_at, archive_buffer.getvalue()
+
+
+def _github_backup_api_request(url, token, method="GET", payload=None,
+                               allow_not_found=False):
+    request_data = (
+        json.dumps(payload).encode("utf-8") if payload is not None else None
+    )
+    request = urllib.request.Request(
+        url,
+        data=request_data,
+        method=method,
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": "9555-server-backup",
+            **({"Content-Type": "application/json"} if request_data is not None else {}),
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            response_body = response.read()
+    except urllib.error.HTTPError as error:
+        if allow_not_found and error.code == 404:
+            return None
+        raise RuntimeError(
+            f"GitHub backup request failed with HTTP {error.code}."
+        ) from error
+    except urllib.error.URLError as error:
+        raise RuntimeError("GitHub backup request could not reach GitHub.") from error
+    return json.loads(response_body.decode("utf-8")) if response_body else {}
+
+
+def backup_server_data_to_github():
+    token = os.environ.get("GITHUB_BACKUP_TOKEN", "").strip()
+    encryption_key = os.environ.get("GITHUB_BACKUP_ENCRYPTION_KEY", "").strip()
+    if not token or not encryption_key:
+        raise RuntimeError(
+            "Set GITHUB_BACKUP_TOKEN and GITHUB_BACKUP_ENCRYPTION_KEY to enable backups."
+        )
+
+    repository = os.environ.get(
+        "GITHUB_BACKUP_REPOSITORY", "ledio011/AutoTheftDatabase"
+    ).strip()
+    owner, separator, repo_name = repository.partition("/")
+    if not separator or not owner or not repo_name or "/" in repo_name:
+        raise ValueError("GITHUB_BACKUP_REPOSITORY must be in owner/repository form.")
+
+    api_root = (
+        "https://api.github.com/repos/"
+        f"{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo_name, safe='')}"
+    )
+    repo_info = _github_backup_api_request(api_root, token)
+    if not isinstance(repo_info, dict):
+        raise RuntimeError("GitHub returned invalid backup repository metadata.")
+    if repo_info.get("private") is not True:
+        raise RuntimeError("Refusing to upload server data to a non-private repository.")
+
+    branch = (
+        os.environ.get("GITHUB_BACKUP_BRANCH", "").strip()
+        or str(repo_info.get("default_branch") or "")
+    )
+    if not branch:
+        raise RuntimeError("GitHub backup repository has no usable default branch.")
+
+    created_at, archive_data = _create_github_backup_archive()
+    encrypted_data = Fernet(encryption_key.encode("ascii")).encrypt(archive_data)
+    backup_file_url = (
+        f"{api_root}/contents/"
+        f"{urllib.parse.quote(GITHUB_BACKUP_PATH, safe='/')}"
+    )
+    existing_file_url = (
+        f"{backup_file_url}?{urllib.parse.urlencode({'ref': branch})}"
+    )
+    existing_file = _github_backup_api_request(
+        existing_file_url, token, allow_not_found=True
+    )
+    payload = {
+        "message": f"Encrypted server backup {created_at}",
+        "content": base64.b64encode(encrypted_data).decode("ascii"),
+        "branch": branch,
+    }
+    if isinstance(existing_file, dict) and existing_file.get("sha"):
+        payload["sha"] = existing_file["sha"]
+
+    result = _github_backup_api_request(
+        backup_file_url, token, method="PUT", payload=payload
+    )
+    commit = result.get("commit") if isinstance(result, dict) else None
+    if not isinstance(commit, dict) or not commit.get("sha"):
+        raise RuntimeError("GitHub did not confirm the encrypted backup commit.")
+    print(
+        f"[GITHUB BACKUP] encrypted snapshot saved to "
+        f"{repository}/{GITHUB_BACKUP_PATH} at {created_at}"
+    )
+
+
+def _github_backup_worker():
+    while True:
+        try:
+            backup_server_data_to_github()
+        except (OSError, RuntimeError, ValueError) as backup_error:
+            print(f"[GITHUB BACKUP] failed: {backup_error}")
+        time.sleep(GITHUB_BACKUP_INTERVAL_SECONDS)
+
+
+def start_github_backup_worker():
+    missing = [
+        name for name in ("GITHUB_BACKUP_TOKEN", "GITHUB_BACKUP_ENCRYPTION_KEY")
+        if not os.environ.get(name, "").strip()
+    ]
+    if missing:
+        print(
+            "[GITHUB BACKUP] disabled; configure Railway variables: "
+            + ", ".join(missing)
+        )
+        return
+    threading.Thread(
+        target=_github_backup_worker,
+        daemon=True,
+        name="github-server-backup",
+    ).start()
+
 
 def _save_guild_city_owners():
     temp_path = GUILD_CITY_OWNER_PATH + ".tmp"
@@ -36895,6 +37096,7 @@ def start_server():
     server.bind(("0.0.0.0", PORT))
     server.listen(20)
     print(f"GAME SERVER 9555 READY ON PORT {PORT}")
+    start_github_backup_worker()
     _restore_guild_dance_speaker_timers()
     threading.Thread(target=_guild_boss_scheduler_loop, daemon=True).start()
     RepeatingTask(1.0, _wild_boss_schedule_tick).start()
