@@ -61,9 +61,23 @@ try:
 except OSError as state_dir_error:
     raise RuntimeError(f"Unable to create persistent data directory {STATE_DIR}") from state_dir_error
 
-if (os.environ.get("RAILWAY_ENVIRONMENT")
-        and not os.environ.get("RAILWAY_VOLUME_MOUNT_PATH")
-        and not os.environ.get("DATA_DIR")):
+def railway_persistence_configured():
+    return bool(
+        os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+        or os.environ.get("DATA_DIR", "").strip()
+    )
+
+
+def require_railway_persistence():
+    if os.environ.get("RAILWAY_ENVIRONMENT") and not railway_persistence_configured():
+        raise RuntimeError(
+            "[PERSISTENCE ERROR] Refusing to start on Railway without a mounted "
+            "volume. Attach a Railway Volume (recommended mount path: /data) or "
+            "set DATA_DIR to a directory on persistent storage."
+        )
+
+
+if os.environ.get("RAILWAY_ENVIRONMENT") and not railway_persistence_configured():
     print("[PERSISTENCE WARNING] Railway volume not detected; server data may be lost on redeploy.")
 
 
@@ -3319,12 +3333,15 @@ def load_chars():
         except Exception as e:
             print(f"[WARN] Failed to load {CHAR_DB}: {e}")
 
-    if data is None and os.path.exists(BAK_DB):
+    if not data and os.path.exists(BAK_DB):
         try:
             with open(BAK_DB, "r", encoding="utf-8") as f:
                 raw_data = json.load(f)
                 if isinstance(raw_data, dict):
-                    print(f"[RECOVERY] Restored character database from {BAK_DB}!")
+                    print(
+                        f"[RECOVERY] Restored character database from {BAK_DB}; "
+                        "primary file was missing, invalid, or empty."
+                    )
                     data = raw_data
                     try:
                         with open(CHAR_DB, "w", encoding="utf-8") as out:
@@ -3512,6 +3529,21 @@ def _save_chars_atomic(data):
                 process_lock.close()
 
 all_accounts_chars = load_chars()
+_loaded_account_count = sum(
+    len(accounts) for accounts in all_accounts_chars.values()
+    if isinstance(accounts, dict)
+)
+_loaded_character_count = sum(
+    len(characters)
+    for accounts in all_accounts_chars.values()
+    if isinstance(accounts, dict)
+    for characters in accounts.values()
+    if isinstance(characters, list)
+)
+print(
+    f"[CHARACTER DB] loaded accounts={_loaded_account_count} "
+    f"characters={_loaded_character_count} path={CHAR_DB}"
+)
 
 # Guild data is persisted separately so it survives the leader logging out or
 # leaving the server. It contains only guild-owned state; character balances
@@ -37089,6 +37121,7 @@ def start_solo_equipment_run(conn, char, copy_id, use_time_item, send_rpc_push):
     return True
 
 def start_server():
+    require_railway_persistence()
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     # Do not enable SO_REUSEPORT: this server's game state is process-local,
