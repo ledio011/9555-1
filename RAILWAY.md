@@ -4,7 +4,9 @@ The server stores character data, guilds, and event state in JSON files. Railway
 
 On the first startup with a volume, existing state files beside 9555.py are copied into the volume only when the corresponding volume file does not exist. Existing volume data is never overwritten. If Railway has already discarded the old deployment filesystem, this migration cannot recover that lost data; restore it from a backup.
 
-Without a volume (or DATA_DIR), the server logs a warning on Railway and continues using its deployment directory, which can still be lost during redeploys.
+Without a volume (or DATA_DIR), the server warns and continues using its deployment directory so it can still start, but that data may be lost on redeploy. If you set DATA_DIR yourself, point it inside a Railway Volume. Startup logs the character database path and loaded account/character counts. If the primary character file is empty or invalid, the server attempts recovery from characters_final.json.bak.
+
+The GitHub backup is an additional recovery copy, not a live database or a substitute for a Railway Volume. It is disabled until both GitHub variables are configured.
 
 Encrypted GitHub backups
 
