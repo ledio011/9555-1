@@ -1325,8 +1325,8 @@ try:
                     }
         debug_log(f"[AI DATA CONFIG LOADED] count={len(AI_DATA_CONFIG)}")
 
-    # Map 11 mission enemies (9901-9905, 9910-9916) retain NpcData stats and skills.
-    # Keep separate fixed overrides for side missions and static NPCs.
+    # Keep separate fixed overrides for static NPCs, but never replace a
+    # client-authored, level-scaled NpcData row with generic fixed stats.
     _map11_monsters = {
         '9501': {'name': 'Hulk', 'model': 'NPC_Nan_013', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
         '9502': {'name': 'Hip Guy', 'model': 'NPC_Nan_022', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
@@ -1382,8 +1382,14 @@ try:
         '1511': {'name': 'Secret Owner', 'model': 'NPC_Nv_010', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
         '1512': {'name': 'Administrator', 'model': 'NPC_Nan_005', 'level': 1, 'atk_abs': 40, 'hp_abs': 1000, 'def_abs': 100, 'hit_abs': 2844, 'eva_abs': 129, 'cri_abs': 351, 'res_abs': 0, 'exd_abs': 0, 'exr_abs': 0, 'crd_abs': 15000, 'crr_abs': 0, 'anti_stun_abs': 0, 'anti_knock_down_abs': 0, 'defa_abs': 3158, 'dgea_abs': 6317, 'resa_abs': 3158, 'hita_abs': 316, 'cria_abs': 3158},
     }
+    _map11_overrides_applied = []
+    _map11_client_data_preserved = []
     for _nid, _override in _map11_monsters.items():
         if _nid in NPC_CONFIG:
+            if (int(NPC_CONFIG[_nid].get('level', 1) or 1) == 9999
+                    and not NPC_CONFIG[_nid].get('is_abs', True)):
+                _map11_client_data_preserved.append(_nid)
+                continue
             # Always apply the override to ensure correct configuration
             # For percentage-based NPCs (is_abs=False), override the coefficients and level
             # For absolute NPCs (is_abs=True), override the absolute values
@@ -1438,7 +1444,10 @@ try:
                             'anti_stun_coe', 'anti_knock_down_coe', 'defa_coe', 'dgea_coe',
                             'resa_coe', 'hita_coe', 'cria_coe']:
                     NPC_CONFIG[_nid][key] = _override.get(key, 10000)
-    print(f"[MAP11 MONSTER OVERRIDES APPLIED] NPCs={list(_map11_monsters.keys())}")
+        _map11_overrides_applied.append(_nid)
+    print(f"[MAP11 MONSTER OVERRIDES APPLIED] NPCs={_map11_overrides_applied}")
+    if _map11_client_data_preserved:
+        print(f"[MAP11 CLIENT NPC DATA PRESERVED] NPCs={_map11_client_data_preserved}")
 
     # Load MonsterData (and split into Monster vs Static NPC)
     mon_path = os.path.join(text_asset_root, "MonsterData")
@@ -1497,9 +1506,9 @@ try:
                 parts = line.strip().split(",")
                 if len(parts) > 7 and parts[1].isdigit():
                     row_id = parts[1]
-                    # Skip duplicate 4-digit MissionID override rows (e.g., 1001 with FlashNum=4) in favor of 1-digit LogicIDs (e.g., 1 with FlashNum=2)
-                    if int(row_id) >= 1000 and str(int(row_id) - 1000) in KILL_TARGET_SPAWNS:
-                        continue
+                    # 1-digit tutorial LogicIDs and 4-digit side-mission
+                    # LogicIDs are distinct spawn sets, even when they target
+                    # the same NPC (for example 1 and 1001 both use NPC 9901).
                     if row_id not in KILL_TARGET_SPAWNS: KILL_TARGET_SPAWNS[row_id] = []
                     flash_num = int(parts[7]) if parts[7].isdigit() else 1
                     require_num = int(parts[8]) if len(parts) > 8 and parts[8].isdigit() else flash_num
@@ -1685,15 +1694,20 @@ try:
                         max_speed = float(parts[24]) / 100.0 if len(parts) > 24 and parts[24] else 0.0
                     except (TypeError, ValueError):
                         max_speed = 0.0
+                    mount_attributes = [
+                        (int(parts[i]), int(parts[i + 1]))
+                        for i in (7, 9, 11, 13)
+                        if (len(parts) > i + 1
+                            and parts[i].lstrip('-').isdigit()
+                            and parts[i + 1].lstrip('-').isdigit()
+                            and int(parts[i]) > 0)
+                    ]
                     # World-map mounted movement uses MountData's MOV (2011)
                     # percentage bonus. MaxSpeed is reserved for physics cars
                     # such as the separate Street Race vehicle.
                     world_mov_bonus = sum(
-                        int(parts[i + 1])
-                        for i in (7, 9, 11, 13)
-                        if (len(parts) > i + 1 and parts[i].isdigit()
-                            and parts[i + 1].lstrip('-').isdigit()
-                            and int(parts[i]) == 2011)
+                        value for attribute_id, value in mount_attributes
+                        if attribute_id == 2011
                     )
                     MOUNT_CONFIG[parts[1]] = {
                         'colors': colors,
@@ -1702,6 +1716,7 @@ try:
                         'need_show': int(parts[36]) if parts[36].isdigit() else 0,
                         'is_motor': is_motor,
                         'max_speed': max_speed,
+                        'attributes': mount_attributes,
                         'world_mov_bonus': world_mov_bonus,
                         'model_id': parts[15] if len(parts) > 15 else '',
                         'gta_link_car_id': parts[38] if len(parts) > 38 and parts[38] else parts[1],
@@ -6585,6 +6600,18 @@ def get_character_stats(c, backpack_state_ready=False):
                 refine_power_score += attribute_combat_value(attribute_id, value)
         # RefineData.GetCombatValue floors each refine node independently.
         power_attribute_score += math.floor(refine_power_score)
+
+    # MountData applies the selected garage vehicle's stat pairs while it is
+    # equipped. The 2011 MOV bonus is handled only while driving in a big
+    # world map by get_mount_driving_speed().
+    mount_id, _, _ = get_equipped_mount(c)
+    mount_cfg = MOUNT_CONFIG.get(mount_id, {})
+    if mount_cfg.get('need_show') == 1:
+        for attribute_id, value in mount_cfg.get('attributes', []):
+            if attribute_id == 2011:
+                continue
+            add_item_attribute(attribute_id, value)
+            power_attribute_score += attribute_combat_value(attribute_id, value)
 
     # Apply percentage attributes to runtime combat stats. Global power uses
     # the client's per-attribute score for each configured bonus rather than
@@ -28608,26 +28635,38 @@ def client_handler(conn, addr):
 
             elif msg in (236, 237): # mount_equip / mount_unequip
                 mount_id = field_text(body, 0)
-                if picked_char and mount_id in MOUNT_CONFIG:
-                    mounts = picked_char.setdefault('mounts', {})
-                    target = mounts.setdefault(mount_id, {})
-                    if int(target.get('state', 0)) > 0:
-                        if msg == 236:
-                            for state in mounts.values():
-                                if int(state.get('state', 0)) == 2:
-                                    state['state'] = 1
-                            target['state'] = 2
-                            picked_char['equipped_mount_id'] = mount_id
-                        else:
-                            target['state'] = 1
-                            if str(picked_char.get('equipped_mount_id', '')) == mount_id:
-                                picked_char['equipped_mount_id'] = ''
-                        save_chars(all_accounts_chars)
-                        send_rpc_push(631, encode_sproto([(0, build_mount_info(picked_char)), (1, mount_id)]))
-                        # The APK reads MainPlayer.MountId from the player visual.
-                        # Vehicle selection does not change normal character speed.
-                        sync_main_player_visual(picked_char, send_rpc_push)
-                        print(f"[MOUNT] {'equipped' if msg == 236 else 'unequipped'} id={mount_id}")
+                if (picked_char and is_current_character_connection(conn, picked_char)
+                        and mount_id in MOUNT_CONFIG):
+                    with get_character_transaction_lock(picked_char):
+                        mounts = picked_char.setdefault('mounts', {})
+                        target = mounts.setdefault(mount_id, {})
+                        if int(target.get('state', 0)) > 0:
+                            ensure_backpack_state(picked_char)
+                            power_before = get_character_stats(
+                                picked_char, backpack_state_ready=True)['power']
+                            if msg == 236:
+                                for state in mounts.values():
+                                    if int(state.get('state', 0)) == 2:
+                                        state['state'] = 1
+                                target['state'] = 2
+                                picked_char['equipped_mount_id'] = mount_id
+                            else:
+                                target['state'] = 1
+                                if str(picked_char.get('equipped_mount_id', '')) == mount_id:
+                                    picked_char['equipped_mount_id'] = ''
+                            save_chars(all_accounts_chars)
+                            stats_after = get_character_stats(
+                                picked_char, backpack_state_ready=True)
+                            send_rpc_push(631, encode_sproto([
+                                (0, build_mount_info(picked_char)), (1, mount_id)
+                            ]))
+                            sync_char_attrs_rpc(conn, picked_char, stats=stats_after)
+                            # The APK reads MainPlayer.MountId from the player visual.
+                            sync_main_player_visual(picked_char, send_rpc_push)
+                            send_combat_power_gain_tip(
+                                send_rpc_push, power_before, stats_after['power']
+                            )
+                            print(f"[MOUNT] {'equipped' if msg == 236 else 'unequipped'} id={mount_id}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
