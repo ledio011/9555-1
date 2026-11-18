@@ -8,7 +8,7 @@ try:
 except ImportError:
     fcntl = None
 
-PORT = int(os.environ.get("PORT", 15678))
+PORT = int(os.environ.get("PORT", 9555))
 SERVER_DEBUG_LOGS = os.environ.get("GAME_SERVER_DEBUG", "").lower() in ("1", "true", "yes")
 
 def debug_log(*args, **kwargs):
