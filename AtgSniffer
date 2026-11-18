@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """AtgSniffer - read-only TCP proxy for Auto Theft Gangsters mission 1014 diagnostics.
 
 This diagnostic proxy watches mission 1014 for every character stored under
