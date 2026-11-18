@@ -18538,6 +18538,22 @@ def _rank_pvp_ensure_world():
             return []
         valid_positions = set()
         missing = []
+        unplayed_max_rank_count = 0
+        for character in characters:
+            state = character.get("rank_pvp_state")
+            if not isinstance(state, dict):
+                continue
+            try:
+                played_matches = (
+                    max(0, int(state.get("win_count", 0)))
+                    + max(0, int(state.get("loss_count", 0)))
+                )
+                rank_pos = int(state.get("rank_pos", 0))
+            except (TypeError, ValueError):
+                continue
+            if played_matches == 0 and rank_pos == RANK_PVP_MAX_RANK:
+                unplayed_max_rank_count += 1
+
         for character in characters:
             state = character.get("rank_pvp_state")
             if not isinstance(state, dict):
@@ -18561,15 +18577,18 @@ def _rank_pvp_ensure_world():
             if 1 <= rank_pos <= RANK_PVP_MAX_RANK:
                 # Rank 1000 was previously assigned to every unplayed
                 # character as a placeholder. Treat it as uninitialized so
-                # the ladder can give each player a unique client-visible rank.
-                if played_matches == 0 and rank_pos == RANK_PVP_MAX_RANK:
+                # duplicated legacy slots can be assigned uniquely.
+                if (played_matches == 0 and rank_pos == RANK_PVP_MAX_RANK
+                        and unplayed_max_rank_count > 1):
                     missing.append(character)
                 elif rank_pos in valid_positions:
                     missing.append(character)
                 else:
                     valid_positions.add(rank_pos)
             else:
-                missing.append(character)
+                state["rank_pos"] = RANK_PVP_MAX_RANK + 1
+                state.setdefault("best_rank_pos", RANK_PVP_MAX_RANK + 1)
+                changed = True
 
         if not valid_positions and missing:
             # No ladder exists yet: seed it by the server's real combat-power formula.
