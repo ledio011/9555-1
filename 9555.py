@@ -68,15 +68,6 @@ def railway_persistence_configured():
     )
 
 
-def require_railway_persistence():
-    if os.environ.get("RAILWAY_ENVIRONMENT") and not railway_persistence_configured():
-        raise RuntimeError(
-            "[PERSISTENCE ERROR] Refusing to start on Railway without a mounted "
-            "volume. Attach a Railway Volume (recommended mount path: /data) or "
-            "set DATA_DIR to a directory on persistent storage."
-        )
-
-
 if os.environ.get("RAILWAY_ENVIRONMENT") and not railway_persistence_configured():
     print("[PERSISTENCE WARNING] Railway volume not detected; server data may be lost on redeploy.")
 
@@ -37121,7 +37112,6 @@ def start_solo_equipment_run(conn, char, copy_id, use_time_item, send_rpc_push):
     return True
 
 def start_server():
-    require_railway_persistence()
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     # Do not enable SO_REUSEPORT: this server's game state is process-local,
