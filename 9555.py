@@ -4236,7 +4236,7 @@ def sync_main_player_visual(picked_char, send_rpc_push):
     send_rpc_push(510, encode_sproto([(0, character)]))
     broadcast_aoi_visual(picked_char)
 
-def get_boss_char(inst_id, did, player_level=1, map_id=None):
+def get_boss_char(inst_id, did, player_level=1, map_id=None, stats_override=None):
     # Domin 1 boss stats and visual (XD profession)
     # Boss scales to player level — the arena challenge adapts to the player's strength.
     # NpcData 1105: percentage-based (百分比), all coefficients 100%, skill group defaults to 50001.
@@ -4252,7 +4252,8 @@ def get_boss_char(inst_id, did, player_level=1, map_id=None):
     # Boss scales to player level for consistent arena challenge.
     # NPC 1105 is percentage-based with level 9999, so get_npc_attr uses the player's level.
     # At player level 21: atk=467, hp=7082, def=541 → power = 61,515
-    boss_stats = get_npc_attr(npc_id, player_level)
+    boss_stats = (stats_override if stats_override is not None
+                  else get_npc_attr(npc_id, player_level))
     lv = boss_stats['lv']
     hp_max = boss_stats['hp_max']
     power = boss_stats['power']
@@ -19202,17 +19203,50 @@ def _domin_capture_story_current(character, domin_id):
     )
 
 
+def _domin_capture_mission_active(character, domin_id):
+    if str(domin_id) != "1" or not isinstance(character, dict):
+        return False
+    active_missions = character.get("active_missions")
+    if not isinstance(active_missions, dict):
+        return False
+    mission = active_missions.get("1003")
+    try:
+        return int(mission.get("state", 0)) == 1
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def _domin_capture_npc_stats(character, npc_id, domin_id):
+    stats = get_npc_attr(npc_id, character.get("level", 1))
+    if str(npc_id) != "1105" or not _domin_capture_mission_active(
+            character, domin_id):
+        return stats
+
+    player_stats = get_character_stats(character)
+    attribute_fields = (
+        "hp_max", "atk", "def", "hit", "eva", "cri", "res", "exd", "exr",
+        "crd", "crr", "defa", "mov", "rec", "anti_stun",
+        "anti_knock_down", "dgea", "resa", "hita", "cria", "ate", "satm",
+        "satc", "satp",
+    )
+    for field in attribute_fields:
+        stats[field] = max(0, int(player_stats.get(field, 0) or 0)) * 9 // 10
+    stats["lv"] = int(player_stats.get("lv", stats["lv"]))
+    stats["power"] = max(0, int(player_stats.get("power", 0) or 0)) * 9 // 10
+    return stats
+
+
 def _domin_capture_npc_look(character, npc_id="1105", domin_id="1"):
     """Build a selectable Capture NPC card from the configured NPC template."""
     district = DOMIN_CONFIG.get(str(domin_id), {})
+    stats = _domin_capture_npc_stats(character, npc_id, domin_id)
     npc = get_boss_char(
         int(npc_id), str(domin_id), character.get("level", 1),
-        map_id=district.get("map_id", "502")
+        map_id=district.get("map_id", "502"), stats_override=stats
     )
     fields = decode_sproto(npc)
     general = decode_sproto(fields.get(1, b""))
     visual = decode_sproto(fields.get(6, b""))
-    stats = get_npc_attr(npc_id, character.get("level", 1))
     return encode_sproto([
         (0, int(npc_id)),
         (1, encode_sproto(list(general.items()))),
@@ -19581,8 +19615,8 @@ def _domin_capture_selected_enemy(fields, roster):
     return None
 
 
-def _domin_capture_challenge_enemy(fields, roster, capture_story_active):
-    if capture_story_active:
+def _domin_capture_challenge_enemy(fields, roster, capture_mission_active):
+    if capture_mission_active:
         return _domin_capture_npc_descriptor("1105")
     selected_enemy = _domin_capture_selected_enemy(fields, roster)
     if selected_enemy is None and len(roster) == 1:
@@ -19666,9 +19700,10 @@ def _domin_capture_spawn_enemy(conn, character, send_rpc_push):
     else:
         descriptor = roster[index] if index < len(roster) else _domin_capture_npc_descriptor()
         npc_id = str(descriptor.get("npc_id", "1105"))
-        stats = get_npc_attr(npc_id, character.get("level", 1))
+        stats = _domin_capture_npc_stats(character, npc_id, domin_id)
         payload = get_boss_char(
-            inst_id, domin_id, character.get("level", 1), map_id=map_id
+            inst_id, domin_id, character.get("level", 1), map_id=map_id,
+            stats_override=stats
         )
         skills = _domin_capture_boss_skills()
         character["_domin_capture_enemy"] = {
@@ -33279,9 +33314,11 @@ def client_handler(conn, addr):
                             conn.sendall(struct.pack(">H", len(pf)) + pf)
                         continue
 
+                    capture_mission_active = _domin_capture_mission_active(
+                        picked_char, valid_domin_id
+                    )
                     capture_story_active = bool(
-                        capture_story_current and existing_capture
-                        and int(existing_capture.get('state', 0)) == 1
+                        capture_story_current and capture_mission_active
                     )
                     offered_roster = picked_char.get(
                         '_domin_capture_offered_enemies')
@@ -33298,7 +33335,7 @@ def client_handler(conn, addr):
                             )
                         ]
                     selected_enemy = _domin_capture_challenge_enemy(
-                        body, district_roster, capture_story_active
+                        body, district_roster, capture_mission_active
                     )
                     if selected_enemy is not None:
                         if selected_enemy.get("kind") == "npc":
