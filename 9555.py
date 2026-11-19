@@ -10962,6 +10962,7 @@ def gotham_boss_weapon_rewards(count, rank):
 def gotham_boss_rank_mail(slot):
     if slot.get("rank_mail_settled"):
         return True
+    boss_name = NPC_CONFIG.get(str(slot.get("nid", "")), {}).get("name", "Boss")
     ranked = sorted(
         ((int(char_id), int(info.get("damage", 0) or 0))
          for char_id, info in slot.get("damage", {}).items()
@@ -11037,7 +11038,7 @@ def gotham_boss_rank_mail(slot):
                 "receiveId": char_id,
                 "readTime": 0,
                 "context": (
-                    f"The Pain has been defeated, you caused {damage} damage to "
+                    f"{boss_name} has been defeated, you caused {damage} damage to "
                     f"the BOSS and finally ranked {rank}.Congratulations on your "
                     "contribution. Please get the reward from mail."
                 ),
@@ -11171,10 +11172,9 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
             and str(candidate.get("map_id", "")) == current_map
         ), (None, None))
     if current_map in GOTHAM_CITY_MAP_IDS and slot is not None:
-        if (current_map == GOTHAM_MAP_ID and valid_kill
-                and grant_rewards and slot.get("is_boss")):
+        if valid_kill and grant_rewards and slot.get("is_boss"):
             settled = gotham_boss_rank_mail(slot)
-            print(f"[GOTHAM BOSS REWARD] slot={slot_key} "
+            print(f"[CITY BOSS REWARD] slot={slot_key} "
                   f"contributors={len(slot.get('damage', {}))} settled={settled}")
     elif (current_map in GOTHAM_CITY_MAP_IDS and valid_kill
           and any(str(cfg.get("npc_id")) == str(npcid)
