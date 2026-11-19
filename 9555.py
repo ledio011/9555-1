@@ -19242,9 +19242,9 @@ def _domin_capture_npc_stats(character, npc_id, domin_id):
         "satc", "satp",
     )
     for field in attribute_fields:
-        stats[field] = max(0, int(player_stats.get(field, 0) or 0)) * 9 // 10
+        stats[field] = max(0, int(player_stats.get(field, 0) or 0)) * 100 // 130
     stats["lv"] = int(player_stats.get("lv", stats["lv"]))
-    stats["power"] = max(0, int(player_stats.get("power", 0) or 0)) * 9 // 10
+    stats["power"] = max(0, int(player_stats.get("power", 0) or 0)) * 100 // 130
     return stats
 
 
