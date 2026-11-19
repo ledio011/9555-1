@@ -4296,9 +4296,9 @@ def get_boss_char(inst_id, did, player_level=1, map_id=None, stats_override=None
 # Starter skills per profession: 3 basic attacks + 1 dodge + 1 active skill
 # Additional active skills are granted by weapon skins (LabelID system), not by level
 PROF_SKILLS = {
-    0: {"atk": ["101", "102", "103"], "dodge": "104", "starter_active": "105"},
-    1: {"atk": ["201", "202", "203"], "dodge": "204", "starter_active": "205"},
-    2: {"atk": ["301", "302", "303"], "dodge": "304", "starter_active": "305"}
+    0: {"atk": ["101", "102", "103"], "dodge": "104", "starter_active": "10001"},
+    1: {"atk": ["201", "202", "203"], "dodge": "204", "starter_active": "20001"},
+    2: {"atk": ["301", "302", "303"], "dodge": "304", "starter_active": "30001"}
 }
 
 def get_character_combat_skills(prof, equipped_items=None):
@@ -4673,7 +4673,7 @@ def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None,
     free_candidate_slots = [slot for slot in sorted(skill_list_slots)
                             if slot not in used_candidate_slots]
 
-    # Starter active skill (105 / 205 / 305) - fallback for a weapon without
+    # Starter active skill (10001 / 20001 / 30001) - fallback for a weapon without
     # weapon-granted skills. The regular starter attacks and dodge above remain
     # available with every weapon.
     starter_active = p["starter_active"]
@@ -15504,7 +15504,7 @@ def ensure_backpack_state(picked_char):
                     seen_ids.add(item_index)
                 equipped.append({
                     'index_id': item_index, 'id': starter_id, 'amount': 1,
-                    'bindflag': True, 'level': 1, 'quality': 1,
+                    'bindflag': True, 'level': 0, 'quality': 0,
                     'appraise': 0, 'parm': [0] * 8,
                     'random_attri': {}, 'inlay': {}
                 })
