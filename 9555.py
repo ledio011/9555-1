@@ -1205,7 +1205,20 @@ try:
                             (int(parts[12] or 0), int(parts[13] or 0)),
                             (int(parts[14] or 0), int(parts[15] or 0)),
                             (int(parts[16] or 0), int(parts[17] or 0))
-                        ]
+                        ],
+                        "first_drop_id": str(parts[18]) if len(parts) > 18 else "",
+                        "first_rank": int(parts[19] or 0) if len(parts) > 19 else 0,
+                        "second_drop_id": str(parts[20]) if len(parts) > 20 else "",
+                        "second_rank": int(parts[21] or 0) if len(parts) > 21 else 0,
+                        "third_drop_id": str(parts[22]) if len(parts) > 22 else "",
+                        "third_rank": int(parts[23] or 0) if len(parts) > 23 else 0,
+                        "win_drop_id": str(parts[24]) if len(parts) > 24 else "",
+                        "failure_drop_id": str(parts[25]) if len(parts) > 25 else "",
+                        "rank_drop_ids": [
+                            str(parts[index]) if len(parts) > index else ""
+                            for index in range(26, 34)
+                        ],
+                        "show_reward_id": str(parts[34]) if len(parts) > 34 else "",
                     }
                 except (TypeError, ValueError):
                     continue
@@ -3575,7 +3588,9 @@ print(
 # leaving the server. It contains only guild-owned state; character balances
 # and membership fields remain in the existing character database.
 GUILD_DB_PATH = persistent_state_path("guilds.json")
+GUILD_BATTLE_STATE_PATH = persistent_state_path("guild_battle_state.json")
 GUILD_DB_LOCK = threading.RLock()
+GUILD_BATTLE_STATE_LOCK = threading.RLock()
 GUILD_INVITE_LOCK = threading.Lock()
 GUILD_INVITES = {}  # (target character ID, guild ID) -> expiry epoch for accepted invite flow
 GUILD_INVITE_TTL_SECONDS = 600
@@ -3606,6 +3621,39 @@ def _save_guild_states():
 GUILD_STATES = _load_guild_states()
 GUILD_ID_COUNTER = max([99999] + [int(key) for key in GUILD_STATES if str(key).isdigit()]) + 1
 print(f"[GUILD] loaded guilds={len(GUILD_STATES)} next_id={GUILD_ID_COUNTER}")
+
+def _load_guild_battle_state():
+    try:
+        with open(GUILD_BATTLE_STATE_PATH, "r", encoding="utf-8") as state_file:
+            loaded = json.load(state_file)
+        if isinstance(loaded, dict) and loaded.get("version") == 1:
+            events = loaded.get("events", {})
+            if isinstance(events, dict):
+                return {"version": 1, "events": events}
+    except FileNotFoundError:
+        pass
+    except Exception as battle_error:
+        print(f"[GUILD BATTLE] failed to read {GUILD_BATTLE_STATE_PATH}: {battle_error}")
+    return {"version": 1, "events": {}}
+
+def _save_guild_battle_state():
+    with GUILD_BATTLE_STATE_LOCK:
+        temp_path = GUILD_BATTLE_STATE_PATH + ".tmp"
+        try:
+            with open(temp_path, "w", encoding="utf-8") as state_file:
+                json.dump(GUILD_BATTLE_STATE, state_file, ensure_ascii=False, indent=2)
+                state_file.flush()
+                os.fsync(state_file.fileno())
+            os.replace(temp_path, GUILD_BATTLE_STATE_PATH)
+        except Exception as battle_error:
+            print(f"[GUILD BATTLE] failed to save {GUILD_BATTLE_STATE_PATH}: {battle_error}")
+
+GUILD_BATTLE_STATE = _load_guild_battle_state()
+GUILD_BATTLE_SCENES = {}
+GUILD_BATTLE_SCENE_LOCK = threading.RLock()
+GUILD_BATTLE_EMPTY_WEEK_LOGGED = set()
+GUILD_BATTLE_NPC_META = {}
+GUILD_BATTLE_NPC_LOCK = threading.RLock()
 
 # Guild-city ownership is guild state; active boss HP and damage stay in RAM
 # for the current scheduled event. The APK tables provide the five city maps,
@@ -3715,6 +3763,7 @@ GITHUB_BACKUP_STATE_PATHS = (
     CHAR_DB,
     BAK_DB,
     GUILD_DB_PATH,
+    GUILD_BATTLE_STATE_PATH,
     GUILD_CITY_OWNER_PATH,
     WILD_BOSS_FINISHED_PATH,
     GOTHAM_BOSS_RESPAWN_PATH,
@@ -5548,6 +5597,12 @@ def can_aoi_exchange(source, target):
     map_id = str(source.get('map_id') or '')
     if not client_expects_player_aoi(map_id):
         return False
+    if map_id == '1501':
+        return bool(
+            source.get('_guild_battle_match_key')
+            and source.get('_guild_battle_match_key')
+            == target.get('_guild_battle_match_key')
+        )
     guild_boss_id = _guild_boss_map_id(map_id)
     if guild_boss_id:
         source_guild_id = _guild_id_for_character(source)
@@ -13063,12 +13118,13 @@ def start_prison_npc_runtime():
 
 
 def register_slum_npc_ai(conn, char, inst_id, npc_id, x, z, heading):
-    if not conn or not char or str(char.get("map_id", "")) != SLUM_DISTRICT_MAP_ID:
+    map_id = str(char.get("map_id", "")) if char else ""
+    if not conn or not char or map_id not in (SLUM_DISTRICT_MAP_ID, "1501"):
         return
-    if is_slum_static_npc(npc_id):
+    if map_id == SLUM_DISTRICT_MAP_ID and is_slum_static_npc(npc_id):
         return
     if not any(str(spawn.get("nid") or "") == str(npc_id)
-               for spawn in MONSTER_DATA.get(SLUM_DISTRICT_MAP_ID, [])):
+               for spawn in MONSTER_DATA.get(map_id, [])):
         return
     try:
         owner_id = int(char.get("id", 0) or 0)
@@ -13083,6 +13139,8 @@ def register_slum_npc_ai(conn, char, inst_id, npc_id, x, z, heading):
         SLUM_NPC_AI_STATES[inst_id] = {
             "owner_id": owner_id,
             "owner_conn_id": id(conn),
+            "map_id": map_id,
+            "player_level": max(1, int(char.get("level", 1) or 1)),
             "nid": str(npc_id),
             "home_x": int(x),
             "home_z": int(z),
@@ -13108,8 +13166,9 @@ def slum_npc_retarget_on_hit(inst_id, attacker, conn):
         attacker_hp = int(attacker.get("hp", 0) or 0)
     except (AttributeError, TypeError, ValueError):
         return False
+    attacker_map = str(attacker.get("map_id", ""))
     if (attacker_id <= 0
-            or str(attacker.get("map_id", "")) != SLUM_DISTRICT_MAP_ID
+            or attacker_map not in (SLUM_DISTRICT_MAP_ID, "1501")
             or attacker_hp <= 0):
         return False
     active_conn, active_char = ALL_CONNECTIONS.get(attacker_id, (None, None))
@@ -13122,7 +13181,9 @@ def slum_npc_retarget_on_hit(inst_id, attacker, conn):
         state = SLUM_NPC_AI_STATES.get(inst_id)
         if (not state or state["owner_id"] != attacker_id
                 or state["owner_conn_id"] != id(conn)
-                or is_slum_static_npc(state.get("nid", ""))
+                or state.get("map_id", SLUM_DISTRICT_MAP_ID) != attacker_map
+                or (attacker_map == SLUM_DISTRICT_MAP_ID
+                    and is_slum_static_npc(state.get("nid", "")))
                 or inst_id in DEAD_NPC_SET
                 or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
             return False
@@ -13221,7 +13282,9 @@ def _slum_npc_ai_tick():
     try:
         for inst_id, snapshot in snapshots:
             inst_id = int(inst_id)
-            if is_slum_static_npc(snapshot.get("nid", "")):
+            map_id = str(snapshot.get("map_id", SLUM_DISTRICT_MAP_ID))
+            if (map_id == SLUM_DISTRICT_MAP_ID
+                    and is_slum_static_npc(snapshot.get("nid", ""))):
                 with SLUM_NPC_AI_LOCK:
                     SLUM_NPC_AI_STATES.pop(inst_id, None)
                 continue
@@ -13229,7 +13292,7 @@ def _slum_npc_ai_tick():
             conn, char = ALL_CONNECTIONS.get(owner_id, (None, None))
             if (not conn or not char
                     or id(conn) != snapshot["owner_conn_id"]
-                    or str(char.get("map_id", "")) != SLUM_DISTRICT_MAP_ID
+                    or str(char.get("map_id", "")) != map_id
                     or not is_current_character_connection(conn, char)):
                 with SLUM_NPC_AI_LOCK:
                     SLUM_NPC_AI_STATES.pop(inst_id, None)
@@ -13249,7 +13312,8 @@ def _slum_npc_ai_tick():
                 0.5,
                 (int(ai_cfg.get("around_min_distance", 100) or 100)
                  + int(ai_cfg.get("around_max_distance", 200) or 200)) / 200.0)
-            skills = _prison_npc_skills(npc_cfg, attack_distance)
+            skills = _prison_npc_skills(
+                npc_cfg, attack_distance, include_model_radii=(map_id == "1501"))
             if not skills:
                 continue
 
@@ -13267,12 +13331,52 @@ def _slum_npc_ai_tick():
 
             target_id = int(snapshot.get("target_id", 0) or 0)
             target_pos = char.get("pos") or default_map_spawn_position(
-                SLUM_DISTRICT_MAP_ID)
+                map_id)
             target_valid = (
                 target_id == owner_id
                 and int(char.get("hp", 0) or 0) > 0
                 and float(snapshot.get("attack_until", 0) or 0) > now
             )
+            if map_id == "1501":
+                battle_entry = _guild_battle_entry_for_char(char)
+                if (not battle_entry or not battle_entry.get("combat_started")
+                        or char.get("_guild_battle_match_key")
+                        != battle_entry.get("match_key")):
+                    with SLUM_NPC_AI_LOCK:
+                        live_state = SLUM_NPC_AI_STATES.get(inst_id)
+                        if live_state:
+                            live_state["target_id"] = 0
+                            live_state["attack_until"] = 0
+                    _slum_npc_stop(inst_id, now)
+                    continue
+                if (not target_valid
+                        and int(ai_cfg.get("lock_type", 0) or 0) == 1
+                        and int(char.get("hp", 0) or 0) > 0):
+                    search_radius = max(
+                        0, int(npc_cfg.get("search_radius", 0) or 0))
+                    configured_lock = int(ai_cfg.get("lock_distance", -1) or -1)
+                    lock_distance = (
+                        search_radius if configured_lock < 0
+                        else min(search_radius, configured_lock)
+                        if search_radius > 0 else configured_lock)
+                    target_distance = math.hypot(
+                        int(target_pos[0]) - mx_cm,
+                        int(target_pos[2]) - mz_cm)
+                    if lock_distance > 0 and target_distance <= lock_distance:
+                        min_action = max(
+                            0, int(ai_cfg.get("action_min_time", 5000) or 5000))
+                        max_action = max(
+                            min_action,
+                            int(ai_cfg.get("action_max_time", 6000) or 6000))
+                        attack_until = now + random.uniform(
+                            min_action, max_action) / 1000.0
+                        with SLUM_NPC_AI_LOCK:
+                            live_state = SLUM_NPC_AI_STATES.get(inst_id)
+                            if live_state:
+                                live_state["target_id"] = owner_id
+                                live_state["attack_until"] = attack_until
+                        target_id = owner_id
+                        target_valid = True
             if not target_valid:
                 with SLUM_NPC_AI_LOCK:
                     live_state = SLUM_NPC_AI_STATES.get(inst_id)
@@ -13336,7 +13440,9 @@ def _slum_npc_ai_tick():
                         now + random.uniform(min_cd, max_cd) / 1000.0)
 
                 damage, hit, critical = get_combat_damage(
-                    get_npc_attr(npc_id), get_character_stats(char),
+                    get_npc_attr(
+                        npc_id, snapshot.get("player_level", 1)),
+                    get_character_stats(char),
                     skill_id, 0, effinfo_id=effect_id, attacker_is_npc=True)
                 if not hit or damage <= 0:
                     continue
@@ -13360,12 +13466,12 @@ def _slum_npc_ai_tick():
                 send_rpc_push_safe(conn, 511, damage_data)
                 sync_char_attrs_rpc(conn, char)
                 save_chars(all_accounts_chars)
-                if target_hp <= 0 and supports_normal_relife(SLUM_DISTRICT_MAP_ID):
+                if target_hp <= 0 and supports_normal_relife(map_id):
                     death_count = int(char.get("death_count", 0) or 0) + 1
                     char["death_count"] = death_count
                     relife_cfg = get_relife_config(death_count)
                     offer = remember_relife_offer(
-                        char, relife_offer_type(SLUM_DISTRICT_MAP_ID),
+                        char, relife_offer_type(map_id),
                         relife_cfg.get("use_count", 1), "9011")
                     send_rpc_push_safe(conn, 618, offer)
                     save_chars(all_accounts_chars)
@@ -13408,7 +13514,7 @@ def _slum_npc_ai_tick():
                         inst_id, patrol_target[0], patrol_target[1],
                         walk_speed, now, walk=True)
     except Exception as exc:
-        print(f"[SLUM NPC AI] tick failed: {exc}")
+        print(f"[NPC AI] tick failed: {exc}")
     return True
 
 
@@ -14626,6 +14732,13 @@ def spawn_exp_team_stage_map(conn, map_id, char, force=False):
 
 def spawn_map_npcs(conn, map_id, picked_char=None):
     map_str = str(map_id)
+    if map_str == '1501':
+        entry = _guild_battle_entry_for_char(picked_char)
+        if (not entry or picked_char.get('_guild_battle_match_key')
+                != entry.get('match_key')):
+            print(f"[GUILD BATTLE] suppressed unassigned map spawn "
+                  f"player={picked_char.get('id') if picked_char else '-'}")
+            return
     if map_str in PRISON_NPC_AOI_MAP_IDS:
         # Prison enemies are created after map_ready and streamed to the client.
         return
@@ -14667,7 +14780,8 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
         inst_id, attr = build_npc_attr_sproto(
             nid, name, x, z, o,
             player_level=(int(picked_char.get('level', 1))
-                          if is_cash_truck or survive_battle_config_for_map(map_str)
+                          if (is_cash_truck or map_str == '1501'
+                              or survive_battle_config_for_map(map_str))
                           else 1),
             initial_hp=initial_hp
         )
@@ -14678,7 +14792,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             cash_state['boss_inst_id'] = inst_id
             cash_state['boss_hp'] = NPC_HP_MAP[inst_id]
         sent = send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
-        if slum_enemy and sent:
+        if sent and (slum_enemy or map_str == '1501'):
             register_slum_npc_ai(
                 conn, picked_char, inst_id, nid, x, z, o)
         return inst_id
@@ -14822,9 +14936,11 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
             for i, m in enumerate(MONSTER_DATA[map_str]):
                 nid = m['nid']
                 cfg = NPC_CONFIG.get(nid, {'name': f"Monster_{nid}"})
-                send_npc_create(
+                inst_id = send_npc_create(
                     nid, cfg['name'], m['x'], m['z'], m['o'],
                     slum_enemy=(map_str == SLUM_DISTRICT_MAP_ID))
+                if map_str == '1501' and inst_id:
+                    _guild_battle_register_npc(inst_id, conn, picked_char, m)
 
     # The active city-capture vehicle is configured by GuildCaptureData and
     # has one shared server instance across players in that map.
@@ -19465,6 +19581,15 @@ def _domin_capture_selected_enemy(fields, roster):
     return None
 
 
+def _domin_capture_challenge_enemy(fields, roster, capture_story_active):
+    if capture_story_active:
+        return _domin_capture_npc_descriptor("1105")
+    selected_enemy = _domin_capture_selected_enemy(fields, roster)
+    if selected_enemy is None and len(roster) == 1:
+        return roster[0]
+    return selected_enemy
+
+
 def _domin_capture_zombie_character(character, inst_id, map_id="502"):
     """Clone a saved player profile as a locally fightable Capture zombie."""
     stats = get_character_stats(character)
@@ -21281,7 +21406,16 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         clear_prison_npc_aoi(conn, send_remove=True)
     if src_map == WAREHOUSE_SNEAK_COPY_ID and src_map != target_map_id:
         picked_char.pop(WAREHOUSE_SNEAK_STATE_KEY, None)
-    if src_map != target_map_id: broadcast_aoi_remove(picked_char.get('id', 0), src_map)
+    if src_map != target_map_id:
+        broadcast_aoi_remove(picked_char.get('id', 0), src_map)
+    if src_map == '1501' and target_map_id != '1501':
+        _guild_battle_cleanup_player_npcs(picked_char)
+        for key in (
+                '_guild_battle_event_start', '_guild_battle_round',
+                '_guild_battle_pair_index', '_guild_battle_match_key',
+                '_guild_battle_guild_id', '_guild_battle_team_index',
+                '_guild_battle_return_map', '_guild_battle_return_pos'):
+            picked_char.pop(key, None)
     NPC_SPAWNED_MAPS.setdefault(id(conn), set()).discard(target_map_id)
     picked_char['map_id'] = target_map_id
     if target_map_id == '101' and int(picked_char.get('level', 1)) >= int(CITY_DANCE_CONFIG.get('101', {}).get('UnlockLevel', 8) or 8):
@@ -21627,6 +21761,15 @@ def can_player_attack_player(attacker, target, check_safe_area=True):
         return False
     if not client_expects_player_aoi(map_id):
         return False
+    if map_id == '1501':
+        battle_entry = _guild_battle_entry_for_char(attacker)
+        if (not battle_entry or not battle_entry.get('combat_started')
+                or not attacker.get('_guild_battle_match_key')
+                or attacker.get('_guild_battle_match_key')
+                != target.get('_guild_battle_match_key')
+                or attacker.get('_guild_battle_match_key')
+                != battle_entry.get('match_key')):
+            return False
     if (check_safe_area
             and (is_in_map_safe_area(map_id, attacker.get('pos'))
                  or is_in_map_safe_area(map_id, target.get('pos')))):
@@ -24884,13 +25027,693 @@ def _guild_star_map(guild):
         result[star_id] = encode_sproto([(0, star_id), (1, state)])
     return result
 
-def _guild_battle_info_bytes(guild=None):
-    # -1 is the client's configured, not-yet-open state. It displays the
-    # GuildBattleData schedule and keeps the future rounds out of the UI.
-    battle_id = next(iter(sorted(GUILD_BATTLE_DATA, key=lambda value: (len(value), value))), '1501')
+def _guild_battle_config():
+    battle_id = next(iter(sorted(
+        GUILD_BATTLE_DATA, key=lambda value: (len(value), value)
+    )), '1501')
+    return battle_id, GUILD_BATTLE_DATA.get(battle_id, {})
+
+
+def _guild_battle_selection_start(now=None, cfg=None):
+    now = int(time.time()) if now is None else int(now)
+    cfg = cfg or _guild_battle_config()[1]
+    selection_week = int(cfg.get('week', 5) or 5)
+    selection_time = int(cfg.get('start_time', 70200) or 70200)
+    utc = time.gmtime(now)
+    monday_start = now - (utc.tm_wday * 86400) - (utc.tm_hour * 3600
+                                                   + utc.tm_min * 60 + utc.tm_sec)
+    selection = monday_start + (selection_week - 1) * 86400 + selection_time
+    if selection > now:
+        selection -= 7 * 86400
+    return selection
+
+
+def _guild_battle_round_start(selection_start, round_number, cfg=None):
+    cfg = cfg or _guild_battle_config()[1]
+    rounds = cfg.get('rounds') or []
+    if not 1 <= int(round_number) <= len(rounds):
+        return 0
+    selection_week = int(cfg.get('week', 5) or 5)
+    monday_start = int(selection_start) - ((selection_week - 1) * 86400
+                                             + int(cfg.get('start_time', 70200) or 70200))
+    round_week, round_time = rounds[int(round_number) - 1]
+    if not 1 <= int(round_week) <= 7:
+        return 0
+    return monday_start + (int(round_week) - 1) * 86400 + int(round_time)
+
+
+def _guild_battle_team_by_id(event, guild_id):
+    return next((team for team in event.get('guilds', [])
+                 if int(team.get('id', 0) or 0) == int(guild_id or 0)), None)
+
+
+def _guild_battle_create_event(selection_start, cfg):
+    ranked = sorted(
+        GUILD_STATES.values(),
+        key=lambda item: (-_guild_combo(item), -_guild_level(item),
+                          -int(item.get('exp', 0) or 0), int(item.get('id', 0) or 0))
+    )[:8]
+    teams = []
+    max_players = max(1, int(cfg.get('max_play_num', 10) or 10))
+    for guild in ranked:
+        guild_id = int(guild.get('id', 0) or 0)
+        member_ids = []
+        members = guild.get('members') or {}
+        configured_roster = guild.get('battle_roster') or []
+        try:
+            member_ids = list(dict.fromkeys(
+                int(member_id) for member_id in configured_roster
+                if str(member_id).lstrip('-').isdigit()
+                and str(member_id) in members
+                and int(members[str(member_id)].get('job', 3)) != 4
+            ))[:max_players]
+        except (TypeError, ValueError, AttributeError):
+            member_ids = []
+        if not member_ids:
+            candidates = []
+            for member_id, member in members.items():
+                try:
+                    if int(member.get('job', 3)) == 4:
+                        continue
+                    char_id = int(member_id)
+                    char = _guild_char_by_id(char_id) or {}
+                    candidates.append((
+                        -int(get_character_stats(char).get('power', 0) or 0),
+                        char_id,
+                    ))
+                except (TypeError, ValueError, AttributeError):
+                    continue
+            member_ids = [char_id for _power, char_id in sorted(candidates)[:max_players]]
+        teams.append({
+            'id': guild_id,
+            'name': str(guild.get('name', '')),
+            'icon': int(guild.get('icon', 0) or 0),
+            'power': _guild_combo(guild),
+            'roster': member_ids,
+        })
+    return {
+        'selection_start': int(selection_start),
+        'guilds': teams,
+        'rounds': {},
+        'guesses': {},
+        'champion_id': 0,
+    }
+
+
+def _guild_battle_event_for_time(now=None, create=True):
+    now = int(time.time()) if now is None else int(now)
+    battle_id, cfg = _guild_battle_config()
+    selection_start = _guild_battle_selection_start(now, cfg)
+    final_start = _guild_battle_round_start(selection_start, 3, cfg)
+    final_end = final_start + int(cfg.get('wait_time', 10) or 0) + int(
+        cfg.get('duration', 1800) or 0)
+    event_key = str(selection_start)
+    with GUILD_BATTLE_STATE_LOCK:
+        event = GUILD_BATTLE_STATE.setdefault('events', {}).get(event_key)
+        if not isinstance(event, dict):
+            if not create or now < selection_start or now > final_end:
+                return event_key, None, cfg, battle_id
+            event = _guild_battle_create_event(selection_start, cfg)
+            if len(event.get('guilds', [])) < 8:
+                if event_key not in GUILD_BATTLE_EMPTY_WEEK_LOGGED:
+                    print(f"[GUILD BATTLE] schedule closed; requires 8 guilds "
+                          f"but found {len(event.get('guilds', []))}")
+                    GUILD_BATTLE_EMPTY_WEEK_LOGGED.add(event_key)
+                return event_key, None, cfg, battle_id
+            GUILD_BATTLE_STATE['events'][event_key] = event
+            _save_guild_battle_state()
+        elif len(event.get('guilds', [])) < 8:
+            return event_key, None, cfg, battle_id
+    return event_key, event, cfg, battle_id
+
+
+def _guild_battle_state_at(now=None):
+    now = int(time.time()) if now is None else int(now)
+    event_key, event, cfg, battle_id = _guild_battle_event_for_time(now)
+    if event is None:
+        return {
+            'event_key': event_key, 'event': None, 'cfg': cfg,
+            'battle_id': battle_id, 'state': -1, 'round': 0, 'time': 0,
+        }
+    wait_time = max(0, int(cfg.get('wait_time', 10) or 0))
+    duration = max(0, int(cfg.get('duration', 1800) or 0))
+    for round_number in range(1, 4):
+        start = _guild_battle_round_start(event['selection_start'], round_number, cfg)
+        end = start + wait_time + duration
+        if now < start:
+            return {
+                'event_key': event_key, 'event': event, 'cfg': cfg,
+                'battle_id': battle_id, 'state': (round_number - 1) * 2,
+                'round': round_number, 'time': start,
+            }
+        if now < end:
+            return {
+                'event_key': event_key, 'event': event, 'cfg': cfg,
+                'battle_id': battle_id, 'state': (round_number * 2) - 1,
+                'round': round_number, 'time': end,
+            }
+    final_end = (_guild_battle_round_start(event['selection_start'], 3, cfg)
+                 + wait_time + duration)
+    return {
+        'event_key': event_key, 'event': event, 'cfg': cfg,
+        'battle_id': battle_id, 'state': 6, 'round': 3, 'time': final_end,
+    }
+
+
+def _guild_battle_round_teams(event, round_number):
+    teams = list(event.get('guilds', []))
+    if round_number <= 1:
+        return teams
+    rounds = event.get('rounds', {})
+    wins = {}
+    scores = {}
+    for prior_round in range(1, round_number):
+        result = rounds.get(str(prior_round), {})
+        for match in result.get('matches', {}).values():
+            winner_id = int(match.get('winner_id', 0) or 0)
+            if winner_id:
+                wins[winner_id] = wins.get(winner_id, 0) + 1
+            for guild_id, score in (match.get('scores') or {}).items():
+                gid = int(guild_id)
+                scores[gid] = scores.get(gid, 0) + int(score or 0)
+    return sorted(
+        teams,
+        key=lambda team: (-wins.get(int(team['id']), 0),
+                          -scores.get(int(team['id']), 0),
+                          -int(team.get('power', 0) or 0), int(team['id']))
+    )
+
+
+def _guild_battle_round_matches(event, round_number, create=False):
+    rounds = event.setdefault('rounds', {})
+    round_state = rounds.setdefault(str(round_number), {'matches': {}})
+    matches = round_state.setdefault('matches', {})
+    teams = _guild_battle_round_teams(event, round_number)
+    for pair_index in range(4):
+        key = str(pair_index)
+        if key not in matches and create and len(teams) >= (pair_index * 2 + 2):
+            matches[key] = {
+                'guild_ids': [int(teams[pair_index * 2]['id']),
+                              int(teams[pair_index * 2 + 1]['id'])],
+                'scores': {}, 'players': {}, 'winner_id': 0,
+                'started_at': 0, 'finished_at': 0,
+            }
+    return matches
+
+
+def _guild_battle_match_for_guild(event, round_number, guild_id, create=False):
+    teams = _guild_battle_round_teams(event, round_number)
+    team_index = next((index for index, team in enumerate(teams)
+                       if int(team.get('id', 0) or 0) == int(guild_id or 0)), -1)
+    if team_index < 0:
+        return None, None, None
+    pair_index = team_index // 2
+    match = _guild_battle_round_matches(event, round_number, create).get(str(pair_index))
+    return match, team_index + 1, pair_index
+
+
+def _guild_battle_entry_for_char(char, now=None):
+    if not char:
+        return None
+    now = int(time.time()) if now is None else int(now)
+    battle = _guild_battle_state_at(now)
+    if battle['state'] not in (1, 3, 5) or not battle['event']:
+        return None
+    try:
+        guild_id = int(_guild_id_for_character(char) or 0)
+        char_id = int(char.get('id', 0) or 0)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    team = _guild_battle_team_by_id(battle['event'], guild_id)
+    if not team or char_id not in [int(value) for value in team.get('roster', [])]:
+        return None
+    match, team_index, pair_index = _guild_battle_match_for_guild(
+        battle['event'], battle['round'], guild_id, create=True)
+    if not match:
+        return None
+    match_key = f"{battle['event_key']}:{battle['round']}:{pair_index}"
+    round_start = _guild_battle_round_start(
+        battle['event']['selection_start'], battle['round'], battle['cfg'])
+    return {
+        **battle, 'guild_id': guild_id, 'team': team,
+        'team_index': team_index, 'pair_index': pair_index,
+        'match': match, 'match_key': match_key,
+        'combat_started': now >= round_start + max(
+            0, int(battle['cfg'].get('wait_time', 10) or 0)),
+    }
+
+
+def _guild_battle_record_kill(char, npc_id=None, victim=None):
+    entry = _guild_battle_entry_for_char(char)
+    if (not entry or not entry.get('combat_started')
+            or str(char.get('map_id', '')) != str(entry['cfg'].get('map_id', '1501'))):
+        return False
+    if char.get('_guild_battle_match_key') != entry['match_key']:
+        return False
+    char_id = int(char.get('id', 0) or 0)
+    if victim is not None:
+        try:
+            victim_guild_id = int(_guild_id_for_character(victim) or 0)
+        except (TypeError, ValueError, AttributeError):
+            return False
+        if victim_guild_id not in entry['match'].get('guild_ids', []):
+            return False
+        if victim_guild_id == entry['guild_id']:
+            return False
+        points = 10
+    else:
+        npc_cfg = NPC_CONFIG.get(str(npc_id), {})
+        points = 5 if int(npc_cfg.get('type', 0) or 0) == 2 else 1
+    with GUILD_BATTLE_STATE_LOCK:
+        match = entry['match']
+        if int(match.get('finished_at', 0) or 0):
+            return False
+        scores = match.setdefault('scores', {})
+        scores[str(entry['guild_id'])] = int(scores.get(str(entry['guild_id']), 0) or 0) + points
+        players = match.setdefault('players', {})
+        player = players.setdefault(str(char_id), {
+            'name': str(char.get('name', '')), 'guild_id': entry['guild_id'],
+            'score': 0, 'kill_num': 0, 'continue_kill': 0,
+            'max_continue_kill': 0,
+        })
+        player['score'] = int(player.get('score', 0) or 0) + points
+        player['kill_num'] = int(player.get('kill_num', 0) or 0) + 1
+        player['continue_kill'] = int(player.get('continue_kill', 0) or 0) + 1
+        player['max_continue_kill'] = max(
+            int(player.get('max_continue_kill', 0) or 0),
+            int(player['continue_kill']))
+        if victim is not None:
+            victim_score = players.get(str(int(victim.get('id', 0) or 0)))
+            if victim_score:
+                victim_score['continue_kill'] = 0
+        _save_guild_battle_state()
+    return True
+
+
+def _guild_battle_register_npc(inst_id, conn, char, spawn_row):
+    if not inst_id or not conn or not char:
+        return
+    with GUILD_BATTLE_NPC_LOCK:
+        GUILD_BATTLE_NPC_META[int(inst_id)] = {
+            'conn': conn,
+            'char_id': int(char.get('id', 0) or 0),
+            'match_key': str(char.get('_guild_battle_match_key', '')),
+            'spawn': dict(spawn_row),
+            'timer': None,
+            'respawning': False,
+        }
+
+
+def _guild_battle_schedule_npc_respawn(inst_id):
+    try:
+        inst_id = int(inst_id)
+    except (TypeError, ValueError):
+        return False
+    with GUILD_BATTLE_NPC_LOCK:
+        meta = GUILD_BATTLE_NPC_META.get(inst_id)
+        if not meta or meta.get('respawning'):
+            return False
+        try:
+            delay = int(meta['spawn'].get('rebirth_time', -1))
+        except (TypeError, ValueError):
+            delay = -1
+        if delay < 0:
+            GUILD_BATTLE_NPC_META.pop(inst_id, None)
+            return False
+        meta['respawning'] = True
+        meta['respawn_at'] = time.time() + max(4.5, float(delay))
+    return True
+
+
+def _guild_battle_process_npc_respawns(now=None):
+    now = time.time() if now is None else float(now)
+    with GUILD_BATTLE_NPC_LOCK:
+        due = [
+            inst_id for inst_id, meta in GUILD_BATTLE_NPC_META.items()
+            if meta.get('respawning')
+            and float(meta.get('respawn_at', float('inf'))) <= now
+        ]
+    for inst_id in due:
+        _guild_battle_respawn_npc(inst_id)
+
+
+def _guild_battle_respawn_npc(previous_inst_id):
+    with GUILD_BATTLE_NPC_LOCK:
+        meta = GUILD_BATTLE_NPC_META.pop(int(previous_inst_id), None)
+    if not meta:
+        return
+    char_id = int(meta.get('char_id', 0) or 0)
+    conn, char = ALL_CONNECTIONS.get(char_id, (None, None))
+    entry = _guild_battle_entry_for_char(char) if char else None
+    if (not conn or not char
+            or conn is not meta.get('conn')
+            or str(char.get('map_id', '')) != '1501'
+            or char.get('_guild_battle_match_key') != meta.get('match_key')
+            or not entry or not entry.get('combat_started')):
+        return
+    spawn = meta.get('spawn') or {}
+    nid = str(spawn.get('nid', ''))
+    cfg = NPC_CONFIG.get(nid, {})
+    inst_id, attr = build_npc_attr_sproto(
+        nid, cfg.get('name', f"Monster_{nid}"),
+        int(spawn.get('x', 0)), int(spawn.get('z', 0)),
+        int(spawn.get('o', 0)),
+        player_level=max(1, int(char.get('level', 1) or 1)))
+    if not inst_id:
+        return
+    NPC_INSTANCE_MAP[inst_id] = '1501'
+    _guild_battle_register_npc(inst_id, conn, char, spawn)
+    if send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
+        register_slum_npc_ai(
+            conn, char, inst_id, nid, spawn.get('x', 0),
+            spawn.get('z', 0), spawn.get('o', 0))
+        sync_npc_attrs_rpc(
+            conn, inst_id,
+            get_npc_attr(nid, int(char.get('level', 1) or 1)),
+            NPC_HP_MAP.get(inst_id, 0))
+
+
+def _guild_battle_cleanup_player_npcs(char):
+    if not char:
+        return
+    try:
+        char_id = int(char.get('id', 0) or 0)
+    except (TypeError, ValueError):
+        return
+    with GUILD_BATTLE_NPC_LOCK:
+        instances = [
+            inst_id for inst_id, meta in GUILD_BATTLE_NPC_META.items()
+            if int(meta.get('char_id', 0) or 0) == char_id
+        ]
+        metas = [GUILD_BATTLE_NPC_META.pop(inst_id) for inst_id in instances]
+    for inst_id, meta in zip(instances, metas):
+        timer = meta.get('timer')
+        if timer:
+            timer.cancel()
+        NPC_HP_MAP.pop(inst_id, None)
+        NPC_INST_MAP.pop(inst_id, None)
+        NPC_INSTANCE_MAP.pop(inst_id, None)
+        NPC_ATTR_MAP.pop(inst_id, None)
+        DEAD_NPC_SET.discard(inst_id)
+        with SLUM_NPC_AI_LOCK:
+            SLUM_NPC_AI_STATES.pop(inst_id, None)
+
+
+def _guild_battle_guess_id(char, event, round_number):
+    if not char or not event or not 1 <= int(round_number) <= 3:
+        return -1
+    try:
+        char_id = int(char.get('id', 0) or 0)
+    except (TypeError, ValueError, AttributeError):
+        return -1
+    guess = event.get('guesses', {}).get(f"{char_id}:{round_number}")
+    return int(guess.get('guild_id', -1)) if isinstance(guess, dict) else -1
+
+
+def _guild_battle_place_guess(char, target_guild_id, battle):
+    if battle['state'] not in (0, 2, 4) or not battle.get('event'):
+        return False
+    try:
+        target_guild_id = int(target_guild_id)
+        char_id = int(char.get('id', 0) or 0)
+        voter_guild_id = int(_guild_id_for_character(char) or 0)
+    except (TypeError, ValueError, AttributeError):
+        return False
+    event = battle['event']
+    if not voter_guild_id or _guild_battle_team_by_id(event, voter_guild_id):
+        return False
+    target = _guild_battle_team_by_id(event, target_guild_id)
+    round_teams = _guild_battle_round_teams(event, battle['round'])
+    if not target or target_guild_id not in [
+            int(team['id']) for team in round_teams]:
+        return False
+    cfg = battle['cfg']
+    money_type = {'1001': 0, '1002': 1, '1003': 2, '1004': 3}.get(
+        str(cfg.get('guess_id', '')))
+    cost = max(0, int(cfg.get('guess_cost', 0) or 0))
+    if money_type is None or cost <= 0:
+        return False
+    guess_key = f"{char_id}:{battle['round']}"
+    with GUILD_BATTLE_STATE_LOCK, get_character_transaction_lock(char):
+        if guess_key in event.setdefault('guesses', {}):
+            return False
+        balance = get_currency_balance(char, money_type)
+        if balance < cost:
+            return False
+        set_currency_balance(char, money_type, balance - cost)
+        event['guesses'][guess_key] = {
+            'char_id': char_id, 'voter_guild_id': voter_guild_id,
+            'guild_id': target_guild_id, 'round': int(battle['round']),
+            'rewarded': False,
+        }
+        if not save_chars(all_accounts_chars):
+            set_currency_balance(char, money_type, balance)
+            event['guesses'].pop(guess_key, None)
+            print(f"[GUILD BATTLE] vote persistence failed player={char_id}")
+            return False
+        _save_guild_battle_state()
+    return True
+
+
+def _guild_battle_match_for_char(char):
+        if not char:
+            return None
+        try:
+            event_key = str(int(char.get('_guild_battle_event_start', 0) or 0))
+            round_number = int(char.get('_guild_battle_round', 0) or 0)
+            pair_index = int(char.get('_guild_battle_pair_index', -1))
+        except (TypeError, ValueError):
+            return None
+        event = GUILD_BATTLE_STATE.get('events', {}).get(event_key)
+        if not event or not 1 <= round_number <= 3 or not 0 <= pair_index <= 3:
+            return None
+        match = _guild_battle_round_matches(event, round_number, create=True).get(
+            str(pair_index))
+        if not match:
+            return None
+        return {
+            'event_key': event_key, 'event': event, 'round': round_number,
+            'pair_index': pair_index, 'match': match,
+        }
+
+
+def _guild_battle_score_info_bytes(char):
+        record = _guild_battle_match_for_char(char)
+        if not record:
+            return encode_sproto([
+                (0, []), (1, 0), (2, 0), (3, 0), (4, 0),
+                (5, ''), (6, ''), (7, 0), (8, 0), (9, 0),
+            ])
+        event = record['event']
+        match = record['match']
+        guild_ids = match.get('guild_ids', [0, 0])
+        first = _guild_battle_team_by_id(event, guild_ids[0]) or {}
+        second = _guild_battle_team_by_id(event, guild_ids[1]) or {}
+        scores = match.get('scores', {})
+        first_score = int(scores.get(str(guild_ids[0]), 0) or 0)
+        second_score = int(scores.get(str(guild_ids[1]), 0) or 0)
+        player_info = []
+        players = sorted(
+            match.get('players', {}).items(),
+            key=lambda item: (-int(item[1].get('score', 0) or 0), int(item[0]))
+        )
+        for player_id, player in players:
+            player_guild = _guild_battle_team_by_id(
+                event, int(player.get('guild_id', 0) or 0)) or {}
+            player_info.append(encode_sproto([
+                (0, int(player_id)), (1, str(player.get('name', ''))),
+                (2, int(player.get('guild_id', 0) or 0)),
+                (3, str(player_guild.get('name', ''))),
+                (4, int(player.get('kill_num', 0) or 0)),
+                (5, int(player.get('max_continue_kill', 0) or 0)),
+                (6, int(player.get('score', 0) or 0)),
+            ]))
+        self_player = match.get('players', {}).get(str(int(char.get('id', 0) or 0)), {})
+        winner_id = int(match.get('winner_id', 0) or 0)
+        win = int(winner_id == int(guild_ids[0])) if winner_id else 0
+        return encode_sproto([
+            (0, player_info), (1, first_score), (2, second_score),
+            (3, int(self_player.get('kill_num', 0) or 0)),
+            (4, int(self_player.get('score', 0) or 0)),
+            (5, str(first.get('name', ''))), (6, str(second.get('name', ''))),
+            (7, win), (8, int(first.get('icon', 0) or 0)),
+            (9, int(second.get('icon', 0) or 0)),
+        ])
+
+
+def _guild_battle_online_players(match_key):
+        return [
+            (conn, char) for conn, char in list(ALL_CONNECTIONS.values())
+            if conn and char and str(char.get('map_id', '')) == '1501'
+            and char.get('_guild_battle_match_key') == match_key
+            and is_current_character_connection(conn, char)
+        ]
+
+
+def _guild_battle_tick():
+        _guild_battle_process_npc_respawns()
+        now = int(time.time())
+        battle = _guild_battle_state_at(now)
+        event = battle.get('event')
+        if not event:
+            return True
+        cfg = battle['cfg']
+        wait_time = max(0, int(cfg.get('wait_time', 10) or 0))
+        duration = max(0, int(cfg.get('duration', 1800) or 0))
+        for round_number in range(1, 4):
+            start = _guild_battle_round_start(
+                event['selection_start'], round_number, cfg)
+            end = start + wait_time + duration
+            round_state = event.setdefault('rounds', {}).setdefault(
+                str(round_number), {'matches': {}})
+            if now >= end and not int(round_state.get('finished_at', 0) or 0):
+                _guild_battle_finalize_round(event, round_number, now)
+                for pair_index in range(4):
+                    match_key = f"{battle['event_key']}:{round_number}:{pair_index}"
+                    for conn, char in _guild_battle_online_players(match_key):
+                        payload = encode_sproto([
+                            (0, _guild_battle_score_info_bytes(char))
+                        ])
+                        send_rpc_push_safe(conn, 668, payload)
+            elif start + wait_time <= now < end:
+                existing_matches = _guild_battle_round_matches(event, round_number)
+                existing_count = len(existing_matches)
+                matches = _guild_battle_round_matches(
+                    event, round_number, create=True)
+                if len(matches) > existing_count:
+                    _save_guild_battle_state()
+                for pair_index in range(4):
+                    match_key = f"{battle['event_key']}:{round_number}:{pair_index}"
+                    scene = GUILD_BATTLE_SCENES.setdefault(
+                        match_key, {'start_sent': False, 'npcs': {}})
+                    if scene.get('start_sent'):
+                        continue
+                    players = _guild_battle_online_players(match_key)
+                    if players:
+                        for conn, _char in players:
+                            send_rpc_push_safe(conn, 670, encode_sproto([]))
+                        scene['start_sent'] = True
+        return True
+
+
+def _guild_battle_finalize_round(event, round_number, now=None):
+    now = int(time.time()) if now is None else int(now)
+    matches = _guild_battle_round_matches(event, round_number, create=True)
+    if len(matches) < 4:
+        return False
+    for pair_index in range(4):
+        match = matches[str(pair_index)]
+        if int(match.get('finished_at', 0) or 0):
+            continue
+        first_id, second_id = match['guild_ids']
+        scores = match.setdefault('scores', {})
+        first_score = int(scores.get(str(first_id), 0) or 0)
+        second_score = int(scores.get(str(second_id), 0) or 0)
+        if first_score == second_score:
+            first = _guild_battle_team_by_id(event, first_id) or {}
+            second = _guild_battle_team_by_id(event, second_id) or {}
+            winner_id = first_id if int(first.get('power', 0) or 0) >= int(
+                second.get('power', 0) or 0) else second_id
+        else:
+            winner_id = first_id if first_score > second_score else second_id
+        match['winner_id'] = int(winner_id)
+        match['finished_at'] = now
+    round_state = event.setdefault('rounds', {}).setdefault(
+        str(round_number), {'matches': matches})
+    round_state['finished_at'] = now
+    _guild_battle_settle_guesses(event, round_number)
+    if round_number == 3:
+        ranked = _guild_battle_round_teams(event, 4)
+        event['champion_id'] = int(ranked[0]['id']) if ranked else 0
+    _save_guild_battle_state()
+    return True
+
+
+def _guild_battle_settle_guesses(event, round_number):
+    cfg = _guild_battle_config()[1]
+    guess_rewards = max(0, int(cfg.get('guess_success', 0) or 0))
+    money_type = {'1001': 0, '1002': 1, '1003': 2, '1004': 3}.get(
+        str(cfg.get('guess_id', '')))
+    guesses = event.setdefault('guesses', {})
+    for guess in guesses.values():
+        if (not isinstance(guess, dict)
+                or int(guess.get('round', 0) or 0) != int(round_number)
+                or guess.get('settled')):
+            continue
+        match, _index, _pair = _guild_battle_match_for_guild(
+            event, round_number, int(guess.get('guild_id', 0) or 0))
+        if not match or not int(match.get('finished_at', 0) or 0):
+            continue
+        if int(match.get('winner_id', 0) or 0) != int(
+                guess.get('guild_id', 0) or 0):
+            guess['settled'] = True
+            continue
+        char = _guild_char_by_id(int(guess.get('char_id', 0) or 0))
+        if not char or money_type is None or guess_rewards <= 0:
+            print(f"[GUILD BATTLE] vote reward unavailable player="
+                  f"{guess.get('char_id')} money_type={money_type} amount={guess_rewards}")
+            continue
+        with get_character_transaction_lock(char):
+            balance = get_currency_balance(char, money_type)
+            set_currency_balance(char, money_type, balance + guess_rewards)
+            if not save_chars(all_accounts_chars):
+                set_currency_balance(char, money_type, balance)
+                print(f"[GUILD BATTLE] vote reward persistence failed "
+                      f"player={guess.get('char_id')}")
+                continue
+        guess['settled'] = True
+        online = ALL_CONNECTIONS.get(int(guess.get('char_id', 0) or 0))
+        if online and online[0]:
+            sync_char_attrs_rpc(online[0], char)
+
+
+def _guild_battle_info_bytes(guild=None, char=None, now=None):
+    battle = _guild_battle_state_at(now)
+    event = battle['event']
+    if not event:
+        champion_name = ''
+        prior_key = str(int(battle['event_key']) - 7 * 86400)
+        prior = GUILD_BATTLE_STATE.get('events', {}).get(prior_key, {})
+        champion = _guild_battle_team_by_id(
+            prior, int(prior.get('champion_id', 0) or 0)) if prior else None
+        if champion:
+            champion_name = str(champion.get('name', ''))
+        return encode_sproto([
+            (0, -1), (5, battle['battle_id']),
+            (6, -1),
+            (7, champion_name),
+        ])
+
+    def encode_round(round_number):
+        teams = _guild_battle_round_teams(event, round_number)
+        matches = _guild_battle_round_matches(event, round_number)
+        encoded_teams = {}
+        for index, team in enumerate(teams[:8], 1):
+            state = 0
+            match = matches.get(str((index - 1) // 2), {})
+            if int(match.get('finished_at', 0) or 0):
+                state = 3 if int(match.get('winner_id', 0) or 0) == int(team['id']) else 4
+            encoded_teams[str(index)] = encode_sproto([
+                (0, int(team['id'])), (1, str(team.get('name', ''))),
+                (2, index), (3, state),
+            ])
+        active = int(battle['round'] == round_number
+                     and battle['state'] in (1, 3, 5))
+        return encode_sproto([(0, encoded_teams), (1, active)])
+
+    round_fields = []
+    for round_number in range(1, 4):
+        if round_number <= battle['round']:
+            round_fields.append((round_number, encode_round(round_number)))
+        else:
+            round_fields.append((round_number, encode_sproto([(0, {}), (1, 0)])))
+    champion = _guild_battle_team_by_id(
+        event, int(event.get('champion_id', 0) or 0)) if event.get('champion_id') else None
     return encode_sproto([
-        (0, -1), (5, battle_id),
-        (6, int(guild.get('id', 0)) if guild else 0), (7, '')
+        (0, battle['state']), *round_fields, (4, battle['time']),
+        (5, battle['battle_id']),
+        (6, _guild_battle_guess_id(char, event, battle['round'])),
+        (7, str(champion.get('name', '')) if champion else ''),
     ])
 
 def _guild_daily_activity_window(now, start_time, duration):
@@ -25176,7 +25999,7 @@ def _guild_activity_response(guild=None, char=None):
                 _save_guild_states()
     return encode_sproto([
         (0, _guild_boss_activity_map(guild, char)),
-        (1, _guild_battle_info_bytes(guild)),
+        (1, _guild_battle_info_bytes(guild, char)),
         (2, _guild_level(guild) if guild else 0),
         (3, _guild_dance_activity_info(guild)),
         (4, _guild_capture_activity_map(char=char))
@@ -25636,25 +26459,65 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         send_rpc_push(627, battle_info)
 
     elif msg == 285:  # req_guild_battle_info; open the configured Gang Battle panel
-        send_rpc_push(662, encode_sproto([(0, _guild_battle_info_bytes(guild))]))
+        send_rpc_push(662, encode_sproto([
+            (0, _guild_battle_info_bytes(guild, char))
+        ]))
 
-    elif msg == 286:  # enter_guild_battle; battle runtime is not active on this server
-        # The APK opens a wait box for request 286 and only closes it when it
-        # receives ret_enter_guild_battle (677).  The battle panel currently
-        # reports state=-1 (not open), so explicitly return the closed state
-        # instead of letting the client wait for its timeout.
-        send_rpc_push(677, encode_sproto([(0, 0)]))
+    elif msg == 286:  # enter_guild_battle
+        entry = _guild_battle_entry_for_char(char)
+        births = map_config_position_list(
+            (entry or {}).get('cfg', {}).get('map_id', '1501'), 'birth')
+        if not entry or len(births) < 2:
+            send_rpc_push(677, encode_sproto([(0, 1)]))
+        else:
+            spawn_index = 0 if entry['team_index'] % 2 == 1 else 1
+            char['_guild_battle_event_start'] = int(entry['event']['selection_start'])
+            char['_guild_battle_round'] = int(entry['round'])
+            char['_guild_battle_pair_index'] = int(entry['pair_index'])
+            char['_guild_battle_match_key'] = entry['match_key']
+            char['_guild_battle_guild_id'] = int(entry['guild_id'])
+            char['_guild_battle_team_index'] = int(entry['team_index'])
+            char['_guild_battle_return_map'] = str(char.get('map_id', '101'))
+            char['_guild_battle_return_pos'] = list(
+                char.get('pos') or default_map_spawn_position(char.get('map_id', '101')))
+            start_map_transition(
+                conn, char, entry['cfg'].get('map_id', '1501'), send_rpc_push,
+                override_pos=births[spawn_index])
+            with GUILD_BATTLE_SCENE_LOCK:
+                GUILD_BATTLE_SCENES.setdefault(
+                    entry['match_key'], {'start_sent': False, 'npcs': {}})
+            round_start = _guild_battle_round_start(
+                entry['event']['selection_start'], entry['round'], entry['cfg'])
+            if int(time.time()) >= round_start + int(
+                    entry['cfg'].get('wait_time', 10) or 0):
+                scene = GUILD_BATTLE_SCENES[entry['match_key']]
+                if not scene.get('start_sent'):
+                    for peer_conn, _peer_char in _guild_battle_online_players(
+                            entry['match_key']):
+                        send_rpc_push_safe(peer_conn, 670, encode_sproto([]))
+                    scene['start_sent'] = True
+                else:
+                    send_rpc_push(670, encode_sproto([]))
+            send_rpc_push(677, encode_sproto([(0, 0)]))
 
-    elif msg == 291:  # req_guild_score_info; no live battle score state exists
-        # GuildBattleSceneManager polls this every two seconds. If an old or
-        # directly-entered battle scene sends the request while this server
-        # has no battle runtime, return a well-formed empty score snapshot so
-        # the client does not retain stale values from a previous scene.
-        score_info = encode_sproto([
-            (0, []), (1, 0), (2, 0), (3, 0), (4, 0),
-            (5, ''), (6, ''), (7, 0), (8, 0), (9, 0)
-        ])
-        send_rpc_push(667, encode_sproto([(0, score_info)]))
+    elif msg == 291:  # req_guild_score_info
+        send_rpc_push(667, encode_sproto([
+            (0, _guild_battle_score_info_bytes(char))
+        ]))
+
+    elif msg == 290:  # guild_battle_guess
+        battle = _guild_battle_state_at()
+        guess_guild_id = get_val_int(body, 0, -1)
+        if _guild_battle_place_guess(char, guess_guild_id, battle):
+            send_rpc_push(669, encode_sproto([(0, guess_guild_id)]))
+        if session is not None:
+            send_rpc_response(session)
+
+    elif msg == 292:  # req_guild_battle_guess
+        battle = _guild_battle_state_at()
+        guess_guild_id = _guild_battle_guess_id(
+            char, battle.get('event'), battle.get('round', 0))
+        send_rpc_push(669, encode_sproto([(0, guess_guild_id)]))
 
     elif msg == 287:  # req_guild_battle_rank
         ranked_guilds = sorted(
@@ -25717,8 +26580,14 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         max_players = max(1, int(battle_cfg.get('max_play_num', 10) or 10))
         required_count = min(len(active_members), max_players)
         selected_unique = list(dict.fromkeys(selected_ids))
+        battle_state = _guild_battle_state_at()
+        roster_open = battle_state['state'] in (0, 2, 4)
+        selected_team = (_guild_battle_team_by_id(
+            battle_state['event'], current_guild_id)
+            if battle_state.get('event') else None)
         success = bool(
             guild and member and int(member.get('job', 4)) == 0
+            and roster_open and selected_team
             and required_count > 0 and len(selected_unique) == required_count
             and len(selected_unique) <= max_players
             and all(selected_id in active_members for selected_id in selected_unique)
@@ -25729,6 +26598,9 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
                     entry['battle'] = 1 if selected_id in selected_unique else 0
                 guild['battle_roster'] = selected_unique
                 _save_guild_states()
+            with GUILD_BATTLE_STATE_LOCK:
+                selected_team['roster'] = list(selected_unique)
+                _save_guild_battle_state()
         send_rpc_push(666, encode_sproto([(0, 0 if success else 1)]))
 
     elif msg == 293:  # req_guild_star
@@ -25787,7 +26659,9 @@ def handle_guild_request(conn, char, msg, body, send_rpc_push, send_rpc_response
         send_rpc_push(672, encode_sproto([(0, _guild_star_map(guild))]))
 
     elif msg == 295:  # req_guild_battle_state
-        send_rpc_push(673, encode_sproto([(0, _guild_battle_info_bytes(guild))]))
+        send_rpc_push(673, encode_sproto([
+            (0, _guild_battle_info_bytes(guild, char))
+        ]))
 
     elif msg == 318:  # request_guild_map_domine_top
         capture_id = get_val_str(body, 0, '')
@@ -26938,7 +27812,7 @@ def client_handler(conn, addr):
             elif msg == 3: # verfiy
                 req_id = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, acc_id))
                 if req_id: acc_id = req_id
-                resp = encode_sproto([(0, 0), (1, int(time.time()) % 100000), (2, ""), (3, ""), (4, "1.012.017"), (5, "205")])
+                resp = encode_sproto([(0, 0), (1, int(time.time()) % 100000), (2, ""), (3, ""), (4, "1.012.017"), (5, 0)])
                 ph = encode_sproto([(1, session)]) if session is not None else encode_sproto([(0, 3)])
                 pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -26948,7 +27822,7 @@ def client_handler(conn, addr):
                 sid = get_val_int(body, 5, 1); cur_areaId = str(get_area_id(sid))
                 # sync_common_data: serverTime(0), time_offset(2), func_info(9), pvp_scale(4), seed(12), server_level(13), start_time(14)
                 resp = encode_sproto([
-                    (0, int(time.time())), (1, "1.012.017"), (2, "205"), (3, 1),
+                    (0, int(time.time())), (1, "1.012.017"), (2, 0), (3, 1),
                     # pvp_scale = 1.0 (10000), seed = random
                     (4, 10000), (12, random.randint(1, 10000))
                 ])
@@ -31131,6 +32005,9 @@ def client_handler(conn, addr):
                             # Check if victim died
                             if old_hp > 0 and new_hp == 0:
                                 print(f"[PvP] Player {target_id} killed by {picked_char['id']}")
+                                if current_map == '1501':
+                                    _guild_battle_record_kill(
+                                        picked_char, victim=target_char)
                                 record_pvp_kill_streak(picked_char, target_char)
                                 survival_forced_return = survive_battle_pvp_kill(
                                     picked_char, target_char)
@@ -31225,6 +32102,15 @@ def client_handler(conn, addr):
                                 continue
 
                             cur_map = str(picked_char.get('map_id', ''))
+                            if cur_map == '1501':
+                                battle_entry = _guild_battle_entry_for_char(picked_char)
+                                if (not battle_entry
+                                        or not battle_entry.get('combat_started')
+                                        or picked_char.get('_guild_battle_match_key')
+                                        != battle_entry.get('match_key')):
+                                    print(f"[GUILD BATTLE] rejected NPC hit outside "
+                                          f"assigned round player={picked_char.get('id')}")
+                                    continue
                             is_exp = is_exp_map(cur_map)
                             is_equipment = is_equipment_copy_map(cur_map)
                             is_tower = is_tower_map(cur_map)
@@ -31607,7 +32493,7 @@ def client_handler(conn, addr):
                                     and cur_map in PRISON_NPC_AOI_MAP_IDS):
                                 prison_npc_retarget_on_hit(target_id, picked_char)
                             if (applied_damage > 0
-                                    and cur_map == SLUM_DISTRICT_MAP_ID):
+                                    and cur_map in (SLUM_DISTRICT_MAP_ID, '1501')):
                                 slum_npc_retarget_on_hit(
                                     target_id, picked_char, conn)
                             if (applied_damage > 0
@@ -31724,6 +32610,10 @@ def client_handler(conn, addr):
                             npc_died = exp_npc_died if is_stage_combat else world_npc_died
                             if npc_died:
                                 print(f"[{stage_label} MSG111] NPC DEAD target_id={target_id} target_nid={target_nid} hp={NPC_HP_MAP[target_id]}")
+                                if cur_map == '1501':
+                                    _guild_battle_record_kill(
+                                        picked_char, npc_id=target_nid)
+                                    _guild_battle_schedule_npc_respawn(target_id)
                                 if str(target_nid) == "23101":
                                     resolve_gotham_escort_npc_death(
                                         picked_char, conn, target_id)
@@ -31837,6 +32727,8 @@ def client_handler(conn, addr):
                                 else:
                                     if (str(target_nid) == "23101"
                                             and is_gotham_escort_map(cur_map)):
+                                        pass
+                                    elif cur_map == '1501':
                                         pass
                                     elif is_equipment:
                                         on_equipment_npc_killed(exp_state_hit, target_id, target_nid)
@@ -32405,11 +33297,9 @@ def client_handler(conn, addr):
                                 str(1104 + int(valid_domin_id))
                             )
                         ]
-                    selected_enemy = _domin_capture_selected_enemy(
-                        body, district_roster
+                    selected_enemy = _domin_capture_challenge_enemy(
+                        body, district_roster, capture_story_active
                     )
-                    if selected_enemy is None and len(district_roster) == 1:
-                        selected_enemy = district_roster[0]
                     if selected_enemy is not None:
                         if selected_enemy.get("kind") == "npc":
                             npc_id = str(selected_enemy.get("npc_id", ""))
@@ -36572,7 +37462,8 @@ def client_handler(conn, addr):
 
             elif (msg in (146, 147, 148, 149, 150, 151, 152, 153, 154, 200,
                           169, 170, 173, 174, 175, 176, 195, 212, 231, 233, 247,
-                          285, 286, 287, 288, 289, 291, 293, 294, 295, 315, 318, 319, 320)
+                          285, 286, 287, 288, 289, 290, 291, 292, 293, 294, 295,
+                          315, 318, 319, 320)
                   or (msg == 143 and get_val_int(body, 0, -1) == 3)
                   or (msg == 144 and get_val_int(body, 2, -1) == 3)):
                 handle_guild_request(
@@ -37290,6 +38181,7 @@ def start_server():
     start_github_backup_worker()
     _restore_guild_dance_speaker_timers()
     threading.Thread(target=_guild_boss_scheduler_loop, daemon=True).start()
+    RepeatingTask(1.0, _guild_battle_tick).start()
     RepeatingTask(1.0, _wild_boss_schedule_tick).start()
     RepeatingTask(1.0, _scheduled_activity_chat_tick).start()
     RepeatingTask(10.0, _inventory_expiry_worker_tick).start()
