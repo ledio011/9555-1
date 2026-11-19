@@ -3965,6 +3965,14 @@ def get_val_int(fields, tag, default=0):
         if len(val) == 1: return val[0]
     return default
 
+def parse_equip_inherit_request(body):
+    """Return source index/type and target index/type from the APK's request tags."""
+    # Tags 0/1 are the source container/index; tags 2/3 are the target.
+    return (
+        get_val_int(body, 1, -1), get_val_int(body, 0, -1),
+        get_val_int(body, 3, -1), get_val_int(body, 2, -1)
+    )
+
 def get_val_str(fields, tag, default=''):
     """Extract a string value from sproto fields."""
     val = fields.get(tag)
@@ -4411,9 +4419,12 @@ def apply_skill_level_up(character, skill_id, client_level, upgrade_all=False):
     is_weapon_skill = (skill_id in ALL_WEAPON_SKILL_IDS
                        or skill_id in ALL_EQUIPMENT_BASE_SKILL_IDS)
     skill_owned = (
+        skill_id not in LEGACY_JJC_SKILL_IDS
+        and (
             skill_id in owned_starter_skills
             or skill_id in weapon_skill_ids
             or (skill_key in skill_levels and not is_weapon_skill)
+        )
     )
     skill_cfg = SKILL_CONFIG.get(skill_id, {})
     request_valid = (
@@ -4515,6 +4526,7 @@ ALL_EQUIPMENT_BASE_SKILL_IDS = frozenset(
     for skill_id in equip.get('base_skills', [])
     if str(skill_id)
 )
+LEGACY_JJC_SKILL_IDS = frozenset(('105', '205', '305'))
 
 
 def learned_non_weapon_skill_ids(skill_levels):
@@ -4522,7 +4534,8 @@ def learned_non_weapon_skill_ids(skill_levels):
     if not isinstance(skill_levels, dict):
         return set()
     return {str(skill_id) for skill_id in skill_levels
-            if str(skill_id) not in ALL_WEAPON_SKILL_IDS
+            if str(skill_id) not in LEGACY_JJC_SKILL_IDS
+            and str(skill_id) not in ALL_WEAPON_SKILL_IDS
             and str(skill_id) not in ALL_EQUIPMENT_BASE_SKILL_IDS}
 
 
@@ -4692,11 +4705,8 @@ def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None,
     # Include any additional skills specified in skill_levels (e.g., boss skills 106-110)
     # The client's ObjZombiePlayer.UpdateSkillList() only accepts indexPos 4, 5, 6
     # (line 114: index > 3 && index < 7), so only 3 active skills can be used by zombie AI.
-    # The client then sorts mEnableSkillIDList by PriorityAutoCombat (descending):
-    #   110(priority=5) -> used first
-    #   105(priority=4) -> used second
-    #   106(priority=3) -> used third
-    #   107/108/109(priority=2) -> not in mEnableSkillIDList if >3 skills
+    # The client sorts mEnableSkillIDList by PriorityAutoCombat (descending);
+    # JJC bot-only skills 105/205/305 are excluded from player skill maps below.
     # We need to assign indexPos 4-6 to the skills with the highest PriorityAutoCombat.
     # Collect all extra skills and sort by PriorityAutoCombat descending.
     extra_skills = []
@@ -4709,7 +4719,8 @@ def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None,
         # its own skills, so it cannot reappear as a stale fourth entry.
         if weapon_skill_rows and sid == starter_active:
             continue
-        if (sid not in smap and sid not in weapon_skill_ids
+        if (sid not in LEGACY_JJC_SKILL_IDS
+                and sid not in smap and sid not in weapon_skill_ids
                 and sid not in ALL_WEAPON_SKILL_IDS
                 and sid not in ALL_EQUIPMENT_BASE_SKILL_IDS):
             skill_cfg = SKILL_CONFIG.get(sid, {})
@@ -30125,10 +30136,8 @@ def client_handler(conn, addr):
                 send_rpc_response(session, response_data)
 
             elif msg == 184: # equip_inhert: transfer stored equipment XP between same-slot gear
-                source_index = get_val_int(body, 0, -1)
-                source_type = get_val_int(body, 1, -1)
-                target_index = get_val_int(body, 2, -1)
-                target_type = get_val_int(body, 3, -1)
+                source_index, source_type, target_index, target_type = \
+                    parse_equip_inherit_request(body)
                 result = None
                 if picked_char and is_current_character_connection(conn, picked_char):
                     with get_character_transaction_lock(picked_char):
