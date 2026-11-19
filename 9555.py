@@ -117,11 +117,21 @@ SLUM_DISTRICT_MAP_ID = "102"
 PRIVATE_ISLAND_MAP_ID = "106"
 VEGAS_MAP_ID = "104"
 CHINATOWN_MAP_ID = "107"
+SAN_ANDREAS_MAP_ID = "105"
+UPTOWN_MAP_ID = "108"
+SONA_MAP_ID = "1201"
+FOX_RIVER_MAP_ID = "1202"
 OPEN_WORLD_NPC_RESPAWN_SECONDS = 5
 SLUM_NPC_EXP_REWARD_SCALE = 0.01
 OPEN_WORLD_NPC_MAP_IDS = frozenset((
-    SLUM_DISTRICT_MAP_ID, VEGAS_MAP_ID, CHINATOWN_MAP_ID,
-    PRIVATE_ISLAND_MAP_ID))
+    SLUM_DISTRICT_MAP_ID, VEGAS_MAP_ID, CHINATOWN_MAP_ID, UPTOWN_MAP_ID,
+    PRIVATE_ISLAND_MAP_ID, SAN_ANDREAS_MAP_ID))
+WORLD_MAP_NPC_REWARD_MAP_IDS = frozenset((
+    GOTHAM_MAP_ID, VILLA_AREA_MAP_ID, CHINATOWN_MAP_ID, UPTOWN_MAP_ID,
+    PRIVATE_ISLAND_MAP_ID, SAN_ANDREAS_MAP_ID))
+WORLD_MAP_NPC_RESPAWN_MAP_IDS = frozenset((
+    GOTHAM_MAP_ID, VILLA_AREA_MAP_ID, CHINATOWN_MAP_ID, UPTOWN_MAP_ID,
+    PRIVATE_ISLAND_MAP_ID, SAN_ANDREAS_MAP_ID, SONA_MAP_ID, FOX_RIVER_MAP_ID))
 WAREHOUSE_SNEAK_BOSS_NPC_ID = "13101"
 WAREHOUSE_SNEAK_BOSS_EXP_REWARD_SCALE = 0.05
 GOTHAM_BOSS_DEFAULT_RESPAWN_SECONDS = 4 * 60 * 60
@@ -12246,9 +12256,7 @@ def prison_npc_specs(map_id, player_level=1, player_id=None,
                 continue
             rebirth_time = int(row.get("rebirth_time", -1))
             if (index < monster_count
-                    and (map_str == CHINATOWN_MAP_ID
-                         or (map_str in OPEN_WORLD_NPC_MAP_IDS
-                             and rebirth_time < 0))):
+                    and map_str in WORLD_MAP_NPC_RESPAWN_MAP_IDS):
                 rebirth_time = OPEN_WORLD_NPC_RESPAWN_SECONDS
             owner_id = int(player_id) if (
                 map_str == WAREHOUSE_SNEAK_COPY_ID and player_id is not None
@@ -13433,7 +13441,11 @@ def gotham_shared_npc_specs(map_id):
                 "x": int(row.get("x", 0)),
                 "z": int(row.get("z", 0)),
                 "o": int(row.get("o", 0)),
-                "rebirth_time": int(row.get("rebirth_time", -1)),
+                "rebirth_time": (
+                    OPEN_WORLD_NPC_RESPAWN_SECONDS
+                    if (kind == "monster"
+                        and map_str in WORLD_MAP_NPC_RESPAWN_MAP_IDS)
+                    else int(row.get("rebirth_time", -1))),
                 "path_id": path_id,
                 "patrol_path": list(patrol_paths.get(path_id, [])) if path_id else [],
                 "is_boss": False,
@@ -17918,7 +17930,15 @@ def calculate_npc_kill_rewards_for_map(player_level, npc_level, map_id,
         # their previous reward curve used the fixed level-1 NPC override.
         npc_level = 1
     exp_reward, cash_reward = calculate_npc_kill_rewards(player_level, npc_level)
-    if map_id in OPEN_WORLD_NPC_MAP_IDS:
+    if map_id in WORLD_MAP_NPC_REWARD_MAP_IDS:
+        npc_cfg = NPC_CONFIG.get(str(npc_id), {})
+        try:
+            is_boss = int(npc_cfg.get("type", 0) or 0) == 17
+        except (TypeError, ValueError):
+            is_boss = False
+        if not is_boss:
+            exp_reward = max(1, int(exp_reward * SLUM_NPC_EXP_REWARD_SCALE))
+    elif map_id in OPEN_WORLD_NPC_MAP_IDS:
         exp_reward = max(1, int(exp_reward * SLUM_NPC_EXP_REWARD_SCALE))
     elif map_id == WAREHOUSE_SNEAK_COPY_ID:
         exp_scale = (
