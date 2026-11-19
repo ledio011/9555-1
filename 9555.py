@@ -1315,7 +1315,7 @@ try:
                     ai_id = parts[1]
                     AI_DATA_CONFIG[ai_id] = {
                         'lock_type': int(parts[2]) if parts[2].isdigit() else 0,
-                        'lock_distance': int(parts[3]) if parts[3].isdigit() else 500,
+                        'lock_distance': int(parts[3]) if parts[3].lstrip('-').isdigit() else 500,
                         'around_prob': int(parts[4]) if parts[4].isdigit() else 20,
                         'around_time_min': int(parts[5]) if parts[5].isdigit() else 1500,
                         'around_time_max': int(parts[6]) if parts[6].isdigit() else 3000,
@@ -13428,6 +13428,7 @@ def gotham_shared_npc_specs(map_id):
                 "slot": (f"{kind}:{index}" if map_str == GOTHAM_MAP_ID
                          else f"{map_str}:{kind}:{index}"),
                 "map_id": map_str,
+                "is_monster": kind == "monster",
                 "nid": str(row.get("nid", "")),
                 "x": int(row.get("x", 0)),
                 "z": int(row.get("z", 0)),
@@ -13719,7 +13720,9 @@ def _gotham_npc_ai_tick():
                     with GOTHAM_NPC_LOCK:
                         if GOTHAM_SHARED_NPC_SLOTS.get(slot_key, {}).get("inst_id") == inst_id:
                             GOTHAM_SHARED_NPC_SLOTS[slot_key]["target_id"] = 0
-            if target is None and int(ai_cfg.get("lock_type", 0) or 0) == 1:
+            if (target is None
+                    and (int(ai_cfg.get("lock_type", 0) or 0) == 1
+                         or snapshot.get("is_monster"))):
                 possible = [
                     (math.hypot((p[3] / 100.0) - mx, (p[4] / 100.0) - mz), p)
                     for p in players
@@ -13747,14 +13750,6 @@ def _gotham_npc_ai_tick():
 
             if target is None:
                 if snapshot.get("is_boss"):
-                    continue
-                dx = mx_cm - int(snapshot["x"])
-                dz = mz_cm - int(snapshot["z"])
-                distance_from_home = math.hypot(dx, dz) / 100.0
-                if distance_from_home > return_distance:
-                    _gotham_npc_move_toward(
-                        GOTHAM_SHARED_NPC_SLOTS[slot_key], inst_id,
-                        int(snapshot["x"]), int(snapshot["z"]), walk_speed, now)
                     continue
                 patrol_path = snapshot.get("patrol_path") or []
                 if len(patrol_path) >= 2:
@@ -13786,6 +13781,14 @@ def _gotham_npc_ai_tick():
                             _gotham_npc_move_toward(
                                 GOTHAM_SHARED_NPC_SLOTS[slot_key], inst_id,
                                 patrol_target[0], patrol_target[1], walk_speed, now)
+                    continue
+                dx = mx_cm - int(snapshot["x"])
+                dz = mz_cm - int(snapshot["z"])
+                distance_from_home = math.hypot(dx, dz) / 100.0
+                if distance_from_home > return_distance:
+                    _gotham_npc_move_toward(
+                        GOTHAM_SHARED_NPC_SLOTS[slot_key], inst_id,
+                        int(snapshot["x"]), int(snapshot["z"]), walk_speed, now)
                     continue
                 patrol_type = int(ai_cfg.get("patrol_type", 0) or 0)
                 patrol_distance = (
@@ -13903,16 +13906,28 @@ def start_gotham_npc_runtime():
 def gotham_create_shared_npc(slot, spec):
     nid = str(spec["nid"])
     cfg = NPC_CONFIG.get(nid, {"name": f"NPC_{nid}"})
+    patrol_path = spec.get("patrol_path") or []
+    spawn_x, spawn_z = int(spec["x"]), int(spec["z"])
+    patrol_path_index = (
+        min(
+            range(len(patrol_path)),
+            key=lambda index: (
+                (int(patrol_path[index][0]) - spawn_x) ** 2
+                + (int(patrol_path[index][1]) - spawn_z) ** 2
+            ),
+        )
+        if patrol_path else 0
+    )
     inst_id, attr = build_npc_attr_sproto(
         nid, cfg.get("name", f"NPC_{nid}"),
-        int(spec["x"]), int(spec["z"]), int(spec.get("o", 0)))
+        spawn_x, spawn_z, int(spec.get("o", 0)))
     map_id = str(spec.get("map_id", GOTHAM_MAP_ID))
     NPC_INSTANCE_MAP[inst_id] = map_id
     slot.update({
         "inst_id": inst_id,
         "respawn_at": 0,
-        "patrol_path_index": 0,
-        "position": (int(spec["x"]), int(spec["z"])),
+        "patrol_path_index": patrol_path_index,
+        "position": (spawn_x, spawn_z),
         "heading": int(spec.get("o", 0)),
         "damage": {},
         "target_id": 0,
