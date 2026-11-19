@@ -5905,7 +5905,7 @@ def map_config_teleport_position(map_id):
 
 
 def is_near_map_teleport_position(map_id, position):
-    """Match the client's three-unit terminal radius in horizontal coordinates."""
+    """Allow for a delayed movement snapshot after the client's 3-unit trigger."""
     teleport_pos = map_config_teleport_position(map_id)
     if teleport_pos is None:
         return False
@@ -5914,7 +5914,7 @@ def is_near_map_teleport_position(map_id, position):
     except (TypeError, ValueError, IndexError, OverflowError):
         return False
     dx, dz = x - teleport_pos[0], z - teleport_pos[2]
-    return dx * dx + dz * dz <= 300 * 300
+    return dx * dx + dz * dz <= 500 * 500
 
 
 def configured_map_birth_position(map_id):
@@ -17827,8 +17827,12 @@ def calculate_npc_kill_rewards(player_level, npc_level=1):
 
 def calculate_npc_kill_rewards_for_map(player_level, npc_level, map_id,
                                        npc_id=None):
-    exp_reward, cash_reward = calculate_npc_kill_rewards(player_level, npc_level)
     map_id = str(map_id)
+    if map_id == "11":
+        # Map 11 NPC level 9999 scales combat stats with player level, but
+        # their previous reward curve used the fixed level-1 NPC override.
+        npc_level = 1
+    exp_reward, cash_reward = calculate_npc_kill_rewards(player_level, npc_level)
     if map_id in OPEN_WORLD_NPC_MAP_IDS:
         exp_reward = max(1, int(exp_reward * SLUM_NPC_EXP_REWARD_SCALE))
     elif map_id == WAREHOUSE_SNEAK_COPY_ID:
@@ -26647,10 +26651,17 @@ def client_handler(conn, addr):
         picked_char["domin_capture_result_reason"] = str(reason)
         picked_char["domin_capture_result_at"] = int(time.time())
         if result == "win":
-            # Capture has no result-screen RPC; 551 is TianTi rank-PvP and
-            # opens the unrelated arena win/loss UI. Refresh Capture state instead.
+            # Protocol 685 is the APK's Capture result handler; 551 belongs
+            # to TianTi rank-PvP and opens the unrelated arena result UI.
+            send_rpc_push(685, encode_sproto([
+                (0, True), (2, str(picked_char.get("active_domin_id") or "1"))
+            ]))
             _, info_payload = _domin_capture_info_payload(picked_char)
             send_rpc_push(684, info_payload)
+        else:
+            send_rpc_push(685, encode_sproto([
+                (0, False), (2, str(picked_char.get("active_domin_id") or "1"))
+            ]))
         save_chars(all_accounts_chars)
         debug_log(f"[CAPTURE] result={result} reason={reason} "
                   f"player={picked_char.get('id')}")
