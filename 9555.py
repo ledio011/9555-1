@@ -101,6 +101,7 @@ CHAR_DB = persistent_state_path("characters_final.json")
 BAK_DB = persistent_state_path("characters_final.json.bak")
 TMP_DB = CHAR_DB + ".tmp"
 RESOURCE_ROOT = os.path.join(SCRIPT_DIR, "assets")
+RESOURCE_DATA_VERSION = 205
 server_session_counter = 8000
 GLOBAL_INST_COUNTER = 3000000
 GLOBAL_INST_COUNTER_LOCK = threading.Lock()
@@ -21610,8 +21611,10 @@ def serve_resource_http(conn, initial_data):
         if len(parts) < 2 or parts[0] not in ("GET", "HEAD"):
             conn.sendall(b"HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n")
             return
-        relative_path = parts[1].split("?", 1)[0].lstrip("/")
+        relative_path = urllib.parse.unquote(parts[1].split("?", 1)[0]).lstrip("/")
         normalized = os.path.normpath(relative_path).replace("\\", "/")
+        if normalized == "RES_-001" or normalized.startswith("RES_-001/"):
+            normalized = f"RES_{RESOURCE_DATA_VERSION}{normalized[len('RES_-001'):]}"
         if not normalized.startswith("RES_") or normalized.startswith("../"):
             conn.sendall(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
             return
@@ -27858,7 +27861,10 @@ def client_handler(conn, addr):
             elif msg == 3: # verfiy
                 req_id = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, acc_id))
                 if req_id: acc_id = req_id
-                resp = encode_sproto([(0, 0), (1, int(time.time()) % 100000), (2, ""), (3, ""), (4, "1.012.017"), (5, 0)])
+                resp = encode_sproto([
+                    (0, 0), (1, int(time.time()) % 100000), (2, []), (3, ""),
+                    (4, 0), (5, "1.012.017"), (6, str(RESOURCE_DATA_VERSION))
+                ])
                 ph = encode_sproto([(1, session)]) if session is not None else encode_sproto([(0, 3)])
                 pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -27868,7 +27874,8 @@ def client_handler(conn, addr):
                 sid = get_val_int(body, 5, 1); cur_areaId = str(get_area_id(sid))
                 # sync_common_data: serverTime(0), time_offset(2), func_info(9), pvp_scale(4), seed(12), server_level(13), start_time(14)
                 resp = encode_sproto([
-                    (0, int(time.time())), (1, "1.012.017"), (2, 0), (3, 1),
+                    (0, int(time.time())), (1, "1.012.017"),
+                    (2, str(RESOURCE_DATA_VERSION)), (3, 1),
                     # pvp_scale = 1.0 (10000), seed = random
                     (4, 10000), (12, random.randint(1, 10000))
                 ])
