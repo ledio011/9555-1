@@ -15527,11 +15527,22 @@ def ensure_backpack_state(picked_char):
         starter_id for starter_set in starter_sets.values()
         for starter_id in starter_set
     }
-    starter_affixes_changed = False
+    starter_equipment_changed = False
     for item in (picked_char.get('equipped_equip', [])
                  + picked_char.get('equip_inventory', [])):
-        if str(item.get('id', '')) not in starter_item_ids:
+        item_id = str(item.get('id', ''))
+        if item_id not in starter_item_ids:
             continue
+        original_quality = ITEM_CONFIG.get(item_id, {}).get('quality')
+        if original_quality is not None:
+            try:
+                original_quality = int(original_quality)
+                item_quality = int(item.get('quality', original_quality))
+            except (TypeError, ValueError):
+                item_quality = None
+            if item_quality != original_quality:
+                item['quality'] = original_quality
+                starter_equipment_changed = True
         try:
             if int(item.get('appraise', 0)) == 1:
                 continue
@@ -15543,8 +15554,8 @@ def ensure_backpack_state(picked_char):
         if isinstance(random_attributes, dict) and random_attributes:
             item['random_attri'] = random_attributes
             item['appraise'] = 1
-            starter_affixes_changed = True
-    if starter_affixes_changed:
+            starter_equipment_changed = True
+    if starter_equipment_changed:
         schedule_character_db_save()
 
     # Keep allocation monotonic across all four backpacks and the three packs.
