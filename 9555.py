@@ -109,6 +109,9 @@ NPC_INST_MAP = {} # inst_id -> nid (to resolve rewards)
 NPC_INSTANCE_MAP = {} # inst_id -> map ID, to reject cross-map forged death reports
 NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_ATTR_MAP = {} # runtime NPC payloads for reconnect replay
+MISSION_1001_HULK_LOCK = threading.RLock()
+MISSION_1001_HULK_SERVER_NPCS = {}
+MISSION_1001_HULK_LOCAL_TO_SERVER = {}
 GOTHAM_MAP_ID = "109"
 VILLA_AREA_MAP_ID = "110"
 CARGO_PORT_MAP_ID = "111"
@@ -8897,10 +8900,13 @@ def validate_tower_npc_attack_damage(conn, char, effinfo_id, client_damage):
 
 def build_npc_attr_sproto(
         nid, name, x, z, o, existing_inst_id=None, player_level=1,
-        initial_hp=None, hp_max_override=None):
+        initial_hp=None, hp_max_override=None, npc_stats_override=None):
     """Build NPC attribute sproto for TAG 509 (npc_create).
     Bug 1/6: Shared function to eliminate code duplication between send_npc_create and send_npc_wrapper."""
-    npc_stats = get_npc_attr(nid, player_level)
+    npc_stats = (
+        dict(npc_stats_override) if npc_stats_override is not None
+        else get_npc_attr(nid, player_level)
+    )
     if hp_max_override is not None:
         npc_stats['hp_max'] = max(1, int(hp_max_override))
     hp_max = npc_stats['hp_max']
@@ -8960,6 +8966,11 @@ def resync_live_npc_instance(conn, char, inst_id, expected_npcid):
     except (TypeError, ValueError, AttributeError):
         return False
     if not is_current_character_connection(conn, char):
+        return False
+    with MISSION_1001_HULK_LOCK:
+        mission_hulk_state = MISSION_1001_HULK_SERVER_NPCS.get(inst_id)
+    if (mission_hulk_state
+            and int(mission_hulk_state.get("owner_id", 0) or 0) != char_id):
         return False
     server_npcid = NPC_INST_MAP.get(inst_id)
     if (server_npcid is None
@@ -13130,15 +13141,90 @@ def start_prison_npc_runtime():
         PRISON_NPC_AI_TASK = RepeatingTask(0.2, _prison_npc_ai_tick).start()
 
 
-def register_slum_npc_ai(conn, char, inst_id, npc_id, x, z, heading):
+def _mission_1001_hulk_active_for_character(char):
+    active_missions = (char.get("active_missions") or {}) if char else {}
+    mission = active_missions.get("1001") or active_missions.get(1001)
+    return bool(
+        char
+        and str(char.get("map_id", "")) == "11"
+        and mission
+        and mission.get("state") == 1
+    )
+
+
+def _mission_1001_hulk_spawn_for_character(char):
+    if not _mission_1001_hulk_active_for_character(char):
+        return None
+    mission_cfg = missions_data.get("1001", {})
+    spawn_key = str(mission_cfg.get("logic_id", ""))
+    position = char.get("pos") or default_map_spawn_position("11")
+    try:
+        px, pz = int(position[0]), int(position[2])
+    except (TypeError, ValueError, IndexError):
+        return None
+    for spawn in KILL_TARGET_SPAWNS.get(spawn_key, []):
+        if (str(spawn.get("map", "")) != "11"
+                or str(spawn.get("nid", "")) != "9901"):
+            continue
+        x, z = int(spawn.get("x", 0)), int(spawn.get("z", 0))
+        radius = max(1500, int(spawn.get("range", 500) or 500) + 1000)
+        if math.hypot(px - x, pz - z) <= radius:
+            return spawn
+    return None
+
+
+def _mission_1001_hulk_stats(char):
+    stats = get_npc_attr("9901", char.get("level", 1))
+    player_stats = get_character_stats(char)
+    for field in (
+            "hp_max", "atk", "def", "hit", "eva", "cri", "res", "exd",
+            "exr", "crd", "crr", "defa", "dgea", "hita", "resa", "cria",
+            "anti_stun", "anti_knock_down"):
+        stats[field] = max(0, int(player_stats.get(field, 0) or 0) * 5 // 9)
+    stats["hp_max"] = max(1, stats["hp_max"])
+    stats["power"] = max(0, int(player_stats.get("power", 0) or 0) * 5 // 9)
+    return stats
+
+
+def _forget_mission_1001_hulk(inst_id):
+    try:
+        inst_id = int(inst_id)
+    except (TypeError, ValueError):
+        return
+    with MISSION_1001_HULK_LOCK:
+        state = MISSION_1001_HULK_SERVER_NPCS.pop(inst_id, None)
+        if state:
+            MISSION_1001_HULK_LOCAL_TO_SERVER.pop(
+                (int(state.get("owner_id", 0) or 0),
+                 int(state.get("source_inst_id", 0) or 0)), None)
+    with SLUM_NPC_AI_LOCK:
+        SLUM_NPC_AI_STATES.pop(inst_id, None)
+    if state:
+        NPC_HP_MAP.pop(inst_id, None)
+        NPC_INST_MAP.pop(inst_id, None)
+        NPC_INSTANCE_MAP.pop(inst_id, None)
+        NPC_ATTR_MAP.pop(inst_id, None)
+        DEAD_NPC_SET.discard(inst_id)
+
+
+def register_slum_npc_ai(
+        conn, char, inst_id, npc_id, x, z, heading,
+        mission_hulk=False, stats_override=None):
     map_id = str(char.get("map_id", "")) if char else ""
-    if not conn or not char or map_id not in (SLUM_DISTRICT_MAP_ID, "1501"):
+    if not conn or not char:
         return
-    if map_id == SLUM_DISTRICT_MAP_ID and is_slum_static_npc(npc_id):
-        return
-    if not any(str(spawn.get("nid") or "") == str(npc_id)
-               for spawn in MONSTER_DATA.get(map_id, [])):
-        return
+    if mission_hulk:
+        if (map_id != "11" or str(npc_id) != "9901"
+                or _mission_1001_hulk_spawn_for_character(char) is None):
+            return
+    else:
+        if map_id not in (SLUM_DISTRICT_MAP_ID, "1501"):
+            return
+        if map_id == SLUM_DISTRICT_MAP_ID and is_slum_static_npc(npc_id):
+            return
+        if not any(str(spawn.get("nid") or "") == str(npc_id)
+                   for spawn in MONSTER_DATA.get(map_id, [])):
+            return
     try:
         owner_id = int(char.get("id", 0) or 0)
         inst_id = int(inst_id)
@@ -13155,6 +13241,8 @@ def register_slum_npc_ai(conn, char, inst_id, npc_id, x, z, heading):
             "map_id": map_id,
             "player_level": max(1, int(char.get("level", 1) or 1)),
             "nid": str(npc_id),
+            "mission_hulk": bool(mission_hulk),
+            "stats_override": dict(stats_override) if stats_override else None,
             "home_x": int(x),
             "home_z": int(z),
             "position": (int(x), int(z)),
@@ -13181,8 +13269,11 @@ def slum_npc_retarget_on_hit(inst_id, attacker, conn):
         return False
     attacker_map = str(attacker.get("map_id", ""))
     if (attacker_id <= 0
-            or attacker_map not in (SLUM_DISTRICT_MAP_ID, "1501")
+            or attacker_map not in (SLUM_DISTRICT_MAP_ID, "1501", "11")
             or attacker_hp <= 0):
+        return False
+    if (attacker_map == "11"
+            and not _mission_1001_hulk_active_for_character(attacker)):
         return False
     active_conn, active_char = ALL_CONNECTIONS.get(attacker_id, (None, None))
     if (active_conn is not conn or active_char is not attacker
@@ -13197,6 +13288,8 @@ def slum_npc_retarget_on_hit(inst_id, attacker, conn):
                 or state.get("map_id", SLUM_DISTRICT_MAP_ID) != attacker_map
                 or (attacker_map == SLUM_DISTRICT_MAP_ID
                     and is_slum_static_npc(state.get("nid", "")))
+                or (attacker_map == "11"
+                    and not state.get("mission_hulk"))
                 or inst_id in DEAD_NPC_SET
                 or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
             return False
@@ -13309,6 +13402,15 @@ def _slum_npc_ai_tick():
                     or not is_current_character_connection(conn, char)):
                 with SLUM_NPC_AI_LOCK:
                     SLUM_NPC_AI_STATES.pop(inst_id, None)
+                if snapshot.get("mission_hulk"):
+                    _forget_mission_1001_hulk(inst_id)
+                continue
+            if (snapshot.get("mission_hulk")
+                    and not _mission_1001_hulk_active_for_character(char)):
+                send_rpc_push_safe(conn, 506, encode_sproto([(0, inst_id)]))
+                with SLUM_NPC_AI_LOCK:
+                    SLUM_NPC_AI_STATES.pop(inst_id, None)
+                _forget_mission_1001_hulk(inst_id)
                 continue
             if (inst_id in DEAD_NPC_SET
                     or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
@@ -13390,6 +13492,29 @@ def _slum_npc_ai_tick():
                                 live_state["attack_until"] = attack_until
                         target_id = owner_id
                         target_valid = True
+            elif (map_id == "11" and snapshot.get("mission_hulk")
+                    and not target_valid
+                    and int(char.get("hp", 0) or 0) > 0):
+                search_radius = max(
+                    0, int(npc_cfg.get("search_radius", 0) or 0))
+                target_distance = math.hypot(
+                    int(target_pos[0]) - mx_cm,
+                    int(target_pos[2]) - mz_cm)
+                if search_radius > 0 and target_distance <= search_radius:
+                    min_action = max(
+                        0, int(ai_cfg.get("action_min_time", 5000) or 5000))
+                    max_action = max(
+                        min_action,
+                        int(ai_cfg.get("action_max_time", 6000) or 6000))
+                    attack_until = now + random.uniform(
+                        min_action, max_action) / 1000.0
+                    with SLUM_NPC_AI_LOCK:
+                        live_state = SLUM_NPC_AI_STATES.get(inst_id)
+                        if live_state:
+                            live_state["target_id"] = owner_id
+                            live_state["attack_until"] = attack_until
+                    target_id = owner_id
+                    target_valid = True
             if not target_valid:
                 with SLUM_NPC_AI_LOCK:
                     live_state = SLUM_NPC_AI_STATES.get(inst_id)
@@ -13452,9 +13577,10 @@ def _slum_npc_ai_tick():
                     live_state["next_attack_at"] = (
                         now + random.uniform(min_cd, max_cd) / 1000.0)
 
+                npc_stats = snapshot.get("stats_override") or get_npc_attr(
+                    npc_id, snapshot.get("player_level", 1))
                 damage, hit, critical = get_combat_damage(
-                    get_npc_attr(
-                        npc_id, snapshot.get("player_level", 1)),
+                    npc_stats,
                     get_character_stats(char),
                     skill_id, 0, effinfo_id=effect_id, attacker_is_npc=True)
                 if not hit or damage <= 0:
@@ -31685,6 +31811,12 @@ def client_handler(conn, addr):
                                          else picked_char.get('equipment_stage_state') if is_equipment
                         else None)
                         current_conn, current_char = ALL_CONNECTIONS.get(int(picked_char.get('id', 0)), (None, None))
+                        mission_local_hulk = False
+                        mission_hulk_created = False
+                        mission_hulk_local_id = 0
+                        mission_hulk_spawn = None
+                        mission_hulk_stats = None
+                        mission_hulk_state = None
 
                         # EXP damage is only valid for a live participant in
                         # the same run. This also prevents stale/reconnected
@@ -32140,19 +32272,49 @@ def client_handler(conn, addr):
 
                         else:
                             # === NPC/Monster/Boss damage ===
-                            # Map 11 NPCs are fully client-side - skip all server-side HP/death handling
-                            # Do NOT advance missions on damage — only on actual death (tag 307)
-                            if picked_char and (
-                                    str(picked_char.get('map_id')) == '11'
-                                    or client_owns_map_npc_simulation(picked_char.get('map_id'))):
-                                # Tutorial NPC combat is simulated and spawned
-                                # locally by the APK. MSG 111 targets client
-                                # instance IDs; MSG 307 is the validated death
-                                # event for these scenes, so never treat these
-                                # as server-created NPC instances.
+                            cur_map = str(picked_char.get('map_id', ''))
+                            if cur_map == "11":
+                                owner_id = int(picked_char.get("id", 0) or 0)
+                                try:
+                                    target_id = int(target_id)
+                                except (TypeError, ValueError):
+                                    continue
+                                if target_id <= 0:
+                                    continue
+                                with MISSION_1001_HULK_LOCK:
+                                    mapped_inst = MISSION_1001_HULK_LOCAL_TO_SERVER.get(
+                                        (owner_id, int(target_id or 0)))
+                                    mission_hulk_state = (
+                                        MISSION_1001_HULK_SERVER_NPCS.get(int(target_id or 0))
+                                        if not mapped_inst else
+                                        MISSION_1001_HULK_SERVER_NPCS.get(int(mapped_inst))
+                                    )
+                                if (not _mission_1001_hulk_active_for_character(picked_char)
+                                        and (mapped_inst or mission_hulk_state)):
+                                    continue
+                                if mapped_inst:
+                                    target_id = int(mapped_inst)
+                                    if (not mission_hulk_state
+                                            or int(mission_hulk_state.get("owner_id", 0) or 0)
+                                            != owner_id):
+                                        continue
+                                elif mission_hulk_state:
+                                    if int(mission_hulk_state.get("owner_id", 0) or 0) != owner_id:
+                                        continue
+                                else:
+                                    mission_hulk_spawn = _mission_1001_hulk_spawn_for_character(
+                                        picked_char)
+                                    if (not mission_hulk_spawn
+                                            or current_conn is not conn
+                                            or current_char is not picked_char
+                                            or not is_current_character_connection(conn, picked_char)):
+                                        continue
+                                    mission_local_hulk = True
+                                    mission_hulk_local_id = int(target_id)
+                                    mission_hulk_stats = _mission_1001_hulk_stats(picked_char)
+                            elif client_owns_map_npc_simulation(cur_map):
                                 continue
 
-                            cur_map = str(picked_char.get('map_id', ''))
                             if cur_map == '1501':
                                 battle_entry = _guild_battle_entry_for_char(picked_char)
                                 if (not battle_entry
@@ -32170,9 +32332,10 @@ def client_handler(conn, addr):
                                              else picked_char.get('equipment_stage_state') if is_equipment
                             else None)
                             if not is_stage_combat and (
-                                    target_id not in NPC_INST_MAP
-                                    or str(NPC_INSTANCE_MAP.get(target_id, '')) != cur_map
-                                    or target_id not in NPC_HP_MAP):
+                                    not mission_local_hulk
+                                    and (target_id not in NPC_INST_MAP
+                                         or str(NPC_INSTANCE_MAP.get(target_id, '')) != cur_map
+                                         or target_id not in NPC_HP_MAP)):
                                 print(f"[COMBAT SECURITY] rejected unknown/cross-map NPC target={target_id} map={cur_map}")
                                 continue
                             if cur_map == WAREHOUSE_SNEAK_COPY_ID:
@@ -32218,8 +32381,11 @@ def client_handler(conn, addr):
                                 print(f"[COMBAT] Tag 111 rejected: NPC {target_id} already dead")
                                 continue
 
-                            target_nid = NPC_INST_MAP.get(target_id, str(target_id))
-                            if not is_exp:
+                            target_nid = (
+                                "9901" if mission_local_hulk else
+                                NPC_INST_MAP.get(target_id, str(target_id))
+                            )
+                            if not is_exp and not mission_local_hulk:
                                 NPC_INST_MAP[target_id] = target_nid
                             if _domin_capture_is_arena(cur_map):
                                 capture_enemy = picked_char.get('_domin_capture_enemy') or {}
@@ -32300,6 +32466,10 @@ def client_handler(conn, addr):
                                     and target_id == picked_char.get('boss_inst_id')
                                     and capture_enemy.get('stats')):
                                 defender_stats = capture_enemy['stats']
+                            elif mission_local_hulk:
+                                defender_stats = mission_hulk_stats
+                            elif mission_hulk_state:
+                                defender_stats = mission_hulk_state["stats"]
                             else:
                                 nid_str = "1105" if target_nid.startswith("BOSS_") else target_nid
                                 npc_level = picked_char.get('level', 1)
@@ -32319,7 +32489,7 @@ def client_handler(conn, addr):
                                             "player_level", npc_level)
                                 defender_stats = get_npc_attr(nid_str, npc_level)
 
-                            if target_id not in NPC_HP_MAP:
+                            if not mission_local_hulk and target_id not in NPC_HP_MAP:
                                 NPC_HP_MAP[target_id] = defender_stats['hp_max']
 
                             # Validate the reported skill/effect before resolving NPC damage.
@@ -32470,6 +32640,36 @@ def client_handler(conn, addr):
                                     hit = True
                                     calc_cri = is_cri
 
+                            if mission_local_hulk:
+                                if client_dmg >= int(mission_hulk_stats["hp_max"]):
+                                    # A lethal client-local hit is finalized by
+                                    # its existing MSG 307 path; only take over
+                                    # a still-live Hulk.
+                                    continue
+                                server_inst_id = next_global_inst_id()
+                                owner_id = int(picked_char.get("id", 0) or 0)
+                                mission_hulk_state = {
+                                    "owner_id": owner_id,
+                                    "source_inst_id": mission_hulk_local_id,
+                                    "stats": dict(mission_hulk_stats),
+                                    "spawn": dict(mission_hulk_spawn),
+                                }
+                                with MISSION_1001_HULK_LOCK:
+                                    MISSION_1001_HULK_LOCAL_TO_SERVER[
+                                        (owner_id, mission_hulk_local_id)
+                                    ] = server_inst_id
+                                    MISSION_1001_HULK_SERVER_NPCS[
+                                        server_inst_id
+                                    ] = mission_hulk_state
+                                NPC_HP_MAP[server_inst_id] = int(
+                                    mission_hulk_stats["hp_max"])
+                                NPC_INST_MAP[server_inst_id] = "9901"
+                                NPC_INSTANCE_MAP[server_inst_id] = "11"
+                                target_id = server_inst_id
+                                target_nid = "9901"
+                                mission_local_hulk = False
+                                mission_hulk_created = True
+
                             exp_npc_died = False
                             exp_dead_target = False
                             world_npc_died = False
@@ -32539,12 +32739,52 @@ def client_handler(conn, addr):
                                 print(f"[{stage_label} HIT] rejected target already dead/inactive target={target_id}")
                                 continue
 
+                            if mission_hulk_created:
+                                spawn = mission_hulk_state["spawn"]
+                                npc_name = str(
+                                    NPC_CONFIG.get("9901", {}).get("name") or "Hulk")
+                                _inst_id, npc_attr = build_npc_attr_sproto(
+                                    "9901", npc_name,
+                                    int(spawn.get("x", 0)),
+                                    int(spawn.get("z", 0)),
+                                    int(spawn.get("o", 0)),
+                                    existing_inst_id=target_id,
+                                    player_level=picked_char.get("level", 1),
+                                    npc_stats_override=mission_hulk_stats,
+                                )
+                                if send_rpc_push_safe(
+                                        conn, 509, encode_sproto([(0, npc_attr)])):
+                                    send_rpc_push_safe(
+                                        conn, 506,
+                                        encode_sproto([(0, mission_hulk_local_id)]))
+                                    register_slum_npc_ai(
+                                        conn, picked_char, target_id, "9901",
+                                        int(spawn.get("x", 0)),
+                                        int(spawn.get("z", 0)),
+                                        int(spawn.get("o", 0)),
+                                        mission_hulk=True,
+                                        stats_override=mission_hulk_stats,
+                                    )
+                                    if applied_damage <= 0:
+                                        sync_npc_attrs_rpc(
+                                            conn, target_id, mission_hulk_stats,
+                                            NPC_HP_MAP.get(
+                                                target_id,
+                                                mission_hulk_stats["hp_max"]),
+                                        )
+                                else:
+                                    print(f"[MISSION 1001] failed to create server Hulk "
+                                          f"player={picked_char.get('id')} target={target_id}")
+                                    _forget_mission_1001_hulk(target_id)
+                                    continue
+
                             cash_stage_state = picked_char.get('cash_stage_state') if picked_char else None
                             if (applied_damage > 0
                                     and cur_map in PRISON_NPC_AOI_MAP_IDS):
                                 prison_npc_retarget_on_hit(target_id, picked_char)
                             if (applied_damage > 0
-                                    and cur_map in (SLUM_DISTRICT_MAP_ID, '1501')):
+                                    and (cur_map in (SLUM_DISTRICT_MAP_ID, '1501')
+                                         or mission_hulk_state)):
                                 slum_npc_retarget_on_hit(
                                     target_id, picked_char, conn)
                             if (applied_damage > 0
@@ -32640,7 +32880,9 @@ def client_handler(conn, addr):
                                 ])
                                 dmg_board = encode_sproto([(0, [dmg_entry])])
                                 attacker_id = int(picked_char.get('id', 0) or 0)
-                                if (cur_map in PRISON_NPC_AOI_MAP_IDS
+                                if mission_hulk_state:
+                                    peers = []
+                                elif (cur_map in PRISON_NPC_AOI_MAP_IDS
                                         and target_id in PRISON_NPC_SHARED_BY_INSTANCE):
                                     slot_key = PRISON_NPC_SHARED_BY_INSTANCE[target_id]
                                     peers = prison_npc_visible_connections(slot_key, target_id)
@@ -32788,6 +33030,8 @@ def client_handler(conn, addr):
                                         if (cur_map in GOTHAM_CITY_MAP_IDS
                                                 and target_id in GOTHAM_SHARED_NPC_BY_INSTANCE):
                                             gotham_mark_shared_npc_dead(target_id)
+                                        if mission_hulk_state:
+                                            _forget_mission_1001_hulk(target_id)
 
                     if session is not None:
                         ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -32886,9 +33130,18 @@ def client_handler(conn, addr):
                             == int(picked_char.get('id', 0) or 0)
                         )
                     )
+                    with MISSION_1001_HULK_LOCK:
+                        mission_hulk_state = MISSION_1001_HULK_SERVER_NPCS.get(
+                            int(inst_id or 0))
+                    mission_hulk_owner_valid = (
+                        not mission_hulk_state
+                        or int(mission_hulk_state.get("owner_id", 0) or 0)
+                        == int(picked_char.get("id", 0) or 0)
+                    )
                     report_valid = bool(inst_id and expected_client_npcid == str(npcid)
                                         and str(NPC_INSTANCE_MAP.get(inst_id, '')) == cur_map
                                         and cash_owner_valid
+                                        and mission_hulk_owner_valid
                                         and warehouse_owner_valid
                                         and int(NPC_HP_MAP.get(inst_id, 1)) <= 0)
                 elif picked_char and die_type in (2, 6):
