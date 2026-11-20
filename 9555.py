@@ -100,8 +100,186 @@ def persistent_state_path(filename):
 CHAR_DB = persistent_state_path("characters_final.json")
 BAK_DB = persistent_state_path("characters_final.json.bak")
 TMP_DB = CHAR_DB + ".tmp"
+SPEED_ANTICHEAT_PATH = persistent_state_path("speed_anticheat.json")
+SPEED_ANTICHEAT_LOCK = threading.RLock()
+SPEED_ANTICHEAT_MOVEMENT_LOCK = threading.RLock()
+SPEED_ANTICHEAT_MOVEMENT = {}
 RESOURCE_ROOT = os.path.join(SCRIPT_DIR, "assets")
 RESOURCE_DATA_VERSION = 205
+
+
+def _load_speed_anticheat_state():
+    try:
+        with open(SPEED_ANTICHEAT_PATH, "r", encoding="utf-8") as state_file:
+            loaded = json.load(state_file)
+    except FileNotFoundError:
+        return {"version": 1, "accounts": {}}
+    except (OSError, ValueError) as state_error:
+        raise RuntimeError(
+            f"Unable to load speed anti-cheat state from {SPEED_ANTICHEAT_PATH}"
+        ) from state_error
+    if (not isinstance(loaded, dict) or loaded.get("version") != 1
+            or not isinstance(loaded.get("accounts"), dict)):
+        raise RuntimeError(
+            f"Invalid speed anti-cheat state in {SPEED_ANTICHEAT_PATH}"
+        )
+    normalized_accounts = {}
+    for stored_key, stored_record in loaded["accounts"].items():
+        try:
+            identity = json.loads(stored_key)
+        except (TypeError, ValueError) as key_error:
+            raise RuntimeError(
+                f"Invalid speed anti-cheat account key in {SPEED_ANTICHEAT_PATH}"
+            ) from key_error
+        if (not isinstance(identity, list) or len(identity) not in (1, 2)
+                or not isinstance(stored_record, dict)):
+            raise RuntimeError(
+                f"Invalid speed anti-cheat account record in {SPEED_ANTICHEAT_PATH}"
+            )
+        account_id = str(identity[-1] or "").strip()
+        if not account_id:
+            raise RuntimeError(
+                f"Invalid speed anti-cheat account key in {SPEED_ANTICHEAT_PATH}"
+            )
+        account_key = json.dumps([account_id], separators=(",", ":"))
+        existing = normalized_accounts.get(account_key)
+        if existing is None:
+            normalized_accounts[account_key] = copy.deepcopy(stored_record)
+            continue
+        try:
+            violations = max(
+                int(existing.get("violations", 0) or 0),
+                int(stored_record.get("violations", 0) or 0),
+            )
+            suspended_until = max(
+                float(existing.get("suspended_until", 0) or 0),
+                float(stored_record.get("suspended_until", 0) or 0),
+            )
+        except (TypeError, ValueError) as record_error:
+            raise RuntimeError(
+                f"Invalid speed anti-cheat account record in {SPEED_ANTICHEAT_PATH}"
+            ) from record_error
+        history = list(existing.get("history", [])) + list(stored_record.get("history", []))
+        existing.update({
+            "violations": violations,
+            "permanent": bool(
+                existing.get("permanent") or stored_record.get("permanent")
+                or violations >= 2
+            ),
+            "suspended_until": 0 if violations >= 2 else suspended_until,
+            "history": sorted(
+                history, key=lambda event: int(event.get("at", 0) or 0)
+            )[-20:],
+        })
+    loaded["accounts"] = normalized_accounts
+    return loaded
+
+
+def _save_speed_anticheat_state():
+    temp_path = SPEED_ANTICHEAT_PATH + ".tmp"
+    with open(temp_path, "w", encoding="utf-8") as state_file:
+        json.dump(SPEED_ANTICHEAT_STATE, state_file, ensure_ascii=False, indent=2)
+        state_file.flush()
+        os.fsync(state_file.fileno())
+    os.replace(temp_path, SPEED_ANTICHEAT_PATH)
+
+
+SPEED_ANTICHEAT_STATE = _load_speed_anticheat_state()
+
+
+def _speed_anticheat_account_key(_area_id, account_id):
+    account_id = str(account_id or "").strip()
+    if not account_id or account_id.lower() in ("0", "none", "null"):
+        return None
+    return json.dumps([account_id], separators=(",", ":"))
+
+
+def speed_anticheat_restriction(area_id, account_id, now=None):
+    key = _speed_anticheat_account_key(area_id, account_id)
+    if key is None:
+        return None
+    now = time.time() if now is None else float(now)
+    with SPEED_ANTICHEAT_LOCK:
+        record = SPEED_ANTICHEAT_STATE["accounts"].get(key)
+        if record is None:
+            return None
+        if not isinstance(record, dict):
+            raise RuntimeError(f"Invalid speed anti-cheat account record for {key}")
+        try:
+            violations = int(record.get("violations", 0) or 0)
+            suspended_until = float(record.get("suspended_until", 0) or 0)
+        except (TypeError, ValueError) as record_error:
+            raise RuntimeError(
+                f"Invalid speed anti-cheat account record for {key}"
+            ) from record_error
+        if record.get("permanent") or violations >= 2:
+            return {"permanent": True}
+        if suspended_until > now:
+            return {"permanent": False, "suspended_until": suspended_until}
+    return None
+
+
+def speed_anticheat_notice_text(restriction):
+    if restriction.get("permanent"):
+        return "Your account has been permanently banned. Reason: Speed Hack Anticheat."
+    expiry = datetime.datetime.fromtimestamp(
+        restriction["suspended_until"], datetime.timezone.utc
+    ).strftime("%Y-%m-%d %H:%M UTC")
+    return (
+        "Your account has been added to the 72-hour speed-hack blacklist. "
+        f"Access returns at {expiry}. Reason: Speed Hack Anticheat."
+    )
+
+
+def record_speed_anticheat_violation(
+        area_id, account_id, character_id, map_id, evidence, now=None):
+    key = _speed_anticheat_account_key(area_id, account_id)
+    if key is None:
+        raise ValueError("Cannot record speed anti-cheat evidence without an account ID")
+    now = time.time() if now is None else float(now)
+    with SPEED_ANTICHEAT_LOCK:
+        accounts = SPEED_ANTICHEAT_STATE["accounts"]
+        previous = copy.deepcopy(accounts.get(key))
+        record = previous if isinstance(previous, dict) else {
+            "violations": 0, "suspended_until": 0, "permanent": False, "history": []
+        }
+        violations = max(0, int(record.get("violations", 0) or 0))
+        suspended_until = float(record.get("suspended_until", 0) or 0)
+        if record.get("permanent"):
+            return copy.deepcopy(record)
+        if violations and suspended_until > now:
+            return copy.deepcopy(record)
+        violations += 1
+        event = {
+            "at": int(now),
+            "area_id": str(area_id),
+            "character_id": str(character_id),
+            "map_id": str(map_id),
+            "evidence": evidence,
+        }
+        history = list(record.get("history", []))
+        history.append(event)
+        record.update({
+            "violations": violations,
+            "last_violation_at": int(now),
+            "history": history[-20:],
+        })
+        if violations == 1:
+            record["permanent"] = False
+            record["suspended_until"] = int(now + 72 * 60 * 60)
+        else:
+            record["permanent"] = True
+            record["suspended_until"] = 0
+        accounts[key] = record
+        try:
+            _save_speed_anticheat_state()
+        except OSError:
+            if previous is None:
+                accounts.pop(key, None)
+            else:
+                accounts[key] = previous
+            raise
+        return copy.deepcopy(record)
 server_session_counter = 8000
 GLOBAL_INST_COUNTER = 3000000
 GLOBAL_INST_COUNTER_LOCK = threading.Lock()
@@ -3411,6 +3589,45 @@ def get_account_chars(all_chars, area_id, acc_id):
     if isinstance(acc_dict, dict):
         return acc_dict.get(acc_id, [])
     return []
+
+
+def get_character_owner_account_id(all_chars, area_id, character):
+    """Resolve the server-stored account that owns this character."""
+    if not isinstance(all_chars, dict) or not isinstance(character, dict):
+        return None
+    area_chars = all_chars.get(str(area_id))
+    if not isinstance(area_chars, dict):
+        return None
+    try:
+        character_id = int(character.get('id', 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if character_id <= 0:
+        return None
+
+    identity_owners = set()
+    id_owners = set()
+    for account_id, characters in area_chars.items():
+        if not isinstance(characters, (list, tuple)):
+            continue
+        account_id = str(account_id)
+        for stored_character in characters:
+            if not isinstance(stored_character, dict):
+                continue
+            if stored_character is character:
+                identity_owners.add(account_id)
+            try:
+                stored_character_id = int(stored_character.get('id', 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if stored_character_id == character_id:
+                id_owners.add(account_id)
+    if len(identity_owners) == 1:
+        return next(iter(identity_owners))
+    if identity_owners:
+        return None
+    return next(iter(id_owners)) if len(id_owners) == 1 else None
+
 
 def _json_default_handler(obj):
     """Custom JSON default handler to skip non-serializable objects like Timer, set, lock."""
@@ -6904,6 +7121,152 @@ def record_pvp_position(char, now=None):
         history.append((stamp, map_id, position))
         if len(history) > 160:
             del history[:-160]
+
+
+def _speed_anticheat_movement_key(char, connection_id):
+    try:
+        char_id = int(char.get('id', 0) or 0)
+        connection_id = int(connection_id or 0)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return (connection_id, char_id) if char_id > 0 else None
+
+
+def reset_speed_anticheat_movement(char, connection_id=None, now=None):
+    if not isinstance(char, dict):
+        return
+    try:
+        char_id = int(char.get('id', 0) or 0)
+        position = [int(value) for value in char.get('pos', [])[:4]]
+    except (TypeError, ValueError):
+        return
+    if char_id <= 0 or len(position) < 3:
+        return
+    if len(position) == 3:
+        position.append(0)
+    state_key = _speed_anticheat_movement_key(char, connection_id)
+    if state_key is None:
+        return
+    stamp = time.monotonic() if now is None else float(now)
+    with SPEED_ANTICHEAT_MOVEMENT_LOCK:
+        SPEED_ANTICHEAT_MOVEMENT[state_key] = {
+            "map_id": str(char.get('map_id', '') or ''),
+            "position": position,
+            "client_position": list(position),
+            "at": stamp,
+            "speed": 500,
+            "speed_checked_at": stamp - 1.0,
+            "samples": [],
+        }
+
+
+def clear_speed_anticheat_movement(char, connection_id=None):
+    state_key = _speed_anticheat_movement_key(char, connection_id)
+    if state_key is None:
+        return
+    with SPEED_ANTICHEAT_MOVEMENT_LOCK:
+        SPEED_ANTICHEAT_MOVEMENT.pop(state_key, None)
+
+
+def validate_speed_anticheat_movement(
+        char, map_id, requested_pos, connection_id=None, now=None):
+    requested_pos = list(requested_pos)
+    map_id = str(map_id or '')
+    if not MAP_CONFIG.get(map_id) or street_race_config_for_map(map_id):
+        return requested_pos, None
+    try:
+        char_id = int(char.get('id', 0) or 0)
+        current_pos = [int(value) for value in char.get('pos', [])[:4]]
+    except (AttributeError, TypeError, ValueError):
+        return requested_pos, None
+    if char_id <= 0 or len(current_pos) < 3 or len(requested_pos) < 3:
+        return requested_pos, None
+    if len(current_pos) == 3:
+        current_pos.append(0)
+    if len(requested_pos) == 3:
+        requested_pos.append(0)
+    state_key = _speed_anticheat_movement_key(char, connection_id)
+    if state_key is None:
+        return requested_pos, None
+
+    now = time.monotonic() if now is None else float(now)
+    with SPEED_ANTICHEAT_MOVEMENT_LOCK:
+        state = SPEED_ANTICHEAT_MOVEMENT.get(state_key)
+        position_changed = bool(
+            state and math.sqrt(sum(
+                (float(state["position"][axis]) - float(current_pos[axis])) ** 2
+                for axis in range(3)
+            )) > 75
+        )
+        if state is None or state.get("map_id") != map_id or position_changed:
+            state = {
+                "map_id": map_id,
+                "position": current_pos,
+                "client_position": list(current_pos),
+                "at": now - 0.2,
+                "speed": 500,
+                "speed_checked_at": now - 1.0,
+                "samples": [],
+            }
+            SPEED_ANTICHEAT_MOVEMENT[state_key] = state
+
+        elapsed = max(0.0, now - float(state["at"]))
+        previous_client_pos = state.get("client_position", current_pos)
+        client_dx = float(requested_pos[0]) - float(previous_client_pos[0])
+        client_dz = float(requested_pos[2]) - float(previous_client_pos[2])
+        client_distance = math.hypot(client_dx, client_dz)
+        if elapsed < 0.08:
+            state["client_position"] = list(requested_pos)
+            state["at"] = now
+            state.setdefault("samples", []).clear()
+            accepted_pos = list(current_pos)
+            accepted_pos[3] = requested_pos[3]
+            return accepted_pos, None
+
+        allowance_elapsed = min(elapsed, 1.0)
+        if now - float(state.get("speed_checked_at", 0.0)) >= 1.0:
+            state["speed"] = max(100, int(get_character_stats(char).get("mov", 500)))
+            state["speed_checked_at"] = now
+        speed = max(100, int(state.get("speed", 500)))
+        expected_distance = speed * allowance_elapsed
+        dx = float(requested_pos[0]) - float(current_pos[0])
+        dz = float(requested_pos[2]) - float(current_pos[2])
+        distance = math.hypot(dx, dz)
+        excessive = client_distance > max(
+            expected_distance * 1.75, expected_distance + 25
+        )
+
+        samples = state.setdefault("samples", [])
+        if 0.12 <= elapsed <= 1.0:
+            samples.append((
+                now, excessive, client_distance / max(expected_distance, 1.0)
+            ))
+            del samples[:-8]
+        else:
+            samples.clear()
+
+        violation = None
+        if (len(samples) == 8
+                and sum(1 for sample in samples if sample[1]) >= 7
+                and now - samples[0][0] >= 1.0):
+            violation = {
+                "samples": len(samples),
+                "excessive_samples": sum(1 for sample in samples if sample[1]),
+                "window_seconds": round(now - samples[0][0], 2),
+                "max_speed_multiple": round(max(sample[2] for sample in samples), 2),
+                "server_speed_cm_s": speed,
+            }
+
+        max_distance = expected_distance + max(5, expected_distance * 0.1)
+        accepted_pos = list(requested_pos)
+        if distance > max_distance:
+            scale = max_distance / distance
+            accepted_pos[0] = round(float(current_pos[0]) + dx * scale)
+            accepted_pos[2] = round(float(current_pos[2]) + dz * scale)
+        state["position"] = list(accepted_pos)
+        state["client_position"] = list(requested_pos)
+        state["at"] = now
+        return accepted_pos, violation
 
 
 def record_pvp_skill_cast(char, skill_id, client_tick, now=None):
@@ -21522,6 +21885,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         print(f"[MAP SPAWN] map={target_map_id} pos={picked_char['pos']}")
     else:
         print(f"[MAP SPAWN] no configured spawn available map={target_map_id}")
+    reset_speed_anticheat_movement(picked_char, connection_id=id(conn))
 
     if target_map_id == "101":
         print(
@@ -27809,6 +28173,33 @@ def client_handler(conn, addr):
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
             debug_log(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
+            if picked_char:
+                character_account_id = get_character_owner_account_id(
+                    all_accounts_chars, cur_areaId, picked_char
+                )
+                if character_account_id is None:
+                    send_rpc_push(529, encode_sproto([
+                        (0, "Unable to verify this character's account. Please log in again."),
+                        (1, True)
+                    ]))
+                    print(
+                        f"[SPEED ANTICHEAT] disconnected character without owner "
+                        f"character={picked_char.get('id')} area={cur_areaId}"
+                    )
+                    break
+                active_restriction = speed_anticheat_restriction(
+                    cur_areaId, character_account_id
+                )
+                if active_restriction:
+                    send_rpc_push(529, encode_sproto([
+                        (0, speed_anticheat_notice_text(active_restriction)), (1, True)
+                    ]))
+                    print(
+                        f"[SPEED ANTICHEAT] disconnected restricted session "
+                        f"area={cur_areaId} account={character_account_id} "
+                        f"permanent={bool(active_restriction.get('permanent'))}"
+                    )
+                    break
             if (invest_trace_count < 20
                     and time.monotonic() < invest_trace_until):
                 invest_trace_count += 1
@@ -27907,6 +28298,7 @@ def client_handler(conn, addr):
             elif msg == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
                 sid = get_val_int(body, 5, 1); cur_areaId = str(get_area_id(sid))
+                speed_restriction = speed_anticheat_restriction(cur_areaId, acc_id)
                 # sync_common_data: serverTime(0), time_offset(2), func_info(9), pvp_scale(4), seed(12), server_level(13), start_time(14)
                 resp = encode_sproto([
                     (0, int(time.time())), (1, "1.012.017"),
@@ -27916,6 +28308,13 @@ def client_handler(conn, addr):
                 ])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
+                if speed_restriction:
+                    send_rpc_push(529, encode_sproto([
+                        (0, speed_anticheat_notice_text(speed_restriction)), (1, True)
+                    ]))
+                    print(f"[SPEED ANTICHEAT] denied login area={cur_areaId} account={acc_id} "
+                          f"permanent={bool(speed_restriction.get('permanent'))}")
+                    break
 
             elif msg == 103: # character_list
                 chars = get_account_chars(all_accounts_chars, cur_areaId, acc_id)
@@ -27948,9 +28347,36 @@ def client_handler(conn, addr):
 
             elif msg == 105: # character_pick
                 char_id = get_val_int(body, 0)
-                picked_char = next((c for c in get_account_chars(all_accounts_chars, cur_areaId, acc_id) if c['id'] == char_id), None)
-                char_id = picked_char.get('id', 0)
+                picked_char = next((c for c in get_account_chars(
+                    all_accounts_chars, cur_areaId, acc_id
+                ) if c['id'] == char_id), None)
+                character_account_id = get_character_owner_account_id(
+                    all_accounts_chars, cur_areaId, picked_char
+                )
+                speed_restriction = (
+                    speed_anticheat_restriction(cur_areaId, character_account_id)
+                    if character_account_id is not None else None
+                )
+                if picked_char and character_account_id is None:
+                    resp = encode_sproto([(0, 0)])
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    send_rpc_push(529, encode_sproto([
+                        (0, "Unable to verify this character's account. Please log in again."),
+                        (1, True)
+                    ]))
+                    break
+                if speed_restriction:
+                    resp = encode_sproto([(0, 0)])
+                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
+                    conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    send_rpc_push(529, encode_sproto([
+                        (0, speed_anticheat_notice_text(speed_restriction)), (1, True)
+                    ]))
+                    break
+                char_id = picked_char.get('id', 0) if picked_char else 0
                 if picked_char:
+                    reset_speed_anticheat_movement(picked_char, connection_id=id(conn))
                     with PVP_KILL_STREAK_LOCK:
                         try:
                             previous_streak = max(
@@ -28791,6 +29217,7 @@ def client_handler(conn, addr):
                             ALL_CONNECTIONS.pop(old_id, None)
                             CONNECTION_LOCKS.pop(old_id, None)
                     picked_char = reconnect_char
+                    reset_speed_anticheat_movement(picked_char, connection_id=id(conn))
                     ALL_CONNECTIONS[reconnect_char_id] = (conn, picked_char)
                     CONNECTION_LOCKS[reconnect_char_id] = send_lock
                     # The client recycles NPCs and remote players on reconnect.
@@ -29097,17 +29524,23 @@ def client_handler(conn, addr):
                     map_cfg = MAP_CONFIG.get(current_map, {})
                     positions = map_config_position_list(current_map, 'relife_pos')
                     point_index = get_val_int(body, 3, -1)
+                    at_teleport = is_near_map_teleport_position(
+                        current_map, picked_char.get('pos')
+                    )
                     if (str(map_cfg.get('teleport_pos') or '').strip()
+                            and at_teleport
                             and int(picked_char.get('hp', 0)) > 0
                             and 0 <= point_index < len(positions)):
                         picked_char['pos'] = list(positions[point_index])
+                        reset_speed_anticheat_movement(picked_char, connection_id=id(conn))
                         broadcast_aoi_move(picked_char)
                         save_chars(all_accounts_chars)
                         print(f"[MAP TELEPORT] player={picked_char.get('id')} map={current_map} "
                               f"point={point_index} pos={picked_char['pos']}")
                     else:
                         print(f"[MAP TELEPORT] rejected player={picked_char.get('id')} "
-                              f"map={current_map} point={point_index}")
+                              f"map={current_map} point={point_index} "
+                              f"at_teleport={at_teleport}")
                 if session is not None:
                     ph = encode_sproto([(1, session)])
                     pf = sproto_pack(ph + encode_sproto([]))
@@ -29116,6 +29549,12 @@ def client_handler(conn, addr):
             elif msg == 101: # move
                 p_raw = body.get(0)
                 move_map = str(picked_char.get('map_id', '')) if picked_char else ''
+                speed_sanction = None
+                speed_owner_account_id = (
+                    get_character_owner_account_id(
+                        all_accounts_chars, cur_areaId, picked_char
+                    ) if picked_char else None
+                )
                 is_exp_move_map = is_exp_map(move_map)
                 is_equipment_move_map = is_equipment_copy_map(move_map)
                 move_stage_state = None
@@ -29146,6 +29585,22 @@ def client_handler(conn, addr):
                         # squad visuals; do not overwrite it with raw client
                         # coordinates below.
                         new_pos = update_exp_authoritative_position(picked_char, move_stage_state, new_pos)
+                    else:
+                        new_pos, speed_evidence = validate_speed_anticheat_movement(
+                            picked_char, move_map, new_pos, connection_id=id(conn)
+                        )
+                        if speed_evidence:
+                            if speed_owner_account_id is None:
+                                print(
+                                    f"[SPEED ANTICHEAT] evidence without account "
+                                    f"player={picked_char.get('id')} map={move_map}"
+                                )
+                            else:
+                                speed_sanction = record_speed_anticheat_violation(
+                                    cur_areaId, speed_owner_account_id,
+                                    picked_char.get('id', 0),
+                                    move_map, speed_evidence
+                                )
                     picked_char['pos'] = new_pos
                     record_pvp_position(picked_char)
                     # Issue 224: Throttle position saves to avoid excessive disk I/O.
@@ -29197,6 +29652,17 @@ def client_handler(conn, addr):
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, p_raw)]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
+                if speed_sanction:
+                    send_rpc_push(529, encode_sproto([
+                        (0, speed_anticheat_notice_text(speed_sanction)), (1, True)
+                    ]))
+                    print(
+                        f"[SPEED ANTICHEAT] sanctioned area={cur_areaId} "
+                        f"account={speed_owner_account_id} "
+                        f"character={picked_char.get('id')} map={move_map} "
+                        f"permanent={bool(speed_sanction.get('permanent'))}"
+                    )
+                    break
 
             elif msg == 309: # refresh_online_misison
                 refresh_success = False
@@ -31401,6 +31867,7 @@ def client_handler(conn, addr):
 
                     if bool(picked_char.get('mount_riding', False)) != should_ride:
                         picked_char['mount_riding'] = should_ride
+                        reset_speed_anticheat_movement(picked_char, connection_id=id(conn))
                         save_chars(all_accounts_chars)
                         # TAG 510 updates CurSpeed locally; while mounted it
                         # is exactly MountData.MaxSp. Dismount restores normal MOV.
@@ -37568,6 +38035,10 @@ def client_handler(conn, addr):
         traceback.print_exc()
     finally:
         try:
+            if picked_char:
+                clear_speed_anticheat_movement(
+                    picked_char, connection_id=id(conn)
+                )
             if conn_id in NPC_SPAWNED_MAPS:
                 del NPC_SPAWNED_MAPS[conn_id]
             # Clean up AOI-tracked Liberty City NPCs on disconnect
