@@ -4730,7 +4730,7 @@ def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None,
     # Sort by priority descending so highest priority gets indexPos 4
     extra_skills.sort(key=lambda x: x[2], reverse=True)
     used_skill_positions = {4} if include_starter_active else set()
-    used_skill_positions.update(affix_index + 4 for affix_index, _sid in weapon_skill_rows)
+    used_skill_positions.update(affix_index + 3 for affix_index, _sid in weapon_skill_rows)
     for idx, (sid, slv, priority) in enumerate(extra_skills):
         if not free_candidate_slots:
             # The client has six candidate cells; do not send an overflow
@@ -4750,13 +4750,13 @@ def build_skills_map(prof, char_level, skill_levels=None, equipped_items=None,
             (5, False)        # disable
         ])
 
-    # WeaponDrop affix `index` is one-based. The client looks up its displayed
-    # skill level at indexPos2 == affix index + 4, and uses indexPos for the
-    # active-skill bar. Include these only while that weapon is equipped.
+    # WeaponDrop affix `index` is one-based. indexPos selects the active-bar
+    # slot (first affix -> slot 4); indexPos2 selects the weapon-skill list
+    # cell and is also used to look up its displayed level.
     for affix_index, sid in weapon_skill_rows:
         if sid in smap:
             continue
-        skill_pos = affix_index + 4
+        skill_pos = affix_index + 3
         smap[sid] = encode_sproto([
             (0, sid),
             (1, skill_levels.get(sid, 0)),
