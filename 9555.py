@@ -5077,6 +5077,28 @@ def recover_interrupted_street_race(char):
         char.pop(key, None)
     return return_map, list(return_pos)
 
+
+def prepare_street_race_reconnect(char):
+    """Restart an unfinished race at its route start without changing its attempt."""
+    copy_id = str(char.get('active_copy_id') or '')
+    cfg = COPY_SCENE_CONFIG.get(copy_id, {})
+    race_map = str(cfg.get('map_id') or '')
+    if cfg.get('subtype') != 7 or race_map not in MAP_CONFIG:
+        return None
+    start_pos = street_race_start_position(race_map) or default_map_spawn_position(race_map)
+    if not isinstance(start_pos, (list, tuple)) or len(start_pos) < 3:
+        return None
+    char['map_id'] = race_map
+    char['pos'] = list(start_pos)
+    char['street_race_started_at'] = None
+    char['street_race_checkpoint_progress'] = 0
+    char.pop('street_race_elapsed_offset_cs', None)
+    char.pop('street_race_last_car_pos', None)
+    char.pop('street_race_last_move_at', None)
+    char['_street_race_reconnect_pending'] = True
+    return race_map
+
+
 def street_race_start_position(map_id):
     """Return the APK's local race-car start point, with MapInfo birth fallback."""
     cfg = street_race_config_for_map(map_id)
@@ -7168,6 +7190,7 @@ def reset_speed_anticheat_movement(char, connection_id=None, now=None):
             "map_id": str(char.get('map_id', '') or ''),
             "position": position,
             "client_position": list(position),
+            "client_sample_at": stamp,
             "at": stamp,
             "speed": 500,
             "speed_checked_at": stamp - 1.0,
@@ -7245,6 +7268,7 @@ def validate_speed_anticheat_movement(
                 "map_id": map_id,
                 "position": current_pos,
                 "client_position": list(current_pos),
+                "client_sample_at": now - 0.2,
                 "at": now - 0.2,
                 "speed": 500,
                 "speed_checked_at": now - 1.0,
@@ -7254,56 +7278,69 @@ def validate_speed_anticheat_movement(
             SPEED_ANTICHEAT_MOVEMENT[state_key] = state
         elif state.get("vehicle_mode", "walk") != vehicle_mode:
             state["vehicle_mode"] = vehicle_mode
+            state["client_position"] = list(current_pos)
+            state["client_sample_at"] = now
             state["speed_checked_at"] = now - 1.0
             state.setdefault("samples", []).clear()
 
         elapsed = max(0.0, now - float(state["at"]))
+        sample_at = float(state.get("client_sample_at", state["at"]))
+        sample_elapsed = max(0.0, now - sample_at)
         previous_client_pos = state.get("client_position", current_pos)
         client_dx = float(requested_pos[0]) - float(previous_client_pos[0])
         client_dz = float(requested_pos[2]) - float(previous_client_pos[2])
         client_distance = math.hypot(client_dx, client_dz)
-        if elapsed < 0.08:
-            state["client_position"] = list(requested_pos)
-            state["at"] = now
-            state.setdefault("samples", []).clear()
-            accepted_pos = list(current_pos)
-            accepted_pos[3] = requested_pos[3]
-            return accepted_pos, None
-
-        allowance_elapsed = min(elapsed, 1.0)
         if now - float(state.get("speed_checked_at", 0.0)) >= 1.0:
             state["speed"] = max(100, int(get_character_stats(char).get("mov", 500)))
             state["speed"] = max(state["speed"], vehicle_speed)
             state["speed_checked_at"] = now
         speed = max(100, int(state.get("speed", 500)))
+
+        samples = state.setdefault("samples", [])
+        if sample_elapsed > 1.0:
+            # A long movement-report gap is treated as lag, not accumulated
+            # evidence; start a fresh measurement window at the latest point.
+            samples.clear()
+            state["client_position"] = list(requested_pos)
+            state["client_sample_at"] = now
+            sample_elapsed = 0.0
+            client_distance = 0.0
+
+        violation = None
+        if sample_elapsed >= 0.08:
+            evidence_distance = speed * sample_elapsed
+            excessive = client_distance > max(
+                evidence_distance * 1.75, evidence_distance + 25
+            )
+            samples.append((
+                now, excessive, client_distance / max(evidence_distance, 1.0)
+            ))
+            del samples[:-16]
+            state["client_position"] = list(requested_pos)
+            state["client_sample_at"] = now
+            excessive_count = sum(1 for sample in samples if sample[1])
+            window_seconds = now - samples[0][0]
+            if (len(samples) >= 8 and window_seconds >= 1.0
+                    and excessive_count * 8 >= len(samples) * 7):
+                violation = {
+                    "samples": len(samples),
+                    "excessive_samples": excessive_count,
+                    "window_seconds": round(window_seconds, 2),
+                    "max_speed_multiple": round(max(sample[2] for sample in samples), 2),
+                    "server_speed_cm_s": speed,
+                }
+
+        if elapsed < 0.08:
+            state["at"] = now
+            accepted_pos = list(current_pos)
+            accepted_pos[3] = requested_pos[3]
+            return accepted_pos, violation
+
+        allowance_elapsed = min(elapsed, 1.0)
         expected_distance = speed * allowance_elapsed
         dx = float(requested_pos[0]) - float(current_pos[0])
         dz = float(requested_pos[2]) - float(current_pos[2])
         distance = math.hypot(dx, dz)
-        excessive = client_distance > max(
-            expected_distance * 1.75, expected_distance + 25
-        )
-
-        samples = state.setdefault("samples", [])
-        if 0.12 <= elapsed <= 1.0:
-            samples.append((
-                now, excessive, client_distance / max(expected_distance, 1.0)
-            ))
-            del samples[:-8]
-        else:
-            samples.clear()
-
-        violation = None
-        if (len(samples) == 8
-                and sum(1 for sample in samples if sample[1]) >= 7
-                and now - samples[0][0] >= 1.0):
-            violation = {
-                "samples": len(samples),
-                "excessive_samples": sum(1 for sample in samples if sample[1]),
-                "window_seconds": round(now - samples[0][0], 2),
-                "max_speed_multiple": round(max(sample[2] for sample in samples), 2),
-                "server_speed_cm_s": speed,
-            }
 
         max_distance = expected_distance + max(5, expected_distance * 0.1)
         accepted_pos = list(requested_pos)
@@ -7312,7 +7349,6 @@ def validate_speed_anticheat_movement(
             accepted_pos[0] = round(float(current_pos[0]) + dx * scale)
             accepted_pos[2] = round(float(current_pos[2]) + dz * scale)
         state["position"] = list(accepted_pos)
-        state["client_position"] = list(requested_pos)
         state["at"] = now
         return accepted_pos, violation
 
@@ -28535,11 +28571,16 @@ def client_handler(conn, addr):
                                                       or picked_char.get('pos')
                                                       or default_map_spawn_position(current_map_id))
                         else:
-                            # The client has no saved race-car/checkpoint restore path.
-                            # A full character login must return an unfinished run to
-                            # the pre-race world location instead of reopening the copy.
-                            return_map, _return_pos = recover_interrupted_street_race(picked_char)
-                            print(f"[STREET RACE] aborted interrupted run player={char_id} map={return_map}")
+                            # The client cannot restore its car/checkpoint objects;
+                            # rebuild this already-paid run from the route start.
+                            resume_map = prepare_street_race_reconnect(picked_char)
+                            if resume_map:
+                                print(f"[STREET RACE] resuming interrupted run from start "
+                                      f"player={char_id} map={resume_map}")
+                            else:
+                                return_map, _return_pos = recover_interrupted_street_race(picked_char)
+                                print(f"[STREET RACE] aborted invalid interrupted run "
+                                      f"player={char_id} map={return_map}")
                     elif orphaned_race_map or (active_copy_cfg.get('subtype') == 7
                                                and not active_race):
                         # A disconnect during a half-finished transition can leave
@@ -29441,11 +29482,12 @@ def client_handler(conn, addr):
                             char_map = return_map
                             active_race = False
 
-                        if active_race and reconnect_type == 1:
+                        if (active_race and (reconnect_type == 1
+                                             or picked_char.get('_street_race_reconnect_pending'))):
                             # With no MainPlayer, CarChaseSceneManager has already
                             # consumed its one-shot creation event. Reload the scene
                             # so the APK rebuilds the character/car and registers the
-                            # scene callbacks again. Active races restart from route
+                            # scene callbacks again. Unfinished runs restart at route
                             # spawn; completed races restore the saved result at entry.
                             picked_char['street_race_started_at'] = None
                             picked_char.pop('street_race_elapsed_offset_cs', None)
@@ -29463,6 +29505,7 @@ def client_handler(conn, addr):
                                 picked_char['street_race_result_recorded'] = False
                                 picked_char.pop('street_race_pending_result', None)
                             else:
+                                picked_char['_street_race_reconnect_pending'] = True
                                 picked_char.pop('street_race_pending_result', None)
                             start_map_transition(conn, picked_char, char_map, send_rpc_push,
                                                  override_pos=transition_override_pos)
@@ -29470,6 +29513,12 @@ def client_handler(conn, addr):
                         elif reconnect_type == 1 or requested_map != char_map:
                             # The saved server map is authoritative after a leave,
                             # stale client scene, or half-finished transition.
+                            if (active_race
+                                    and not picked_char.get('street_race_result_recorded')):
+                                resume_map = prepare_street_race_reconnect(picked_char)
+                                if resume_map:
+                                    char_map = resume_map
+                                    transition_override_pos = None
                             if not active_race and transition_override_pos is None:
                                 transition_override_pos = list(
                                     picked_char.get('pos') or default_map_spawn_position(char_map))
@@ -34764,6 +34813,8 @@ def client_handler(conn, addr):
                     if cfg and cfg['subtype'] == 7:
                         current_map = str(picked_char.get('map_id', ''))
                         if current_map == str(cfg.get('map_id')) and not picked_char.get('street_race_result_recorded'):
+                            reconnecting_race = bool(
+                                picked_char.get('_street_race_reconnect_pending'))
                             if picked_char.get('street_race_started_at') is None:
                                 picked_char['street_race_checkpoint_progress'] = 0
                                 start_time = time.monotonic()
@@ -34773,7 +34824,9 @@ def client_handler(conn, addr):
                                         street_race_start_position(current_map)
                                         or list(picked_char.get('pos')
                                                 or default_map_spawn_position(current_map)))
-                                picked_char['street_race_movement_valid'] = True
+                                if not reconnecting_race:
+                                    picked_char['street_race_movement_valid'] = True
+                            picked_char.pop('_street_race_reconnect_pending', None)
                             duration = int(cfg.get('exist_time') or 900)
                             elapsed_s = max(0, int(time.monotonic() - float(picked_char['street_race_started_at'])))
                             remaining_s = max(0, duration - elapsed_s)
@@ -37453,7 +37506,9 @@ def client_handler(conn, addr):
                                         target_level = ch.get('level', 1)
                                         target_prof = ch.get('prof', 0)
                                         target_combat = get_character_stats(ch)['power']
-                                        target_state = ch.get('state', 1)
+                                        # Presence comes from the live connection,
+                                        # not the character's gameplay state field.
+                                        target_state = 1
                                         target_guildId = ch.get('guildId', 0)
                                         target_guildName = ch.get('guildName', '')
                                         break
@@ -38125,15 +38180,21 @@ def client_handler(conn, addr):
                             broadcast_aoi_attribute(picked_char)
                         save_chars(all_accounts_chars)
                     broadcast_aoi_remove(char_id, picked_char.get('map_id', '11'))
-                    # An unexpected socket loss aborts an unfinished Street Race.
-                    # Keep the attempt consumed, but persist the pre-race world location
-                    # so the next character pick does not reopen the CAR_CHASE_COPY map.
+                    # Preserve an unfinished run for reconnect. The attempt was
+                    # already charged on entry; reconnect must not charge it again.
                     race_cfg = COPY_SCENE_CONFIG.get(str(picked_char.get('active_copy_id') or ''), {})
                     if (race_cfg.get('subtype') == 7
                             and not picked_char.get('street_race_result_recorded')):
-                        return_map, _return_pos = recover_interrupted_street_race(picked_char)
-                        save_chars(all_accounts_chars)
-                        print(f"[STREET RACE] disconnect recovery player={char_id} map={return_map}")
+                        resume_map = prepare_street_race_reconnect(picked_char)
+                        if resume_map:
+                            save_chars(all_accounts_chars)
+                            print(f"[STREET RACE] preserved run for reconnect "
+                                  f"player={char_id} map={resume_map}")
+                        else:
+                            return_map, _return_pos = recover_interrupted_street_race(picked_char)
+                            save_chars(all_accounts_chars)
+                            print(f"[STREET RACE] invalid disconnect recovery "
+                                  f"player={char_id} map={return_map}")
             RANDOM_NAME_CALLED.discard(conn_id)
             if picked_char:
                 if is_current_connection:
