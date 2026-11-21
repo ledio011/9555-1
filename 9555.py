@@ -100,214 +100,8 @@ def persistent_state_path(filename):
 CHAR_DB = persistent_state_path("characters_final.json")
 BAK_DB = persistent_state_path("characters_final.json.bak")
 TMP_DB = CHAR_DB + ".tmp"
-SPEED_ANTICHEAT_PATH = persistent_state_path("speed_anticheat.json")
-SPEED_ANTICHEAT_LOCK = threading.RLock()
-SPEED_ANTICHEAT_MOVEMENT_LOCK = threading.RLock()
-SPEED_ANTICHEAT_MOVEMENT = {}
-# Movement anti-cheat tuning. Distances in cm, times in seconds, measured on
-# the server clock. See validate_speed_anticheat_movement().
-# Sustained speed allowed above the server-computed MOV (jitter, rounding).
-MOVE_AC_TOLERANCE = 1.10
-# How many seconds of travel the authoritative position may "bank" while the
-# player stands still or walks slower than MOV.
-MOVE_AC_REFILL_CAP_S = 1.0
-# One-off burst on top of the bank for jitter and the dodge skills
-# (SkillData 104/204/304: up to 5 m). Dash skills with a longer displacement
-# get an explicit credit from skill_use; see grant_speed_anticheat_skill_move.
-MOVE_AC_BURST_CM = 500
-# A skill credit stays valid for MoveTime plus this network slack.
-MOVE_AC_SKILL_CREDIT_SLACK_S = 1.5
-# Window used to explain the client's *claimed* path. The client drops the
-# socket after ~12 s without a heartbeat reply, so 30 s covers every TCP
-# stall that can still flush queued move packets on the same connection.
-MOVE_AC_EVIDENCE_WINDOW_S = 30.0
-# Unexplained distance forgiven per second, and the amount that becomes
-# evidence. A 1.5x speed hack reaches the limit in ~20 s, 3x in ~3 s.
-MOVE_AC_SCORE_DECAY_CM_S = 25.0
-MOVE_AC_SCORE_LIMIT_CM = 3000
-# Characters follow the NavMesh, so height only changes with travel. Allow
-# slopes up to ~56 degrees plus a small time-scaled step.
-MOVE_AC_CLIMB_SLOPE = 1.5
-MOVE_AC_CLIMB_SLACK_CM = 200
-# EXP/equipment stages keep their existing 3x allowance, as a time budget.
-EXP_MOVE_RATE_CM_S = 500.0 * 3.0
-EXP_MOVE_CAP_S = 1.5
 RESOURCE_ROOT = os.path.join(SCRIPT_DIR, "assets")
 RESOURCE_DATA_VERSION = 205
-
-
-def _load_speed_anticheat_state():
-    try:
-        with open(SPEED_ANTICHEAT_PATH, "r", encoding="utf-8") as state_file:
-            loaded = json.load(state_file)
-    except FileNotFoundError:
-        return {"version": 1, "accounts": {}}
-    except (OSError, ValueError) as state_error:
-        raise RuntimeError(
-            f"Unable to load speed anti-cheat state from {SPEED_ANTICHEAT_PATH}"
-        ) from state_error
-    if (not isinstance(loaded, dict) or loaded.get("version") != 1
-            or not isinstance(loaded.get("accounts"), dict)):
-        raise RuntimeError(
-            f"Invalid speed anti-cheat state in {SPEED_ANTICHEAT_PATH}"
-        )
-    normalized_accounts = {}
-    for stored_key, stored_record in loaded["accounts"].items():
-        try:
-            identity = json.loads(stored_key)
-        except (TypeError, ValueError) as key_error:
-            raise RuntimeError(
-                f"Invalid speed anti-cheat account key in {SPEED_ANTICHEAT_PATH}"
-            ) from key_error
-        if (not isinstance(identity, list) or len(identity) not in (1, 2)
-                or not isinstance(stored_record, dict)):
-            raise RuntimeError(
-                f"Invalid speed anti-cheat account record in {SPEED_ANTICHEAT_PATH}"
-            )
-        account_id = str(identity[-1] or "").strip()
-        if not account_id:
-            raise RuntimeError(
-                f"Invalid speed anti-cheat account key in {SPEED_ANTICHEAT_PATH}"
-            )
-        account_key = json.dumps([account_id], separators=(",", ":"))
-        existing = normalized_accounts.get(account_key)
-        if existing is None:
-            normalized_accounts[account_key] = copy.deepcopy(stored_record)
-            continue
-        try:
-            violations = max(
-                int(existing.get("violations", 0) or 0),
-                int(stored_record.get("violations", 0) or 0),
-            )
-            suspended_until = max(
-                float(existing.get("suspended_until", 0) or 0),
-                float(stored_record.get("suspended_until", 0) or 0),
-            )
-        except (TypeError, ValueError) as record_error:
-            raise RuntimeError(
-                f"Invalid speed anti-cheat account record in {SPEED_ANTICHEAT_PATH}"
-            ) from record_error
-        history = list(existing.get("history", [])) + list(stored_record.get("history", []))
-        existing.update({
-            "violations": violations,
-            "permanent": bool(
-                existing.get("permanent") or stored_record.get("permanent")
-                or violations >= 2
-            ),
-            "suspended_until": 0 if violations >= 2 else suspended_until,
-            "history": sorted(
-                history, key=lambda event: int(event.get("at", 0) or 0)
-            )[-20:],
-        })
-    loaded["accounts"] = normalized_accounts
-    return loaded
-
-
-def _save_speed_anticheat_state():
-    temp_path = SPEED_ANTICHEAT_PATH + ".tmp"
-    with open(temp_path, "w", encoding="utf-8") as state_file:
-        json.dump(SPEED_ANTICHEAT_STATE, state_file, ensure_ascii=False, indent=2)
-        state_file.flush()
-        os.fsync(state_file.fileno())
-    os.replace(temp_path, SPEED_ANTICHEAT_PATH)
-
-
-SPEED_ANTICHEAT_STATE = _load_speed_anticheat_state()
-
-
-def _speed_anticheat_account_key(_area_id, account_id):
-    account_id = str(account_id or "").strip()
-    if not account_id or account_id.lower() in ("0", "none", "null"):
-        return None
-    return json.dumps([account_id], separators=(",", ":"))
-
-
-def speed_anticheat_restriction(area_id, account_id, now=None):
-    key = _speed_anticheat_account_key(area_id, account_id)
-    if key is None:
-        return None
-    now = time.time() if now is None else float(now)
-    with SPEED_ANTICHEAT_LOCK:
-        record = SPEED_ANTICHEAT_STATE["accounts"].get(key)
-        if record is None:
-            return None
-        if not isinstance(record, dict):
-            raise RuntimeError(f"Invalid speed anti-cheat account record for {key}")
-        try:
-            violations = int(record.get("violations", 0) or 0)
-            suspended_until = float(record.get("suspended_until", 0) or 0)
-        except (TypeError, ValueError) as record_error:
-            raise RuntimeError(
-                f"Invalid speed anti-cheat account record for {key}"
-            ) from record_error
-        if record.get("permanent") or violations >= 2:
-            return {"permanent": True}
-        if suspended_until > now:
-            return {"permanent": False, "suspended_until": suspended_until}
-    return None
-
-
-def speed_anticheat_notice_text(restriction):
-    if restriction.get("permanent"):
-        return "Your account has been permanently banned. Reason: Speed Hack Anticheat."
-    expiry = datetime.datetime.fromtimestamp(
-        restriction["suspended_until"], datetime.timezone.utc
-    ).strftime("%Y-%m-%d %H:%M UTC")
-    return (
-        "Your account has been added to the 72-hour speed-hack blacklist. "
-        f"Access returns at {expiry}. Reason: Speed Hack Anticheat."
-    )
-
-
-def record_speed_anticheat_violation(
-        area_id, account_id, character_id, map_id, evidence, now=None):
-    key = _speed_anticheat_account_key(area_id, account_id)
-    if key is None:
-        raise ValueError("Cannot record speed anti-cheat evidence without an account ID")
-    now = time.time() if now is None else float(now)
-    with SPEED_ANTICHEAT_LOCK:
-        accounts = SPEED_ANTICHEAT_STATE["accounts"]
-        previous = copy.deepcopy(accounts.get(key))
-        record = previous if isinstance(previous, dict) else {
-            "violations": 0, "suspended_until": 0, "permanent": False, "history": []
-        }
-        violations = max(0, int(record.get("violations", 0) or 0))
-        suspended_until = float(record.get("suspended_until", 0) or 0)
-        if record.get("permanent"):
-            return copy.deepcopy(record)
-        if violations and suspended_until > now:
-            return copy.deepcopy(record)
-        violations += 1
-        event = {
-            "at": int(now),
-            "area_id": str(area_id),
-            "character_id": str(character_id),
-            "map_id": str(map_id),
-            "evidence": evidence,
-        }
-        history = list(record.get("history", []))
-        history.append(event)
-        record.update({
-            "violations": violations,
-            "last_violation_at": int(now),
-            "history": history[-20:],
-        })
-        if violations == 1:
-            record["permanent"] = False
-            record["suspended_until"] = int(now + 72 * 60 * 60)
-        else:
-            record["permanent"] = True
-            record["suspended_until"] = 0
-        accounts[key] = record
-        try:
-            _save_speed_anticheat_state()
-        except OSError:
-            if previous is None:
-                accounts.pop(key, None)
-            else:
-                accounts[key] = previous
-            raise
-        return copy.deepcopy(record)
 server_session_counter = 8000
 GLOBAL_INST_COUNTER = 3000000
 GLOBAL_INST_COUNTER_LOCK = threading.Lock()
@@ -1011,10 +805,6 @@ try:
                         ],
                         'cooldown_ms': int(parts[10]) if len(parts) > 10 and parts[10].isdigit() else 0,
                         'trace_distance_cm': int(parts[12]) if len(parts) > 12 and parts[12].isdigit() else 0,
-                        # SkillMotion displacement (used by the movement anti-cheat).
-                        'auto_move': int(parts[20]) if len(parts) > 20 and parts[20].isdigit() else 0,
-                        'move_time_ms': int(parts[21]) if len(parts) > 21 and parts[21].isdigit() else 0,
-                        'move_distance_cm': int(parts[22]) if len(parts) > 22 and parts[22].isdigit() else 0,
                         'priority': int(parts[30]) if len(parts) > 30 and parts[30].isdigit() else 0,
                         # Equip inheritance groups weapon skills by SkillData.TeamID;
                         # matching skill IDs alone rejects valid client selections.
@@ -3622,45 +3412,6 @@ def get_account_chars(all_chars, area_id, acc_id):
         return acc_dict.get(acc_id, [])
     return []
 
-
-def get_character_owner_account_id(all_chars, area_id, character):
-    """Resolve the server-stored account that owns this character."""
-    if not isinstance(all_chars, dict) or not isinstance(character, dict):
-        return None
-    area_chars = all_chars.get(str(area_id))
-    if not isinstance(area_chars, dict):
-        return None
-    try:
-        character_id = int(character.get('id', 0) or 0)
-    except (TypeError, ValueError):
-        return None
-    if character_id <= 0:
-        return None
-
-    identity_owners = set()
-    id_owners = set()
-    for account_id, characters in area_chars.items():
-        if not isinstance(characters, (list, tuple)):
-            continue
-        account_id = str(account_id)
-        for stored_character in characters:
-            if not isinstance(stored_character, dict):
-                continue
-            if stored_character is character:
-                identity_owners.add(account_id)
-            try:
-                stored_character_id = int(stored_character.get('id', 0) or 0)
-            except (TypeError, ValueError):
-                continue
-            if stored_character_id == character_id:
-                id_owners.add(account_id)
-    if len(identity_owners) == 1:
-        return next(iter(identity_owners))
-    if identity_owners:
-        return None
-    return next(iter(id_owners)) if len(id_owners) == 1 else None
-
-
 def _json_default_handler(obj):
     """Custom JSON default handler to skip non-serializable objects like Timer, set, lock."""
     if isinstance(obj, threading.Timer):
@@ -5109,28 +4860,6 @@ def recover_interrupted_street_race(char):
         char.pop(key, None)
     return return_map, list(return_pos)
 
-
-def prepare_street_race_reconnect(char):
-    """Restart an unfinished race at its route start without changing its attempt."""
-    copy_id = str(char.get('active_copy_id') or '')
-    cfg = COPY_SCENE_CONFIG.get(copy_id, {})
-    race_map = str(cfg.get('map_id') or '')
-    if cfg.get('subtype') != 7 or race_map not in MAP_CONFIG:
-        return None
-    start_pos = street_race_start_position(race_map) or default_map_spawn_position(race_map)
-    if not isinstance(start_pos, (list, tuple)) or len(start_pos) < 3:
-        return None
-    char['map_id'] = race_map
-    char['pos'] = list(start_pos)
-    char['street_race_started_at'] = None
-    char['street_race_checkpoint_progress'] = 0
-    char.pop('street_race_elapsed_offset_cs', None)
-    char.pop('street_race_last_car_pos', None)
-    char.pop('street_race_last_move_at', None)
-    char['_street_race_reconnect_pending'] = True
-    return race_map
-
-
 def street_race_start_position(map_id):
     """Return the APK's local race-car start point, with MapInfo birth fallback."""
     cfg = street_race_config_for_map(map_id)
@@ -5481,7 +5210,6 @@ def update_exp_authoritative_position(char, state, requested_pos):
     char_id = int(char.get('id', 0))
     positions = state.setdefault('player_auth_pos', {})
     timestamps = state.setdefault('player_auth_move_at', {})
-    budgets = state.setdefault('player_auth_budget', {})
     current = positions.get(char_id)
     if not isinstance(current, (list, tuple)) or len(current) < 4:
         current = list(char.get('pos', requested_pos))
@@ -5489,33 +5217,25 @@ def update_exp_authoritative_position(char, state, requested_pos):
             current = list(current) + [0] * (4 - len(current))
         positions[char_id] = current
         timestamps[char_id] = time.monotonic()
-        budgets[char_id] = float(MOVE_AC_BURST_CM)
 
     now = time.monotonic()
-    elapsed = max(0.0, now - float(timestamps.get(char_id, now)))
+    elapsed = max(0.02, min(now - float(timestamps.get(char_id, now)), 1.5))
     # The APK receives movement speed 500 (5 m/s). Allow 3x for dashes,
     # uneven packet timing, and motion interpolation while still limiting jumps.
-    # This is a time budget refilled from the server clock: the old per-packet
-    # 75 cm minimum let a client flood move packets for unlimited speed.
-    cap = EXP_MOVE_RATE_CM_S * EXP_MOVE_CAP_S
-    budget = min(cap, float(budgets.get(char_id, MOVE_AC_BURST_CM))
-                 + EXP_MOVE_RATE_CM_S * elapsed)
+    max_step_cm = max(75.0, 500.0 * elapsed * 3.0)
     dx = float(requested_pos[0]) - float(current[0])
     dz = float(requested_pos[2]) - float(current[2])
     distance = math.hypot(dx, dz)
-    if distance > budget and distance > 0:
-        scale = budget / distance
+    if distance > max_step_cm and distance > 0:
+        scale = max_step_cm / distance
         x = int(round(float(current[0]) + dx * scale))
         z = int(round(float(current[2]) + dz * scale))
-        budget = 0.0
     else:
         x = int(requested_pos[0])
         z = int(requested_pos[2])
-        budget -= distance
     tracked = [x, int(requested_pos[1]), z, int(requested_pos[3])]
     positions[char_id] = tracked
     timestamps[char_id] = now
-    budgets[char_id] = budget
     return tracked
 
 def validate_exp_skill_hit(char, state, target_id, skill_id, requested_effinfo_id,
@@ -6282,21 +6002,6 @@ def is_near_map_teleport_position(map_id, position):
     except (TypeError, ValueError, IndexError, OverflowError):
         return False
     dx, dz = x - teleport_pos[0], z - teleport_pos[2]
-    return dx * dx + dz * dz <= 500 * 500
-
-
-def is_near_map_portal_position(source_map, target_map, position):
-    """Check the directed MapConnectInfoData portal in source-map coordinates."""
-    portal = MAP_CONNECT_DATA.get((str(source_map), str(target_map)))
-    if portal is None:
-        return False
-    try:
-        x, z = int(position[0]), int(position[2])
-        portal_x = int(round(float(portal[0]) * 100))
-        portal_z = int(round(float(portal[2]) * 100))
-    except (TypeError, ValueError, IndexError, OverflowError):
-        return False
-    dx, dz = x - portal_x, z - portal_z
     return dx * dx + dz * dz <= 500 * 500
 
 
@@ -7199,290 +6904,6 @@ def record_pvp_position(char, now=None):
         history.append((stamp, map_id, position))
         if len(history) > 160:
             del history[:-160]
-
-
-def _speed_anticheat_movement_key(char, connection_id):
-    try:
-        char_id = int(char.get('id', 0) or 0)
-        connection_id = int(connection_id or 0)
-    except (AttributeError, TypeError, ValueError):
-        return None
-    return (connection_id, char_id) if char_id > 0 else None
-
-
-def _new_speed_anticheat_state(map_id, position, now, vehicle_mode="walk"):
-    """Fresh movement state after login, map change, server teleport or reset."""
-    position = list(position)
-    return {
-        "map_id": str(map_id or ''),
-        "position": position,
-        "client_position": list(position),
-        "at": now - 0.2,
-        "speed": 500,
-        "speed_checked_at": now - 1.0,
-        "vehicle_mode": vehicle_mode,
-        # Token buckets (cm). Start with one skill burst, not a full bank,
-        # so reconnecting or re-entering a map is not a free teleport.
-        "budget": float(MOVE_AC_BURST_CM),
-        "client_budget": float(MOVE_AC_BURST_CM),
-        "score": 0.0,
-    }
-
-
-def reset_speed_anticheat_movement(char, connection_id=None, now=None):
-    if not isinstance(char, dict):
-        return
-    try:
-        char_id = int(char.get('id', 0) or 0)
-        position = [int(value) for value in char.get('pos', [])[:4]]
-    except (TypeError, ValueError):
-        return
-    if char_id <= 0 or len(position) < 3:
-        return
-    if len(position) == 3:
-        position.append(0)
-    state_key = _speed_anticheat_movement_key(char, connection_id)
-    if state_key is None:
-        return
-    stamp = time.monotonic() if now is None else float(now)
-    with SPEED_ANTICHEAT_MOVEMENT_LOCK:
-        SPEED_ANTICHEAT_MOVEMENT[state_key] = _new_speed_anticheat_state(
-            char.get('map_id', ''), position, stamp
-        )
-
-
-def clear_speed_anticheat_movement(char, connection_id=None):
-    state_key = _speed_anticheat_movement_key(char, connection_id)
-    if state_key is None:
-        return
-    with SPEED_ANTICHEAT_MOVEMENT_LOCK:
-        SPEED_ANTICHEAT_MOVEMENT.pop(state_key, None)
-
-
-def speed_anticheat_vehicle_profile(char, map_id, reported_speed):
-    """Return (mode, extra speed floor in cm/s) for the movement validator.
-
-    Big-world mounts move with the NavMeshAgent at CurSpeed, which is the MOV
-    this server sends in TAG 510 (get_mount_driving_speed adds the MountData
-    2011 bonus). MountData.MaxSpeed is only used by physics cars (street race,
-    tutorial car), so it must not widen the big-world allowance: doing so let
-    a mounted player move 3-4x faster than their real mounted speed.
-    """
-    map_id = str(map_id or '')
-    try:
-        map_type = int(MAP_CONFIG.get(map_id, {}).get('type', -1))
-    except (TypeError, ValueError):
-        map_type = -1
-
-    if map_type == 1 and char.get('mount_riding'):
-        mount_id, _, _ = get_equipped_mount(char)
-        if mount_id:
-            # Speed comes from get_character_stats()["mov"], which already
-            # includes the mount bonus. The mode only resets state on change.
-            return f'mount:{mount_id}', 0
-
-    # TutorialCar sends its car position through move.parm=0; walking sends
-    # the character's nonzero movement speed. NOTE: parm is client-controlled,
-    # so a forged parm=0 unlocks this profile on foot. Gate it on server state
-    # (tutorial car step active) once the server tracks that step.
-    if map_type == 10 and reported_speed == 0:
-        max_speed = float(MOUNT_CONFIG.get('Chevrolet', {}).get('max_speed', 0) or 0)
-        if max_speed > 0:
-            return 'tutorial_car', int(round(max_speed * 100))
-    return 'walk', 0
-
-
-def grant_speed_anticheat_skill_move(char, skill_id, connection_id=None, now=None):
-    """Credit movement for a validated skill_use that displaces the caster.
-
-    SkillMotion.ResetSkillMove moves the caster MoveDistance over MoveTime, or
-    toward the target (up to the cast range) for AutoMoveFlag skills. The
-    credit is granted at most once per cooldown and expires shortly after the
-    motion ends, so spamming skill_use cannot be turned into a speed hack.
-    """
-    cfg = SKILL_CONFIG.get(str(skill_id or ''), {})
-    try:
-        distance = int(cfg.get('move_distance_cm', 0) or 0)
-        if int(cfg.get('auto_move', 0) or 0):
-            distance = max(distance, int(cfg.get('trace_distance_cm', 0) or 0))
-        cooldown_s = max(0.5, int(cfg.get('cooldown_ms', 0) or 0) / 1000.0)
-        move_s = max(0.0, int(cfg.get('move_time_ms', 0) or 0) / 1000.0)
-    except (TypeError, ValueError):
-        return
-    if distance <= 0:
-        return
-    state_key = _speed_anticheat_movement_key(char, connection_id)
-    if state_key is None:
-        return
-    now = time.monotonic() if now is None else float(now)
-    credit = float(distance + 100)
-    with SPEED_ANTICHEAT_MOVEMENT_LOCK:
-        state = SPEED_ANTICHEAT_MOVEMENT.get(state_key)
-        if state is None:
-            return
-        granted_at = state.setdefault("skill_credit_at", {})
-        if now - float(granted_at.get(str(skill_id), -1e9)) < cooldown_s * 0.8:
-            return
-        granted_at[str(skill_id)] = now
-        until = now + move_s + MOVE_AC_SKILL_CREDIT_SLACK_S
-        for key in ("skill_credit", "client_skill_credit"):
-            active = (float(state.get(key, 0.0))
-                      if now <= float(state.get(key + "_until", 0.0)) else 0.0)
-            state[key] = active + credit
-            state[key + "_until"] = until
-
-
-def _spend_speed_anticheat_credit(state, key, now, wanted):
-    """Spend up to ``wanted`` cm of an unexpired skill credit; return the amount."""
-    if now > float(state.get(key + "_until", 0.0)):
-        state[key] = 0.0
-        return 0.0
-    used = min(max(0.0, float(state.get(key, 0.0))), wanted)
-    state[key] = float(state.get(key, 0.0)) - used
-    return used
-
-
-def validate_speed_anticheat_movement(
-        char, map_id, requested_pos, connection_id=None, now=None,
-        reported_speed=None):
-    """Bound a client move packet and collect speed-hack evidence.
-
-    Returns (accepted_pos, violation_or_None). Two token buckets are refilled
-    from the server clock only, so packet timing can never buy extra distance:
-
-    * ``budget`` limits the position the server stores and broadcasts. It
-      banks at most MOVE_AC_REFILL_CAP_S seconds of travel plus one skill
-      burst: dashes, dodges and network jitter pass, but the long-run average
-      can never exceed MOV * MOVE_AC_TOLERANCE, whatever the packet rate.
-    * ``client_budget`` replays the path the client *claims* over a longer
-      window (covers TCP stalls). Distance it cannot explain is added to a
-      suspicion score that decays slowly; pauses and "normal" packets do not
-      wipe it. Evidence is returned once the score reaches
-      MOVE_AC_SCORE_LIMIT_CM.
-
-    Validated dash skills add a short-lived credit to both buckets
-    (grant_speed_anticheat_skill_move). Height (pos[1]) is bounded to
-    terrain-following changes.
-    """
-    requested_pos = list(requested_pos)
-    map_id = str(map_id or '')
-    if not MAP_CONFIG.get(map_id) or street_race_config_for_map(map_id):
-        return requested_pos, None
-    try:
-        char_id = int(char.get('id', 0) or 0)
-        current_pos = [int(value) for value in char.get('pos', [])[:4]]
-    except (AttributeError, TypeError, ValueError):
-        return requested_pos, None
-    if char_id <= 0 or len(current_pos) < 3 or len(requested_pos) < 3:
-        return requested_pos, None
-    try:
-        requested_pos = [int(value) for value in requested_pos[:4]]
-    except (TypeError, ValueError):
-        return list(current_pos), None
-    if len(current_pos) == 3:
-        current_pos.append(0)
-    if len(requested_pos) == 3:
-        requested_pos.append(0)
-    state_key = _speed_anticheat_movement_key(char, connection_id)
-    if state_key is None:
-        return requested_pos, None
-
-    vehicle_mode, vehicle_speed = speed_anticheat_vehicle_profile(
-        char, map_id, reported_speed
-    )
-    now = time.monotonic() if now is None else float(now)
-    with SPEED_ANTICHEAT_MOVEMENT_LOCK:
-        state = SPEED_ANTICHEAT_MOVEMENT.get(state_key)
-        position_changed = bool(
-            state and math.sqrt(sum(
-                (float(state["position"][axis]) - float(current_pos[axis])) ** 2
-                for axis in range(3)
-            )) > 75
-        )
-        if (state is None or state.get("map_id") != map_id or position_changed
-                or "budget" not in state):
-            # Login, map change or a server-side teleport moved the player.
-            state = _new_speed_anticheat_state(map_id, current_pos, now, vehicle_mode)
-            SPEED_ANTICHEAT_MOVEMENT[state_key] = state
-        elif state.get("vehicle_mode", "walk") != vehicle_mode:
-            # Mount/dismount changes MOV; refresh it now. Budgets carry over and
-            # are re-capped below, so dismounting cannot keep mount speed.
-            state["vehicle_mode"] = vehicle_mode
-            state["speed_checked_at"] = now - 1.0
-
-        if now - float(state.get("speed_checked_at", 0.0)) >= 1.0:
-            state["speed"] = max(100, int(get_character_stats(char).get("mov", 500)))
-            state["speed"] = max(state["speed"], vehicle_speed)
-            state["speed_checked_at"] = now
-        speed = max(100, int(state.get("speed", 500)))
-        rate = speed * MOVE_AC_TOLERANCE
-        elapsed = max(0.0, now - float(state["at"]))
-        state["at"] = now
-
-        # 1) Authoritative position --------------------------------------
-        cap = rate * MOVE_AC_REFILL_CAP_S + MOVE_AC_BURST_CM
-        budget = min(cap, float(state["budget"]) + rate * elapsed)
-        dx = float(requested_pos[0]) - float(current_pos[0])
-        dz = float(requested_pos[2]) - float(current_pos[2])
-        distance = math.hypot(dx, dz)
-        accepted_pos = list(requested_pos)
-        credit = _spend_speed_anticheat_credit(
-            state, "skill_credit", now, max(0.0, distance - budget))
-        available = budget + credit
-        moved = distance
-        if distance > available:
-            scale = available / distance
-            accepted_pos[0] = int(round(float(current_pos[0]) + dx * scale))
-            accepted_pos[2] = int(round(float(current_pos[2]) + dz * scale))
-            moved = available
-        state["budget"] = max(0.0, budget - (moved - credit))
-
-        step_slack = min(float(MOVE_AC_CLIMB_SLACK_CM), rate * elapsed)
-        max_dy = moved * MOVE_AC_CLIMB_SLOPE + step_slack
-        dy = float(requested_pos[1]) - float(current_pos[1])
-        if abs(dy) > max_dy:
-            accepted_pos[1] = int(round(float(current_pos[1]) + math.copysign(max_dy, dy)))
-        state["position"] = list(accepted_pos)
-
-        # 2) Evidence from the client's claimed path ----------------------
-        previous_client = state.get("client_position", current_pos)
-        claimed = math.hypot(
-            float(requested_pos[0]) - float(previous_client[0]),
-            float(requested_pos[2]) - float(previous_client[2]),
-        )
-        claimed_dy = abs(float(requested_pos[1]) - float(previous_client[1]))
-        state["client_position"] = list(requested_pos)
-        client_cap = rate * MOVE_AC_EVIDENCE_WINDOW_S + MOVE_AC_BURST_CM
-        client_budget = min(client_cap, float(state["client_budget"]) + rate * elapsed)
-        client_budget += _spend_speed_anticheat_credit(
-            state, "client_skill_credit", now, max(0.0, claimed - client_budget))
-        unexplained = max(0.0, claimed - client_budget)
-        state["client_budget"] = max(0.0, min(client_cap, client_budget - claimed))
-        # Height claims are judged leniently here (full step slack per packet);
-        # the authoritative clamp above already uses the time-scaled slack.
-        unexplained += max(
-            0.0, claimed_dy - (claimed * MOVE_AC_CLIMB_SLOPE + MOVE_AC_CLIMB_SLACK_CM)
-        )
-        score = max(0.0, float(state.get("score", 0.0)) - MOVE_AC_SCORE_DECAY_CM_S * elapsed)
-        score += unexplained
-        state["score"] = score
-
-        violation = None
-        if score >= MOVE_AC_SCORE_LIMIT_CM:
-            violation = {
-                "unexplained_cm": int(score),
-                "score_limit_cm": MOVE_AC_SCORE_LIMIT_CM,
-                "server_speed_cm_s": speed,
-                "vehicle_mode": vehicle_mode,
-                "last_claimed_cm": int(claimed),
-                "last_elapsed_s": round(elapsed, 3),
-                "client_server_gap_cm": int(math.hypot(
-                    float(requested_pos[0]) - float(accepted_pos[0]),
-                    float(requested_pos[2]) - float(accepted_pos[2]),
-                )),
-            }
-            state["score"] = 0.0
-        return accepted_pos, violation
 
 
 def record_pvp_skill_cast(char, skill_id, client_tick, now=None):
@@ -20051,7 +19472,6 @@ def _domin_capture_info_state(character, district, opponent=None, now_ms=None):
     owner = _domin_capture_owned_by(domin_id, now_ms)
     owned_by_player = bool(
         character and owner
-        and not (opponent and opponent.get("kind") == "npc")
         and numeric_id_value(owner.get("id", 0)) ==
         numeric_id_value(character.get("id", 0))
     )
@@ -20092,10 +19512,10 @@ def _domin_capture_info_state(character, district, opponent=None, now_ms=None):
         ])
         resource_fields.append((10 + index, resource_end_time))
 
-    if opponent:
-        server_id = int(opponent.get("character_id", opponent.get("npc_id", 0)) or 0)
-    elif owner:
+    if owner:
         server_id = numeric_id_value(owner.get("id", 0)) or 0
+    elif opponent:
+        server_id = int(opponent.get("character_id", opponent.get("npc_id", 0)) or 0)
     else:
         server_id = 0
 
@@ -20116,7 +19536,7 @@ def _domin_capture_enemy_roster(character):
         capture_mission_state = int(capture_mission.get("state", 0))
     except (AttributeError, TypeError, ValueError):
         capture_mission_state = 0
-    ash_viper_story_active = capture_mission_state == 1
+    ash_viper_story_active = capture_mission_state in (1, 2)
     for district in _domin_capture_open_districts():
         domin_id = str(district["id"])
         if domin_id == "1" and ash_viper_story_active:
@@ -22102,7 +21522,6 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         print(f"[MAP SPAWN] map={target_map_id} pos={picked_char['pos']}")
     else:
         print(f"[MAP SPAWN] no configured spawn available map={target_map_id}")
-    reset_speed_anticheat_movement(picked_char, connection_id=id(conn))
 
     if target_map_id == "101":
         print(
@@ -28390,33 +27809,6 @@ def client_handler(conn, addr):
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
             debug_log(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
-            if picked_char:
-                character_account_id = get_character_owner_account_id(
-                    all_accounts_chars, cur_areaId, picked_char
-                )
-                if character_account_id is None:
-                    send_rpc_push(529, encode_sproto([
-                        (0, "Unable to verify this character's account. Please log in again."),
-                        (1, True)
-                    ]))
-                    print(
-                        f"[SPEED ANTICHEAT] disconnected character without owner "
-                        f"character={picked_char.get('id')} area={cur_areaId}"
-                    )
-                    break
-                active_restriction = speed_anticheat_restriction(
-                    cur_areaId, character_account_id
-                )
-                if active_restriction:
-                    send_rpc_push(529, encode_sproto([
-                        (0, speed_anticheat_notice_text(active_restriction)), (1, True)
-                    ]))
-                    print(
-                        f"[SPEED ANTICHEAT] disconnected restricted session "
-                        f"area={cur_areaId} account={character_account_id} "
-                        f"permanent={bool(active_restriction.get('permanent'))}"
-                    )
-                    break
             if (invest_trace_count < 20
                     and time.monotonic() < invest_trace_until):
                 invest_trace_count += 1
@@ -28515,7 +27907,6 @@ def client_handler(conn, addr):
             elif msg == 4: # login
                 acc_id = body.get(1, b"").decode('utf-8') if isinstance(body.get(1), bytes) else str(body.get(1))
                 sid = get_val_int(body, 5, 1); cur_areaId = str(get_area_id(sid))
-                speed_restriction = speed_anticheat_restriction(cur_areaId, acc_id)
                 # sync_common_data: serverTime(0), time_offset(2), func_info(9), pvp_scale(4), seed(12), server_level(13), start_time(14)
                 resp = encode_sproto([
                     (0, int(time.time())), (1, "1.012.017"),
@@ -28525,13 +27916,6 @@ def client_handler(conn, addr):
                 ])
                 ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
                 conn.sendall(struct.pack(">H", len(pf)) + pf)
-                if speed_restriction:
-                    send_rpc_push(529, encode_sproto([
-                        (0, speed_anticheat_notice_text(speed_restriction)), (1, True)
-                    ]))
-                    print(f"[SPEED ANTICHEAT] denied login area={cur_areaId} account={acc_id} "
-                          f"permanent={bool(speed_restriction.get('permanent'))}")
-                    break
 
             elif msg == 103: # character_list
                 chars = get_account_chars(all_accounts_chars, cur_areaId, acc_id)
@@ -28564,36 +27948,9 @@ def client_handler(conn, addr):
 
             elif msg == 105: # character_pick
                 char_id = get_val_int(body, 0)
-                picked_char = next((c for c in get_account_chars(
-                    all_accounts_chars, cur_areaId, acc_id
-                ) if c['id'] == char_id), None)
-                character_account_id = get_character_owner_account_id(
-                    all_accounts_chars, cur_areaId, picked_char
-                )
-                speed_restriction = (
-                    speed_anticheat_restriction(cur_areaId, character_account_id)
-                    if character_account_id is not None else None
-                )
-                if picked_char and character_account_id is None:
-                    resp = encode_sproto([(0, 0)])
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-                    send_rpc_push(529, encode_sproto([
-                        (0, "Unable to verify this character's account. Please log in again."),
-                        (1, True)
-                    ]))
-                    break
-                if speed_restriction:
-                    resp = encode_sproto([(0, 0)])
-                    ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + resp)
-                    conn.sendall(struct.pack(">H", len(pf)) + pf)
-                    send_rpc_push(529, encode_sproto([
-                        (0, speed_anticheat_notice_text(speed_restriction)), (1, True)
-                    ]))
-                    break
-                char_id = picked_char.get('id', 0) if picked_char else 0
+                picked_char = next((c for c in get_account_chars(all_accounts_chars, cur_areaId, acc_id) if c['id'] == char_id), None)
+                char_id = picked_char.get('id', 0)
                 if picked_char:
-                    reset_speed_anticheat_movement(picked_char, connection_id=id(conn))
                     with PVP_KILL_STREAK_LOCK:
                         try:
                             previous_streak = max(
@@ -28703,16 +28060,11 @@ def client_handler(conn, addr):
                                                       or picked_char.get('pos')
                                                       or default_map_spawn_position(current_map_id))
                         else:
-                            # The client cannot restore its car/checkpoint objects;
-                            # rebuild this already-paid run from the route start.
-                            resume_map = prepare_street_race_reconnect(picked_char)
-                            if resume_map:
-                                print(f"[STREET RACE] resuming interrupted run from start "
-                                      f"player={char_id} map={resume_map}")
-                            else:
-                                return_map, _return_pos = recover_interrupted_street_race(picked_char)
-                                print(f"[STREET RACE] aborted invalid interrupted run "
-                                      f"player={char_id} map={return_map}")
+                            # The client has no saved race-car/checkpoint restore path.
+                            # A full character login must return an unfinished run to
+                            # the pre-race world location instead of reopening the copy.
+                            return_map, _return_pos = recover_interrupted_street_race(picked_char)
+                            print(f"[STREET RACE] aborted interrupted run player={char_id} map={return_map}")
                     elif orphaned_race_map or (active_copy_cfg.get('subtype') == 7
                                                and not active_race):
                         # A disconnect during a half-finished transition can leave
@@ -29439,7 +28791,6 @@ def client_handler(conn, addr):
                             ALL_CONNECTIONS.pop(old_id, None)
                             CONNECTION_LOCKS.pop(old_id, None)
                     picked_char = reconnect_char
-                    reset_speed_anticheat_movement(picked_char, connection_id=id(conn))
                     ALL_CONNECTIONS[reconnect_char_id] = (conn, picked_char)
                     CONNECTION_LOCKS[reconnect_char_id] = send_lock
                     # The client recycles NPCs and remote players on reconnect.
@@ -29614,12 +28965,11 @@ def client_handler(conn, addr):
                             char_map = return_map
                             active_race = False
 
-                        if (active_race and (reconnect_type == 1
-                                             or picked_char.get('_street_race_reconnect_pending'))):
+                        if active_race and reconnect_type == 1:
                             # With no MainPlayer, CarChaseSceneManager has already
                             # consumed its one-shot creation event. Reload the scene
                             # so the APK rebuilds the character/car and registers the
-                            # scene callbacks again. Unfinished runs restart at route
+                            # scene callbacks again. Active races restart from route
                             # spawn; completed races restore the saved result at entry.
                             picked_char['street_race_started_at'] = None
                             picked_char.pop('street_race_elapsed_offset_cs', None)
@@ -29637,7 +28987,6 @@ def client_handler(conn, addr):
                                 picked_char['street_race_result_recorded'] = False
                                 picked_char.pop('street_race_pending_result', None)
                             else:
-                                picked_char['_street_race_reconnect_pending'] = True
                                 picked_char.pop('street_race_pending_result', None)
                             start_map_transition(conn, picked_char, char_map, send_rpc_push,
                                                  override_pos=transition_override_pos)
@@ -29645,12 +28994,6 @@ def client_handler(conn, addr):
                         elif reconnect_type == 1 or requested_map != char_map:
                             # The saved server map is authoritative after a leave,
                             # stale client scene, or half-finished transition.
-                            if (active_race
-                                    and not picked_char.get('street_race_result_recorded')):
-                                resume_map = prepare_street_race_reconnect(picked_char)
-                                if resume_map:
-                                    char_map = resume_map
-                                    transition_override_pos = None
                             if not active_race and transition_override_pos is None:
                                 transition_override_pos = list(
                                     picked_char.get('pos') or default_map_spawn_position(char_map))
@@ -29725,34 +29068,26 @@ def client_handler(conn, addr):
                     source_type = target_type = -1
                     target_open_level = player_level = player_hp = 0
                 tutorial_return = source_map == '11' and target_map == '101'
-                single_mitropolis_entry = target_map == '11' and target_type == 10
                 at_city_teleport = bool(
                     picked_char
                     and source_type == 1
                     and is_near_map_teleport_position(source_map, picked_char.get('pos'))
-                )
-                at_map_portal = bool(
-                    picked_char
-                    and source_type == 1
-                    and is_near_map_portal_position(
-                        source_map, target_map, picked_char.get('pos'))
                 )
                 valid_transition = bool(
                     picked_char
                     and is_current_character_connection(conn, picked_char)
                     and player_hp > 0
                     and target_map != source_map
-                    and (target_type == 1 or single_mitropolis_entry)
+                    and target_type == 1
                     and target_birth is not None
                     and player_level >= target_open_level
-                    and (tutorial_return or at_city_teleport or at_map_portal)
+                    and (tutorial_return or at_city_teleport)
                 )
                 if valid_transition:
                     start_map_transition(conn, picked_char, target_map, send_rpc_push)
                 else:
                     print(f"[MAP TRANSITION] rejected player={picked_char.get('id') if picked_char else 0} "
-                          f"from={source_map} to={target_map} "
-                          f"at_teleport={at_city_teleport} at_portal={at_map_portal}")
+                          f"from={source_map} to={target_map} at_teleport={at_city_teleport}")
                 if session is not None:
                     send_rpc_response(session)
 
@@ -29762,23 +29097,17 @@ def client_handler(conn, addr):
                     map_cfg = MAP_CONFIG.get(current_map, {})
                     positions = map_config_position_list(current_map, 'relife_pos')
                     point_index = get_val_int(body, 3, -1)
-                    at_teleport = is_near_map_teleport_position(
-                        current_map, picked_char.get('pos')
-                    )
                     if (str(map_cfg.get('teleport_pos') or '').strip()
-                            and at_teleport
                             and int(picked_char.get('hp', 0)) > 0
                             and 0 <= point_index < len(positions)):
                         picked_char['pos'] = list(positions[point_index])
-                        reset_speed_anticheat_movement(picked_char, connection_id=id(conn))
                         broadcast_aoi_move(picked_char)
                         save_chars(all_accounts_chars)
                         print(f"[MAP TELEPORT] player={picked_char.get('id')} map={current_map} "
                               f"point={point_index} pos={picked_char['pos']}")
                     else:
                         print(f"[MAP TELEPORT] rejected player={picked_char.get('id')} "
-                              f"map={current_map} point={point_index} "
-                              f"at_teleport={at_teleport}")
+                              f"map={current_map} point={point_index}")
                 if session is not None:
                     ph = encode_sproto([(1, session)])
                     pf = sproto_pack(ph + encode_sproto([]))
@@ -29787,12 +29116,6 @@ def client_handler(conn, addr):
             elif msg == 101: # move
                 p_raw = body.get(0)
                 move_map = str(picked_char.get('map_id', '')) if picked_char else ''
-                speed_sanction = None
-                speed_owner_account_id = (
-                    get_character_owner_account_id(
-                        all_accounts_chars, cur_areaId, picked_char
-                    ) if picked_char else None
-                )
                 is_exp_move_map = is_exp_map(move_map)
                 is_equipment_move_map = is_equipment_copy_map(move_map)
                 move_stage_state = None
@@ -29823,23 +29146,6 @@ def client_handler(conn, addr):
                         # squad visuals; do not overwrite it with raw client
                         # coordinates below.
                         new_pos = update_exp_authoritative_position(picked_char, move_stage_state, new_pos)
-                    else:
-                        new_pos, speed_evidence = validate_speed_anticheat_movement(
-                            picked_char, move_map, new_pos, connection_id=id(conn),
-                            reported_speed=get_val_int(body, 3, -1)
-                        )
-                        if speed_evidence:
-                            if speed_owner_account_id is None:
-                                print(
-                                    f"[SPEED ANTICHEAT] evidence without account "
-                                    f"player={picked_char.get('id')} map={move_map}"
-                                )
-                            else:
-                                speed_sanction = record_speed_anticheat_violation(
-                                    cur_areaId, speed_owner_account_id,
-                                    picked_char.get('id', 0),
-                                    move_map, speed_evidence
-                                )
                     picked_char['pos'] = new_pos
                     record_pvp_position(picked_char)
                     # Issue 224: Throttle position saves to avoid excessive disk I/O.
@@ -29891,17 +29197,6 @@ def client_handler(conn, addr):
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([(0, p_raw)]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
-                if speed_sanction:
-                    send_rpc_push(529, encode_sproto([
-                        (0, speed_anticheat_notice_text(speed_sanction)), (1, True)
-                    ]))
-                    print(
-                        f"[SPEED ANTICHEAT] sanctioned area={cur_areaId} "
-                        f"account={speed_owner_account_id} "
-                        f"character={picked_char.get('id')} map={move_map} "
-                        f"permanent={bool(speed_sanction.get('permanent'))}"
-                    )
-                    break
 
             elif msg == 309: # refresh_online_misison
                 refresh_success = False
@@ -30370,9 +29665,6 @@ def client_handler(conn, addr):
                         else:
                             record_pvp_skill_cast(
                                 picked_char, sid, get_val_int(body, 4, 0)
-                            )
-                            grant_speed_anticheat_skill_move(
-                                picked_char, sid, connection_id=id(conn)
                             )
                             # Do not echo Tag 508 back to the casting player.
                             # The casting player executes skill effects locally on client.
@@ -32109,7 +31401,6 @@ def client_handler(conn, addr):
 
                     if bool(picked_char.get('mount_riding', False)) != should_ride:
                         picked_char['mount_riding'] = should_ride
-                        reset_speed_anticheat_movement(picked_char, connection_id=id(conn))
                         save_chars(all_accounts_chars)
                         # TAG 510 updates CurSpeed locally; while mounted it
                         # is exactly MountData.MaxSp. Dismount restores normal MOV.
@@ -34948,8 +34239,6 @@ def client_handler(conn, addr):
                     if cfg and cfg['subtype'] == 7:
                         current_map = str(picked_char.get('map_id', ''))
                         if current_map == str(cfg.get('map_id')) and not picked_char.get('street_race_result_recorded'):
-                            reconnecting_race = bool(
-                                picked_char.get('_street_race_reconnect_pending'))
                             if picked_char.get('street_race_started_at') is None:
                                 picked_char['street_race_checkpoint_progress'] = 0
                                 start_time = time.monotonic()
@@ -34959,9 +34248,7 @@ def client_handler(conn, addr):
                                         street_race_start_position(current_map)
                                         or list(picked_char.get('pos')
                                                 or default_map_spawn_position(current_map)))
-                                if not reconnecting_race:
-                                    picked_char['street_race_movement_valid'] = True
-                            picked_char.pop('_street_race_reconnect_pending', None)
+                                picked_char['street_race_movement_valid'] = True
                             duration = int(cfg.get('exist_time') or 900)
                             elapsed_s = max(0, int(time.monotonic() - float(picked_char['street_race_started_at'])))
                             remaining_s = max(0, duration - elapsed_s)
@@ -37641,9 +36928,7 @@ def client_handler(conn, addr):
                                         target_level = ch.get('level', 1)
                                         target_prof = ch.get('prof', 0)
                                         target_combat = get_character_stats(ch)['power']
-                                        # Presence comes from the live connection,
-                                        # not the character's gameplay state field.
-                                        target_state = 1
+                                        target_state = ch.get('state', 1)
                                         target_guildId = ch.get('guildId', 0)
                                         target_guildName = ch.get('guildName', '')
                                         break
@@ -38283,10 +37568,6 @@ def client_handler(conn, addr):
         traceback.print_exc()
     finally:
         try:
-            if picked_char:
-                clear_speed_anticheat_movement(
-                    picked_char, connection_id=id(conn)
-                )
             if conn_id in NPC_SPAWNED_MAPS:
                 del NPC_SPAWNED_MAPS[conn_id]
             # Clean up AOI-tracked Liberty City NPCs on disconnect
@@ -38315,21 +37596,15 @@ def client_handler(conn, addr):
                             broadcast_aoi_attribute(picked_char)
                         save_chars(all_accounts_chars)
                     broadcast_aoi_remove(char_id, picked_char.get('map_id', '11'))
-                    # Preserve an unfinished run for reconnect. The attempt was
-                    # already charged on entry; reconnect must not charge it again.
+                    # An unexpected socket loss aborts an unfinished Street Race.
+                    # Keep the attempt consumed, but persist the pre-race world location
+                    # so the next character pick does not reopen the CAR_CHASE_COPY map.
                     race_cfg = COPY_SCENE_CONFIG.get(str(picked_char.get('active_copy_id') or ''), {})
                     if (race_cfg.get('subtype') == 7
                             and not picked_char.get('street_race_result_recorded')):
-                        resume_map = prepare_street_race_reconnect(picked_char)
-                        if resume_map:
-                            save_chars(all_accounts_chars)
-                            print(f"[STREET RACE] preserved run for reconnect "
-                                  f"player={char_id} map={resume_map}")
-                        else:
-                            return_map, _return_pos = recover_interrupted_street_race(picked_char)
-                            save_chars(all_accounts_chars)
-                            print(f"[STREET RACE] invalid disconnect recovery "
-                                  f"player={char_id} map={return_map}")
+                        return_map, _return_pos = recover_interrupted_street_race(picked_char)
+                        save_chars(all_accounts_chars)
+                        print(f"[STREET RACE] disconnect recovery player={char_id} map={return_map}")
             RANDOM_NAME_CALLED.discard(conn_id)
             if picked_char:
                 if is_current_connection:
