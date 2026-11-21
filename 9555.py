@@ -7176,11 +7176,18 @@ def personal_dance_reward_list(char, dance_id, running_source='', interval_index
     except (TypeError, ValueError):
         level = 1
     dance_cfg = DANCE_CONFIG.get(str(dance_id), {})
+    reward_at = time.time() if reward_at is None else float(reward_at)
+    guild_activity_active = (
+        str(running_source) != 'guild_speaker'
+        and _guild_dance_activity_active_for_char(char, reward_at)
+    )
     # Resolve the live activity row first: free dance uses _drop_jh, paid dance
     # uses _drop_jhdj, and sound-box dance uses CityDanceData 102's configured
     # drop. DanceData then applies the client's configured paid multiplier.
     if str(running_source) == 'guild_speaker':
         activity_id = '104'
+    elif guild_activity_active:
+        activity_id = '103'
     else:
         activity_id = '102' if str(running_source) == 'speaker' else '101'
     activity = CITY_DANCE_CONFIG.get(activity_id, CITY_DANCE_CONFIG.get('101', {}))
@@ -7206,7 +7213,7 @@ def personal_dance_reward_list(char, dance_id, running_source='', interval_index
     )
     active_drop_id = str(drop_tables.get(active_drop_key, {}).get(level, '') or '')
 
-    if str(running_source) == 'guild_speaker':
+    if str(running_source) == 'guild_speaker' or guild_activity_active:
         interval = personal_dance_reward_interval(activity)
         try:
             duration = max(0, int(activity.get('DurationTime', 0) or 0))
@@ -7216,19 +7223,16 @@ def personal_dance_reward_list(char, dance_id, running_source='', interval_index
         interval_count = max(1, (duration + interval - 1) // interval)
         if interval_index >= interval_count:
             return []
-        reward_at = time.time() if reward_at is None else float(reward_at)
-        if _guild_dance_speaker_count_for_char(
-                char, reward_at - 0.000001) <= 0:
+        if (str(running_source) == 'guild_speaker'
+                and _guild_dance_speaker_count_for_char(
+                    char, reward_at - 0.000001) <= 0):
             return []
-
-        try:
-            scale = max(0, int(dance_cfg.get('RewardScale', 100) or 100))
-        except (TypeError, ValueError):
-            scale = 100
-        # CityDanceData pays each second; the per-level AdaptData reward rows
-        # are missing from this client export, so use the character's level.
-        exp_per_interval = level * scale // 100
-        contribution_per_interval = scale // 100
+        # CityDanceData rewards every configured interval. Its live per-level
+        # drop counts are absent from this client export, so both scheduled
+        # Gang Dance and Gang Stereo pay level EXP and exactly one contribution
+        # point per interval regardless of dance.
+        exp_per_interval = level
+        contribution_per_interval = 1
         return [
             (item_id, 0, amount)
             for item_id, amount in (
@@ -7708,6 +7712,35 @@ def _guild_dance_speaker_count_for_char(char, now=None):
     if not member or int(member.get('job', 4)) == 4:
         return 0
     return len(_guild_dance_speaker_expiries(guild_id, now))
+
+def _guild_dance_activity_active_for_char(char, now=None):
+    if not char:
+        return False
+    now = int(time.time()) if now is None else int(now)
+    activity = CITY_DANCE_CONFIG.get('103', {})
+    map_id = str(activity.get('MapId', '101'))
+    try:
+        if (str(char.get('map_id', '')) != map_id
+                or int(char.get('level', 1)) < int(activity.get('UnlockLevel', 8))
+                or not is_in_map_gather_area(map_id, char.get('pos'))):
+            return False
+        guild_id = int(_guild_id_for_character(char) or 0)
+        guild = GUILD_STATES.get(str(guild_id))
+        member = _guild_member_id(guild, char.get('id', 0)) if guild else None
+        if not member or int(member.get('job', 4)) == 4:
+            return False
+        start_times = [
+            int(value) for value in str(activity.get('StartTime', '')).split('#')
+            if value
+        ]
+        if not start_times:
+            start_times = [39600]
+        slot = min(max(1, int(guild.get('dance_slot', 1) or 1)), len(start_times))
+        duration = max(0, int(activity.get('DurationTime', 1800) or 1800))
+        return bool(duration and _guild_daily_activity_window(
+            now, start_times[slot - 1], duration)[1])
+    except (TypeError, ValueError):
+        return False
 
 def _guild_dance_scene_chars(guild_id):
     guild = GUILD_STATES.get(str(int(guild_id)))
@@ -12528,16 +12561,17 @@ def update_prison_npc_aoi(conn, map_id, picked_char):
     try:
         pos = picked_char.get("pos") or default_map_spawn_position(map_str)
         px, pz = int(pos[0]), int(pos[2])
-        # MapInfoData and MonsterData both store centimeter coordinates. The
-        # client converts NPC positions to meters by dividing by 100.
-        radius_units = max(0, int(MAP_CONFIG.get(map_str, {}).get("radius", 0) or 0))
+        # MapInfoData.radius is in world units; player and MonsterData
+        # positions use centi-units on the server.
+        radius_cm = max(
+            0, int(MAP_CONFIG.get(map_str, {}).get("radius", 0) or 0)) * 100
     except (TypeError, ValueError, IndexError):
         return
-    if radius_units <= 0 and not survival_field:
+    if radius_cm <= 0 and not survival_field:
         print(f"[PRISON AOI] missing configured visibility radius map={map_str}")
         return
 
-    radius_sq = radius_units * radius_units
+    radius_sq = radius_cm * radius_cm
     tracked = PRISON_NPC_AOI_TRACK.setdefault(id(conn), {})
     visible_slots = set()
     try:
@@ -13626,11 +13660,10 @@ def update_gotham_npc_aoi(conn, char):
         clear_gotham_npc_aoi(conn)
         return
     try:
-        # MapInfoData.radius and NPC positions are both stored in centi-units.
-        # The client converts positions to world units, but the AOI comparison
-        # is performed on raw server coordinates, so do not scale the radius.
-        radius_units = max(0, int(MAP_CONFIG.get(map_id, {}).get("radius", 0) or 0))
-        if radius_units <= 0:
+        # MapInfoData.radius is in world units; NPC positions use centi-units.
+        radius_cm = max(
+            0, int(MAP_CONFIG.get(map_id, {}).get("radius", 0) or 0)) * 100
+        if radius_cm <= 0:
             raise ValueError("MapInfoData radius is missing")
         player_pos = char.get("pos") or default_map_spawn_position(map_id)
         px, pz = int(player_pos[0]), int(player_pos[2])
@@ -13638,7 +13671,7 @@ def update_gotham_npc_aoi(conn, char):
         print(f"[GOTHAM AOI] invalid player/map visibility data char={char.get('id')}: {exc}")
         return
 
-    radius_sq = radius_units * radius_units
+    radius_sq = radius_cm * radius_cm
     tracked = GOTHAM_AOI_TRACK.setdefault(conn_key, {})
     visible_slots = set()
     for spec in gotham_shared_npc_specs(map_id):
