@@ -1,5 +1,6 @@
 import socket, struct, copy, threading, random, json, os, time, traceback, math, re, uuid, shutil
 import datetime
+import sys
 import base64
 import io
 import urllib.error
@@ -185,6 +186,19 @@ def _save_speed_anticheat_state():
 
 
 SPEED_ANTICHEAT_STATE = _load_speed_anticheat_state()
+
+
+def reset_speed_anticheat_state():
+    with SPEED_ANTICHEAT_LOCK:
+        previous_accounts = SPEED_ANTICHEAT_STATE["accounts"]
+        cleared_count = len(previous_accounts)
+        SPEED_ANTICHEAT_STATE["accounts"] = {}
+        try:
+            _save_speed_anticheat_state()
+        except OSError:
+            SPEED_ANTICHEAT_STATE["accounts"] = previous_accounts
+            raise
+    return cleared_count
 
 
 def _speed_anticheat_account_key(_area_id, account_id):
@@ -7168,8 +7182,32 @@ def clear_speed_anticheat_movement(char, connection_id=None):
         SPEED_ANTICHEAT_MOVEMENT.pop(state_key, None)
 
 
+def speed_anticheat_vehicle_profile(char, map_id, reported_speed):
+    map_id = str(map_id or '')
+    try:
+        map_type = int(MAP_CONFIG.get(map_id, {}).get('type', -1))
+    except (TypeError, ValueError):
+        map_type = -1
+
+    if map_type == 1 and char.get('mount_riding'):
+        mount_id, _, _ = get_equipped_mount(char)
+        mount_cfg = MOUNT_CONFIG.get(mount_id, {})
+        max_speed = float(mount_cfg.get('max_speed', 0) or 0)
+        if mount_id and int(mount_cfg.get('need_show', 0)) == 1 and max_speed > 0:
+            return f'mount:{mount_id}', int(round(max_speed * 100))
+
+    # TutorialCar sends its car position through move.parm=0; walking sends
+    # the character's nonzero movement speed. Bound that signal to its car data.
+    if map_type == 10 and reported_speed == 0:
+        max_speed = float(MOUNT_CONFIG.get('Chevrolet', {}).get('max_speed', 0) or 0)
+        if max_speed > 0:
+            return 'tutorial_car', int(round(max_speed * 100))
+    return 'walk', 0
+
+
 def validate_speed_anticheat_movement(
-        char, map_id, requested_pos, connection_id=None, now=None):
+        char, map_id, requested_pos, connection_id=None, now=None,
+        reported_speed=None):
     requested_pos = list(requested_pos)
     map_id = str(map_id or '')
     if not MAP_CONFIG.get(map_id) or street_race_config_for_map(map_id):
@@ -7189,6 +7227,9 @@ def validate_speed_anticheat_movement(
     if state_key is None:
         return requested_pos, None
 
+    vehicle_mode, vehicle_speed = speed_anticheat_vehicle_profile(
+        char, map_id, reported_speed
+    )
     now = time.monotonic() if now is None else float(now)
     with SPEED_ANTICHEAT_MOVEMENT_LOCK:
         state = SPEED_ANTICHEAT_MOVEMENT.get(state_key)
@@ -7207,8 +7248,13 @@ def validate_speed_anticheat_movement(
                 "speed": 500,
                 "speed_checked_at": now - 1.0,
                 "samples": [],
+                "vehicle_mode": vehicle_mode,
             }
             SPEED_ANTICHEAT_MOVEMENT[state_key] = state
+        elif state.get("vehicle_mode", "walk") != vehicle_mode:
+            state["vehicle_mode"] = vehicle_mode
+            state["speed_checked_at"] = now - 1.0
+            state.setdefault("samples", []).clear()
 
         elapsed = max(0.0, now - float(state["at"]))
         previous_client_pos = state.get("client_position", current_pos)
@@ -7226,6 +7272,7 @@ def validate_speed_anticheat_movement(
         allowance_elapsed = min(elapsed, 1.0)
         if now - float(state.get("speed_checked_at", 0.0)) >= 1.0:
             state["speed"] = max(100, int(get_character_stats(char).get("mov", 500)))
+            state["speed"] = max(state["speed"], vehicle_speed)
             state["speed_checked_at"] = now
         speed = max(100, int(state.get("speed", 500)))
         expected_distance = speed * allowance_elapsed
@@ -29589,7 +29636,8 @@ def client_handler(conn, addr):
                         new_pos = update_exp_authoritative_position(picked_char, move_stage_state, new_pos)
                     else:
                         new_pos, speed_evidence = validate_speed_anticheat_movement(
-                            picked_char, move_map, new_pos, connection_id=id(conn)
+                            picked_char, move_map, new_pos, connection_id=id(conn),
+                            reported_speed=get_val_int(body, 3, -1)
                         )
                         if speed_evidence:
                             if speed_owner_account_id is None:
@@ -38754,4 +38802,11 @@ def start_server():
             print(f"[!] Accept error: {e}")
 
 if __name__ == "__main__":
-    start_server()
+    if sys.argv[1:] == ["--reset-speed-anticheat"]:
+        cleared_count = reset_speed_anticheat_state()
+        print(f"Cleared {cleared_count} speed anti-cheat account records.")
+    elif sys.argv[1:]:
+        print("Usage: python 9555.py [--reset-speed-anticheat]", file=sys.stderr)
+        raise SystemExit(2)
+    else:
+        start_server()
