@@ -131,8 +131,9 @@ WORLD_MAP_NPC_REWARD_MAP_IDS = frozenset((
     GOTHAM_MAP_ID, VILLA_AREA_MAP_ID, CARGO_PORT_MAP_ID, CHINATOWN_MAP_ID,
     UPTOWN_MAP_ID, PRIVATE_ISLAND_MAP_ID, SAN_ANDREAS_MAP_ID))
 WORLD_MAP_NPC_RESPAWN_MAP_IDS = frozenset((
-    GOTHAM_MAP_ID, VILLA_AREA_MAP_ID, CHINATOWN_MAP_ID, UPTOWN_MAP_ID,
-    PRIVATE_ISLAND_MAP_ID, SAN_ANDREAS_MAP_ID, SONA_MAP_ID, FOX_RIVER_MAP_ID))
+    SLUM_DISTRICT_MAP_ID, VEGAS_MAP_ID, GOTHAM_MAP_ID, VILLA_AREA_MAP_ID,
+    CARGO_PORT_MAP_ID, CHINATOWN_MAP_ID, UPTOWN_MAP_ID, PRIVATE_ISLAND_MAP_ID,
+    SAN_ANDREAS_MAP_ID, SONA_MAP_ID, FOX_RIVER_MAP_ID))
 WAREHOUSE_SNEAK_BOSS_NPC_ID = "13101"
 WAREHOUSE_SNEAK_BOSS_EXP_REWARD_SCALE = 0.05
 GOTHAM_BOSS_DEFAULT_RESPAWN_SECONDS = 4 * 60 * 60
@@ -13731,14 +13732,28 @@ def gotham_npc_visible_connections(slot_key, inst_id):
     return visible
 
 
-def _gotham_npc_skills(npc_cfg, attack_distance):
+def _gotham_npc_skills(npc_cfg, attack_distance, include_model_radii=False):
     skills = []
+    npc_radius = (
+        CHARACTER_MODEL_RADIUS_CONFIG.get(
+            str(npc_cfg.get("model") or ""), 0) / 100.0
+        if include_model_radii else 0.0)
     for skill_id in re.split(r"[;,]", str(npc_cfg.get("skill_group") or "")):
         skill_id = skill_id.strip()
         if not skill_id or skill_id not in SKILL_CONFIG:
             continue
-        skill_range, _area, _param1, _param2 = _guild_boss_skill_range(
-            skill_id, attack_distance)
+        if include_model_radii:
+            trace_distance = max(
+                0, int(SKILL_CONFIG[skill_id].get("trace_distance_cm", 0) or 0)
+            ) / 100.0
+            # Match the client's CheckSkillDistance without changing boss AI.
+            skill_range = max(
+                attack_distance,
+                trace_distance + npc_radius
+                + SURVIVAL_PLAYER_MODEL_RADIUS_CM / 100.0)
+        else:
+            skill_range, _area, _param1, _param2 = _guild_boss_skill_range(
+                skill_id, attack_distance)
         skills.append((skill_id, skill_range))
     return skills
 
@@ -13858,9 +13873,11 @@ def _gotham_npc_ai_tick():
             ai_cfg = AI_DATA_CONFIG.get(str(npc_cfg.get("ai_data_id") or ""))
             if not ai_cfg:
                 continue
-            skills = _gotham_npc_skills(npc_cfg, max(
-                0.5, (int(ai_cfg.get("around_min_distance", 100) or 100)
-                      + int(ai_cfg.get("around_max_distance", 200) or 200)) / 200.0))
+            skills = _gotham_npc_skills(
+                npc_cfg,
+                max(0.5, (int(ai_cfg.get("around_min_distance", 100) or 100)
+                          + int(ai_cfg.get("around_max_distance", 200) or 200)) / 200.0),
+                include_model_radii=not snapshot.get("is_boss"))
             if not skills:
                 continue
             search_cm = max(0, int(npc_cfg.get("search_radius", 0) or 0))
