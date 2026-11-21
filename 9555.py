@@ -104,6 +104,34 @@ SPEED_ANTICHEAT_PATH = persistent_state_path("speed_anticheat.json")
 SPEED_ANTICHEAT_LOCK = threading.RLock()
 SPEED_ANTICHEAT_MOVEMENT_LOCK = threading.RLock()
 SPEED_ANTICHEAT_MOVEMENT = {}
+# Movement anti-cheat tuning. Distances in cm, times in seconds, measured on
+# the server clock. See validate_speed_anticheat_movement().
+# Sustained speed allowed above the server-computed MOV (jitter, rounding).
+MOVE_AC_TOLERANCE = 1.10
+# How many seconds of travel the authoritative position may "bank" while the
+# player stands still or walks slower than MOV.
+MOVE_AC_REFILL_CAP_S = 1.0
+# One-off burst on top of the bank for jitter and the dodge skills
+# (SkillData 104/204/304: up to 5 m). Dash skills with a longer displacement
+# get an explicit credit from skill_use; see grant_speed_anticheat_skill_move.
+MOVE_AC_BURST_CM = 500
+# A skill credit stays valid for MoveTime plus this network slack.
+MOVE_AC_SKILL_CREDIT_SLACK_S = 1.5
+# Window used to explain the client's *claimed* path. The client drops the
+# socket after ~12 s without a heartbeat reply, so 30 s covers every TCP
+# stall that can still flush queued move packets on the same connection.
+MOVE_AC_EVIDENCE_WINDOW_S = 30.0
+# Unexplained distance forgiven per second, and the amount that becomes
+# evidence. A 1.5x speed hack reaches the limit in ~20 s, 3x in ~3 s.
+MOVE_AC_SCORE_DECAY_CM_S = 25.0
+MOVE_AC_SCORE_LIMIT_CM = 3000
+# Characters follow the NavMesh, so height only changes with travel. Allow
+# slopes up to ~56 degrees plus a small time-scaled step.
+MOVE_AC_CLIMB_SLOPE = 1.5
+MOVE_AC_CLIMB_SLACK_CM = 200
+# EXP/equipment stages keep their existing 3x allowance, as a time budget.
+EXP_MOVE_RATE_CM_S = 500.0 * 3.0
+EXP_MOVE_CAP_S = 1.5
 RESOURCE_ROOT = os.path.join(SCRIPT_DIR, "assets")
 RESOURCE_DATA_VERSION = 205
 
@@ -983,6 +1011,10 @@ try:
                         ],
                         'cooldown_ms': int(parts[10]) if len(parts) > 10 and parts[10].isdigit() else 0,
                         'trace_distance_cm': int(parts[12]) if len(parts) > 12 and parts[12].isdigit() else 0,
+                        # SkillMotion displacement (used by the movement anti-cheat).
+                        'auto_move': int(parts[20]) if len(parts) > 20 and parts[20].isdigit() else 0,
+                        'move_time_ms': int(parts[21]) if len(parts) > 21 and parts[21].isdigit() else 0,
+                        'move_distance_cm': int(parts[22]) if len(parts) > 22 and parts[22].isdigit() else 0,
                         'priority': int(parts[30]) if len(parts) > 30 and parts[30].isdigit() else 0,
                         # Equip inheritance groups weapon skills by SkillData.TeamID;
                         # matching skill IDs alone rejects valid client selections.
@@ -5449,6 +5481,7 @@ def update_exp_authoritative_position(char, state, requested_pos):
     char_id = int(char.get('id', 0))
     positions = state.setdefault('player_auth_pos', {})
     timestamps = state.setdefault('player_auth_move_at', {})
+    budgets = state.setdefault('player_auth_budget', {})
     current = positions.get(char_id)
     if not isinstance(current, (list, tuple)) or len(current) < 4:
         current = list(char.get('pos', requested_pos))
@@ -5456,25 +5489,33 @@ def update_exp_authoritative_position(char, state, requested_pos):
             current = list(current) + [0] * (4 - len(current))
         positions[char_id] = current
         timestamps[char_id] = time.monotonic()
+        budgets[char_id] = float(MOVE_AC_BURST_CM)
 
     now = time.monotonic()
-    elapsed = max(0.02, min(now - float(timestamps.get(char_id, now)), 1.5))
+    elapsed = max(0.0, now - float(timestamps.get(char_id, now)))
     # The APK receives movement speed 500 (5 m/s). Allow 3x for dashes,
     # uneven packet timing, and motion interpolation while still limiting jumps.
-    max_step_cm = max(75.0, 500.0 * elapsed * 3.0)
+    # This is a time budget refilled from the server clock: the old per-packet
+    # 75 cm minimum let a client flood move packets for unlimited speed.
+    cap = EXP_MOVE_RATE_CM_S * EXP_MOVE_CAP_S
+    budget = min(cap, float(budgets.get(char_id, MOVE_AC_BURST_CM))
+                 + EXP_MOVE_RATE_CM_S * elapsed)
     dx = float(requested_pos[0]) - float(current[0])
     dz = float(requested_pos[2]) - float(current[2])
     distance = math.hypot(dx, dz)
-    if distance > max_step_cm and distance > 0:
-        scale = max_step_cm / distance
+    if distance > budget and distance > 0:
+        scale = budget / distance
         x = int(round(float(current[0]) + dx * scale))
         z = int(round(float(current[2]) + dz * scale))
+        budget = 0.0
     else:
         x = int(requested_pos[0])
         z = int(requested_pos[2])
+        budget -= distance
     tracked = [x, int(requested_pos[1]), z, int(requested_pos[3])]
     positions[char_id] = tracked
     timestamps[char_id] = now
+    budgets[char_id] = budget
     return tracked
 
 def validate_exp_skill_hit(char, state, target_id, skill_id, requested_effinfo_id,
@@ -7169,6 +7210,25 @@ def _speed_anticheat_movement_key(char, connection_id):
     return (connection_id, char_id) if char_id > 0 else None
 
 
+def _new_speed_anticheat_state(map_id, position, now, vehicle_mode="walk"):
+    """Fresh movement state after login, map change, server teleport or reset."""
+    position = list(position)
+    return {
+        "map_id": str(map_id or ''),
+        "position": position,
+        "client_position": list(position),
+        "at": now - 0.2,
+        "speed": 500,
+        "speed_checked_at": now - 1.0,
+        "vehicle_mode": vehicle_mode,
+        # Token buckets (cm). Start with one skill burst, not a full bank,
+        # so reconnecting or re-entering a map is not a free teleport.
+        "budget": float(MOVE_AC_BURST_CM),
+        "client_budget": float(MOVE_AC_BURST_CM),
+        "score": 0.0,
+    }
+
+
 def reset_speed_anticheat_movement(char, connection_id=None, now=None):
     if not isinstance(char, dict):
         return
@@ -7186,16 +7246,9 @@ def reset_speed_anticheat_movement(char, connection_id=None, now=None):
         return
     stamp = time.monotonic() if now is None else float(now)
     with SPEED_ANTICHEAT_MOVEMENT_LOCK:
-        SPEED_ANTICHEAT_MOVEMENT[state_key] = {
-            "map_id": str(char.get('map_id', '') or ''),
-            "position": position,
-            "client_position": list(position),
-            "client_sample_at": stamp,
-            "at": stamp,
-            "speed": 500,
-            "speed_checked_at": stamp - 1.0,
-            "samples": [],
-        }
+        SPEED_ANTICHEAT_MOVEMENT[state_key] = _new_speed_anticheat_state(
+            char.get('map_id', ''), position, stamp
+        )
 
 
 def clear_speed_anticheat_movement(char, connection_id=None):
@@ -7207,6 +7260,14 @@ def clear_speed_anticheat_movement(char, connection_id=None):
 
 
 def speed_anticheat_vehicle_profile(char, map_id, reported_speed):
+    """Return (mode, extra speed floor in cm/s) for the movement validator.
+
+    Big-world mounts move with the NavMeshAgent at CurSpeed, which is the MOV
+    this server sends in TAG 510 (get_mount_driving_speed adds the MountData
+    2011 bonus). MountData.MaxSpeed is only used by physics cars (street race,
+    tutorial car), so it must not widen the big-world allowance: doing so let
+    a mounted player move 3-4x faster than their real mounted speed.
+    """
     map_id = str(map_id or '')
     try:
         map_type = int(MAP_CONFIG.get(map_id, {}).get('type', -1))
@@ -7215,13 +7276,15 @@ def speed_anticheat_vehicle_profile(char, map_id, reported_speed):
 
     if map_type == 1 and char.get('mount_riding'):
         mount_id, _, _ = get_equipped_mount(char)
-        mount_cfg = MOUNT_CONFIG.get(mount_id, {})
-        max_speed = float(mount_cfg.get('max_speed', 0) or 0)
-        if mount_id and int(mount_cfg.get('need_show', 0)) == 1 and max_speed > 0:
-            return f'mount:{mount_id}', int(round(max_speed * 100))
+        if mount_id:
+            # Speed comes from get_character_stats()["mov"], which already
+            # includes the mount bonus. The mode only resets state on change.
+            return f'mount:{mount_id}', 0
 
     # TutorialCar sends its car position through move.parm=0; walking sends
-    # the character's nonzero movement speed. Bound that signal to its car data.
+    # the character's nonzero movement speed. NOTE: parm is client-controlled,
+    # so a forged parm=0 unlocks this profile on foot. Gate it on server state
+    # (tutorial car step active) once the server tracks that step.
     if map_type == 10 and reported_speed == 0:
         max_speed = float(MOUNT_CONFIG.get('Chevrolet', {}).get('max_speed', 0) or 0)
         if max_speed > 0:
@@ -7229,9 +7292,78 @@ def speed_anticheat_vehicle_profile(char, map_id, reported_speed):
     return 'walk', 0
 
 
+def grant_speed_anticheat_skill_move(char, skill_id, connection_id=None, now=None):
+    """Credit movement for a validated skill_use that displaces the caster.
+
+    SkillMotion.ResetSkillMove moves the caster MoveDistance over MoveTime, or
+    toward the target (up to the cast range) for AutoMoveFlag skills. The
+    credit is granted at most once per cooldown and expires shortly after the
+    motion ends, so spamming skill_use cannot be turned into a speed hack.
+    """
+    cfg = SKILL_CONFIG.get(str(skill_id or ''), {})
+    try:
+        distance = int(cfg.get('move_distance_cm', 0) or 0)
+        if int(cfg.get('auto_move', 0) or 0):
+            distance = max(distance, int(cfg.get('trace_distance_cm', 0) or 0))
+        cooldown_s = max(0.5, int(cfg.get('cooldown_ms', 0) or 0) / 1000.0)
+        move_s = max(0.0, int(cfg.get('move_time_ms', 0) or 0) / 1000.0)
+    except (TypeError, ValueError):
+        return
+    if distance <= 0:
+        return
+    state_key = _speed_anticheat_movement_key(char, connection_id)
+    if state_key is None:
+        return
+    now = time.monotonic() if now is None else float(now)
+    credit = float(distance + 100)
+    with SPEED_ANTICHEAT_MOVEMENT_LOCK:
+        state = SPEED_ANTICHEAT_MOVEMENT.get(state_key)
+        if state is None:
+            return
+        granted_at = state.setdefault("skill_credit_at", {})
+        if now - float(granted_at.get(str(skill_id), -1e9)) < cooldown_s * 0.8:
+            return
+        granted_at[str(skill_id)] = now
+        until = now + move_s + MOVE_AC_SKILL_CREDIT_SLACK_S
+        for key in ("skill_credit", "client_skill_credit"):
+            active = (float(state.get(key, 0.0))
+                      if now <= float(state.get(key + "_until", 0.0)) else 0.0)
+            state[key] = active + credit
+            state[key + "_until"] = until
+
+
+def _spend_speed_anticheat_credit(state, key, now, wanted):
+    """Spend up to ``wanted`` cm of an unexpired skill credit; return the amount."""
+    if now > float(state.get(key + "_until", 0.0)):
+        state[key] = 0.0
+        return 0.0
+    used = min(max(0.0, float(state.get(key, 0.0))), wanted)
+    state[key] = float(state.get(key, 0.0)) - used
+    return used
+
+
 def validate_speed_anticheat_movement(
         char, map_id, requested_pos, connection_id=None, now=None,
         reported_speed=None):
+    """Bound a client move packet and collect speed-hack evidence.
+
+    Returns (accepted_pos, violation_or_None). Two token buckets are refilled
+    from the server clock only, so packet timing can never buy extra distance:
+
+    * ``budget`` limits the position the server stores and broadcasts. It
+      banks at most MOVE_AC_REFILL_CAP_S seconds of travel plus one skill
+      burst: dashes, dodges and network jitter pass, but the long-run average
+      can never exceed MOV * MOVE_AC_TOLERANCE, whatever the packet rate.
+    * ``client_budget`` replays the path the client *claims* over a longer
+      window (covers TCP stalls). Distance it cannot explain is added to a
+      suspicion score that decays slowly; pauses and "normal" packets do not
+      wipe it. Evidence is returned once the score reaches
+      MOVE_AC_SCORE_LIMIT_CM.
+
+    Validated dash skills add a short-lived credit to both buckets
+    (grant_speed_anticheat_skill_move). Height (pos[1]) is bounded to
+    terrain-following changes.
+    """
     requested_pos = list(requested_pos)
     map_id = str(map_id or '')
     if not MAP_CONFIG.get(map_id) or street_race_config_for_map(map_id):
@@ -7243,6 +7375,10 @@ def validate_speed_anticheat_movement(
         return requested_pos, None
     if char_id <= 0 or len(current_pos) < 3 or len(requested_pos) < 3:
         return requested_pos, None
+    try:
+        requested_pos = [int(value) for value in requested_pos[:4]]
+    except (TypeError, ValueError):
+        return list(current_pos), None
     if len(current_pos) == 3:
         current_pos.append(0)
     if len(requested_pos) == 3:
@@ -7263,93 +7399,89 @@ def validate_speed_anticheat_movement(
                 for axis in range(3)
             )) > 75
         )
-        if state is None or state.get("map_id") != map_id or position_changed:
-            state = {
-                "map_id": map_id,
-                "position": current_pos,
-                "client_position": list(current_pos),
-                "client_sample_at": now - 0.2,
-                "at": now - 0.2,
-                "speed": 500,
-                "speed_checked_at": now - 1.0,
-                "samples": [],
-                "vehicle_mode": vehicle_mode,
-            }
+        if (state is None or state.get("map_id") != map_id or position_changed
+                or "budget" not in state):
+            # Login, map change or a server-side teleport moved the player.
+            state = _new_speed_anticheat_state(map_id, current_pos, now, vehicle_mode)
             SPEED_ANTICHEAT_MOVEMENT[state_key] = state
         elif state.get("vehicle_mode", "walk") != vehicle_mode:
+            # Mount/dismount changes MOV; refresh it now. Budgets carry over and
+            # are re-capped below, so dismounting cannot keep mount speed.
             state["vehicle_mode"] = vehicle_mode
-            state["client_position"] = list(current_pos)
-            state["client_sample_at"] = now
             state["speed_checked_at"] = now - 1.0
-            state.setdefault("samples", []).clear()
 
-        elapsed = max(0.0, now - float(state["at"]))
-        sample_at = float(state.get("client_sample_at", state["at"]))
-        sample_elapsed = max(0.0, now - sample_at)
-        previous_client_pos = state.get("client_position", current_pos)
-        client_dx = float(requested_pos[0]) - float(previous_client_pos[0])
-        client_dz = float(requested_pos[2]) - float(previous_client_pos[2])
-        client_distance = math.hypot(client_dx, client_dz)
         if now - float(state.get("speed_checked_at", 0.0)) >= 1.0:
             state["speed"] = max(100, int(get_character_stats(char).get("mov", 500)))
             state["speed"] = max(state["speed"], vehicle_speed)
             state["speed_checked_at"] = now
         speed = max(100, int(state.get("speed", 500)))
+        rate = speed * MOVE_AC_TOLERANCE
+        elapsed = max(0.0, now - float(state["at"]))
+        state["at"] = now
 
-        samples = state.setdefault("samples", [])
-        if sample_elapsed > 1.0:
-            # A long movement-report gap is treated as lag, not accumulated
-            # evidence; start a fresh measurement window at the latest point.
-            samples.clear()
-            state["client_position"] = list(requested_pos)
-            state["client_sample_at"] = now
-            sample_elapsed = 0.0
-            client_distance = 0.0
-
-        violation = None
-        if sample_elapsed >= 0.08:
-            evidence_distance = speed * sample_elapsed
-            excessive = client_distance > max(
-                evidence_distance * 1.75, evidence_distance + 25
-            )
-            samples.append((
-                now, excessive, client_distance / max(evidence_distance, 1.0)
-            ))
-            del samples[:-16]
-            state["client_position"] = list(requested_pos)
-            state["client_sample_at"] = now
-            excessive_count = sum(1 for sample in samples if sample[1])
-            window_seconds = now - samples[0][0]
-            if (len(samples) >= 8 and window_seconds >= 1.0
-                    and excessive_count * 8 >= len(samples) * 7):
-                violation = {
-                    "samples": len(samples),
-                    "excessive_samples": excessive_count,
-                    "window_seconds": round(window_seconds, 2),
-                    "max_speed_multiple": round(max(sample[2] for sample in samples), 2),
-                    "server_speed_cm_s": speed,
-                }
-
-        if elapsed < 0.08:
-            state["at"] = now
-            accepted_pos = list(current_pos)
-            accepted_pos[3] = requested_pos[3]
-            return accepted_pos, violation
-
-        allowance_elapsed = min(elapsed, 1.0)
-        expected_distance = speed * allowance_elapsed
+        # 1) Authoritative position --------------------------------------
+        cap = rate * MOVE_AC_REFILL_CAP_S + MOVE_AC_BURST_CM
+        budget = min(cap, float(state["budget"]) + rate * elapsed)
         dx = float(requested_pos[0]) - float(current_pos[0])
         dz = float(requested_pos[2]) - float(current_pos[2])
         distance = math.hypot(dx, dz)
-
-        max_distance = expected_distance + max(5, expected_distance * 0.1)
         accepted_pos = list(requested_pos)
-        if distance > max_distance:
-            scale = max_distance / distance
-            accepted_pos[0] = round(float(current_pos[0]) + dx * scale)
-            accepted_pos[2] = round(float(current_pos[2]) + dz * scale)
+        credit = _spend_speed_anticheat_credit(
+            state, "skill_credit", now, max(0.0, distance - budget))
+        available = budget + credit
+        moved = distance
+        if distance > available:
+            scale = available / distance
+            accepted_pos[0] = int(round(float(current_pos[0]) + dx * scale))
+            accepted_pos[2] = int(round(float(current_pos[2]) + dz * scale))
+            moved = available
+        state["budget"] = max(0.0, budget - (moved - credit))
+
+        step_slack = min(float(MOVE_AC_CLIMB_SLACK_CM), rate * elapsed)
+        max_dy = moved * MOVE_AC_CLIMB_SLOPE + step_slack
+        dy = float(requested_pos[1]) - float(current_pos[1])
+        if abs(dy) > max_dy:
+            accepted_pos[1] = int(round(float(current_pos[1]) + math.copysign(max_dy, dy)))
         state["position"] = list(accepted_pos)
-        state["at"] = now
+
+        # 2) Evidence from the client's claimed path ----------------------
+        previous_client = state.get("client_position", current_pos)
+        claimed = math.hypot(
+            float(requested_pos[0]) - float(previous_client[0]),
+            float(requested_pos[2]) - float(previous_client[2]),
+        )
+        claimed_dy = abs(float(requested_pos[1]) - float(previous_client[1]))
+        state["client_position"] = list(requested_pos)
+        client_cap = rate * MOVE_AC_EVIDENCE_WINDOW_S + MOVE_AC_BURST_CM
+        client_budget = min(client_cap, float(state["client_budget"]) + rate * elapsed)
+        client_budget += _spend_speed_anticheat_credit(
+            state, "client_skill_credit", now, max(0.0, claimed - client_budget))
+        unexplained = max(0.0, claimed - client_budget)
+        state["client_budget"] = max(0.0, min(client_cap, client_budget - claimed))
+        # Height claims are judged leniently here (full step slack per packet);
+        # the authoritative clamp above already uses the time-scaled slack.
+        unexplained += max(
+            0.0, claimed_dy - (claimed * MOVE_AC_CLIMB_SLOPE + MOVE_AC_CLIMB_SLACK_CM)
+        )
+        score = max(0.0, float(state.get("score", 0.0)) - MOVE_AC_SCORE_DECAY_CM_S * elapsed)
+        score += unexplained
+        state["score"] = score
+
+        violation = None
+        if score >= MOVE_AC_SCORE_LIMIT_CM:
+            violation = {
+                "unexplained_cm": int(score),
+                "score_limit_cm": MOVE_AC_SCORE_LIMIT_CM,
+                "server_speed_cm_s": speed,
+                "vehicle_mode": vehicle_mode,
+                "last_claimed_cm": int(claimed),
+                "last_elapsed_s": round(elapsed, 3),
+                "client_server_gap_cm": int(math.hypot(
+                    float(requested_pos[0]) - float(accepted_pos[0]),
+                    float(requested_pos[2]) - float(accepted_pos[2]),
+                )),
+            }
+            state["score"] = 0.0
         return accepted_pos, violation
 
 
@@ -30238,6 +30370,9 @@ def client_handler(conn, addr):
                         else:
                             record_pvp_skill_cast(
                                 picked_char, sid, get_val_int(body, 4, 0)
+                            )
+                            grant_speed_anticheat_skill_move(
+                                picked_char, sid, connection_id=id(conn)
                             )
                             # Do not echo Tag 508 back to the casting player.
                             # The casting player executes skill effects locally on client.
