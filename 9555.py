@@ -1,6 +1,5 @@
 import socket, struct, copy, threading, random, json, os, time, traceback, math, re, uuid, shutil
 import datetime
-import sys
 import base64
 import io
 import urllib.error
@@ -186,19 +185,6 @@ def _save_speed_anticheat_state():
 
 
 SPEED_ANTICHEAT_STATE = _load_speed_anticheat_state()
-
-
-def reset_speed_anticheat_state():
-    with SPEED_ANTICHEAT_LOCK:
-        previous_accounts = SPEED_ANTICHEAT_STATE["accounts"]
-        cleared_count = len(previous_accounts)
-        SPEED_ANTICHEAT_STATE["accounts"] = {}
-        try:
-            _save_speed_anticheat_state()
-        except OSError:
-            SPEED_ANTICHEAT_STATE["accounts"] = previous_accounts
-            raise
-    return cleared_count
 
 
 def _speed_anticheat_account_key(_area_id, account_id):
@@ -6233,6 +6219,21 @@ def is_near_map_teleport_position(map_id, position):
     except (TypeError, ValueError, IndexError, OverflowError):
         return False
     dx, dz = x - teleport_pos[0], z - teleport_pos[2]
+    return dx * dx + dz * dz <= 500 * 500
+
+
+def is_near_map_portal_position(source_map, target_map, position):
+    """Check the directed MapConnectInfoData portal in source-map coordinates."""
+    portal = MAP_CONNECT_DATA.get((str(source_map), str(target_map)))
+    if portal is None:
+        return False
+    try:
+        x, z = int(position[0]), int(position[2])
+        portal_x = int(round(float(portal[0]) * 100))
+        portal_z = int(round(float(portal[2]) * 100))
+    except (TypeError, ValueError, IndexError, OverflowError):
+        return False
+    dx, dz = x - portal_x, z - portal_z
     return dx * dx + dz * dz <= 500 * 500
 
 
@@ -29549,6 +29550,12 @@ def client_handler(conn, addr):
                     and source_type == 1
                     and is_near_map_teleport_position(source_map, picked_char.get('pos'))
                 )
+                at_map_portal = bool(
+                    picked_char
+                    and source_type == 1
+                    and is_near_map_portal_position(
+                        source_map, target_map, picked_char.get('pos'))
+                )
                 valid_transition = bool(
                     picked_char
                     and is_current_character_connection(conn, picked_char)
@@ -29557,13 +29564,14 @@ def client_handler(conn, addr):
                     and (target_type == 1 or single_mitropolis_entry)
                     and target_birth is not None
                     and player_level >= target_open_level
-                    and (tutorial_return or at_city_teleport)
+                    and (tutorial_return or at_city_teleport or at_map_portal)
                 )
                 if valid_transition:
                     start_map_transition(conn, picked_char, target_map, send_rpc_push)
                 else:
                     print(f"[MAP TRANSITION] rejected player={picked_char.get('id') if picked_char else 0} "
-                          f"from={source_map} to={target_map} at_teleport={at_city_teleport}")
+                          f"from={source_map} to={target_map} "
+                          f"at_teleport={at_city_teleport} at_portal={at_map_portal}")
                 if session is not None:
                     send_rpc_response(session)
 
@@ -38802,11 +38810,4 @@ def start_server():
             print(f"[!] Accept error: {e}")
 
 if __name__ == "__main__":
-    if sys.argv[1:] == ["--reset-speed-anticheat"]:
-        cleared_count = reset_speed_anticheat_state()
-        print(f"Cleared {cleared_count} speed anti-cheat account records.")
-    elif sys.argv[1:]:
-        print("Usage: python 9555.py [--reset-speed-anticheat]", file=sys.stderr)
-        raise SystemExit(2)
-    else:
-        start_server()
+    start_server()
