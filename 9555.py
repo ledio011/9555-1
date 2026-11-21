@@ -5938,11 +5938,14 @@ def map_relife_type(map_id):
 def relife_offer_type(map_id):
     mid = str(map_id)
     return 0 if (mid in SURVIVE_BATTLE_NPC_MAP_IDS
-                 or map_relife_type(mid) == 2) else 1
+                 or map_relife_type(mid) == 2
+                 or configured_map_relife_position(mid) is None) else 1
 
 def supports_normal_relife(map_id):
     """Allow ordinary revives on configured maps and boss activity maps."""
     mid = str(map_id)
+    if mid == str(RANK_PVP_MAP_ID) or is_tower_map(mid):
+        return False
     if (mid in SURVIVE_BATTLE_NPC_MAP_IDS
             or _guild_boss_map_id(mid) or _wild_boss_map_id(mid)):
         # These activity maps use RelifeType 0 despite defining revive positions.
@@ -5984,25 +5987,36 @@ def map_config_position_list(map_id, field_name):
 
 def map_config_teleport_position(map_id):
     """Return MapInfoData.TelePortPos, whose client parser uses x/y/z triples."""
+    positions = map_config_teleport_positions(map_id)
+    return positions[0] if positions else None
+
+
+def map_config_teleport_positions(map_id):
+    """Return all configured MapInfoData.TelePortPos x/y/z triples."""
     raw = str(MAP_CONFIG.get(str(map_id), {}).get('teleport_pos') or '')
     try:
         values = [int(value) for value in raw.split('#') if value != '']
     except (TypeError, ValueError, OverflowError):
-        return None
-    return values[:3] if len(values) >= 3 else None
+        return []
+    return [
+        values[index:index + 3]
+        for index in range(0, len(values) - 2, 3)
+    ]
 
 
 def is_near_map_teleport_position(map_id, position):
     """Allow for a delayed movement snapshot after the client's 3-unit trigger."""
-    teleport_pos = map_config_teleport_position(map_id)
-    if teleport_pos is None:
+    teleport_positions = map_config_teleport_positions(map_id)
+    if not teleport_positions:
         return False
     try:
         x, z = int(position[0]), int(position[2])
     except (TypeError, ValueError, IndexError, OverflowError):
         return False
-    dx, dz = x - teleport_pos[0], z - teleport_pos[2]
-    return dx * dx + dz * dz <= 500 * 500
+    return any(
+        (x - teleport_pos[0]) ** 2 + (z - teleport_pos[2]) ** 2 <= 500 * 500
+        for teleport_pos in teleport_positions
+    )
 
 
 def configured_map_birth_position(map_id):
@@ -17059,7 +17073,6 @@ def survive_battle_pvp_kill(killer, victim):
         killer_state['score'] = killer_score + 100
         victim_state['score'] = victim_score // 2
 
-    save_chars(all_accounts_chars)
     killer_payload = survive_battle_top_payload(killer)
     killer_id = int(killer.get('id', 0) or 0)
     victim_id = int(victim.get('id', 0) or 0)
@@ -17086,11 +17099,11 @@ def survive_battle_pvp_kill(killer, victim):
             victim['pos'] = list(
                 configured_map_birth_position(str(config.get('map_id', '')))
                 or default_map_spawn_position(str(config.get('map_id', ''))))
-            save_chars(all_accounts_chars)
 
     victim_payload = survive_battle_top_payload(victim)
     if victim_payload is not None:
         send_push_to_char(victim_id, 636, victim_payload)
+    schedule_character_db_save()
     return force_return
 
 
@@ -19536,7 +19549,7 @@ def _domin_capture_enemy_roster(character):
         capture_mission_state = int(capture_mission.get("state", 0))
     except (AttributeError, TypeError, ValueError):
         capture_mission_state = 0
-    ash_viper_story_active = capture_mission_state in (1, 2)
+    ash_viper_story_active = capture_mission_state == 1
     for district in _domin_capture_open_districts():
         domin_id = str(district["id"])
         if domin_id == "1" and ash_viper_story_active:
@@ -22035,7 +22048,7 @@ def record_pvp_kill_streak(killer, victim):
         killer["pvp_kill_streak_map"] = map_id if pvp_map else ""
         victim["pvp_kill_streak"] = 0
         victim["pvp_kill_streak_map"] = ""
-        save_chars(all_accounts_chars)
+    schedule_character_db_save()
 
     if not pvp_map:
         print(f"[PVP STREAK] skip killer={killer.get('id')} map={map_id} "
@@ -29068,9 +29081,9 @@ def client_handler(conn, addr):
                     source_type = target_type = -1
                     target_open_level = player_level = player_hp = 0
                 tutorial_return = source_map == '11' and target_map == '101'
-                at_city_teleport = bool(
+                at_map_teleport = bool(
                     picked_char
-                    and source_type == 1
+                    and (source_type == 1 or source_map == '11')
                     and is_near_map_teleport_position(source_map, picked_char.get('pos'))
                 )
                 valid_transition = bool(
@@ -29078,10 +29091,10 @@ def client_handler(conn, addr):
                     and is_current_character_connection(conn, picked_char)
                     and player_hp > 0
                     and target_map != source_map
-                    and target_type == 1
+                    and (target_type == 1 or target_map == '11')
                     and target_birth is not None
                     and player_level >= target_open_level
-                    and (tutorial_return or at_city_teleport)
+                    and (tutorial_return or at_map_teleport)
                 )
                 if valid_transition:
                     start_map_transition(conn, picked_char, target_map, send_rpc_push)
@@ -32091,7 +32104,7 @@ def client_handler(conn, addr):
                             # Check if victim died
                             if old_hp > 0 and new_hp == 0:
                                 print(f"[PvP] Player {target_id} killed by {picked_char['id']}")
-                                if current_map == '1501':
+                                if str(picked_char.get('map_id', '')) == '1501':
                                     _guild_battle_record_kill(
                                         picked_char, victim=target_char)
                                 record_pvp_kill_streak(picked_char, target_char)
@@ -32132,7 +32145,7 @@ def client_handler(conn, addr):
                                 if not survival_forced_return:
                                     # Persist lethal HP and any revive offer;
                                     # nonlethal HP uses the coalescer.
-                                    save_chars(all_accounts_chars)
+                                    schedule_character_db_save()
 
                         elif target_id == picked_char['id']:
                             if is_stage_combat:
