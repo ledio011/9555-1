@@ -12561,17 +12561,16 @@ def update_prison_npc_aoi(conn, map_id, picked_char):
     try:
         pos = picked_char.get("pos") or default_map_spawn_position(map_str)
         px, pz = int(pos[0]), int(pos[2])
-        # MapInfoData.radius is in world units; player and MonsterData
-        # positions use centi-units on the server.
-        radius_cm = max(
-            0, int(MAP_CONFIG.get(map_str, {}).get("radius", 0) or 0)) * 100
+        # MapInfoData and MonsterData both store centimeter coordinates. The
+        # client converts NPC positions to meters by dividing by 100.
+        radius_units = max(0, int(MAP_CONFIG.get(map_str, {}).get("radius", 0) or 0))
     except (TypeError, ValueError, IndexError):
         return
-    if radius_cm <= 0 and not survival_field:
+    if radius_units <= 0 and not survival_field:
         print(f"[PRISON AOI] missing configured visibility radius map={map_str}")
         return
 
-    radius_sq = radius_cm * radius_cm
+    radius_sq = radius_units * radius_units
     tracked = PRISON_NPC_AOI_TRACK.setdefault(id(conn), {})
     visible_slots = set()
     try:
@@ -13660,10 +13659,11 @@ def update_gotham_npc_aoi(conn, char):
         clear_gotham_npc_aoi(conn)
         return
     try:
-        # MapInfoData.radius is in world units; NPC positions use centi-units.
-        radius_cm = max(
-            0, int(MAP_CONFIG.get(map_id, {}).get("radius", 0) or 0)) * 100
-        if radius_cm <= 0:
+        # MapInfoData.radius and NPC positions are both stored in centi-units.
+        # The client converts positions to world units, but the AOI comparison
+        # is performed on raw server coordinates, so do not scale the radius.
+        radius_units = max(0, int(MAP_CONFIG.get(map_id, {}).get("radius", 0) or 0))
+        if radius_units <= 0:
             raise ValueError("MapInfoData radius is missing")
         player_pos = char.get("pos") or default_map_spawn_position(map_id)
         px, pz = int(player_pos[0]), int(player_pos[2])
@@ -13671,7 +13671,7 @@ def update_gotham_npc_aoi(conn, char):
         print(f"[GOTHAM AOI] invalid player/map visibility data char={char.get('id')}: {exc}")
         return
 
-    radius_sq = radius_cm * radius_cm
+    radius_sq = radius_units * radius_units
     tracked = GOTHAM_AOI_TRACK.setdefault(conn_key, {})
     visible_slots = set()
     for spec in gotham_shared_npc_specs(map_id):
