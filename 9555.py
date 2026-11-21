@@ -15162,7 +15162,7 @@ def item_use_hour(item_id):
 
 
 def expire_timed_inventory_items(picked_char, now=None):
-    """Set missing client expiry timestamps and remove expired items from all packs."""
+    """Remove only items with an explicit, elapsed client expiry timestamp."""
     now = int(time.time() if now is None else now)
     updates = []
     changed = False
@@ -15193,14 +15193,9 @@ def expire_timed_inventory_items(picked_char, now=None):
                     changed = True
                 retained.append(item)
                 continue
-            use_hour = item_use_hour(item_id)
-            if expires_at <= 0 and use_hour > 0:
-                parm[4] = now + use_hour * 3600
-                item['parm'] = parm
-                retained.append(item)
-                updates.append((container_type, item))
-                changed = True
-                continue
+            # Legacy inventory records may not have an acquisition timestamp.
+            # New timed items get one when granted; do not start a timer for
+            # older items during login or the periodic expiry sweep.
             if expires_at > 0 and expires_at <= now:
                 updates.append((container_type, None, int(item.get('index_id', 0))))
                 bucket_changed = True
@@ -15812,6 +15807,51 @@ def add_to_inventory(picked_char, item_id, amount, quality=None):
         records.append(new_item)
         remaining -= stack
     return True
+
+def create_inventory_overflow_mails(picked_char, rewards):
+    """Keep item rewards claimable when the matching client backpack is full."""
+    grouped_rewards = {}
+    for item_id, quality, amount in rewards:
+        item_id = str(item_id)
+        try:
+            quality = int(quality or 0)
+            amount = int(amount)
+        except (TypeError, ValueError):
+            continue
+        if item_id not in ITEM_CONFIG or amount <= 0:
+            continue
+        key = (item_id, quality)
+        grouped_rewards[key] = grouped_rewards.get(key, 0) + amount
+
+    mails = []
+    now = int(time.time())
+    for (item_id, quality), amount in grouped_rewards.items():
+        mail = {
+            "mailId": next_mail_id(),
+            "sendertype": 0,
+            "title": "Backpack Full",
+            "senderTime": now,
+            "receiveId": int(picked_char.get("id", 0) or 0),
+            "readTime": 0,
+            "context": (
+                "Your reward could not fit in your backpack. Claim the item "
+                "from this mail attachment."
+            ),
+            "mailState": 0,
+            "sortTime": now,
+            "items": [{
+                "itemId": item_id,
+                "count": amount,
+                "quality": quality,
+            }],
+            "expireday": 7,
+        }
+        picked_char.setdefault("mails", []).append(mail)
+        mails.append(mail)
+    if mails:
+        print(f"[BACKPACK] mailed overflow rewards player={picked_char.get('id')} "
+              f"mails={len(mails)}")
+    return mails
 
 def can_add_to_inventory(picked_char, item_id, amount, quality=None, extra_free_slots=0):
     """Check client backpack capacity without mutating its items or indices."""
@@ -20209,6 +20249,7 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None,
     currency_gains = {field: 0 for field in MONEY_FIELDS}
     inv_changed = False
     tvshow_item_ids = set()
+    overflow_rewards = []
 
     for entry in rewards_list:
         item_id = str(entry[0])
@@ -20225,10 +20266,14 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None,
             currency_gains[MONEY_FIELDS[currency_index]] += amount
         else:  # Inventory items / currency
             reward_quality = int(entry[1]) if len(entry) > 2 else None
-            add_to_inventory(picked_char, item_id, amount, quality=reward_quality)
+            if not add_to_inventory(picked_char, item_id, amount, quality=reward_quality):
+                if item_id in ITEM_CONFIG and amount > 0:
+                    overflow_rewards.append((item_id, reward_quality, amount))
             inv_changed = True
             if ITEM_CONFIG.get(item_id, {}).get('tvshow'):
                 tvshow_item_ids.add(item_id)
+
+    overflow_mails = create_inventory_overflow_mails(picked_char, overflow_rewards)
 
     if exp_gained > 0:
         normalize_player_level(picked_char)
@@ -20272,6 +20317,10 @@ def grant_item_rewards(picked_char, rewards_list, conn=None, send_rpc_push=None,
 
     saved = save_chars(all_accounts_chars) if save else False
 
+    if send_rpc_push and (saved or not save):
+        for mail in overflow_mails:
+            send_rpc_push(531, build_mail_update(mail))
+
     if saved and tvshow_item_ids:
         gotham_broadcast_tvshow_items(picked_char, tvshow_item_ids)
 
@@ -20286,7 +20335,7 @@ def give_mission_rewards(picked_char, mid):
     try:
         m = missions_data.get(mid)
         if not m:
-            return 0, 0, [], [], False
+            return 0, 0, [], [], False, []
 
         online_reward_rows = None
         if int(m.get('class', 0) or 0) == 7:
@@ -20296,18 +20345,18 @@ def give_mission_rewards(picked_char, mid):
                 online_id = str(int(parm[1]))
             except (IndexError, TypeError, ValueError):
                 print(f"[SCUFFLE MISSION REWARD MISSING] mission={mid} online_id unavailable")
-                return 0, 0, [], [], False
+                return 0, 0, [], [], False, []
             online_cfg = ONLINE_MISSION_CONFIG.get(online_id, {})
             show_reward_id = str(online_cfg.get('show_reward', '') or '').strip()
             if str(online_cfg.get('mission_id', '')) != str(mid) or not show_reward_id:
                 print(f"[SCUFFLE MISSION REWARD MISSING] mission={mid} online_id={online_id}")
-                return 0, 0, [], [], False
+                return 0, 0, [], [], False, []
             online_reward_rows = list(
                 SHOW_REWARD_EXPLICIT_COUNT_CONFIG.get(show_reward_id, []))
             if not online_reward_rows:
                 print(f"[SCUFFLE MISSION REWARD MISSING] mission={mid} "
                       f"online_id={online_id} ShowRewardID={show_reward_id}")
-                return 0, 0, [], [], False
+                return 0, 0, [], [], False, []
             unsupported_resources = [
                 item_id for item_id, _quality, _amount in online_reward_rows
                 if item_id in DIRECT_REWARD_RESOURCE_IDS
@@ -20316,7 +20365,7 @@ def give_mission_rewards(picked_char, mid):
             if unsupported_resources:
                 print(f"[SCUFFLE MISSION REWARD UNSUPPORTED] mission={mid} "
                       f"ShowRewardID={show_reward_id} items={unsupported_resources}")
-                return 0, 0, [], [], False
+                return 0, 0, [], [], False, []
             reward_items = [
                 (item_id, quality, amount)
                 for item_id, quality, amount in online_reward_rows
@@ -20333,13 +20382,13 @@ def give_mission_rewards(picked_char, mid):
             }
         else:
             if not m.get('reward_ids'):
-                return 0, 0, [], [], False
+                return 0, 0, [], [], False, []
             prof = picked_char.get('prof', 0)
             rids = m['reward_ids']
             rid = rids[prof] if prof < len(rids) else rids[0]
             reward = rewards_data.get(rid)
             if not reward:
-                return 0, 0, [], [], False
+                return 0, 0, [], [], False, []
 
         added_exp = reward.get('exp', 0)
         added_cash = reward.get('cash', 0)
@@ -20386,6 +20435,7 @@ def give_mission_rewards(picked_char, mid):
         items, amts = reward.get('items', []), reward.get('item_amounts', [])
         qualities = reward.get('item_qualities', [])
         granted_items = []
+        overflow_rewards = []
         for i in range(len(items)):
             if items[i]:
                 amt = amts[i] if i < len(amts) else 1
@@ -20393,16 +20443,20 @@ def give_mission_rewards(picked_char, mid):
                 if online_reward_rows is None:
                     popup_items.append(encode_sproto([
                         (0, items[i]), (1, amt), (2, quality or 0)]))
-                add_to_inventory(picked_char, items[i], amt, quality=quality)
+                if not add_to_inventory(picked_char, items[i], amt, quality=quality):
+                    if str(items[i]) in ITEM_CONFIG and amt > 0:
+                        overflow_rewards.append((items[i], quality, amt))
                 granted_items.append((items[i], amt))
+        overflow_mails = create_inventory_overflow_mails(
+            picked_char, overflow_rewards)
 
         # The caller sends TAG 638 after ret_complete_mission (521).  The APK
         # opens MissionPassShowRoot from 521; sending the reward first lets
         # that UI cover the SimpleRewardRoot popup.
-        return added_exp, added_cash, granted_items, popup_items, leveled_up
+        return added_exp, added_cash, granted_items, popup_items, leveled_up, overflow_mails
     except:
         traceback.print_exc()
-        return 0, 0, [], [], False
+        return 0, 0, [], [], False, []
 
 def validate_mission_npc_contact(picked_char, mission_id, role):
     mission = missions_data.get(str(mission_id), {})
@@ -29400,7 +29454,8 @@ def client_handler(conn, addr):
                                 and current_main_mission):
                             # Mark before granting: duplicate/reconnected
                             # sessions cannot both claim the same objective.
-                            completion_snapshot = snapshot_character_reward_state(picked_char)
+                            completion_snapshot = snapshot_character_reward_state(
+                                picked_char, include_mails=True)
                             m_entry['state'] = 3
                             claim_mission = True
                     print(f"[MISSION COMPLETE REQ] mid={mid} entry_exists={m_entry is not None} state={m_entry['state'] if m_entry else 'N/A'}")
@@ -29422,7 +29477,9 @@ def client_handler(conn, addr):
                             previous_skip_mission_save = picked_char.get('_skip_mission_save')
                             picked_char['_skip_mission_save'] = True
                             try:
-                                exp_add, cash_add, items_add, popup_items, mission_leveled_up = give_mission_rewards(picked_char, mid)
+                                (exp_add, cash_add, items_add, popup_items,
+                                 mission_leveled_up, overflow_mails) = give_mission_rewards(
+                                    picked_char, mid)
                             finally:
                                 if had_skip_mission_save:
                                     picked_char['_skip_mission_save'] = previous_skip_mission_save
@@ -29506,6 +29563,8 @@ def client_handler(conn, addr):
 
                             # Push Sync sequence
                             send_rpc_push(521, encode_sproto([(0, mid), (1, 0)])) # Success feedback
+                            for mail in overflow_mails:
+                                send_rpc_push(531, build_mail_update(mail))
                             if is_chained and next_mid:
                                 next_m_entry = picked_char.get('active_missions', {}).get(str(next_mid), {})
                                 next_parm = next_m_entry.get('parm', [0]*8)
