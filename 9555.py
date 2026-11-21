@@ -10037,7 +10037,6 @@ def clear_equipment_active_monsters(state):
         for key in (
                 'monster_pos', 'monster_heading', 'monster_born_pos',
                 'monster_patrol_target', 'monster_patrol_started',
-                'monster_aggro', 'monster_move_update_at',
                 'attack_cd', 'monster_skill_ready_at'):
             state.get(key, {}).pop(inst_id, None)
         state.get('movement_stopped', set()).discard(inst_id)
@@ -10251,7 +10250,6 @@ def on_equipment_npc_killed(state, inst_id, npcid):
     for key in (
             'monster_pos', 'monster_heading', 'monster_born_pos',
             'monster_patrol_target', 'monster_patrol_started',
-            'monster_aggro', 'monster_move_update_at',
             'attack_cd', 'monster_skill_ready_at'):
         state.get(key, {}).pop(inst_id, None)
     state.get('movement_stopped', set()).discard(inst_id)
@@ -10451,8 +10449,7 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
         move_speed = float(monster_cfg.get('move_speed', 50) or 50) / 10.0
         if move_speed <= 0:
             move_speed = 5.0
-        movement_interval = 0.5
-        move_speed_per_tick = move_speed * movement_interval
+        move_speed_per_tick = move_speed * 0.2
         walk_speed = float(monster_cfg.get('walk_speed', 10) or 10) / 10.0
         if walk_speed <= 0:
             walk_speed = 1.0
@@ -10460,7 +10457,6 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
         return_distance = max(
             lock_distance,
             int(ai_cfg.get('return_distance', 500) or 500) / 100.0,
-            20.0,
         )
         configured_skill_ids = [
             str(skill_id).strip()
@@ -10488,34 +10484,15 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
                 effect_reach = trace_distance
             configured_skill_reach = max(
                 configured_skill_reach, trace_distance, effect_reach)
-        follow_limit = max(lock_distance, configured_skill_reach, 15.0)
+        follow_limit = max(lock_distance, configured_skill_reach, 5.0)
 
         m_pos = exp_state['monster_pos'].setdefault(inst_id, [6.94, -11.37])
         if exp_state.get('team_id'):
             live_targets = exp_online_members(exp_state, alive=True)
             if not live_targets: continue
-            aggro = exp_state.setdefault('monster_aggro', {}).get(inst_id)
-            aggro_member = None
-            if isinstance(aggro, (list, tuple)) and len(aggro) >= 2:
-                aggro_cid = int(aggro[0])
-                aggro_until = float(aggro[1])
-                if aggro_until > current_time:
-                    aggro_member = next(
-                        (entry for entry in live_targets
-                         if int(entry[0]) == aggro_cid),
-                        None)
-            target_candidate = aggro_member or min(live_targets, key=lambda item: (
-                exp_state.get('player_auth_pos', {}).get(
-                    int(item[0]),
-                    item[2].get('pos') or default_map_spawn_position(item[2].get('map_id'))
-                )[0] / 100.0 - m_pos[0]) ** 2
-                + (
-                    exp_state.get('player_auth_pos', {}).get(
-                        int(item[0]),
-                        item[2].get('pos') or default_map_spawn_position(item[2].get('map_id'))
-                    )[2] / 100.0 - m_pos[1]) ** 2
-            )
-            _tid, target_conn, target_char = target_candidate
+            _tid, target_conn, target_char = min(live_targets, key=lambda item: (
+                                                                                        exp_state.get('player_auth_pos', {}).get(int(item[0]), item[2].get('pos') or default_map_spawn_position(item[2].get('map_id')))[0] / 100.0 - m_pos[0]) ** 2 + (
+                                                                                        exp_state.get('player_auth_pos', {}).get(int(item[0]), item[2].get('pos') or default_map_spawn_position(item[2].get('map_id')))[2] / 100.0 - m_pos[1]) ** 2)
             conn_for_sync = target_conn; picked_char = target_char
             target_pos = exp_state.get('player_auth_pos', {}).get(
                 int(picked_char.get('id', 0)),
@@ -10533,15 +10510,8 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
             born_x = float(born_pos[0])
             born_z = float(born_pos[1])
             dist_from_born = math.hypot(mx - born_x, mz - born_z)
-            aggro = exp_state.setdefault('monster_aggro', {}).get(inst_id)
-            has_aggro = (
-                isinstance(aggro, (list, tuple))
-                and len(aggro) >= 2
-                and float(aggro[1]) > current_time
-            )
 
-            if ((has_aggro and dist <= return_distance)
-                    or (dist <= follow_limit and dist_from_born <= return_distance)):
+            if dist <= follow_limit and dist_from_born <= return_distance:
                 # Outside the small AI lock/around band but within lock or
                 # configured skill reach: run toward the actual attacker.
                 with exp_npc_hp_lock(exp_state, inst_id):
@@ -10549,10 +10519,6 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
                             or inst_id not in exp_state.get('active_monsters', [])):
                         continue
                     exp_state.setdefault('movement_stopped', set()).discard(inst_id)
-                    move_update_at = exp_state.setdefault('monster_move_update_at', {})
-                    if current_time - float(move_update_at.get(inst_id, 0.0)) < movement_interval:
-                        continue
-                    move_update_at[inst_id] = current_time
                     chase_step = min(move_speed_per_tick, dist - attack_distance)
                     if chase_step > 0:
                         new_mx = mx + (dx / dist) * chase_step
@@ -10598,11 +10564,7 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
                         if (inst_id in DEAD_NPC_SET or NPC_HP_MAP.get(inst_id, 0) <= 0
                                 or inst_id not in exp_state.get('active_monsters', [])):
                             continue
-                        move_update_at = exp_state.setdefault('monster_move_update_at', {})
-                        if current_time - float(move_update_at.get(inst_id, 0.0)) < movement_interval:
-                            continue
-                        move_update_at[inst_id] = current_time
-                        walk_step = min(walk_speed * movement_interval, pdist)
+                        walk_step = min(walk_speed * 0.2, pdist)
                         new_mx = mx + (pdx / pdist) * walk_step
                         new_mz = mz + (pdz / pdist) * walk_step
                         exp_state['monster_pos'][inst_id] = [new_mx, new_mz]
@@ -10635,10 +10597,6 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
                         or inst_id not in exp_state.get('active_monsters', [])):
                     continue
                 exp_state.setdefault('movement_stopped', set()).discard(inst_id)
-                move_update_at = exp_state.setdefault('monster_move_update_at', {})
-                if current_time - float(move_update_at.get(inst_id, 0.0)) < movement_interval:
-                    continue
-                move_update_at[inst_id] = current_time
                 step = min(move_speed_per_tick, dist - attack_distance)
                 new_mx = mx + (dx / dist) * step
                 new_mz = mz + (dz / dist) * step
@@ -10919,8 +10877,6 @@ def clear_exp_active_monsters(exp_state, send_rpc_push):
         exp_state.get('monster_born_pos', {}).pop(inst_id, None)
         exp_state.get('monster_patrol_target', {}).pop(inst_id, None)
         exp_state.get('monster_patrol_started', {}).pop(inst_id, None)
-        exp_state.get('monster_aggro', {}).pop(inst_id, None)
-        exp_state.get('monster_move_update_at', {}).pop(inst_id, None)
         exp_state.get('attack_cd', {}).pop(inst_id, None)
         exp_state.get('movement_stopped', set()).discard(inst_id)
     exp_state['active_monsters'] = []
@@ -11500,8 +11456,6 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
         exp_state.get('monster_born_pos', {}).pop(inst_id, None) if exp_state else None
         exp_state.get('monster_patrol_target', {}).pop(inst_id, None) if exp_state else None
         exp_state.get('monster_patrol_started', {}).pop(inst_id, None) if exp_state else None
-        exp_state.get('monster_aggro', {}).pop(inst_id, None) if exp_state else None
-        exp_state.get('monster_move_update_at', {}).pop(inst_id, None) if exp_state else None
         exp_state.get('movement_stopped', set()).discard(inst_id) if exp_state else None
 
     if valid_kill and grant_rewards:
@@ -32676,10 +32630,6 @@ def client_handler(conn, addr):
                                 if validated_hit is None:
                                     continue
                                 skill_id, skill_lv, effinfo_id = validated_hit
-                                exp_state_hit.setdefault('monster_aggro', {})[target_id] = [
-                                    int(picked_char.get('id', 0)),
-                                    time.time() + 12.0,
-                                ]
                             else:
                                 char_skill_levels = {str(key): value for key, value in
                                                      (picked_char.get('skill_levels') or {}).items()}
