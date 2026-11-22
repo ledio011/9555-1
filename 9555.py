@@ -15546,6 +15546,12 @@ def expire_timed_inventory_items(picked_char, now=None):
         bucket_changed = False
         for item in records:
             item_id = str(item.get('id', ''))
+            item_cfg = ITEM_CONFIG.get(item_id, {})
+            try:
+                item_type = int(item_cfg.get('type', -1))
+            except (TypeError, ValueError):
+                item_type = -1
+            use_hour = item_use_hour(item_id)
             parm = item.get('parm')
             if not isinstance(parm, list):
                 parm = list(parm) if isinstance(parm, tuple) else []
@@ -15564,7 +15570,6 @@ def expire_timed_inventory_items(picked_char, now=None):
                 retained.append(item)
                 continue
             if expires_at <= 0:
-                use_hour = item_use_hour(item_id)
                 if use_hour > 0:
                     # Legacy records lack acquisition times, so start their configured lifetime now.
                     expires_at = now + use_hour * 3600
@@ -15572,7 +15577,11 @@ def expire_timed_inventory_items(picked_char, now=None):
                     item['parm'] = parm
                     updates.append((container_type, item))
                     changed = True
-            if expires_at > 0 and expires_at <= now:
+            # The client treats ordinary Type-2 gear as permanent unless
+            # ItemData explicitly configures UseHour; stale parm[4] must not
+            # delete weapons or armor.
+            if (expires_at > 0 and expires_at <= now
+                    and (item_type != 2 or use_hour > 0)):
                 updates.append((container_type, None, int(item.get('index_id', 0))))
                 bucket_changed = True
                 changed = True
