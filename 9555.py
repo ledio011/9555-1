@@ -33825,19 +33825,11 @@ def client_handler(conn, addr):
                     if impact_count >= 300 or len(recent_impact_times) >= 20:
                         print(f"[STREET RACE SECURITY] rejected MSG 298 player={picked_char.get('id')} count={impact_count} burst={len(recent_impact_times)}")
                     else:
-                        player_level = int(picked_char.get('level', 1))
-                        # Preserve the pre-existing MSG 298 reward amounts;
-                        # this change adds the missing ground-drop packet.
-                        exp_drop, cash_drop = calculate_npc_kill_rewards_for_map(
-                            player_level, npc_level=1, map_id=cur_map)
-                        collision_rewards = [("2001", 0, exp_drop), ("1001", 0, cash_drop)]
+                        cash_drop = 55
+                        collision_rewards = [("1001", 0, cash_drop)]
                         grant_item_rewards(picked_char, collision_rewards, conn, send_rpc_push, save=False)
                         send_rpc_push(638, encode_sproto([(0, [
-                            # The client creates a local coin pickup from TAG 527
-                            # and shows its own coin reward when it reaches the
-                            # player. Keep the EXP tip here, without showing the
-                            # same cash reward a second time.
-                            encode_sproto([(0, "2001"), (1, exp_drop), (3, 0)])
+                            encode_sproto([(0, "1001"), (1, cash_drop), (3, 0)])
                         ])]))
 
                         # Street Race NPCs are client-local; place the visible
@@ -33864,7 +33856,7 @@ def client_handler(conn, addr):
                         picked_char['street_race_npc_drop_times'] = recent_impact_times
                         picked_char['street_race_npc_drop_count'] = impact_count + 1
                         save_chars(all_accounts_chars)
-                        print(f"[STREET RACE] collision NPC drop player={picked_char.get('id')} race={race_copy_id} count={impact_count + 1}/300 exp={exp_drop} cash={cash_drop}")
+                        print(f"[STREET RACE] collision NPC drop player={picked_char.get('id')} race={race_copy_id} count={impact_count + 1}/300 cash={cash_drop}")
                 else:
                     print(f"[STREET RACE SECURITY] ignored MSG 298 outside active race player={picked_char.get('id') if picked_char else '-'}")
                 if session is not None:
