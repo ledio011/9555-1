@@ -238,6 +238,11 @@ SCUFFLE_NPC_MAP_IDS = frozenset(("1201", "1202"))
 WAREHOUSE_SNEAK_COPY_ID = "303"
 WAREHOUSE_SNEAK_STATE_KEY = "_warehouse_sneak_state"
 WAREHOUSE_SNEAK_LOCK = threading.RLock()
+MISSION_72_COPY_ID = "304"
+MISSION_72_COPY_SUBTYPE = 2
+MISSION_72_COPY_DURATION = 300
+MISSION_72_COPY_STATE_KEY = "_mission_72_copy_state"
+MISSION_72_COPY_LOCK = threading.RLock()
 PRISON_NPC_AOI_MAP_IDS = (
     SCUFFLE_NPC_MAP_IDS | SURVIVE_BATTLE_NPC_MAP_IDS
     | OPEN_WORLD_NPC_MAP_IDS | frozenset((WAREHOUSE_SNEAK_COPY_ID,)))
@@ -11638,6 +11643,9 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                         (0, "1001"), (1, cash_kill), (3, 0)
                     ]),
                 ])]))
+                if current_map == MISSION_72_COPY_ID:
+                    record_mission_72_copy_kill(
+                        picked_char, inst_id, rewards)
 
     if current_map == WAREHOUSE_SNEAK_COPY_ID and inst_id:
         record_warehouse_sneak_npc_kill(
@@ -12903,6 +12911,163 @@ def record_warehouse_sneak_npc_kill(
     save_chars(all_accounts_chars)
     print(f"[SNEAK COPY] completed player={player_id} copy="
           f"{WAREHOUSE_SNEAK_COPY_ID}")
+    return True
+
+
+def mission_72_copy_result_payload(state, won):
+    items = [
+        encode_sproto([
+            (0, str(item_id)), (1, int(amount)), (3, 0)
+        ])
+        for item_id, amount in sorted(state.get("reward_totals", {}).items())
+        if int(amount or 0) > 0
+    ]
+    return encode_sproto([
+        (0, MISSION_72_COPY_SUBTYPE), (1, MISSION_72_COPY_ID), (2, bool(won)),
+        (3, 0), (4, 0), (5, items),
+    ])
+
+
+def _mission_72_copy_timeout(char_id, expected_end_time):
+    char = _tower_find_character(char_id)
+    if not char:
+        return
+    state = char.get(MISSION_72_COPY_STATE_KEY)
+    if (not isinstance(state, dict)
+            or int(state.get("end_time", 0) or 0) != int(expected_end_time)):
+        return
+    finish_mission_72_copy(char, False)
+
+
+def start_mission_72_copy(char, send_rpc_push):
+    char_id = int(char.get("id", 0) or 0)
+    now = int(time.time())
+    duration = MISSION_72_COPY_DURATION
+    state = {
+        "copy_id": MISSION_72_COPY_ID,
+        "map_id": MISSION_72_COPY_ID,
+        "phase": "running",
+        "start_time": now,
+        "end_time": now + duration,
+        "spawned_npcs": [],
+        "killed_npcs": [],
+        "reward_totals": {},
+        "result_recorded": False,
+    }
+    with MISSION_72_COPY_LOCK:
+        previous = char.get(MISSION_72_COPY_STATE_KEY)
+        if isinstance(previous, dict):
+            old_timer = previous.get("timeout_timer")
+            if old_timer:
+                old_timer.cancel()
+        char[MISSION_72_COPY_STATE_KEY] = state
+
+    timer = threading.Timer(
+        duration, _mission_72_copy_timeout, args=(char_id, state["end_time"]))
+    timer.daemon = True
+    state["timeout_timer"] = timer
+    timer.start()
+    send_rpc_push(629, encode_sproto([(0, state["end_time"]), (1, 2)]))
+    save_chars(all_accounts_chars)
+    return state
+
+
+def track_mission_72_copy_spawn(char, inst_id):
+    state = char.get(MISSION_72_COPY_STATE_KEY) if char else None
+    if (not isinstance(state, dict)
+            or state.get("phase") != "running"
+            or state.get("result_recorded")
+            or str(char.get("active_copy_id") or "") != MISSION_72_COPY_ID):
+        return False
+    try:
+        inst_id = int(inst_id)
+    except (TypeError, ValueError):
+        return False
+    with MISSION_72_COPY_LOCK:
+        spawned = state.setdefault("spawned_npcs", [])
+        if inst_id not in spawned:
+            spawned.append(inst_id)
+    return True
+
+
+def finish_mission_72_copy(char, won):
+    if not char:
+        return False
+    now = int(time.time())
+    with MISSION_72_COPY_LOCK:
+        state = char.get(MISSION_72_COPY_STATE_KEY)
+        if (not isinstance(state, dict)
+                or state.get("phase") != "running"
+                or state.get("result_recorded")):
+            return False
+        spawned = set(state.get("spawned_npcs", []))
+        killed = set(state.get("killed_npcs", []))
+        won = bool(won and spawned and spawned.issubset(killed)
+                   and now < int(state.get("end_time", 0) or 0))
+        if won:
+            state["phase"] = "complete"
+        else:
+            state["phase"] = "failed"
+        state["result_recorded"] = True
+        timer = state.get("timeout_timer")
+        if timer:
+            timer.cancel()
+
+    result = mission_72_copy_result_payload(state, won)
+    if won:
+        send_rpc_push = lambda tag, data: send_push_to_char(
+            char.get("id", 0), tag, data)
+        advance_missions(
+            char, send_rpc_push, "copy_scene_complete",
+            target_id=MISSION_72_COPY_ID, map_id=MISSION_72_COPY_ID)
+    # This page only summarizes kill rewards already granted; it never grants
+    # another copy-clear payout.
+    send_exp_result_to_char(char, result)
+    save_chars(all_accounts_chars)
+    print(f"[MISSION 72] copy result player={char.get('id')} win={won} "
+          f"kills={len(killed)}/{len(spawned)} "
+          f"rewards={state.get('reward_totals', {})}")
+    return True
+
+
+def record_mission_72_copy_kill(char, inst_id, rewards):
+    state = char.get(MISSION_72_COPY_STATE_KEY) if char else None
+    if (not isinstance(state, dict)
+            or state.get("phase") != "running"
+            or state.get("result_recorded")
+            or str(char.get("map_id") or "") != MISSION_72_COPY_ID
+            or str(char.get("active_copy_id") or "") != MISSION_72_COPY_ID):
+        return False
+    try:
+        inst_id = int(inst_id)
+    except (TypeError, ValueError):
+        return False
+
+    expired = False
+    complete = False
+    with MISSION_72_COPY_LOCK:
+        spawned = set(state.get("spawned_npcs", []))
+        if inst_id not in spawned:
+            return False
+        killed = state.setdefault("killed_npcs", [])
+        if inst_id in killed:
+            return False
+        if int(time.time()) >= int(state.get("end_time", 0) or 0):
+            expired = True
+        else:
+            killed.append(inst_id)
+            totals = state.setdefault("reward_totals", {})
+            for item_id, _quality, amount in rewards or []:
+                amount = max(0, int(amount or 0))
+                if amount:
+                    key = str(item_id)
+                    totals[key] = int(totals.get(key, 0) or 0) + amount
+            complete = bool(spawned and spawned.issubset(set(killed)))
+
+    if expired:
+        finish_mission_72_copy(char, False)
+    elif complete:
+        finish_mission_72_copy(char, True)
     return True
 
 
@@ -15201,6 +15366,8 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                 inst_id = send_npc_create(
                     nid, cfg['name'], m['x'], m['z'], m['o'],
                     slum_enemy=(map_str == SLUM_DISTRICT_MAP_ID))
+                if map_str == MISSION_72_COPY_ID and inst_id:
+                    track_mission_72_copy_spawn(picked_char, inst_id)
                 if map_str == '1501' and inst_id:
                     _guild_battle_register_npc(inst_id, conn, picked_char, m)
 
@@ -21804,6 +21971,12 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         clear_prison_npc_aoi(conn, send_remove=True)
     if src_map == WAREHOUSE_SNEAK_COPY_ID and src_map != target_map_id:
         picked_char.pop(WAREHOUSE_SNEAK_STATE_KEY, None)
+    if src_map == MISSION_72_COPY_ID and src_map != target_map_id:
+        mission_72_state = picked_char.pop(MISSION_72_COPY_STATE_KEY, None)
+        if isinstance(mission_72_state, dict):
+            timeout_timer = mission_72_state.get("timeout_timer")
+            if timeout_timer:
+                timeout_timer.cancel()
     if src_map != target_map_id:
         broadcast_aoi_remove(picked_char.get('id', 0), src_map)
     if src_map == '1501' and target_map_id != '1501':
@@ -34081,6 +34254,8 @@ def client_handler(conn, addr):
                     if copy_id == WAREHOUSE_SNEAK_COPY_ID:
                         warehouse_sneak_state_for_char(
                             picked_char, create=True, reset=True)
+                    elif copy_id == MISSION_72_COPY_ID:
+                        start_mission_72_copy(picked_char, send_rpc_push)
                     advance_missions(picked_char, send_rpc_push, 'dungeon', target_id=copy_id)
                     start_map_transition(conn, picked_char, copy_id, send_rpc_push)
                 if session is not None:
