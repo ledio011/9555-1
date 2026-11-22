@@ -5374,6 +5374,32 @@ def exp_sync_npc_attrs(state, inst_id, stats, hp):
     obj=encode_sproto([(0,inst_id),(1,oth),(2,base),(3,allv)])
     exp_send_push(state,510,encode_sproto([(0,obj)]))
 
+
+def exp_send_monster_move(state, inst_id, x, z, heading, walk, send_func,
+                          current_time):
+    """Send an NPC destination only when it materially changes."""
+    commands = state.setdefault('monster_move_command', {})
+    previous = commands.get(inst_id)
+    if previous:
+        mode_changed = previous['walk'] != walk
+        destination_changed = math.hypot(
+            x - previous['x'], z - previous['z']) >= 1.0
+        if not mode_changed and (
+                not destination_changed
+                or current_time - previous['sent_at'] < 0.6):
+            return False
+
+    pos_obj = encode_sproto([
+        (0, int(x * 100)), (1, 0), (2, int(z * 100)), (3, heading)])
+    movement = encode_sproto([(0, pos_obj), (1, pos_obj)])
+    char_move = encode_sproto([(0, inst_id), (1, movement), (2, walk)])
+    send_func(507, encode_sproto([(0, char_move)]))
+    commands[inst_id] = {
+        'x': x, 'z': z, 'walk': walk, 'sent_at': current_time,
+    }
+    return True
+
+
 def is_exp_map(map_id):
     mid = str(map_id)
     if mid in ('223', '224', '225', '226', '227', '228', '229'):
@@ -10037,7 +10063,8 @@ def clear_equipment_active_monsters(state):
         for key in (
                 'monster_pos', 'monster_heading', 'monster_born_pos',
                 'monster_patrol_target', 'monster_patrol_started',
-                'attack_cd', 'monster_skill_ready_at', 'monster_aggro_target'):
+                'attack_cd', 'monster_skill_ready_at', 'monster_aggro_target',
+                'monster_move_command'):
             state.get(key, {}).pop(inst_id, None)
         state.get('movement_stopped', set()).discard(inst_id)
     state['active_monsters'] = []
@@ -10250,7 +10277,8 @@ def on_equipment_npc_killed(state, inst_id, npcid):
     for key in (
             'monster_pos', 'monster_heading', 'monster_born_pos',
             'monster_patrol_target', 'monster_patrol_started',
-            'attack_cd', 'monster_skill_ready_at', 'monster_aggro_target'):
+            'attack_cd', 'monster_skill_ready_at', 'monster_aggro_target',
+            'monster_move_command'):
         state.get(key, {}).pop(inst_id, None)
     state.get('movement_stopped', set()).discard(inst_id)
     if wave_done:
@@ -10379,6 +10407,8 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
         exp_state['attack_cd'] = {}
 
     current_time = time.time()
+    is_pursuit_stage = (
+        exp_state.get('stage_kind') == 'equipment' or is_exp_map(map_str))
 
     for inst_id in list(exp_state.get('active_monsters', [])):
         auto_death_nid = None
@@ -10439,8 +10469,6 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
         # AIData LockDistance and NpcData Search are in centimeters.  A
         # negative lock distance means use the NPC's configured search range.
         lock_distance = (search_radius if configured_lock < 0 else configured_lock) / 100.0
-        if search_radius > 0 and exp_state.get('stage_kind') != 'equipment':
-            lock_distance = min(lock_distance, search_radius / 100.0)
         around_min = int(ai_cfg.get('around_min_distance', 100)) / 100.0
         around_max = int(ai_cfg.get('around_max_distance', 200)) / 100.0
         attack_distance = max(0.5, (around_min + around_max) / 2.0)
@@ -10514,7 +10542,7 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
             px = target_pos[0] / 100.0; pz = target_pos[2] / 100.0
             player_stats = get_character_stats(picked_char)
         is_aggro_target = (
-            exp_state.get('stage_kind') == 'equipment'
+            is_pursuit_stage
             and aggro_id == int(picked_char.get('id', 0) or 0))
         if is_aggro_target:
             follow_limit = max(follow_limit, return_distance)
@@ -10545,13 +10573,11 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
                         exp_state['monster_pos'][inst_id] = [new_mx, new_mz]
                         heading = int(math.degrees(math.atan2(dx, dz)) * 100)
                         exp_state.setdefault('monster_heading', {})[inst_id] = heading
-                        pos_obj = encode_sproto([
-                            (0, int(new_mx * 100)), (1, 0),
-                            (2, int(new_mz * 100)), (3, heading)])
-                        m_move = encode_sproto([(0, pos_obj), (1, pos_obj)])
-                        char_move = encode_sproto([
-                            (0, inst_id), (1, m_move), (2, False)])
-                        send_func(507, encode_sproto([(0, char_move)]))
+                        destination_x = px - (dx / dist) * attack_distance
+                        destination_z = pz - (dz / dist) * attack_distance
+                        exp_send_monster_move(
+                            exp_state, inst_id, destination_x, destination_z,
+                            heading, False, send_func, current_time)
             else:
                 # No valid target in chase/skill range: return and patrol
                 # around the authored spawn with a walk move, not a run.
@@ -10564,7 +10590,8 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
                     if isinstance(target, (list, tuple)) and len(target) >= 2
                     else 999.0
                 )
-                if target is None or target_distance < 0.35 or current_time - started_at >= 4.0:
+                if (target is None or target_distance < 0.35
+                        or current_time - started_at >= 12.0):
                     angle = random.uniform(-math.pi, math.pi)
                     radius = random.uniform(0.2, max(0.2, patrol_distance))
                     patrol_targets[inst_id] = [
@@ -10588,18 +10615,16 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
                         new_mz = mz + (pdz / pdist) * walk_step
                         exp_state['monster_pos'][inst_id] = [new_mx, new_mz]
                         heading = int(math.degrees(math.atan2(pdx, pdz)) * 100)
-                        pos_obj = encode_sproto([
-                            (0, int(new_mx * 100)), (1, 0),
-                            (2, int(new_mz * 100)), (3, heading)])
-                        m_move = encode_sproto([(0, pos_obj), (1, pos_obj)])
-                        char_move = encode_sproto([
-                            (0, inst_id), (1, m_move), (2, True)])
-                        send_func(507, encode_sproto([(0, char_move)]))
+                        exp_send_monster_move(
+                            exp_state, inst_id, tx, tz, heading, True,
+                            send_func, current_time)
                 else:
                     with exp_npc_hp_lock(exp_state, inst_id):
                         stopped_monsters = exp_state.setdefault('movement_stopped', set())
                         if inst_id not in stopped_monsters:
                             stopped_monsters.add(inst_id)
+                            exp_state.setdefault(
+                                'monster_move_command', {}).pop(inst_id, None)
                             heading = int(exp_state.setdefault('monster_heading', {}).get(inst_id, 0))
                             pos_obj_stop = encode_sproto([
                                 (0, int(mx * 100)), (1, 0),
@@ -10622,10 +10647,11 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
                 exp_state['monster_pos'][inst_id] = [new_mx, new_mz]
                 heading = int(math.degrees(math.atan2(dx, dz)) * 100)
                 exp_state.setdefault('monster_heading', {})[inst_id] = heading
-                pos_obj = encode_sproto([(0, int(new_mx * 100)), (1, 0), (2, int(new_mz * 100)), (3, heading)])
-                m_move = encode_sproto([(0, pos_obj), (1, pos_obj)])
-                char_move = encode_sproto([(0, inst_id), (1, m_move), (2, False)])
-                send_func(507, encode_sproto([(0, char_move)]))
+                destination_x = px - (dx / dist) * attack_distance
+                destination_z = pz - (dz / dist) * attack_distance
+                exp_send_monster_move(
+                    exp_state, inst_id, destination_x, destination_z,
+                    heading, False, send_func, current_time)
         else:
             with exp_npc_hp_lock(exp_state, inst_id):
                 if (inst_id in DEAD_NPC_SET or NPC_HP_MAP.get(inst_id, 0) <= 0
@@ -10634,6 +10660,8 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
                 stopped_monsters = exp_state.setdefault('movement_stopped', set())
                 if inst_id not in stopped_monsters:
                     stopped_monsters.add(inst_id)
+                    exp_state.setdefault(
+                        'monster_move_command', {}).pop(inst_id, None)
                     heading = int(math.degrees(math.atan2(dx, dz)) * 100)
                     exp_state.setdefault('monster_heading', {})[inst_id] = heading
                     pos_obj_stop = encode_sproto([(0, int(mx * 100)), (1, 0), (2, int(mz * 100)), (3, heading)])
@@ -10897,6 +10925,8 @@ def clear_exp_active_monsters(exp_state, send_rpc_push):
         exp_state.get('monster_patrol_target', {}).pop(inst_id, None)
         exp_state.get('monster_patrol_started', {}).pop(inst_id, None)
         exp_state.get('attack_cd', {}).pop(inst_id, None)
+        exp_state.get('monster_aggro_target', {}).pop(inst_id, None)
+        exp_state.get('monster_move_command', {}).pop(inst_id, None)
         exp_state.get('movement_stopped', set()).discard(inst_id)
     exp_state['active_monsters'] = []
 
@@ -11475,6 +11505,8 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
         exp_state.get('monster_born_pos', {}).pop(inst_id, None) if exp_state else None
         exp_state.get('monster_patrol_target', {}).pop(inst_id, None) if exp_state else None
         exp_state.get('monster_patrol_started', {}).pop(inst_id, None) if exp_state else None
+        exp_state.get('monster_aggro_target', {}).pop(inst_id, None) if exp_state else None
+        exp_state.get('monster_move_command', {}).pop(inst_id, None) if exp_state else None
         exp_state.get('movement_stopped', set()).discard(inst_id) if exp_state else None
 
     if valid_kill and grant_rewards:
@@ -32826,8 +32858,8 @@ def client_handler(conn, addr):
                                     else:
                                         hp_after = max(0, int(hp_now) - max(0, int(actual_dmg)))
                                         NPC_HP_MAP[target_id] = hp_after
-                                        if (actual_dmg > 0
-                                                and exp_state_hit.get('stage_kind') == 'equipment'):
+                                        if actual_dmg > 0 and (
+                                                is_equipment or is_exp):
                                             exp_state_hit.setdefault(
                                                 'monster_aggro_target', {})[int(target_id)] = int(
                                                     picked_char.get('id', 0) or 0)
