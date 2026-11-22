@@ -36698,7 +36698,7 @@ def client_handler(conn, addr):
                                 sx = int(round(float(survey.get('x', 0.0)) * 100))
                                 sz = int(round(float(survey.get('z', 0.0)) * 100))
                                 radius = (
-                                    310 if mid == '56' else
+                                    310 if mid in ('56', '71') else
                                     400 if str(survey.get('scene_id')) == '11' else 250
                                 )
                                 near_item = math.hypot(int(pos[0]) - sx, int(pos[2]) - sz) <= radius
