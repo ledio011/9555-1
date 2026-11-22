@@ -20067,7 +20067,7 @@ def _domin_capture_roster_character(owner, descriptor):
     rival = find_social_character(character_id)
     if rival is None or int(rival.get("id", 0) or 0) == int(owner.get("id", 0) or 0):
         return None
-    return copy.deepcopy(rival)
+    return dict(rival)
 
 
 def _domin_capture_enemy_looks(character, roster=None):
@@ -36901,14 +36901,16 @@ def client_handler(conn, addr):
                                 sx = int(round(float(survey.get('x', 0.0)) * 100))
                                 sz = int(round(float(survey.get('z', 0.0)) * 100))
                                 radius = (
-                                    310 if mid in ('56', '71') else
+                                    310 if mid in ('56', '71', '82') else
                                     400 if str(survey.get('scene_id')) == '11' else 250
                                 )
                                 near_item = math.hypot(int(pos[0]) - sx, int(pos[2]) - sz) <= radius
                                 now_mono = time.monotonic()
                                 cooldown_key = (int(picked_char.get('id', 0)), mid)
                                 last_event = SURVEY_PROGRESS_TIMES.get(cooldown_key, 0.0)
-                                cooldown = max(0.8, int(survey.get('survey_time', 1000)) / 1000.0)
+                                survey_interval = int(survey.get('survey_time', 1000)) / 1000.0
+                                cooldown = max(
+                                    0.8, survey_interval - (0.25 if mid == '82' else 0.0))
                                 if near_item and now_mono - last_event >= cooldown:
                                     required = int(survey.get('need_num', m_cfg.get('require_num', 1)))
                                     accepted = True
