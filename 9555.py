@@ -215,11 +215,20 @@ def npc_hp_lock(inst_id):
 # use the closest existing client template ID in npc_create packets so Unity
 # can resolve and render the NPC instead of leaving a missing-model ghost.
 NPC_CLIENT_ID_ALIASES = {'21209': '21206', '61303': '61302'}
+# The map-304 Hatchet Guy template shares model and skill 50001 with 702202,
+# whose client AI 1012 actively targets players instead of the passive AI 1000.
+NPC_MAP_CLIENT_ID_OVERRIDES = {'304': {'4001': '702202'}}
 
-def npc_data_id_matches_report(logical_id, reported_id):
+def npc_client_template_id(logical_id, map_id=None):
+    logical_id = str(logical_id or '')
+    map_overrides = NPC_MAP_CLIENT_ID_OVERRIDES.get(str(map_id or ''), {})
+    return map_overrides.get(
+        logical_id, NPC_CLIENT_ID_ALIASES.get(logical_id, logical_id))
+
+def npc_data_id_matches_report(logical_id, reported_id, map_id=None):
     logical_id = str(logical_id or '')
     reported_id = str(reported_id or '')
-    return logical_id == reported_id or NPC_CLIENT_ID_ALIASES.get(logical_id) == reported_id
+    return npc_client_template_id(logical_id, map_id) == reported_id
 
 def client_owns_map_npc_simulation(map_id):
     """The APK spawns MonsterData NPCs itself in local tutorial/low-phone scenes."""
@@ -8976,7 +8985,7 @@ def validate_tower_npc_attack_damage(conn, char, effinfo_id, client_damage):
 
 def build_npc_attr_sproto(
         nid, name, x, z, o, existing_inst_id=None, player_level=1,
-        initial_hp=None, hp_max_override=None):
+        initial_hp=None, hp_max_override=None, map_id=None):
     """Build NPC attribute sproto for TAG 509 (npc_create).
     Bug 1/6: Shared function to eliminate code duplication between send_npc_create and send_npc_wrapper."""
     npc_stats = get_npc_attr(nid, player_level)
@@ -9013,7 +9022,13 @@ def build_npc_attr_sproto(
         hp_cur = max(0, int(NPC_HP_MAP.get(inst_id, hp_max)))
         NPC_INST_MAP[inst_id] = str(nid)
 
-    final_nid = NPC_CLIENT_ID_ALIASES.get(str(nid), str(nid))
+    client_map_id = map_id
+    if client_map_id is None and existing_inst_id is not None:
+        try:
+            client_map_id = NPC_INSTANCE_MAP.get(int(existing_inst_id))
+        except (TypeError, ValueError):
+            client_map_id = None
+    final_nid = npc_client_template_id(nid, client_map_id)
     if ";" in final_nid:
         if "XD_A" in final_nid: final_nid = "100"
         elif "QJ_A" in final_nid: final_nid = "104"
@@ -9042,7 +9057,8 @@ def resync_live_npc_instance(conn, char, inst_id, expected_npcid):
         return False
     server_npcid = NPC_INST_MAP.get(inst_id)
     if (server_npcid is None
-            or not npc_data_id_matches_report(server_npcid, expected_npcid)
+            or not npc_data_id_matches_report(
+                server_npcid, expected_npcid, map_id)
             or str(NPC_INSTANCE_MAP.get(inst_id, "")) != map_id):
         return False
 
@@ -12915,6 +12931,8 @@ def record_warehouse_sneak_npc_kill(
 
 
 def mission_72_copy_result_payload(state, won):
+    grade_flag = 7 if won else 0
+    grade = 3 if won else 0
     items = [
         encode_sproto([
             (0, str(item_id)), (1, int(amount)), (3, 0)
@@ -12924,7 +12942,7 @@ def mission_72_copy_result_payload(state, won):
     ]
     return encode_sproto([
         (0, MISSION_72_COPY_SUBTYPE), (1, MISSION_72_COPY_ID), (2, bool(won)),
-        (3, 0), (4, 0), (5, items),
+        (3, grade_flag), (4, grade), (5, items),
     ])
 
 
@@ -15210,7 +15228,7 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                           if (is_cash_truck or map_str == '1501'
                               or survive_battle_config_for_map(map_str))
                           else 1),
-            initial_hp=initial_hp
+            initial_hp=initial_hp, map_id=map_str
         )
         NPC_INSTANCE_MAP[inst_id] = map_str
         if is_cash_truck:
@@ -33423,7 +33441,8 @@ def client_handler(conn, addr):
                     # that this server actually created, with the matching
                     # client-resolvable NPCData template.
                     server_npcid = str(NPC_INST_MAP.get(inst_id, '')) if inst_id else ''
-                    expected_client_npcid = NPC_CLIENT_ID_ALIASES.get(server_npcid, server_npcid)
+                    expected_client_npcid = npc_client_template_id(
+                        server_npcid, cur_map)
                     cash_owner_valid = (
                         server_npcid != '22101'
                         or (
