@@ -12783,6 +12783,7 @@ def update_prison_npc_aoi(conn, map_id, picked_char):
     radius_sq = radius_units * radius_units
     tracked = PRISON_NPC_AOI_TRACK.setdefault(id(conn), {})
     visible_slots = set()
+    _spawn_guild_city_vehicle(conn, map_str, tracked, visible_slots)
     try:
         player_level = int(picked_char.get("level", 1) or 1)
     except (TypeError, ValueError):
@@ -14079,6 +14080,7 @@ def update_gotham_npc_aoi(conn, char):
             sync_npc_attrs_rpc(conn, inst_id, get_npc_attr(spec["nid"]),
                                NPC_HP_MAP.get(inst_id, 0))
 
+    _spawn_guild_city_vehicle(conn, map_id, tracked, visible_slots)
     for slot_key, inst_id in list(tracked.items()):
         if slot_key not in visible_slots or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0:
             send_rpc_push_safe(conn, 506, encode_sproto([(0, int(inst_id))]))
@@ -14611,8 +14613,6 @@ def gotham_respawn_shared_npc(slot_key, expected_respawn_at):
 def spawn_gotham_map_npcs(conn, char):
     start_gotham_npc_runtime()
     update_gotham_npc_aoi(conn, char)
-    if str(char.get("map_id", "")) == GOTHAM_MAP_ID:
-        _spawn_guild_city_vehicle(conn, GOTHAM_MAP_ID)
 
 
 def gotham_escort_mission_for_npc(inst_id):
@@ -26504,17 +26504,18 @@ def _guild_capture_for_map(map_id):
     return next(((capture_id, row) for capture_id, row in GUILD_CAPTURE_CONFIG.items()
                  if str(row.get('map_id', '')) == map_id), (None, None))
 
-def _spawn_guild_city_vehicle(conn, map_id):
+def _spawn_guild_city_vehicle(conn, map_id, tracked=None, visible_slots=None):
     capture_id, row = _guild_capture_for_map(map_id)
     if not capture_id or not row:
-        return
+        return None
     event, active = _guild_city_event(capture_id)
     if not active or event.get('finished'):
-        return
+        return None
     npc_id = str(row.get('npc_id', '')).strip()
     position = row.get('npc_pos') or []
     if not npc_id or len(position) < 3 or npc_id not in NPC_CONFIG:
-        return
+        return None
+    slot_key = f"guild_city:{capture_id}"
     with GUILD_CITY_LOCK:
         inst_id = event.get('boss_inst_id')
         if (not inst_id or int(inst_id) not in NPC_HP_MAP
@@ -26531,10 +26532,25 @@ def _spawn_guild_city_vehicle(conn, map_id):
                 int(position[0]), int(position[1]), int(position[2]),
                 existing_inst_id=inst_id)
             NPC_INSTANCE_MAP[inst_id] = str(map_id)
-    send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)]))
+    inst_id = int(inst_id)
+    if tracked is not None and visible_slots is not None:
+        if int(tracked.get(slot_key, 0) or 0) == inst_id:
+            visible_slots.add(slot_key)
+            return inst_id
+        previous_inst = tracked.get(slot_key)
+        if previous_inst is not None:
+            send_rpc_push_safe(conn, 506, encode_sproto([(0, int(previous_inst))]))
+    if not send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
+        return None
+    if tracked is not None and visible_slots is not None:
+        tracked[slot_key] = inst_id
+        visible_slots.add(slot_key)
     stats = get_npc_attr(npc_id)
     sync_npc_attrs_rpc(conn, inst_id, stats, NPC_HP_MAP.get(inst_id, stats['hp_max']))
-    print(f"[GUILD CITY] spawned capture vehicle capture={capture_id} inst_id={inst_id} npc={npc_id} map={map_id}")
+    print(f"[GUILD CITY] spawned capture vehicle capture={capture_id} inst_id={inst_id} "
+          f"npc={npc_id} hp={NPC_HP_MAP.get(inst_id, stats['hp_max'])}/{stats['hp_max']} "
+          f"map={map_id}")
+    return inst_id
 
 def _guild_capture_activity_map(now=None, char=None):
     now = int(time.time()) if now is None else int(now)
