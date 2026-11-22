@@ -10037,7 +10037,7 @@ def clear_equipment_active_monsters(state):
         for key in (
                 'monster_pos', 'monster_heading', 'monster_born_pos',
                 'monster_patrol_target', 'monster_patrol_started',
-                'attack_cd', 'monster_skill_ready_at'):
+                'attack_cd', 'monster_skill_ready_at', 'monster_aggro_target'):
             state.get(key, {}).pop(inst_id, None)
         state.get('movement_stopped', set()).discard(inst_id)
     state['active_monsters'] = []
@@ -10250,7 +10250,7 @@ def on_equipment_npc_killed(state, inst_id, npcid):
     for key in (
             'monster_pos', 'monster_heading', 'monster_born_pos',
             'monster_patrol_target', 'monster_patrol_started',
-            'attack_cd', 'monster_skill_ready_at'):
+            'attack_cd', 'monster_skill_ready_at', 'monster_aggro_target'):
         state.get(key, {}).pop(inst_id, None)
     state.get('movement_stopped', set()).discard(inst_id)
     if wave_done:
@@ -10439,7 +10439,7 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
         # AIData LockDistance and NpcData Search are in centimeters.  A
         # negative lock distance means use the NPC's configured search range.
         lock_distance = (search_radius if configured_lock < 0 else configured_lock) / 100.0
-        if search_radius > 0:
+        if search_radius > 0 and exp_state.get('stage_kind') != 'equipment':
             lock_distance = min(lock_distance, search_radius / 100.0)
         around_min = int(ai_cfg.get('around_min_distance', 100)) / 100.0
         around_max = int(ai_cfg.get('around_max_distance', 200)) / 100.0
@@ -10487,18 +10487,37 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
         follow_limit = max(lock_distance, configured_skill_reach, 5.0)
 
         m_pos = exp_state['monster_pos'].setdefault(inst_id, [6.94, -11.37])
+        try:
+            aggro_id = int(exp_state.get('monster_aggro_target', {}).get(inst_id, 0) or 0)
+        except (TypeError, ValueError):
+            aggro_id = 0
         if exp_state.get('team_id'):
             live_targets = exp_online_members(exp_state, alive=True)
             if not live_targets: continue
-            _tid, target_conn, target_char = min(live_targets, key=lambda item: (
-                                                                                        exp_state.get('player_auth_pos', {}).get(int(item[0]), item[2].get('pos') or default_map_spawn_position(item[2].get('map_id')))[0] / 100.0 - m_pos[0]) ** 2 + (
-                                                                                        exp_state.get('player_auth_pos', {}).get(int(item[0]), item[2].get('pos') or default_map_spawn_position(item[2].get('map_id')))[2] / 100.0 - m_pos[1]) ** 2)
+            def target_distance_sq(target):
+                target_pos = exp_state.get('player_auth_pos', {}).get(
+                    int(target[0]),
+                    target[2].get('pos') or default_map_spawn_position(
+                        target[2].get('map_id')))
+                return ((target_pos[0] / 100.0 - m_pos[0]) ** 2
+                        + (target_pos[2] / 100.0 - m_pos[1]) ** 2)
+            aggro_target = next(
+                (target for target in live_targets
+                 if int(target[0]) == aggro_id),
+                None)
+            _tid, target_conn, target_char = (
+                aggro_target or min(live_targets, key=target_distance_sq))
             conn_for_sync = target_conn; picked_char = target_char
             target_pos = exp_state.get('player_auth_pos', {}).get(
                 int(picked_char.get('id', 0)),
                 picked_char.get('pos') or default_map_spawn_position(picked_char.get('map_id')))
             px = target_pos[0] / 100.0; pz = target_pos[2] / 100.0
             player_stats = get_character_stats(picked_char)
+        is_aggro_target = (
+            exp_state.get('stage_kind') == 'equipment'
+            and aggro_id == int(picked_char.get('id', 0) or 0))
+        if is_aggro_target:
+            follow_limit = max(follow_limit, return_distance)
         mx, mz = m_pos[0], m_pos[1]
         dx = px - mx
         dz = pz - mz
@@ -15327,9 +15346,15 @@ def expire_timed_inventory_items(picked_char, now=None):
                     changed = True
                 retained.append(item)
                 continue
-            # Legacy inventory records may not have an acquisition timestamp.
-            # New timed items get one when granted; do not start a timer for
-            # older items during login or the periodic expiry sweep.
+            if expires_at <= 0:
+                use_hour = item_use_hour(item_id)
+                if use_hour > 0:
+                    # Legacy records lack acquisition times, so start their configured lifetime now.
+                    expires_at = now + use_hour * 3600
+                    parm[4] = expires_at
+                    item['parm'] = parm
+                    updates.append((container_type, item))
+                    changed = True
             if expires_at > 0 and expires_at <= now:
                 updates.append((container_type, None, int(item.get('index_id', 0))))
                 bucket_changed = True
@@ -32801,6 +32826,11 @@ def client_handler(conn, addr):
                                     else:
                                         hp_after = max(0, int(hp_now) - max(0, int(actual_dmg)))
                                         NPC_HP_MAP[target_id] = hp_after
+                                        if (actual_dmg > 0
+                                                and exp_state_hit.get('stage_kind') == 'equipment'):
+                                            exp_state_hit.setdefault(
+                                                'monster_aggro_target', {})[int(target_id)] = int(
+                                                    picked_char.get('id', 0) or 0)
                                         if hp_after == 0:
                                             DEAD_NPC_SET.add(target_id)
                                             exp_npc_died = True
@@ -38411,6 +38441,7 @@ def start_team_equipment_run(team, copy_id):
         'start_time': now, 'end_time': now + duration,
         'active_monsters': [], 'spawned_npcs': set(), 'killed_npcs': set(),
         'monster_pos': {}, 'monster_heading': {}, 'attack_cd': {},
+        'monster_aggro_target': {},
         'movement_stopped': set(), 'kill_tracker': [],
         'player_auth_pos': {}, 'player_auth_move_at': {},
         'ready_connections': {},
@@ -38520,6 +38551,7 @@ def start_solo_equipment_run(conn, char, copy_id, use_time_item, send_rpc_push):
         'start_time': now, 'end_time': now + duration,
         'active_monsters': [], 'spawned_npcs': set(), 'killed_npcs': set(),
         'monster_pos': {}, 'monster_heading': {}, 'attack_cd': {},
+        'monster_aggro_target': {},
         'movement_stopped': set(), 'kill_tracker': [],
         'player_auth_pos': {}, 'player_auth_move_at': {},
         'ready_connections': {}, 'ai_active': True,
