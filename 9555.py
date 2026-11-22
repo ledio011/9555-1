@@ -36697,7 +36697,10 @@ def client_handler(conn, addr):
                             if survey and str(survey.get('scene_id')) == str(picked_char.get('map_id')) and len(pos) >= 3:
                                 sx = int(round(float(survey.get('x', 0.0)) * 100))
                                 sz = int(round(float(survey.get('z', 0.0)) * 100))
-                                radius = 400 if str(survey.get('scene_id')) == '11' else 250
+                                radius = (
+                                    310 if mid == '56' else
+                                    400 if str(survey.get('scene_id')) == '11' else 250
+                                )
                                 near_item = math.hypot(int(pos[0]) - sx, int(pos[2]) - sz) <= radius
                                 now_mono = time.monotonic()
                                 cooldown_key = (int(picked_char.get('id', 0)), mid)
