@@ -8992,6 +8992,57 @@ def validate_tower_npc_attack_damage(conn, char, effinfo_id, client_damage):
     return None
 
 
+def validate_map_npc_attack_damage(conn, char, effinfo_id, client_damage):
+    """Validate client-reported damage against live MonsterData enemies on the map."""
+    try:
+        map_id = str(char.get("map_id", ""))
+        client_damage = int(client_damage)
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if (client_damage < 0 or not effinfo_id
+            or not is_current_character_connection(conn, char)):
+        return None
+
+    spawned_npc_ids = {
+        str(row.get("nid", "")) for row in MONSTER_DATA.get(map_id, [])
+    }
+    if not spawned_npc_ids:
+        return None
+
+    player_stats = get_character_stats(char)
+    for raw_inst_id, raw_npc_id in NPC_INST_MAP.items():
+        try:
+            inst_id = int(raw_inst_id)
+            npc_hp = int(NPC_HP_MAP.get(inst_id, 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        npc_id = str(raw_npc_id)
+        if (npc_id not in spawned_npc_ids or npc_hp <= 0
+                or str(NPC_INSTANCE_MAP.get(inst_id, "")) != map_id):
+            continue
+
+        npc_cfg = NPC_CONFIG.get(npc_id)
+        if not npc_cfg:
+            continue
+        npc_stats = get_npc_attr(npc_id, 1)
+        for skill_id in re.split(r"[;,]", str(npc_cfg.get("skill_group", ""))):
+            skill_id = skill_id.strip()
+            skill_cfg = SKILL_CONFIG.get(skill_id)
+            if not skill_cfg or effinfo_id not in {
+                    str(skill_cfg.get(key) or "")
+                    for key in ("eff0", "eff1", "eff2")}:
+                continue
+            if client_damage == 0:
+                return 0
+            max_damage, can_hit, _ = get_combat_damage(
+                npc_stats, player_stats, skill_id, 0, effinfo_id=effinfo_id,
+                forced_hit=True, forced_crit=True, max_variance=True,
+                attacker_is_npc=True)
+            if can_hit and client_damage <= max_damage + 2:
+                return client_damage
+    return None
+
+
 def build_npc_attr_sproto(
         nid, name, x, z, o, existing_inst_id=None, player_level=1,
         initial_hp=None, hp_max_override=None, map_id=None):
@@ -32291,26 +32342,37 @@ def client_handler(conn, addr):
                                   f"client_damage={client_dmg} accepted_damage={server_dmg} "
                                   f"eff={effinfo_id}")
 
-                    # For non-arena Tag 128, the attacker is a local NPC/zombie in a single-copy scene.
-                    # The client sends Tag 128 with characterId = player's ServerId (the target),
-                    # not the attacker's ID. Without knowing which NPC attacked, the server cannot
-                    # look up the correct attacker stats for exact server-authoritative calculation.
-                    # However, we should NOT trust client_dmg directly as it allows damage manipulation.
-                    # Use a reasonable default NPC attacker stats for server-authoritative calculation.
+                    # Tag 128 identifies the player being hit but omits the
+                    # attacker. Map 108 validates against live MonsterData
+                    # enemies above; retain the bounded fallback on other maps.
                     if (not is_area and not is_rank_pvp and not guild_boss_id
                             and not wild_boss_id
                             and not is_tower and picked_char):
-                        # Use a generic NPC attacker with basic stats for non-arena single-copy scenes
-                        # The original game trusted client-authoritative damage, but server-side validation
-                        # prevents extreme manipulation while still allowing the attack to deal damage.
-                        generic_npc_stats = get_npc_attr("100", picked_char.get('level', 1))
-                        player_stats = get_character_stats(picked_char)
-                        server_dmg, hit, calc_cri = get_combat_damage(
-                            generic_npc_stats, player_stats, "101", 0, effinfo_id=effinfo_id, attacker_is_npc=True
-                        )
-                        if not hit:
-                            server_dmg = 0
-                            calc_cri = False
+                        if current_map == "108":
+                            validated_damage = validate_map_npc_attack_damage(
+                                conn, picked_char, effinfo_id, client_dmg)
+                            if validated_damage is None:
+                                server_dmg = 0
+                                print(f"[WORLD NPC ATTACK] rejected player={picked_char.get('id')} "
+                                      f"map={current_map} damage={client_dmg} eff={effinfo_id}")
+                            else:
+                                server_dmg = validated_damage
+                                print(f"[WORLD NPC ATTACK] player={picked_char.get('id')} "
+                                      f"client_damage={client_dmg} accepted_damage={server_dmg} "
+                                      f"map={current_map} eff={effinfo_id}")
+                        else:
+                            # The attacker source is absent from Tag 128 outside
+                            # tracked scenes; bound these reports with the legacy
+                            # generic NPC calculation rather than trusting damage.
+                            generic_npc_stats = get_npc_attr("100", picked_char.get('level', 1))
+                            player_stats = get_character_stats(picked_char)
+                            server_dmg, hit, calc_cri = get_combat_damage(
+                                generic_npc_stats, player_stats, "101", 0,
+                                effinfo_id=effinfo_id, attacker_is_npc=True
+                            )
+                            if not hit:
+                                server_dmg = 0
+                                calc_cri = False
 
                     old_hp = max(0, int(picked_char.get('hp', 0)))
                     new_hp = max(0, old_hp - server_dmg)
