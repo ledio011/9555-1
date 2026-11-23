@@ -21589,6 +21589,35 @@ def accept_mission_logic(picked_char, mid, online_id=None, conn=None):
         copy_state['remaining'][copy_id] = remaining - 1
     return True
 
+def side_mission_log(picked_char, mission_id, event, **details):
+    mission_id = str(mission_id)
+    cfg = missions_data.get(mission_id)
+    if not picked_char or not cfg or cfg.get('class') not in (2, 8):
+        return
+    entry = picked_char.get('active_missions', {}).get(mission_id) or {}
+    record = {
+        'event': event,
+        'mission': mission_id,
+        'name': cfg.get('name', ''),
+        'class': cfg.get('class'),
+        'logic_type': cfg.get('logic_type'),
+        'logic_id': cfg.get('logic_id', ''),
+        'target': cfg.get('target_id', ''),
+        'target_map': cfg.get('map_id', ''),
+        'map': picked_char.get('map_id', ''),
+        'level': picked_char.get('level'),
+        'min_level': cfg.get('min_level'),
+        'pre_id': cfg.get('pre_id', ''),
+        'state': entry.get('state'),
+        'progress': (entry.get('parm') or [None])[0],
+        'required': MISSION_REQUIRE_DATA.get(str(cfg.get('logic_id', '')), {}).get(
+            'require_num', cfg.get('require_num')),
+    }
+    record.update(details)
+    print(f"[SIDE MISSION] player={picked_char.get('id', '?')} "
+          f"{json.dumps(record, ensure_ascii=True, default=str)}", flush=True)
+
+
 def mission1014_log(picked_char, message):
     print(f"[MISSION1014] player={picked_char.get('id', '?')} {message}")
 
@@ -21882,6 +21911,10 @@ def advance_missions(picked_char, send_rpc_push, event, target_id=None, die_type
                     picked_char,
                     f"mission 1014 state changed to complete after event={event}",
                 )
+        side_mission_log(
+            picked_char, mid, 'progress', source=event, actual_target=target_value,
+            event_map=str(map_id or picked_char.get('map_id', '') or ''),
+            progress=progress, required=required)
         updated = True
 
     if daily_mission_completed:
@@ -30390,6 +30423,10 @@ def client_handler(conn, addr):
                         )
                     print(f"[MISSION ACCEPT REQ] mid={mid} result={res} "
                           f"contact={contact_reason}")
+                    side_mission_log(
+                        picked_char, mid, 'accept_request', accepted=res,
+                        already_active=already_active, contact=contact_reason,
+                        online_id=online_id)
                     if mid == '1014':
                         mission1014_log(
                             picked_char,
@@ -30488,6 +30525,9 @@ def client_handler(conn, addr):
                             m_entry['state'] = 3
                             claim_mission = True
                     print(f"[MISSION COMPLETE REQ] mid={mid} entry_exists={m_entry is not None} state={m_entry['state'] if m_entry else 'N/A'}")
+                    side_mission_log(
+                        picked_char, mid, 'complete_request', allowed=claim_mission,
+                        previous_state=mission_state, contact=submit_contact_reason)
                     if mid == '1014':
                         mission1014_log(
                             picked_char,
@@ -30575,6 +30615,7 @@ def client_handler(conn, addr):
                                             picked_char.pop('_skip_mission_save', None)
                             if not save_chars(all_accounts_chars):
                                 restore_character_reward_state(picked_char, completion_snapshot)
+                                side_mission_log(picked_char, mid, 'complete_save_failed')
                                 if mid == '1014':
                                     mission1014_log(picked_char, "claim persistence failed; mission state rolled back")
                                 print(f"[MISSION COMPLETE] persistence failed; rolled back mission={mid} player={picked_char.get('id')}")
@@ -30584,6 +30625,9 @@ def client_handler(conn, addr):
                                 send_rpc_push(519, sync_mission_data(picked_char))
                                 continue
                             print(f"[MISSION COMPLETE] mission_id={mid} chained={is_chained}")
+                            side_mission_log(
+                                picked_char, mid, 'completed', exp=exp_add,
+                                cash=cash_add, items=items_add)
 
                             # Standard completion response
                             if session is not None:
@@ -30655,6 +30699,9 @@ def client_handler(conn, addr):
 
             elif msg == 114: # abandon_mission
                 mid = body.get(0, b"").decode('utf-8') if isinstance(body.get(0), bytes) else str(body.get(0, ''))
+                side_mission_log(
+                    picked_char, mid, 'abandon_request',
+                    active=bool(picked_char and mid in picked_char.get('active_missions', {})))
                 if picked_char and mid in picked_char.get('active_missions', {}):
                     m_cfg = missions_data.get(mid, {})
                     abandoned_entry = picked_char['active_missions'].get(mid, {})
@@ -37591,14 +37638,8 @@ def client_handler(conn, addr):
                                 cooldown_key = (int(picked_char.get('id', 0)), mid)
                                 last_event = SURVEY_PROGRESS_TIMES.get(cooldown_key, 0.0)
                                 survey_interval = int(survey.get('survey_time', 1000)) / 1000.0
-                                monitor_survey = (
-                                    m_cfg.get('class') == 2
-                                    and logic_id.isdigit()
-                                    and 11006 <= int(logic_id) <= 11018
-                                )
                                 cooldown = max(
-                                    0.8, survey_interval - (
-                                        0.25 if mid in ('82', '97') or monitor_survey else 0.0))
+                                    0.8, survey_interval - (0.25 if mid in ('82', '97') else 0.0))
                                 if near_item and now_mono - last_event >= cooldown:
                                     required = int(survey.get('need_num', m_cfg.get('require_num', 1)))
                                     accepted = True
@@ -37633,6 +37674,10 @@ def client_handler(conn, addr):
                         print(f"[MISSION PROGRESS] msg=178 mission={mid} progress={parm[0]}/{required}")
                     else:
                         print(f"[MISSION SECURITY] rejected MSG 178 mission={mid} type={logic_type} map={picked_char.get('map_id')}")
+                    side_mission_log(
+                        picked_char, mid, 'parameter_request', accepted=accepted,
+                        param_type=param_type, param_value=param_value,
+                        required=required if accepted else None)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -37659,6 +37704,9 @@ def client_handler(conn, addr):
                         print(f"[MISSION DIALOG COMPLETE] mission_id={mid}")
                     elif mdata and mdata.get('state') != 2:
                         print(f"[MISSION SECURITY] rejected dialog completion mission={mid} type={logic_type} state={mdata.get('state')}")
+                    side_mission_log(
+                        picked_char, mid, 'dialog_request', accepted=can_finish_dialog,
+                        request_tag=msg)
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
