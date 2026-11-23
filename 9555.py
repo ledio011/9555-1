@@ -252,6 +252,11 @@ MISSION_72_COPY_SUBTYPE = 2
 MISSION_72_COPY_DURATION = 300
 MISSION_72_COPY_STATE_KEY = "_mission_72_copy_state"
 MISSION_72_COPY_LOCK = threading.RLock()
+UNDERGROUND_COPY_ID = "305"
+UNDERGROUND_COPY_SUBTYPE = 3
+UNDERGROUND_COPY_DURATION = 300
+UNDERGROUND_COPY_STATE_KEY = "_underground_copy_state"
+UNDERGROUND_COPY_LOCK = threading.RLock()
 PRISON_NPC_AOI_MAP_IDS = (
     SCUFFLE_NPC_MAP_IDS | SURVIVE_BATTLE_NPC_MAP_IDS
     | OPEN_WORLD_NPC_MAP_IDS | frozenset((WAREHOUSE_SNEAK_COPY_ID,)))
@@ -11722,6 +11727,9 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                 if current_map == MISSION_72_COPY_ID:
                     record_mission_72_copy_kill(
                         picked_char, inst_id, rewards)
+                elif current_map == UNDERGROUND_COPY_ID:
+                    record_underground_copy_kill(
+                        picked_char, inst_id, rewards)
 
     if current_map == WAREHOUSE_SNEAK_COPY_ID and inst_id:
         record_warehouse_sneak_npc_kill(
@@ -13005,6 +13013,182 @@ def mission_72_copy_result_payload(state, won):
         (0, MISSION_72_COPY_SUBTYPE), (1, MISSION_72_COPY_ID), (2, bool(won)),
         (3, grade_flag), (4, grade), (5, items),
     ])
+
+
+def underground_copy_result_payload(state, won):
+    items = [
+        encode_sproto([
+            (0, str(item_id)), (1, int(amount)), (3, 0)
+        ])
+        for item_id, amount in sorted(state.get("reward_totals", {}).items())
+        if int(amount or 0) > 0
+    ]
+    return encode_sproto([
+        (0, UNDERGROUND_COPY_SUBTYPE), (1, UNDERGROUND_COPY_ID),
+        (2, bool(won)), (3, 0), (4, 0), (5, items),
+    ])
+
+
+def start_underground_copy(char):
+    if not char:
+        return None
+    state = char.get(UNDERGROUND_COPY_STATE_KEY)
+    if (isinstance(state, dict)
+            and state.get("phase") in ("ready", "running")
+            and not state.get("result_recorded")):
+        return state
+    state = {
+        "copy_id": UNDERGROUND_COPY_ID,
+        "map_id": UNDERGROUND_COPY_ID,
+        "phase": "ready",
+        "spawned_npcs": [],
+        "killed_npcs": [],
+        "reward_totals": {},
+        "result_recorded": False,
+        "started_at": 0,
+        "end_time": 0,
+    }
+    char[UNDERGROUND_COPY_STATE_KEY] = state
+    return state
+
+
+def track_underground_copy_spawn(char, inst_id):
+    state = char.get(UNDERGROUND_COPY_STATE_KEY) if char else None
+    if (not isinstance(state, dict)
+            or state.get("phase") not in ("ready", "running")
+            or state.get("result_recorded")
+            or str(char.get("map_id") or "") != UNDERGROUND_COPY_ID):
+        return False
+    try:
+        inst_id = int(inst_id)
+    except (TypeError, ValueError):
+        return False
+    with UNDERGROUND_COPY_LOCK:
+        spawned = state.setdefault("spawned_npcs", [])
+        if inst_id not in spawned:
+            spawned.append(inst_id)
+    return True
+
+
+def _underground_copy_timeout(char_id, expected_end_time):
+    char = _tower_find_character(char_id)
+    if not char:
+        return
+    state = char.get(UNDERGROUND_COPY_STATE_KEY)
+    if (not isinstance(state, dict)
+            or int(state.get("end_time", 0) or 0) != int(expected_end_time)
+            or str(char.get("map_id") or "") != UNDERGROUND_COPY_ID):
+        return
+    finish_underground_copy(char, False)
+
+
+def start_underground_copy_battle(char, send_rpc_push):
+    state = char.get(UNDERGROUND_COPY_STATE_KEY) if char else None
+    if (not isinstance(state, dict)
+            or state.get("result_recorded")
+            or str(char.get("map_id") or "") != UNDERGROUND_COPY_ID):
+        return False
+    with UNDERGROUND_COPY_LOCK:
+        if not int(state.get("started_at", 0) or 0):
+            started_at = int(time.time())
+            state["started_at"] = started_at
+            state["end_time"] = started_at + UNDERGROUND_COPY_DURATION
+            state["phase"] = "running"
+        end_time = int(state.get("end_time", 0) or 0)
+        timer = state.get("timeout_timer")
+        if (end_time > int(time.time())
+                and (timer is None or not timer.is_alive())):
+            timer = threading.Timer(
+                end_time - int(time.time()),
+                _underground_copy_timeout,
+                args=(int(char.get("id", 0)), end_time))
+            timer.daemon = True
+            state["timeout_timer"] = timer
+            timer.start()
+    if end_time <= int(time.time()):
+        finish_underground_copy(char, False)
+        return False
+    send_rpc_push(629, encode_sproto([(0, end_time), (1, 2)]))
+    save_chars(all_accounts_chars)
+    return True
+
+
+def finish_underground_copy(char, won):
+    if not char:
+        return False
+    with UNDERGROUND_COPY_LOCK:
+        state = char.get(UNDERGROUND_COPY_STATE_KEY)
+        if (not isinstance(state, dict)
+                or state.get("phase") not in ("ready", "running")
+                or state.get("result_recorded")):
+            return False
+        spawned = set(state.get("spawned_npcs", []))
+        killed = set(state.get("killed_npcs", []))
+        now = int(time.time())
+        won = bool(
+            won and spawned and spawned.issubset(killed)
+            and (not int(state.get("end_time", 0) or 0)
+                 or now < int(state.get("end_time", 0))))
+        state["phase"] = "complete" if won else "failed"
+        state["result_recorded"] = True
+        timer = state.get("timeout_timer")
+        if timer:
+            timer.cancel()
+
+    if won:
+        push = lambda tag, data: send_push_to_char(
+            char.get("id", 0), tag, data)
+        advance_missions(
+            char, push, "copy_scene_complete",
+            target_id=UNDERGROUND_COPY_ID, map_id=UNDERGROUND_COPY_ID)
+    result = underground_copy_result_payload(state, won)
+    send_exp_result_to_char(char, result)
+    save_chars(all_accounts_chars)
+    print(f"[UNDERGROUND COPY] result player={char.get('id')} win={won} "
+          f"kills={len(killed)}/{len(spawned)} "
+          f"rewards={state.get('reward_totals', {})}")
+    return True
+
+
+def record_underground_copy_kill(char, inst_id, rewards):
+    state = char.get(UNDERGROUND_COPY_STATE_KEY) if char else None
+    if (not isinstance(state, dict)
+            or state.get("phase") not in ("ready", "running")
+            or state.get("result_recorded")
+            or str(char.get("map_id") or "") != UNDERGROUND_COPY_ID):
+        return False
+    try:
+        inst_id = int(inst_id)
+    except (TypeError, ValueError):
+        return False
+
+    expired = False
+    complete = False
+    with UNDERGROUND_COPY_LOCK:
+        spawned = set(state.get("spawned_npcs", []))
+        if inst_id not in spawned:
+            return False
+        killed = state.setdefault("killed_npcs", [])
+        if inst_id in killed:
+            return False
+        end_time = int(state.get("end_time", 0) or 0)
+        if end_time and int(time.time()) >= end_time:
+            expired = True
+        else:
+            killed.append(inst_id)
+            totals = state.setdefault("reward_totals", {})
+            for item_id, _quality, amount in rewards or []:
+                amount = max(0, int(amount or 0))
+                if amount:
+                    key = str(item_id)
+                    totals[key] = int(totals.get(key, 0) or 0) + amount
+            complete = bool(spawned and spawned.issubset(set(killed)))
+
+    if expired:
+        finish_underground_copy(char, False)
+    elif complete:
+        finish_underground_copy(char, True)
+    return True
 
 
 def _mission_72_copy_timeout(char_id, expected_end_time):
@@ -15258,6 +15442,8 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
     spawned_maps = NPC_SPAWNED_MAPS.setdefault(id(conn), set())
     if map_str in spawned_maps: return
     spawned_maps.add(map_str)
+    if map_str == UNDERGROUND_COPY_ID and picked_char:
+        start_underground_copy(picked_char)
 
     def send_npc_create(nid, name, x, z, o, slum_enemy=False):
         cash_state = picked_char.get('cash_stage_state') if picked_char else None
@@ -15446,6 +15632,8 @@ def spawn_map_npcs(conn, map_id, picked_char=None):
                     slum_enemy=(map_str == SLUM_DISTRICT_MAP_ID))
                 if map_str == MISSION_72_COPY_ID and inst_id:
                     track_mission_72_copy_spawn(picked_char, inst_id)
+                elif map_str == UNDERGROUND_COPY_ID and inst_id:
+                    track_underground_copy_spawn(picked_char, inst_id)
                 if map_str == '1501' and inst_id:
                     _guild_battle_register_npc(inst_id, conn, picked_char, m)
 
@@ -22164,6 +22352,12 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
         mission_72_state = picked_char.pop(MISSION_72_COPY_STATE_KEY, None)
         if isinstance(mission_72_state, dict):
             timeout_timer = mission_72_state.get("timeout_timer")
+            if timeout_timer:
+                timeout_timer.cancel()
+    if src_map == UNDERGROUND_COPY_ID and src_map != target_map_id:
+        underground_state = picked_char.pop(UNDERGROUND_COPY_STATE_KEY, None)
+        if isinstance(underground_state, dict):
+            timeout_timer = underground_state.get("timeout_timer")
             if timeout_timer:
                 timeout_timer.cancel()
     if src_map != target_map_id:
@@ -34487,6 +34681,8 @@ def client_handler(conn, addr):
                             picked_char, create=True, reset=True)
                     elif copy_id == MISSION_72_COPY_ID:
                         start_mission_72_copy(picked_char, send_rpc_push)
+                    elif copy_id == UNDERGROUND_COPY_ID:
+                        start_underground_copy(picked_char)
                     advance_missions(picked_char, send_rpc_push, 'dungeon', target_id=copy_id)
                     start_map_transition(conn, picked_char, copy_id, send_rpc_push)
                 if session is not None:
@@ -34945,12 +35141,22 @@ def client_handler(conn, addr):
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
 
             elif msg == 220: # start_battle (Street Race & EXP Stage start)
-                if picked_char and is_current_character_connection(conn, picked_char) and picked_char.get('active_copy_id'):
-                    copy_id = str(picked_char['active_copy_id'])
+                if (picked_char and is_current_character_connection(conn, picked_char)
+                        and (picked_char.get('active_copy_id')
+                             or str(picked_char.get('map_id') or '')
+                             == UNDERGROUND_COPY_ID)):
+                    copy_id = str(
+                        picked_char.get('active_copy_id')
+                        or (UNDERGROUND_COPY_ID
+                            if str(picked_char.get('map_id') or '')
+                            == UNDERGROUND_COPY_ID else ''))
                     cfg = COPY_SCENE_CONFIG.get(copy_id)
                     if copy_id == WAREHOUSE_SNEAK_COPY_ID:
                         start_warehouse_sneak_battle(
                             conn, picked_char, send_rpc_push)
+                    elif copy_id == UNDERGROUND_COPY_ID:
+                        start_underground_copy_battle(
+                            picked_char, send_rpc_push)
                     cash_state = picked_char.get('cash_stage_state')
                     if (cfg and int(cfg.get('subtype', -1)) == 11
                             and isinstance(cash_state, dict)
