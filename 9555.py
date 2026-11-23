@@ -833,6 +833,9 @@ try:
                             for index in (25, 27, 29)
                         ],
                         'cooldown_ms': int(parts[10]) if len(parts) > 10 and parts[10].isdigit() else 0,
+                        # SkillData.HoldTime (公共CD): global cooldown the client
+                        # waits after this skill before any next skill.
+                        'hold_ms': int(parts[11]) if len(parts) > 11 and parts[11].isdigit() else 0,
                         'trace_distance_cm': int(parts[12]) if len(parts) > 12 and parts[12].isdigit() else 0,
                         'priority': int(parts[30]) if len(parts) > 30 and parts[30].isdigit() else 0,
                         # Equip inheritance groups weapon skills by SkillData.TeamID;
@@ -5169,8 +5172,298 @@ def get_connection_send_lock(c):
     return None
 
 
+# ======================= SPEED GUARD (anti speed hack) BEGIN =======================
+# Kicks a player whose game runs faster than real time (speed hack x1.25 and up).
+# Every rule below is something an unmodified client can never do:
+#
+#  1) Heartbeat speed (tag 218). NetManager.Update sends one heartbeat every
+#     15 s of GAME time (curTime += Time.deltaTime). The game never runs faster
+#     than real time (Time.timeScale is only ever 0, 0.3 or 1), so a normal
+#     client's heartbeats are at least 15 s apart. Catches every speed hack,
+#     in every scene, including the ones that also speed up the phone clock.
+#  2) Skill cooldown on the client's own clock (tag 102). skill_use field 4 is
+#     realtimeSinceStartup*100, taken at the moment of the cast, so network lag
+#     cannot make two casts look closer together. The client blocks a recast
+#     until SkillData.CD has passed.
+#  3) Global cooldown pace (tag 102). After every skill the client waits
+#     SkillData.HoldTime before ANY next skill (this is what paces normal
+#     attacks 101-103 / 201-203 / 301-303). Checked over 12 casts.
+#
+# The client forgets all its cooldowns when it receives tag 540 or loads a
+# map (ObjMainPlayer.UpdateSkillList), so the guard forgets them at the same
+# moments. Thresholds were tested with a simulation of bad mobile networks,
+# 10 fps phones, server freezes and emulator clock jumps: 0 normal players
+# kicked; cheaters x1.5-x6.5 kicked within roughly 5-100 s.
+
+SPEED_GUARD_ENABLED = True
+SPEED_GUARD_KICK = True               # False = only print who WOULD be kicked
+SPEED_GUARD_BLOCK_SECONDS = 300       # kicked account/character can't log in for 5 min
+SPEED_GUARD_MESSAGE = "Speed Hack detected!"
+
+SPEED_GUARD_HB_WINDOW = 8             # heartbeat gaps used for the median
+SPEED_GUARD_HB_MIN_GAP = 12.0         # median below this = game speed >= x1.25
+SPEED_GUARD_HB_FAILS = 2              # consecutive failing medians before kick
+
+SPEED_GUARD_CD_TOLERANCE = 0.5        # s: one slow frame (<=0.333) + clock rounding
+SPEED_GUARD_CD_IN_A_ROW = 4           # same skill early this many times IN A ROW
+                                      # (a cooldown reset can only cause 1 early recast,
+                                      # the next recast is normal again)
+
+SPEED_GUARD_PACE_CASTS = 12           # casts per global-cooldown window
+SPEED_GUARD_PACE_TOLERANCE = 0.4      # s
+SPEED_GUARD_PACE_STRIKES = 3          # failing windows needed ...
+SPEED_GUARD_PACE_WINDOW = 30.0        # ... within this many seconds ...
+SPEED_GUARD_PACE_SPREAD = 5.0         # ... spread over at least this long
+
+SPEED_GUARD_RESET_GRACE = 5.0         # s after a cooldown reset with no skill checks
+SPEED_GUARD_EXEMPT_SKILLS = {'199', '299', '399'}  # revive skills: no client cooldown
+# Pushes after which the client has zero cooldowns: 540 sync_skill_info,
+# 503 enter_map (scene load rebuilds the skill list), 504 main_player_create.
+SPEED_GUARD_RESET_TAGS = {503, 504, 540}
+
+SPEED_GUARD_LOCK = threading.RLock()
+SPEED_GUARD_STATE = {}                # id(conn) -> per-connection state
+SPEED_GUARD_BLOCKS = {}               # ('acc', str) / ('char', int) -> monotonic deadline
+
+
+def _speed_guard_new_state():
+    return {
+        'hb': [], 'hb_fails': 0, 'map': None,
+        'last_tick': {}, 'cd_runs': {}, 'casts': [], 'pace_strikes': [],
+        'grace_until': 0.0, 'kicked': False,
+    }
+
+
+def _speed_guard_forget_cooldowns(st, now):
+    st['last_tick'] = {}
+    st['cd_runs'] = {}
+    st['casts'] = []
+    st['grace_until'] = now + SPEED_GUARD_RESET_GRACE
+
+
+def speed_guard_reset_skills(conn):
+    """The client resets its cooldowns when it receives tag 540; do the same."""
+    if conn is None:
+        return
+    with SPEED_GUARD_LOCK:
+        st = SPEED_GUARD_STATE.get(id(conn))
+        if st is not None:
+            _speed_guard_forget_cooldowns(st, time.monotonic())
+
+
+def speed_guard_forget(conn):
+    with SPEED_GUARD_LOCK:
+        SPEED_GUARD_STATE.pop(id(conn), None)
+
+
+def _speed_guard_tick_slack(tick):
+    """Extra seconds for float rounding of realtimeSinceStartup*100 when the
+    app has been open for days (float32 loses precision above 2^23)."""
+    try:
+        centis = float(tick)
+        if centis < 8388608.0:
+            return 0.02
+        seconds = centis / 100.0
+        ulp_seconds = 2.0 ** (math.floor(math.log2(seconds)) - 23)
+        ulp_centis = 2.0 ** (math.floor(math.log2(centis)) - 23)
+        return 2.0 * (ulp_seconds + ulp_centis / 100.0) + 0.02
+    except (TypeError, ValueError, OverflowError):
+        return 0.02
+
+
+def _speed_guard_median(values):
+    ordered = sorted(values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _speed_guard_heartbeat(st, now):
+    hb = st['hb']
+    hb.append(now)
+    if len(hb) > SPEED_GUARD_HB_WINDOW + 1:
+        del hb[:-(SPEED_GUARD_HB_WINDOW + 1)]
+    if len(hb) <= SPEED_GUARD_HB_WINDOW:
+        return None
+    median_gap = _speed_guard_median([b - a for a, b in zip(hb, hb[1:])])
+    if median_gap >= SPEED_GUARD_HB_MIN_GAP:
+        st['hb_fails'] = 0
+        return None
+    st['hb_fails'] += 1
+    if st['hb_fails'] < SPEED_GUARD_HB_FAILS:
+        return None
+    return (f"heartbeat every {median_gap:.1f}s instead of 15s "
+            f"(game speed x{15.0 / max(0.1, median_gap):.2f})")
+
+
+def _speed_guard_skill(st, skill_id, tick, now):
+    cfg = SKILL_CONFIG.get(skill_id)
+    if not cfg or skill_id in SPEED_GUARD_EXEMPT_SKILLS or tick <= 0:
+        return None
+    if now < st['grace_until']:
+        return None
+    try:
+        cooldown = max(0, int(cfg.get('cooldown_ms', 0) or 0)) / 1000.0
+        hold = max(0, int(cfg.get('hold_ms', 0) or 0)) / 1000.0
+    except (TypeError, ValueError):
+        return None
+    slack = _speed_guard_tick_slack(tick)
+
+    # Rule 2: same skill again before its cooldown, measured on the client clock.
+    last = st['last_tick'].get(skill_id)
+    st['last_tick'][skill_id] = tick
+    if last is not None and cooldown > 0:
+        gap = (tick - last) / 100.0
+        if gap < cooldown - SPEED_GUARD_CD_TOLERANCE - slack:
+            run = st['cd_runs'].setdefault(skill_id, [])
+            run.append(gap)
+            if len(run) >= SPEED_GUARD_CD_IN_A_ROW:
+                gaps = ", ".join(f"{g:.2f}s" for g in run[-SPEED_GUARD_CD_IN_A_ROW:])
+                return (f"skill {skill_id} recast {len(run)} times in a row before its "
+                        f"{cooldown:.1f}s cooldown ({gaps})")
+        else:
+            st['cd_runs'].pop(skill_id, None)
+
+    # Rule 3: global cooldown pace over the last 12 casts.
+    casts = st['casts']
+    casts.append((tick, hold))
+    if len(casts) > SPEED_GUARD_PACE_CASTS + 1:
+        del casts[:-(SPEED_GUARD_PACE_CASTS + 1)]
+    if len(casts) == SPEED_GUARD_PACE_CASTS + 1:
+        span = (casts[-1][0] - casts[0][0]) / 100.0
+        need = sum(h for _tick, h in casts[:-1])
+        if span < need - SPEED_GUARD_PACE_TOLERANCE - slack:
+            st['pace_strikes'].append((now, span, need))
+            # Start a fresh window so one odd gap can only count once.
+            st['casts'] = [casts[-1]]
+    pace = [p for p in st['pace_strikes'] if now - p[0] <= SPEED_GUARD_PACE_WINDOW]
+    st['pace_strikes'] = pace
+    if (len(pace) >= SPEED_GUARD_PACE_STRIKES
+            and pace[-1][0] - pace[0][0] >= SPEED_GUARD_PACE_SPREAD):
+        span, need = pace[-1][1], pace[-1][2]
+        return (f"{SPEED_GUARD_PACE_CASTS} skills in {span:.2f}s, client minimum {need:.2f}s "
+                f"(attack speed x{need / max(0.1, span):.2f})")
+    return None
+
+
+def speed_guard_on_packet(conn, char, msg, body, now=None):
+    """Feed every received tag 102 / 218. Returns a reason string to kick."""
+    if not SPEED_GUARD_ENABLED or conn is None or not char:
+        return None
+    now = time.monotonic() if now is None else float(now)
+    with SPEED_GUARD_LOCK:
+        st = SPEED_GUARD_STATE.get(id(conn))
+        if st is None:
+            st = SPEED_GUARD_STATE[id(conn)] = _speed_guard_new_state()
+        if st['kicked']:
+            return None
+        map_id = str(char.get('map_id', '') or '')
+        if st['map'] != map_id:
+            if st['map'] is not None:
+                _speed_guard_forget_cooldowns(st, now)  # client reloaded the map
+            st['map'] = map_id
+        if msg == 218:
+            return _speed_guard_heartbeat(st, now)
+        if msg == 102:
+            raw_skill = body.get(1, b"")
+            if isinstance(raw_skill, (bytes, bytearray)):
+                skill_id = raw_skill.decode('utf-8', 'replace')
+            else:
+                skill_id = str(raw_skill or '')
+            return _speed_guard_skill(st, skill_id, get_val_int(body, 4, 0), now)
+    return None
+
+
+def speed_guard_kick(conn, char, acc_id, reason, send_push):
+    """Show the message, block login for a while and close the socket.
+    Returns True when the connection was kicked."""
+    char_id = int(char.get('id', 0) or 0) if char else 0
+    print(f"[SPEED GUARD] {'KICK' if SPEED_GUARD_KICK else 'WOULD KICK'} "
+          f"player={char_id} name={char.get('name') if char else None} acc={acc_id} "
+          f"map={char.get('map_id') if char else None} reason={reason}")
+    with SPEED_GUARD_LOCK:
+        st = SPEED_GUARD_STATE.get(id(conn))
+        if not SPEED_GUARD_KICK:
+            # Log-only mode: start counting again instead of logging every packet.
+            if st is not None:
+                st.update(cd_runs={}, pace_strikes=[], hb=[], hb_fails=0)
+            return False
+        if st is not None:
+            st['kicked'] = True
+        until = time.monotonic() + SPEED_GUARD_BLOCK_SECONDS
+        if acc_id and str(acc_id) != "0":
+            SPEED_GUARD_BLOCKS[('acc', str(acc_id))] = until
+        if char_id:
+            SPEED_GUARD_BLOCKS[('char', char_id)] = until
+    try:
+        send_push(529, encode_sproto([(0, SPEED_GUARD_MESSAGE), (1, True)]))
+    except Exception:
+        pass
+    time.sleep(1.0)  # let the message reach the client before the socket closes
+    try:
+        conn.shutdown(socket.SHUT_RDWR)
+    except OSError:
+        pass
+    return True
+
+
+def speed_guard_login_block_left(msg, body):
+    """Seconds left on a speed-hack block for this login / pick / reconnect."""
+    keys = []
+    if msg == 4:
+        raw = body.get(1, b"")
+        acc = raw.decode('utf-8', 'replace') if isinstance(raw, (bytes, bytearray)) else str(raw or '')
+        if acc:
+            keys.append(('acc', acc))
+    elif msg == 105:
+        keys.append(('char', get_val_int(body, 0, 0)))
+    elif msg == 281:
+        keys.append(('char', get_val_int(body, 1, 0)))
+    now = time.monotonic()
+    left = 0.0
+    with SPEED_GUARD_LOCK:
+        for key in keys:
+            until = SPEED_GUARD_BLOCKS.get(key)
+            if until is None:
+                continue
+            if until <= now:
+                SPEED_GUARD_BLOCKS.pop(key, None)
+            else:
+                left = max(left, until - now)
+    return left
+
+
+def speed_guard_refuse_login(conn, msg, session, seconds_left, send_push):
+    minutes = max(1, int(math.ceil(seconds_left / 60.0)))
+    try:
+        send_push(529, encode_sproto([
+            (0, f"{SPEED_GUARD_MESSAGE} You can play again in {minutes} min."), (1, True)]))
+    except Exception:
+        pass
+    if session is not None and msg in (4, 105):
+        # login.type = 0 / character_pick.errno = 0 send the client back to
+        # the login screen (NetManager.LoginResponse / PickResponse).
+        ph = encode_sproto([(1, session)])
+        pf = sproto_pack(ph + encode_sproto([(0, 0)]))
+        try:
+            conn.sendall(struct.pack(">H", len(pf)) + pf)
+        except OSError:
+            pass
+    if msg == 281:
+        time.sleep(1.0)
+        try:
+            conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+    print(f"[SPEED GUARD] refused msg={msg} block_left={int(seconds_left)}s")
+# ======================= SPEED GUARD (anti speed hack) END =========================
+
+
 def send_rpc_push_safe(c, tag, data):
     """Safe wrapper for sending TAG push — used by relife AI threads to avoid stale closures."""
+    if tag in SPEED_GUARD_RESET_TAGS:
+        speed_guard_reset_skills(c)
     try:
         ph_p = encode_sproto([(0, tag)])
         pf_p = sproto_pack(ph_p + data)
@@ -28164,6 +28457,8 @@ def client_handler(conn, addr):
         print(f"[NETWORK] Could not disable TCP Nagle for {addr}: {error}")
 
     def send_rpc_push(tag, data):
+        if tag in SPEED_GUARD_RESET_TAGS:
+            speed_guard_reset_skills(conn)
         try:
             ph_p = encode_sproto([(0, tag)])
             pf_p = sproto_pack(ph_p + data)
@@ -28697,6 +28992,19 @@ def client_handler(conn, addr):
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
             debug_log(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
+            # Speed guard: refuse login while a speed-hack kick block is active,
+            # and check heartbeat / skill timing of the playing character.
+            if SPEED_GUARD_ENABLED and msg in (4, 105, 281):
+                speed_block_left = speed_guard_login_block_left(msg, body)
+                if speed_block_left > 0:
+                    speed_guard_refuse_login(conn, msg, session, speed_block_left, send_rpc_push)
+                    continue
+            if (SPEED_GUARD_ENABLED and msg in (102, 218) and picked_char
+                    and is_current_character_connection(conn, picked_char)):
+                speed_reason = speed_guard_on_packet(conn, picked_char, msg, body)
+                if speed_reason and speed_guard_kick(
+                        conn, picked_char, acc_id, speed_reason, send_rpc_push):
+                    continue
             if (invest_trace_count < 20
                     and time.monotonic() < invest_trace_until):
                 invest_trace_count += 1
@@ -29259,6 +29567,7 @@ def client_handler(conn, addr):
 
                     debug_log("[DEBUG] BEFORE MAP ENTER")
                     try:
+                        speed_guard_reset_skills(conn)  # client reloads scene: cooldowns reset
                         ph_p = encode_sproto([(0, 503)])
                         data = encode_sproto([(0, mid), (1, 0), (2, 1)])
                         pf_p = sproto_pack(ph_p + data)
@@ -38529,6 +38838,10 @@ def client_handler(conn, addr):
         print(f"[!] Client handler exception for {addr}: {exc}")
         traceback.print_exc()
     finally:
+        try:
+            speed_guard_forget(conn)
+        except Exception:
+            pass
         try:
             if conn_id in NPC_SPAWNED_MAPS:
                 del NPC_SPAWNED_MAPS[conn_id]
