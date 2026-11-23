@@ -730,6 +730,15 @@ try:
             debug_log(f"[MISSION JSON MERGED] count={len(missions_data)}")
             break
 
+    # Mission 87's JSON fallback omits its map; the client MissionData row
+    # configures its acceptance, target, and submission on map 108.
+    if '87' in missions_data:
+        missions_data['87'].update({
+            'accept_map_id': '108',
+            'map_id': '108',
+            'submit_map_id': '108',
+        })
+
     # Load decompiled mission_rewards.json if present
     json_rd_paths = [
         os.path.join(script_dir, "dec&normal", "Decompiled", "mission_rewards.json"),
@@ -16082,12 +16091,114 @@ def _backpack_map(picked_char, bucket):
     return {int(item['index_id']): _gameitem_sproto(item)
             for item in picked_char.get(bucket, [])}
 
+def _merge_badge_inventory_stacks(picked_char):
+    """Combine legacy duplicate badge stacks while retaining one stable index."""
+    records = picked_char.get('badge_inventory', [])
+    groups = {}
+    retained = []
+    removed_indices = []
+    changed = False
+    for item in records:
+        item_id = str(item.get('id', ''))
+        item_config = ITEM_CONFIG.get(item_id, {})
+        max_stack = max(1, int(item_config.get('max_stack', 1)))
+        if (item_id not in BADGE_CONFIG or int(item_config.get('type', -1)) != 6
+                or max_stack <= 1):
+            retained.append(item)
+            continue
+
+        try:
+            remaining = max(0, int(item.get('amount', 1)))
+        except (TypeError, ValueError):
+            remaining = 1
+        matching = groups.setdefault(item_id, [])
+        for existing in matching:
+            room = max(0, max_stack - int(existing.get('amount', 0)))
+            moved = min(room, remaining)
+            if moved:
+                existing['amount'] = int(existing.get('amount', 0)) + moved
+                remaining -= moved
+                changed = True
+            if remaining <= 0:
+                break
+
+        if remaining <= 0:
+            try:
+                removed_indices.append(int(item['index_id']))
+            except (KeyError, TypeError, ValueError):
+                pass
+            changed = True
+            continue
+
+        if remaining != int(item.get('amount', 1)):
+            item['amount'] = remaining
+            changed = True
+        retained.append(item)
+        matching.append(item)
+
+    if changed:
+        picked_char['badge_inventory'] = retained
+    return removed_indices, changed
+
+def _return_badge_to_inventory(picked_char, item, exclude_item=None, extra_free_slots=0):
+    """Return one equipped badge, merging it into an existing stack when possible."""
+    item_id = str(item.get('id', ''))
+    item_config = ITEM_CONFIG.get(item_id, {})
+    if item_id not in BADGE_CONFIG or int(item_config.get('type', -1)) != 6:
+        return None
+
+    bag = picked_char.get('badge_inventory', [])
+    max_stack = max(1, int(item_config.get('max_stack', 1)))
+    amount = max(1, int(item.get('amount', 1)))
+    matching = [
+        entry for entry in bag
+        if entry is not exclude_item and str(entry.get('id', '')) == item_id
+    ]
+    stack_room = sum(max(0, max_stack - int(entry.get('amount', 0)))
+                     for entry in matching) if max_stack > 1 else 0
+    slots_needed = max(0, amount - stack_room + max_stack - 1) // max_stack
+    free_slots = max(0, 100 - len(bag) + max(0, int(extra_free_slots)))
+    if slots_needed > free_slots:
+        return None
+
+    updated_indices = []
+    remaining = amount
+    for entry in matching:
+        room = max(0, max_stack - int(entry.get('amount', 0)))
+        moved = min(room, remaining)
+        if moved:
+            entry['amount'] = int(entry.get('amount', 0)) + moved
+            remaining -= moved
+            updated_indices.append(int(entry['index_id']))
+        if remaining <= 0:
+            break
+
+    added_indices = []
+    if remaining:
+        item['amount'] = remaining
+        bag.append(item)
+        added_indices.append(int(item['index_id']))
+    return {'updated_indices': updated_indices, 'added_indices': added_indices}
+
+def _push_returned_badge_updates(picked_char, result, send_rpc_push):
+    if not result:
+        return
+    for index_id in result['updated_indices'] + result['added_indices']:
+        found = find_backpack_item(picked_char, index_id, 3, backpack_state_ready=True)
+        if found:
+            push_backpack_item_update(send_rpc_push, 3, found['item'])
+
 def sync_inventory_data(picked_char):
     return encode_sproto([(0, _backpack_map(picked_char, 'inventory'))])
 
 def sync_all_backpacks(picked_char, send_rpc_push):
     """Send each backpack via the exact packet consumed by its APK container."""
     ensure_backpack_state(picked_char)
+    removed_badge_indices, badges_changed = _merge_badge_inventory_stacks(picked_char)
+    for index_id in removed_badge_indices:
+        push_backpack_item_update(send_rpc_push, 3, None, index_id)
+    if badges_changed:
+        schedule_character_db_save()
     for container_type, bucket_and_tag in BACKPACKS.items():
         bucket, tag = bucket_and_tag
         send_rpc_push(tag, encode_sproto([(0, _backpack_map(picked_char, bucket))]))
@@ -31033,45 +31144,59 @@ def client_handler(conn, addr):
                                                  if int((entry.get('parm') or [0])[0]) == position), None)
                                 split_source = int(source.get('amount', 1)) > 1
                                 if (int(cfg.get('type', -1)) == 6
-                                        and str(source.get('id')) in BADGE_CONFIG
-                                        and not (split_source and previous and len(bag) >= 100)):
+                                        and str(source.get('id')) in BADGE_CONFIG):
+                                    returned_badge = None
                                     if previous:
-                                        equipped.remove(previous)
                                         previous.setdefault('parm', [0] * 8)[0] = position
-                                        bag.append(previous)
-                                        push_backpack_item_update(send_rpc_push, 4, None, previous['index_id'])
-                                        push_backpack_item_update(send_rpc_push, 3, previous)
-                                    if split_source:
-                                        source['amount'] -= 1
-                                        item = dict(source)
-                                        item['index_id'] = allocate_backpack_index(picked_char)
-                                        # allocate_backpack_index() normalizes the character and rebuilds its backpack lists.
-                                        # Reacquire the rebuilt equipment list before appending the split badge; otherwise
-                                        # the client receives the new index but the server saves only the old list.
-                                        equipped = picked_char['equipped_badges']
-                                        bag = picked_char['badge_inventory']
+                                        returned_badge = _return_badge_to_inventory(
+                                            picked_char,
+                                            previous,
+                                            exclude_item=None if split_source else source,
+                                            extra_free_slots=0 if split_source else 1,
+                                        )
+                                    if not previous or returned_badge is not None:
+                                        if previous:
+                                            equipped.remove(previous)
+                                            push_backpack_item_update(send_rpc_push, 4, None, previous['index_id'])
+                                        if split_source:
+                                            source['amount'] -= 1
+                                            item = dict(source)
+                                            item['index_id'] = allocate_backpack_index(picked_char)
+                                            # allocate_backpack_index() normalizes the character and rebuilds its backpack lists.
+                                            # Reacquire the rebuilt equipment list before appending the split badge; otherwise
+                                            # the client receives the new index but the server saves only the old list.
+                                            equipped = picked_char['equipped_badges']
+                                            bag = picked_char['badge_inventory']
+                                            item['amount'] = 1
+                                            item['parm'] = list(source.get('parm', [0] * 8))
+                                            push_backpack_item_update(send_rpc_push, 3, source)
+                                        else:
+                                            bag.remove(source)
+                                            item = source
+                                            push_backpack_item_update(send_rpc_push, 3, None, source['index_id'])
+                                        item.setdefault('parm', [0] * 8)[0] = position
                                         item['amount'] = 1
-                                        item['parm'] = list(source.get('parm', [0] * 8))
-                                        push_backpack_item_update(send_rpc_push, 3, source)
-                                    else:
-                                        bag.remove(source)
-                                        item = source
-                                        push_backpack_item_update(send_rpc_push, 3, None, source['index_id'])
-                                    item.setdefault('parm', [0] * 8)[0] = position
-                                    item['amount'] = 1
-                                    equipped.append(item)
-                                    push_backpack_item_update(send_rpc_push, 4, item)
-                                    changed = True
+                                        equipped.append(item)
+                                        push_backpack_item_update(send_rpc_push, 4, item)
+                                        _push_returned_badge_updates(
+                                            picked_char, returned_badge, send_rpc_push
+                                        )
+                                        changed = True
                         else:
                             found = find_backpack_item(
                                 picked_char, index_id, 4, backpack_state_ready=True)
-                            if found and len(picked_char['badge_inventory']) < 100:
+                            if found:
                                 item = found['item']
-                                picked_char['equipped_badges'].remove(item)
-                                picked_char['badge_inventory'].append(item)
-                                push_backpack_item_update(send_rpc_push, 4, None, item['index_id'])
-                                push_backpack_item_update(send_rpc_push, 3, item)
-                                changed = True
+                                returned_badge = _return_badge_to_inventory(picked_char, item)
+                                if returned_badge is not None:
+                                    picked_char['equipped_badges'].remove(item)
+                                    push_backpack_item_update(
+                                        send_rpc_push, 4, None, item['index_id']
+                                    )
+                                    _push_returned_badge_updates(
+                                        picked_char, returned_badge, send_rpc_push
+                                    )
+                                    changed = True
                         if changed:
                             schedule_character_db_save()
                             stats_after = get_character_stats(
