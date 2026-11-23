@@ -32343,12 +32343,12 @@ def client_handler(conn, addr):
                                   f"eff={effinfo_id}")
 
                     # Tag 128 identifies the player being hit but omits the
-                    # attacker. Map 108 validates against live MonsterData
-                    # enemies above; retain the bounded fallback on other maps.
+                    # attacker. Validate against live MonsterData enemies
+                    # wherever the scene has configured server-side spawns.
                     if (not is_area and not is_rank_pvp and not guild_boss_id
                             and not wild_boss_id
                             and not is_tower and picked_char):
-                        if current_map == "108":
+                        if MONSTER_DATA.get(current_map):
                             validated_damage = validate_map_npc_attack_damage(
                                 conn, picked_char, effinfo_id, client_dmg)
                             if validated_damage is None:
