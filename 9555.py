@@ -257,6 +257,12 @@ UNDERGROUND_COPY_SUBTYPE = 3
 UNDERGROUND_COPY_DURATION = 300
 UNDERGROUND_COPY_STATE_KEY = "_underground_copy_state"
 UNDERGROUND_COPY_LOCK = threading.RLock()
+HABITATION_COPY_ID = "306"
+HABITATION_COPY_STATE_KEY = "_habitation_copy_state"
+HABITATION_COPY_LOCK = threading.RLock()
+HABITATION_NPC_OWNER = {}
+HABITATION_READY_CONNECTIONS = {}
+HABITATION_TIMERS = {}
 PRISON_NPC_AOI_MAP_IDS = (
     SCUFFLE_NPC_MAP_IDS | SURVIVE_BATTLE_NPC_MAP_IDS
     | OPEN_WORLD_NPC_MAP_IDS | frozenset((WAREHOUSE_SNEAK_COPY_ID,)))
@@ -833,9 +839,6 @@ try:
                             for index in (25, 27, 29)
                         ],
                         'cooldown_ms': int(parts[10]) if len(parts) > 10 and parts[10].isdigit() else 0,
-                        # SkillData.HoldTime (公共CD): global cooldown the client
-                        # waits after this skill before any next skill.
-                        'hold_ms': int(parts[11]) if len(parts) > 11 and parts[11].isdigit() else 0,
                         'trace_distance_cm': int(parts[12]) if len(parts) > 12 and parts[12].isdigit() else 0,
                         'priority': int(parts[30]) if len(parts) > 30 and parts[30].isdigit() else 0,
                         # Equip inheritance groups weapon skills by SkillData.TeamID;
@@ -5172,298 +5175,8 @@ def get_connection_send_lock(c):
     return None
 
 
-# ======================= SPEED GUARD (anti speed hack) BEGIN =======================
-# Kicks a player whose game runs faster than real time (speed hack x1.25 and up).
-# Every rule below is something an unmodified client can never do:
-#
-#  1) Heartbeat speed (tag 218). NetManager.Update sends one heartbeat every
-#     15 s of GAME time (curTime += Time.deltaTime). The game never runs faster
-#     than real time (Time.timeScale is only ever 0, 0.3 or 1), so a normal
-#     client's heartbeats are at least 15 s apart. Catches every speed hack,
-#     in every scene, including the ones that also speed up the phone clock.
-#  2) Skill cooldown on the client's own clock (tag 102). skill_use field 4 is
-#     realtimeSinceStartup*100, taken at the moment of the cast, so network lag
-#     cannot make two casts look closer together. The client blocks a recast
-#     until SkillData.CD has passed.
-#  3) Global cooldown pace (tag 102). After every skill the client waits
-#     SkillData.HoldTime before ANY next skill (this is what paces normal
-#     attacks 101-103 / 201-203 / 301-303). Checked over 12 casts.
-#
-# The client forgets all its cooldowns when it receives tag 540 or loads a
-# map (ObjMainPlayer.UpdateSkillList), so the guard forgets them at the same
-# moments. Thresholds were tested with a simulation of bad mobile networks,
-# 10 fps phones, server freezes and emulator clock jumps: 0 normal players
-# kicked; cheaters x1.5-x6.5 kicked within roughly 5-100 s.
-
-SPEED_GUARD_ENABLED = True
-SPEED_GUARD_KICK = True               # False = only print who WOULD be kicked
-SPEED_GUARD_BLOCK_SECONDS = 300       # kicked account/character can't log in for 5 min
-SPEED_GUARD_MESSAGE = "Speed Hack detected!"
-
-SPEED_GUARD_HB_WINDOW = 8             # heartbeat gaps used for the median
-SPEED_GUARD_HB_MIN_GAP = 12.0         # median below this = game speed >= x1.25
-SPEED_GUARD_HB_FAILS = 2              # consecutive failing medians before kick
-
-SPEED_GUARD_CD_TOLERANCE = 0.5        # s: one slow frame (<=0.333) + clock rounding
-SPEED_GUARD_CD_IN_A_ROW = 4           # same skill early this many times IN A ROW
-                                      # (a cooldown reset can only cause 1 early recast,
-                                      # the next recast is normal again)
-
-SPEED_GUARD_PACE_CASTS = 12           # casts per global-cooldown window
-SPEED_GUARD_PACE_TOLERANCE = 0.4      # s
-SPEED_GUARD_PACE_STRIKES = 3          # failing windows needed ...
-SPEED_GUARD_PACE_WINDOW = 30.0        # ... within this many seconds ...
-SPEED_GUARD_PACE_SPREAD = 5.0         # ... spread over at least this long
-
-SPEED_GUARD_RESET_GRACE = 5.0         # s after a cooldown reset with no skill checks
-SPEED_GUARD_EXEMPT_SKILLS = {'199', '299', '399'}  # revive skills: no client cooldown
-# Pushes after which the client has zero cooldowns: 540 sync_skill_info,
-# 503 enter_map (scene load rebuilds the skill list), 504 main_player_create.
-SPEED_GUARD_RESET_TAGS = {503, 504, 540}
-
-SPEED_GUARD_LOCK = threading.RLock()
-SPEED_GUARD_STATE = {}                # id(conn) -> per-connection state
-SPEED_GUARD_BLOCKS = {}               # ('acc', str) / ('char', int) -> monotonic deadline
-
-
-def _speed_guard_new_state():
-    return {
-        'hb': [], 'hb_fails': 0, 'map': None,
-        'last_tick': {}, 'cd_runs': {}, 'casts': [], 'pace_strikes': [],
-        'grace_until': 0.0, 'kicked': False,
-    }
-
-
-def _speed_guard_forget_cooldowns(st, now):
-    st['last_tick'] = {}
-    st['cd_runs'] = {}
-    st['casts'] = []
-    st['grace_until'] = now + SPEED_GUARD_RESET_GRACE
-
-
-def speed_guard_reset_skills(conn):
-    """The client resets its cooldowns when it receives tag 540; do the same."""
-    if conn is None:
-        return
-    with SPEED_GUARD_LOCK:
-        st = SPEED_GUARD_STATE.get(id(conn))
-        if st is not None:
-            _speed_guard_forget_cooldowns(st, time.monotonic())
-
-
-def speed_guard_forget(conn):
-    with SPEED_GUARD_LOCK:
-        SPEED_GUARD_STATE.pop(id(conn), None)
-
-
-def _speed_guard_tick_slack(tick):
-    """Extra seconds for float rounding of realtimeSinceStartup*100 when the
-    app has been open for days (float32 loses precision above 2^23)."""
-    try:
-        centis = float(tick)
-        if centis < 8388608.0:
-            return 0.02
-        seconds = centis / 100.0
-        ulp_seconds = 2.0 ** (math.floor(math.log2(seconds)) - 23)
-        ulp_centis = 2.0 ** (math.floor(math.log2(centis)) - 23)
-        return 2.0 * (ulp_seconds + ulp_centis / 100.0) + 0.02
-    except (TypeError, ValueError, OverflowError):
-        return 0.02
-
-
-def _speed_guard_median(values):
-    ordered = sorted(values)
-    mid = len(ordered) // 2
-    if len(ordered) % 2:
-        return ordered[mid]
-    return (ordered[mid - 1] + ordered[mid]) / 2.0
-
-
-def _speed_guard_heartbeat(st, now):
-    hb = st['hb']
-    hb.append(now)
-    if len(hb) > SPEED_GUARD_HB_WINDOW + 1:
-        del hb[:-(SPEED_GUARD_HB_WINDOW + 1)]
-    if len(hb) <= SPEED_GUARD_HB_WINDOW:
-        return None
-    median_gap = _speed_guard_median([b - a for a, b in zip(hb, hb[1:])])
-    if median_gap >= SPEED_GUARD_HB_MIN_GAP:
-        st['hb_fails'] = 0
-        return None
-    st['hb_fails'] += 1
-    if st['hb_fails'] < SPEED_GUARD_HB_FAILS:
-        return None
-    return (f"heartbeat every {median_gap:.1f}s instead of 15s "
-            f"(game speed x{15.0 / max(0.1, median_gap):.2f})")
-
-
-def _speed_guard_skill(st, skill_id, tick, now):
-    cfg = SKILL_CONFIG.get(skill_id)
-    if not cfg or skill_id in SPEED_GUARD_EXEMPT_SKILLS or tick <= 0:
-        return None
-    if now < st['grace_until']:
-        return None
-    try:
-        cooldown = max(0, int(cfg.get('cooldown_ms', 0) or 0)) / 1000.0
-        hold = max(0, int(cfg.get('hold_ms', 0) or 0)) / 1000.0
-    except (TypeError, ValueError):
-        return None
-    slack = _speed_guard_tick_slack(tick)
-
-    # Rule 2: same skill again before its cooldown, measured on the client clock.
-    last = st['last_tick'].get(skill_id)
-    st['last_tick'][skill_id] = tick
-    if last is not None and cooldown > 0:
-        gap = (tick - last) / 100.0
-        if gap < cooldown - SPEED_GUARD_CD_TOLERANCE - slack:
-            run = st['cd_runs'].setdefault(skill_id, [])
-            run.append(gap)
-            if len(run) >= SPEED_GUARD_CD_IN_A_ROW:
-                gaps = ", ".join(f"{g:.2f}s" for g in run[-SPEED_GUARD_CD_IN_A_ROW:])
-                return (f"skill {skill_id} recast {len(run)} times in a row before its "
-                        f"{cooldown:.1f}s cooldown ({gaps})")
-        else:
-            st['cd_runs'].pop(skill_id, None)
-
-    # Rule 3: global cooldown pace over the last 12 casts.
-    casts = st['casts']
-    casts.append((tick, hold))
-    if len(casts) > SPEED_GUARD_PACE_CASTS + 1:
-        del casts[:-(SPEED_GUARD_PACE_CASTS + 1)]
-    if len(casts) == SPEED_GUARD_PACE_CASTS + 1:
-        span = (casts[-1][0] - casts[0][0]) / 100.0
-        need = sum(h for _tick, h in casts[:-1])
-        if span < need - SPEED_GUARD_PACE_TOLERANCE - slack:
-            st['pace_strikes'].append((now, span, need))
-            # Start a fresh window so one odd gap can only count once.
-            st['casts'] = [casts[-1]]
-    pace = [p for p in st['pace_strikes'] if now - p[0] <= SPEED_GUARD_PACE_WINDOW]
-    st['pace_strikes'] = pace
-    if (len(pace) >= SPEED_GUARD_PACE_STRIKES
-            and pace[-1][0] - pace[0][0] >= SPEED_GUARD_PACE_SPREAD):
-        span, need = pace[-1][1], pace[-1][2]
-        return (f"{SPEED_GUARD_PACE_CASTS} skills in {span:.2f}s, client minimum {need:.2f}s "
-                f"(attack speed x{need / max(0.1, span):.2f})")
-    return None
-
-
-def speed_guard_on_packet(conn, char, msg, body, now=None):
-    """Feed every received tag 102 / 218. Returns a reason string to kick."""
-    if not SPEED_GUARD_ENABLED or conn is None or not char:
-        return None
-    now = time.monotonic() if now is None else float(now)
-    with SPEED_GUARD_LOCK:
-        st = SPEED_GUARD_STATE.get(id(conn))
-        if st is None:
-            st = SPEED_GUARD_STATE[id(conn)] = _speed_guard_new_state()
-        if st['kicked']:
-            return None
-        map_id = str(char.get('map_id', '') or '')
-        if st['map'] != map_id:
-            if st['map'] is not None:
-                _speed_guard_forget_cooldowns(st, now)  # client reloaded the map
-            st['map'] = map_id
-        if msg == 218:
-            return _speed_guard_heartbeat(st, now)
-        if msg == 102:
-            raw_skill = body.get(1, b"")
-            if isinstance(raw_skill, (bytes, bytearray)):
-                skill_id = raw_skill.decode('utf-8', 'replace')
-            else:
-                skill_id = str(raw_skill or '')
-            return _speed_guard_skill(st, skill_id, get_val_int(body, 4, 0), now)
-    return None
-
-
-def speed_guard_kick(conn, char, acc_id, reason, send_push):
-    """Show the message, block login for a while and close the socket.
-    Returns True when the connection was kicked."""
-    char_id = int(char.get('id', 0) or 0) if char else 0
-    print(f"[SPEED GUARD] {'KICK' if SPEED_GUARD_KICK else 'WOULD KICK'} "
-          f"player={char_id} name={char.get('name') if char else None} acc={acc_id} "
-          f"map={char.get('map_id') if char else None} reason={reason}")
-    with SPEED_GUARD_LOCK:
-        st = SPEED_GUARD_STATE.get(id(conn))
-        if not SPEED_GUARD_KICK:
-            # Log-only mode: start counting again instead of logging every packet.
-            if st is not None:
-                st.update(cd_runs={}, pace_strikes=[], hb=[], hb_fails=0)
-            return False
-        if st is not None:
-            st['kicked'] = True
-        until = time.monotonic() + SPEED_GUARD_BLOCK_SECONDS
-        if acc_id and str(acc_id) != "0":
-            SPEED_GUARD_BLOCKS[('acc', str(acc_id))] = until
-        if char_id:
-            SPEED_GUARD_BLOCKS[('char', char_id)] = until
-    try:
-        send_push(529, encode_sproto([(0, SPEED_GUARD_MESSAGE), (1, True)]))
-    except Exception:
-        pass
-    time.sleep(1.0)  # let the message reach the client before the socket closes
-    try:
-        conn.shutdown(socket.SHUT_RDWR)
-    except OSError:
-        pass
-    return True
-
-
-def speed_guard_login_block_left(msg, body):
-    """Seconds left on a speed-hack block for this login / pick / reconnect."""
-    keys = []
-    if msg == 4:
-        raw = body.get(1, b"")
-        acc = raw.decode('utf-8', 'replace') if isinstance(raw, (bytes, bytearray)) else str(raw or '')
-        if acc:
-            keys.append(('acc', acc))
-    elif msg == 105:
-        keys.append(('char', get_val_int(body, 0, 0)))
-    elif msg == 281:
-        keys.append(('char', get_val_int(body, 1, 0)))
-    now = time.monotonic()
-    left = 0.0
-    with SPEED_GUARD_LOCK:
-        for key in keys:
-            until = SPEED_GUARD_BLOCKS.get(key)
-            if until is None:
-                continue
-            if until <= now:
-                SPEED_GUARD_BLOCKS.pop(key, None)
-            else:
-                left = max(left, until - now)
-    return left
-
-
-def speed_guard_refuse_login(conn, msg, session, seconds_left, send_push):
-    minutes = max(1, int(math.ceil(seconds_left / 60.0)))
-    try:
-        send_push(529, encode_sproto([
-            (0, f"{SPEED_GUARD_MESSAGE} You can play again in {minutes} min."), (1, True)]))
-    except Exception:
-        pass
-    if session is not None and msg in (4, 105):
-        # login.type = 0 / character_pick.errno = 0 send the client back to
-        # the login screen (NetManager.LoginResponse / PickResponse).
-        ph = encode_sproto([(1, session)])
-        pf = sproto_pack(ph + encode_sproto([(0, 0)]))
-        try:
-            conn.sendall(struct.pack(">H", len(pf)) + pf)
-        except OSError:
-            pass
-    if msg == 281:
-        time.sleep(1.0)
-        try:
-            conn.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
-    print(f"[SPEED GUARD] refused msg={msg} block_left={int(seconds_left)}s")
-# ======================= SPEED GUARD (anti speed hack) END =========================
-
-
 def send_rpc_push_safe(c, tag, data):
     """Safe wrapper for sending TAG push — used by relife AI threads to avoid stale closures."""
-    if tag in SPEED_GUARD_RESET_TAGS:
-        speed_guard_reset_skills(c)
     try:
         ph_p = encode_sproto([(0, tag)])
         pf_p = sproto_pack(ph_p + data)
@@ -12023,6 +11736,9 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                 elif current_map == UNDERGROUND_COPY_ID:
                     record_underground_copy_kill(
                         picked_char, inst_id, rewards)
+                elif current_map == HABITATION_COPY_ID:
+                    record_habitation_copy_kill(
+                        conn, picked_char, inst_id, rewards, send_rpc_push)
 
     if current_map == WAREHOUSE_SNEAK_COPY_ID and inst_id:
         record_warehouse_sneak_npc_kill(
@@ -13318,7 +13034,8 @@ def underground_copy_result_payload(state, won):
     ]
     return encode_sproto([
         (0, UNDERGROUND_COPY_SUBTYPE), (1, UNDERGROUND_COPY_ID),
-        (2, bool(won)), (3, 0), (4, 0), (5, items),
+        (2, bool(won)), (3, 7 if won else 0), (4, 3 if won else 0),
+        (5, items),
     ])
 
 
@@ -13482,6 +13199,237 @@ def record_underground_copy_kill(char, inst_id, rewards):
     elif complete:
         finish_underground_copy(char, True)
     return True
+
+
+def habitation_copy_result_payload(state, won):
+    items = [
+        encode_sproto([(0, str(item_id)), (1, int(amount)), (3, 0)])
+        for item_id, amount in sorted(state.get("reward_totals", {}).items())
+        if int(amount or 0) > 0
+    ]
+    return encode_sproto([
+        (0, 2), (1, HABITATION_COPY_ID), (2, bool(won)),
+        (3, 7 if won else 0), (4, 3 if won else 0), (5, items),
+    ])
+
+
+def clear_habitation_copy_runtime(char, conn=None):
+    char_id = int(char.get("id", 0) or 0)
+    timer = HABITATION_TIMERS.pop(char_id, None)
+    if timer:
+        timer.cancel()
+    HABITATION_READY_CONNECTIONS.pop(char_id, None)
+    for inst_id, owner_id in list(HABITATION_NPC_OWNER.items()):
+        if owner_id != char_id:
+            continue
+        if conn:
+            send_rpc_push_safe(conn, 506, encode_sproto([(0, inst_id)]))
+        HABITATION_NPC_OWNER.pop(inst_id, None)
+        NPC_HP_MAP.pop(inst_id, None)
+        NPC_INST_MAP.pop(inst_id, None)
+        NPC_INSTANCE_MAP.pop(inst_id, None)
+        NPC_ATTR_MAP.pop(inst_id, None)
+
+
+def start_habitation_copy(char, reset=False):
+    if not char:
+        return None
+    with HABITATION_COPY_LOCK:
+        state = char.get(HABITATION_COPY_STATE_KEY)
+        if not reset and isinstance(state, dict):
+            return state
+        clear_habitation_copy_runtime(char)
+        state = {
+            "phase": "ready", "group": 1, "instances": {},
+            "killed_slots": [], "reward_totals": {}, "end_time": 0,
+            "result_recorded": False,
+        }
+        char[HABITATION_COPY_STATE_KEY] = state
+        return state
+
+
+def habitation_copy_npc_is_active(char, inst_id):
+    state = char.get(HABITATION_COPY_STATE_KEY) if char else None
+    return bool(
+        isinstance(state, dict) and state.get("phase") == "battle"
+        and not state.get("result_recorded")
+        and str(char.get("map_id") or "") == HABITATION_COPY_ID
+        and HABITATION_NPC_OWNER.get(int(inst_id or 0)) == int(char.get("id", 0) or 0)
+        and int(inst_id or 0) in state.get("instances", {}).values())
+
+
+def spawn_habitation_group(conn, char):
+    state = char.get(HABITATION_COPY_STATE_KEY) if char else None
+    if (not isinstance(state, dict) or state.get("phase") != "battle"
+            or str(char.get("map_id") or "") != HABITATION_COPY_ID):
+        return False
+    group = int(state.get("group", 0) or 0)
+    rows = MONSTER_DATA.get(HABITATION_COPY_ID, [])
+    slots = [(index, row) for index, row in enumerate(rows)
+             if int(row.get("group", 0)) == group]
+    if not slots:
+        print(f"[HABITATION] missing MonsterData group={group}")
+        return False
+    owner_id = int(char.get("id", 0) or 0)
+    killed = set(state.get("killed_slots", []))
+    instances = state.setdefault("instances", {})
+    ok = True
+    for index, row in slots:
+        if index in killed:
+            continue
+        key = str(index)
+        inst_id = int(instances.get(key, 0) or 0)
+        existing = (inst_id if HABITATION_NPC_OWNER.get(inst_id) == owner_id
+                    and inst_id in NPC_HP_MAP else None)
+        nid = str(row["nid"])
+        cfg = NPC_CONFIG.get(nid)
+        if not cfg:
+            print(f"[HABITATION] missing NPC config npc={nid} group={group}")
+            ok = False
+            continue
+        inst_id, attr = build_npc_attr_sproto(
+            nid, cfg.get("name", f"Monster_{nid}"),
+            row["x"], row["z"], row["o"],
+            existing_inst_id=existing, map_id=HABITATION_COPY_ID)
+        NPC_INSTANCE_MAP[inst_id] = HABITATION_COPY_ID
+        HABITATION_NPC_OWNER[inst_id] = owner_id
+        instances[key] = inst_id
+        if not send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
+            print(f"[HABITATION] failed to send NPC player={owner_id} slot={index}")
+            ok = False
+    return ok
+
+
+def finish_habitation_copy(char, won):
+    if not char:
+        return False
+    with HABITATION_COPY_LOCK:
+        state = char.get(HABITATION_COPY_STATE_KEY)
+        if (not isinstance(state, dict) or state.get("result_recorded")
+                or str(char.get("map_id") or "") != HABITATION_COPY_ID):
+            return False
+        rows = MONSTER_DATA.get(HABITATION_COPY_ID, [])
+        required = {index for index, row in enumerate(rows)
+                    if int(row.get("group", 0)) in (1, 2, 3)}
+        won = bool(won and required and required.issubset(
+            set(state.get("killed_slots", [])))
+            and int(time.time()) < int(state.get("end_time", 0) or 0))
+        state["phase"] = "complete" if won else "failed"
+        state["result_recorded"] = True
+        timer = HABITATION_TIMERS.pop(int(char.get("id", 0) or 0), None)
+        if timer:
+            timer.cancel()
+    if won:
+        push = lambda tag, data: send_push_to_char(char.get("id", 0), tag, data)
+        advance_missions(char, push, "copy_scene_complete",
+                         target_id=HABITATION_COPY_ID, map_id=HABITATION_COPY_ID)
+    result = habitation_copy_result_payload(state, won)
+    send_exp_result_to_char(char, result)
+    save_chars(all_accounts_chars)
+    print(f"[HABITATION] result player={char.get('id')} win={won} "
+          f"kills={len(state.get('killed_slots', []))}/{len(required)}")
+    return True
+
+
+def _habitation_copy_timeout(char_id, expected_end_time):
+    char = _guild_char_by_id(char_id)
+    state = char.get(HABITATION_COPY_STATE_KEY) if char else None
+    if (isinstance(state, dict)
+            and int(state.get("end_time", 0) or 0) == expected_end_time
+            and int(time.time()) >= expected_end_time):
+        finish_habitation_copy(char, False)
+
+
+def habitation_map_ready(conn, char, send_rpc_push):
+    if str(char.get("map_id") or "") != HABITATION_COPY_ID:
+        return False
+    with HABITATION_COPY_LOCK:
+        state = start_habitation_copy(char)
+        char_id = int(char.get("id", 0) or 0)
+        if HABITATION_READY_CONNECTIONS.get(char_id) == id(conn):
+            return True
+        if state.get("result_recorded"):
+            send_rpc_push(552, habitation_copy_result_payload(
+                state, state.get("phase") == "complete"))
+            HABITATION_READY_CONNECTIONS[char_id] = id(conn)
+            return True
+        now = int(time.time())
+        if not int(state.get("end_time", 0) or 0):
+            state["end_time"] = now + 300
+        end_time = int(state["end_time"])
+        if now >= end_time:
+            finish_habitation_copy(char, False)
+            return False
+        timer = HABITATION_TIMERS.get(char_id)
+        if timer is None or not timer.is_alive():
+            timer = threading.Timer(end_time - now, _habitation_copy_timeout,
+                                    args=(char_id, end_time))
+            timer.daemon = True
+            HABITATION_TIMERS[char_id] = timer
+            timer.start()
+        if state.get("phase") == "ready":
+            state["phase"] = "battle"
+        send_rpc_push(629, encode_sproto([(0, end_time), (1, 2)]))
+        # Each push advances the client's waypoint index, even on reconnect.
+        completed_groups = int(state.get("group", 1)) - 1
+        if state.get("phase") == "waiting":
+            completed_groups += 1
+        for wave in range(2, 2 + completed_groups):
+            send_rpc_push(515, encode_sproto([(0, wave)]))
+        ok = (state.get("phase") != "battle"
+              or spawn_habitation_group(conn, char))
+        if ok:
+            HABITATION_READY_CONNECTIONS[char_id] = id(conn)
+        save_chars(all_accounts_chars)
+        return ok
+
+
+def start_habitation_next_group(conn, char, send_rpc_push):
+    with HABITATION_COPY_LOCK:
+        state = char.get(HABITATION_COPY_STATE_KEY) if char else None
+        if (not isinstance(state, dict) or state.get("phase") != "waiting"
+                or str(char.get("map_id") or "") != HABITATION_COPY_ID):
+            return False
+        if int(time.time()) >= int(state.get("end_time", 0) or 0):
+            finish_habitation_copy(char, False)
+            return False
+        state["group"] = int(state["group"]) + 1
+        state["phase"] = "battle"
+        state["instances"] = {}
+        ok = spawn_habitation_group(conn, char)
+        save_chars(all_accounts_chars)
+        return ok
+
+
+def record_habitation_copy_kill(conn, char, inst_id, rewards, send_rpc_push):
+    with HABITATION_COPY_LOCK:
+        if not habitation_copy_npc_is_active(char, inst_id):
+            return False
+        state = char[HABITATION_COPY_STATE_KEY]
+        instances = state["instances"]
+        slot = next((int(key) for key, value in instances.items()
+                     if int(value) == int(inst_id)), None)
+        if slot is None or slot in state["killed_slots"]:
+            return False
+        HABITATION_NPC_OWNER.pop(int(inst_id), None)
+        state["killed_slots"].append(slot)
+        for item_id, _quality, amount in rewards or []:
+            amount = max(0, int(amount or 0))
+            if amount:
+                totals = state["reward_totals"]
+                totals[str(item_id)] = int(totals.get(str(item_id), 0)) + amount
+        group = int(state["group"])
+        required = {index for index, row in enumerate(
+            MONSTER_DATA.get(HABITATION_COPY_ID, []))
+                    if int(row.get("group", 0)) == group}
+        if required and required.issubset(set(state["killed_slots"])):
+            if group == 3:
+                finish_habitation_copy(char, True)
+            else:
+                state["phase"] = "waiting"
+                send_rpc_push(515, encode_sproto([(0, group + 1)]))
+        save_chars(all_accounts_chars)
+        return True
 
 
 def _mission_72_copy_timeout(char_id, expected_end_time):
@@ -15714,6 +15662,9 @@ def spawn_exp_team_stage_map(conn, map_id, char, force=False):
 
 def spawn_map_npcs(conn, map_id, picked_char=None):
     map_str = str(map_id)
+    if map_str == HABITATION_COPY_ID:
+        # SingleRunPointSceneManager sends map_ready after loading.
+        return
     if map_str == '1501':
         entry = _guild_battle_entry_for_char(picked_char)
         if (not entry or picked_char.get('_guild_battle_match_key')
@@ -19243,6 +19194,8 @@ def calculate_npc_kill_rewards_for_map(player_level, npc_level, map_id,
             exp_reward = max(1, int(exp_reward * SLUM_NPC_EXP_REWARD_SCALE))
     elif map_id in OPEN_WORLD_NPC_MAP_IDS:
         exp_reward = max(1, int(exp_reward * SLUM_NPC_EXP_REWARD_SCALE))
+    elif map_id in (UNDERGROUND_COPY_ID, HABITATION_COPY_ID):
+        exp_reward = max(1, exp_reward // 100)
     elif map_id == WAREHOUSE_SNEAK_COPY_ID:
         exp_scale = (
             WAREHOUSE_SNEAK_BOSS_EXP_REWARD_SCALE
@@ -22653,6 +22606,10 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
             timeout_timer = underground_state.get("timeout_timer")
             if timeout_timer:
                 timeout_timer.cancel()
+    if src_map == HABITATION_COPY_ID and src_map != target_map_id:
+        with HABITATION_COPY_LOCK:
+            clear_habitation_copy_runtime(picked_char, conn)
+            picked_char.pop(HABITATION_COPY_STATE_KEY, None)
     if src_map != target_map_id:
         broadcast_aoi_remove(picked_char.get('id', 0), src_map)
     if src_map == '1501' and target_map_id != '1501':
@@ -28457,8 +28414,6 @@ def client_handler(conn, addr):
         print(f"[NETWORK] Could not disable TCP Nagle for {addr}: {error}")
 
     def send_rpc_push(tag, data):
-        if tag in SPEED_GUARD_RESET_TAGS:
-            speed_guard_reset_skills(conn)
         try:
             ph_p = encode_sproto([(0, tag)])
             pf_p = sproto_pack(ph_p + data)
@@ -28992,19 +28947,6 @@ def client_handler(conn, addr):
             msg, session = get_val_int(pkg, 0), get_val_int(pkg, 1, None)
             debug_log(f"[RX] MSG={msg} SESSION={session}")
             off = 2 + (struct.unpack("<H", raw[:2])[0] * 2); body = decode_sproto(raw, off)
-            # Speed guard: refuse login while a speed-hack kick block is active,
-            # and check heartbeat / skill timing of the playing character.
-            if SPEED_GUARD_ENABLED and msg in (4, 105, 281):
-                speed_block_left = speed_guard_login_block_left(msg, body)
-                if speed_block_left > 0:
-                    speed_guard_refuse_login(conn, msg, session, speed_block_left, send_rpc_push)
-                    continue
-            if (SPEED_GUARD_ENABLED and msg in (102, 218) and picked_char
-                    and is_current_character_connection(conn, picked_char)):
-                speed_reason = speed_guard_on_packet(conn, picked_char, msg, body)
-                if speed_reason and speed_guard_kick(
-                        conn, picked_char, acc_id, speed_reason, send_rpc_push):
-                    continue
             if (invest_trace_count < 20
                     and time.monotonic() < invest_trace_until):
                 invest_trace_count += 1
@@ -29567,7 +29509,6 @@ def client_handler(conn, addr):
 
                     debug_log("[DEBUG] BEFORE MAP ENTER")
                     try:
-                        speed_guard_reset_skills(conn)  # client reloads scene: cooldowns reset
                         ph_p = encode_sproto([(0, 503)])
                         data = encode_sproto([(0, mid), (1, 0), (2, 1)])
                         pf_p = sproto_pack(ph_p + data)
@@ -29824,6 +29765,14 @@ def client_handler(conn, addr):
                             if tower_run.get("status") == "running":
                                 spawn_tower_map_npcs(conn, mid, picked_char)
                             tower_send_pending_result(picked_char, send_rpc_push)
+                    elif mid == HABITATION_COPY_ID:
+                        if is_current_character_connection(conn, picked_char):
+                            habitation_map_ready(conn, picked_char, send_rpc_push)
+                            pending_relife = picked_char.get('_pending_relife')
+                            if (int(picked_char.get('hp', 0)) <= 0
+                                    and pending_relife_offer_is_valid(pending_relife, mid)
+                                    and supports_normal_relife(mid)):
+                                send_rpc_push(618, encode_pending_relife_offer(pending_relife))
                     elif is_cash_stage_map(mid):
                         if is_current_character_connection(conn, picked_char):
                             spawn_map_npcs(conn, mid, picked_char)
@@ -33450,6 +33399,12 @@ def client_handler(conn, addr):
                                     print(f"[SNEAK COPY] rejected unowned/inactive target={target_id} "
                                           f"player={picked_char.get('id')}")
                                     continue
+                            if (cur_map == HABITATION_COPY_ID
+                                    and not habitation_copy_npc_is_active(
+                                        picked_char, target_id)):
+                                print(f"[HABITATION] rejected unowned/inactive target={target_id} "
+                                      f"player={picked_char.get('id')}")
+                                continue
                             if is_tower:
                                 tower_state = picked_char.get('tower_run')
                                 if (not isinstance(tower_state, dict)
@@ -34112,6 +34067,12 @@ def client_handler(conn, addr):
                                     or is_equipment_copy_map(picked_char.get('map_id', ''))):
                     stage_label = 'EQUIP' if is_equipment_copy_map(picked_char.get('map_id', '')) else 'EXP'
                     print(f"[{stage_label} DEATH] ignored client death report inst_id={inst_id} map={picked_char.get('map_id')}")
+                    if session is not None:
+                        ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
+                        conn.sendall(struct.pack(">H", len(pf)) + pf)
+                    continue
+                if picked_char and str(picked_char.get('map_id', '')) == HABITATION_COPY_ID:
+                    print(f"[HABITATION] ignored client NPC death report inst_id={inst_id}")
                     if session is not None:
                         ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                         conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -34992,6 +34953,8 @@ def client_handler(conn, addr):
                         start_mission_72_copy(picked_char, send_rpc_push)
                     elif copy_id == UNDERGROUND_COPY_ID:
                         start_underground_copy(picked_char)
+                    elif copy_id == HABITATION_COPY_ID:
+                        start_habitation_copy(picked_char, reset=True)
                     advance_missions(picked_char, send_rpc_push, 'dungeon', target_id=copy_id)
                     start_map_transition(conn, picked_char, copy_id, send_rpc_push)
                 if session is not None:
@@ -35453,12 +35416,10 @@ def client_handler(conn, addr):
                 if (picked_char and is_current_character_connection(conn, picked_char)
                         and (picked_char.get('active_copy_id')
                              or str(picked_char.get('map_id') or '')
-                             == UNDERGROUND_COPY_ID)):
+                             in (UNDERGROUND_COPY_ID, HABITATION_COPY_ID))):
                     copy_id = str(
                         picked_char.get('active_copy_id')
-                        or (UNDERGROUND_COPY_ID
-                            if str(picked_char.get('map_id') or '')
-                            == UNDERGROUND_COPY_ID else ''))
+                        or picked_char.get('map_id') or '')
                     cfg = COPY_SCENE_CONFIG.get(copy_id)
                     if copy_id == WAREHOUSE_SNEAK_COPY_ID:
                         start_warehouse_sneak_battle(
@@ -35466,6 +35427,9 @@ def client_handler(conn, addr):
                     elif copy_id == UNDERGROUND_COPY_ID:
                         start_underground_copy_battle(
                             picked_char, send_rpc_push)
+                    elif copy_id == HABITATION_COPY_ID:
+                        start_habitation_next_group(
+                            conn, picked_char, send_rpc_push)
                     cash_state = picked_char.get('cash_stage_state')
                     if (cfg and int(cfg.get('subtype', -1)) == 11
                             and isinstance(cash_state, dict)
@@ -38838,10 +38802,6 @@ def client_handler(conn, addr):
         print(f"[!] Client handler exception for {addr}: {exc}")
         traceback.print_exc()
     finally:
-        try:
-            speed_guard_forget(conn)
-        except Exception:
-            pass
         try:
             if conn_id in NPC_SPAWNED_MAPS:
                 del NPC_SPAWNED_MAPS[conn_id]
