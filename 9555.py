@@ -37591,8 +37591,14 @@ def client_handler(conn, addr):
                                 cooldown_key = (int(picked_char.get('id', 0)), mid)
                                 last_event = SURVEY_PROGRESS_TIMES.get(cooldown_key, 0.0)
                                 survey_interval = int(survey.get('survey_time', 1000)) / 1000.0
+                                monitor_survey = (
+                                    m_cfg.get('class') == 2
+                                    and logic_id.isdigit()
+                                    and 11006 <= int(logic_id) <= 11018
+                                )
                                 cooldown = max(
-                                    0.8, survey_interval - (0.25 if mid in ('82', '97') else 0.0))
+                                    0.8, survey_interval - (
+                                        0.25 if mid in ('82', '97') or monitor_survey else 0.0))
                                 if near_item and now_mono - last_event >= cooldown:
                                     required = int(survey.get('need_num', m_cfg.get('require_num', 1)))
                                     accepted = True
