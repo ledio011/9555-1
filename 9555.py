@@ -37583,7 +37583,7 @@ def client_handler(conn, addr):
                                 sx = int(round(float(survey.get('x', 0.0)) * 100))
                                 sz = int(round(float(survey.get('z', 0.0)) * 100))
                                 radius = (
-                                    310 if mid in ('56', '71', '82', '97') else
+                                    310 if mid in ('56', '71', '82', '97', '50063') else
                                     400 if str(survey.get('scene_id')) == '11' else 250
                                 )
                                 near_item = math.hypot(int(pos[0]) - sx, int(pos[2]) - sz) <= radius
@@ -37592,8 +37592,11 @@ def client_handler(conn, addr):
                                 last_event = SURVEY_PROGRESS_TIMES.get(cooldown_key, 0.0)
                                 survey_interval = int(survey.get('survey_time', 1000)) / 1000.0
                                 cooldown = max(
-                                    0.8, survey_interval - (0.25 if mid in ('82', '97', '50063') else 0.0))
-                                if near_item and now_mono - last_event >= cooldown:
+                                    0.8, survey_interval - (0.25 if mid in ('82', '97') else 0.0))
+                                # This four-tick client survey can arrive in a
+                                # burst after a slow synchronous save. The
+                                # request carries no client timestamp.
+                                if near_item and (mid == '50063' or now_mono - last_event >= cooldown):
                                     required = int(survey.get('need_num', m_cfg.get('require_num', 1)))
                                     accepted = True
                                     SURVEY_PROGRESS_TIMES[cooldown_key] = now_mono
@@ -37626,7 +37629,9 @@ def client_handler(conn, addr):
                         send_rpc_push(519, sync_mission_data(picked_char))
                         print(f"[MISSION PROGRESS] msg=178 mission={mid} progress={parm[0]}/{required}")
                     else:
-                        print(f"[MISSION SECURITY] rejected MSG 178 mission={mid} type={logic_type} map={picked_char.get('map_id')}")
+                        print(f"[MISSION SECURITY] rejected MSG 178 mission={mid} type={logic_type} "
+                              f"map={picked_char.get('map_id')} state={mdata.get('state') if mdata else None} "
+                              f"param_type={param_type} param_value={param_value} pos={picked_char.get('pos')}")
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
