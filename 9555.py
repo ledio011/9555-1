@@ -261,7 +261,7 @@ HABITATION_COPY_ID = "306"
 GARAGE_MISSION_COPY_ID = "1301"
 MISSION_WAVE_COPY_MISSIONS = {
     GARAGE_MISSION_COPY_ID: "40039", "1302": "40055", "1303": "40058",
-    "1304": "40061",
+    "1304": "40061", "1305": "40064",
 }
 MISSION_WAVE_COPY_IDS = (HABITATION_COPY_ID, *MISSION_WAVE_COPY_MISSIONS)
 MISSION_WAVE_WAYPOINT_COPY_IDS = (HABITATION_COPY_ID, "1304")
@@ -19278,7 +19278,7 @@ def calculate_npc_kill_rewards_for_map(player_level, npc_level, map_id,
             exp_reward = max(1, int(exp_reward * SLUM_NPC_EXP_REWARD_SCALE))
     elif map_id in OPEN_WORLD_NPC_MAP_IDS:
         exp_reward = max(1, int(exp_reward * SLUM_NPC_EXP_REWARD_SCALE))
-    elif map_id in (UNDERGROUND_COPY_ID, HABITATION_COPY_ID):
+    elif map_id == UNDERGROUND_COPY_ID or map_id in MISSION_WAVE_COPY_IDS:
         exp_reward = max(1, exp_reward // 100)
     elif map_id == WAREHOUSE_SNEAK_COPY_ID:
         exp_scale = (
