@@ -16111,11 +16111,36 @@ def complete_vehicle_missions(picked_char):
     return completed
 
 
+def complete_ability_upgrade_missions(picked_char):
+    candidates = [
+        (str(mid), entry, missions_data.get(str(mid), {}))
+        for mid, entry in picked_char.get('active_missions', {}).items()
+        if entry.get('state') == 1
+        and missions_data.get(str(mid), {}).get('class') == 2
+        and missions_data.get(str(mid), {}).get('logic_type') == 128
+    ]
+    if not candidates:
+        return []
+    highest_level = max(character_refine_levels(picked_char).values())
+    completed = []
+    for mid, entry, cfg in candidates:
+        try:
+            required_level = int(cfg.get('logic_id', ''))
+        except (TypeError, ValueError):
+            print(f"[MISSION CONFIG] invalid ability star level mission={mid}")
+            continue
+        if required_level > 0 and highest_level >= required_level:
+            entry['state'] = 2
+            completed.append(mid)
+    return completed
+
+
 def sync_mission_data(picked_char):
     with get_character_transaction_lock(picked_char):
         reconciled = (complete_equipment_upgrade_missions(picked_char)
                       + complete_badge_upgrade_missions(picked_char)
                       + complete_skill_upgrade_missions(picked_char)
+                      + complete_ability_upgrade_missions(picked_char)
                       + complete_vehicle_missions(picked_char))
         if reconciled and not save_chars(all_accounts_chars):
             for mid in reconciled:
@@ -31523,10 +31548,15 @@ def client_handler(conn, addr):
                                 request_matches = False
                             if request_matches:
                                 power_before = get_character_stats(picked_char)['power']
+                                snapshot = snapshot_character_reward_state(picked_char)
+                                refine_snapshot = copy.deepcopy(picked_char['refine_levels'])
+                                pending_item_pushes = []
                                 # All material balances were preflighted together so consuming
                                 # multiple configured costs cannot leave a partial upgrade.
                                 consumed = all(
-                                    consume_backpack_item(picked_char, item_id, amount, send_rpc_push, 2)
+                                    consume_backpack_item(
+                                        picked_char, item_id, amount,
+                                        lambda tag, data: pending_item_pushes.append((tag, data)), 2)
                                     for item_id, amount in requirements.items()
                                 )
                                 if consumed:
@@ -31553,25 +31583,51 @@ def client_handler(conn, addr):
                                     }
                                     response_level = current_level
                                     response_allstar = sum(levels.values())
+                                    ability_missions = (complete_ability_upgrade_missions(picked_char)
+                                                        if succeeded else [])
                                     saved = save_chars(all_accounts_chars)
-                                    sync_char_attrs_rpc(conn, picked_char)
-                                    send_combat_power_gain_tip(
-                                        send_rpc_push, power_before,
-                                        get_character_stats(picked_char)['power']
-                                    )
-                                    sync_equipment_status_to_peers(picked_char)
-                                    if saved and succeeded:
-                                        gotham_broadcast_scroll_template(
-                                            101911, 10,
-                                            [str(picked_char.get('name', ''))],
-                                            [part, current_level])
-                                        if current_level == 10:
+                                    if saved:
+                                        for tag, data in pending_item_pushes:
+                                            send_rpc_push(tag, data)
+                                        sync_char_attrs_rpc(conn, picked_char)
+                                        send_combat_power_gain_tip(
+                                            send_rpc_push, power_before,
+                                            get_character_stats(picked_char)['power']
+                                        )
+                                        sync_equipment_status_to_peers(picked_char)
+                                        for mid in ability_missions:
+                                            send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                                        if ability_missions:
+                                            send_rpc_push(519, sync_mission_data(picked_char))
+                                        if succeeded:
                                             gotham_broadcast_scroll_template(
-                                                101905, 4,
+                                                101911, 10,
                                                 [str(picked_char.get('name', ''))],
-                                                [part])
-                                    print(f"[BACKPACK] refine part={part} level={current_level} "
-                                          f"state={response_state} protected={use_safety}")
+                                                [part, current_level])
+                                            if current_level == 10:
+                                                gotham_broadcast_scroll_template(
+                                                    101905, 4,
+                                                    [str(picked_char.get('name', ''))],
+                                                    [part])
+                                        print(f"[BACKPACK] refine part={part} level={current_level} "
+                                              f"state={response_state} protected={use_safety}")
+                                    else:
+                                        restore_character_reward_state(picked_char, snapshot)
+                                        picked_char['refine_levels'] = refine_snapshot
+                                        response_state = 1
+                                        response_level = int(refine_snapshot[str(part)])
+                                        response_allstar = sum(refine_snapshot.values())
+                                        print(f"[BACKPACK] failed to persist refine player={picked_char.get('id')} part={part}")
+                                        send_rpc_push(529, encode_sproto([
+                                            (0, 'Ability upgrade could not be saved. Please try again.'), (1, True)
+                                        ]))
+                                else:
+                                    restore_character_reward_state(picked_char, snapshot)
+                                    picked_char['refine_levels'] = refine_snapshot
+                                    print(f"[BACKPACK] refine material consumption failed player={picked_char.get('id')} part={part}")
+                                    send_rpc_push(529, encode_sproto([
+                                        (0, 'Ability upgrade failed because materials changed. Please try again.'), (1, True)
+                                    ]))
                 response_data = encode_sproto([
                     (0, response_state), (1, response_part),
                     (2, response_level), (3, response_allstar)
