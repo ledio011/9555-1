@@ -15917,28 +15917,29 @@ def mission_rank_for_active_entry(mid, mission_entry):
         return 0
 
 
-def complete_armor_upgrade_missions(picked_char):
-    """Reconcile active protector missions against persisted enhance slots."""
+def complete_equipment_upgrade_missions(picked_char):
+    """Reconcile protector and weapon missions against persisted enhance slots."""
     active = picked_char.get('active_missions', {})
+    mission_slots = {124: (1, 2, 3), 125: (0,)}
     candidates = [
         (str(mid), entry, missions_data.get(str(mid), {}))
         for mid, entry in active.items()
         if entry.get('state') == 1
         and missions_data.get(str(mid), {}).get('class') == 2
-        and missions_data.get(str(mid), {}).get('logic_type') == 124
+        and missions_data.get(str(mid), {}).get('logic_type') in mission_slots
     ]
     if not candidates:
         return []
     levels = equipment_enhance_levels(picked_char)
-    armor_level = max(levels.get(slot, 0) for slot in (1, 2, 3))
     completed = []
     for mid, entry, cfg in candidates:
         try:
             required_level = int(cfg.get('logic_id', ''))
         except (TypeError, ValueError):
-            print(f"[MISSION CONFIG] invalid armor upgrade level mission={mid}")
+            print(f"[MISSION CONFIG] invalid equipment upgrade level mission={mid}")
             continue
-        if required_level > 0 and armor_level >= required_level:
+        current_level = max(levels.get(slot, 0) for slot in mission_slots[cfg['logic_type']])
+        if required_level > 0 and current_level >= required_level:
             entry['state'] = 2
             completed.append(mid)
     return completed
@@ -15946,11 +15947,11 @@ def complete_armor_upgrade_missions(picked_char):
 
 def sync_mission_data(picked_char):
     with get_character_transaction_lock(picked_char):
-        reconciled = complete_armor_upgrade_missions(picked_char)
+        reconciled = complete_equipment_upgrade_missions(picked_char)
         if reconciled and not save_chars(all_accounts_chars):
             for mid in reconciled:
                 picked_char['active_missions'][mid]['state'] = 1
-            print(f"[MISSION] failed to persist armor upgrade progress missions={reconciled}")
+            print(f"[MISSION] failed to persist equipment upgrade progress missions={reconciled}")
     active_missions = picked_char.get("active_missions", {})
     main_mission = active_missions.get("1014", {})
     if (int(main_mission.get("state", 0) or 0) == 1
@@ -31224,12 +31225,12 @@ def client_handler(conn, addr):
                                             str(slot): level for slot, level in levels.items()
                                         }
                                         item['level'] = target_level
-                                        armor_missions = complete_armor_upgrade_missions(picked_char)
+                                        equipment_missions = complete_equipment_upgrade_missions(picked_char)
                                         saved = save_chars(all_accounts_chars)
-                                        if not saved and armor_missions:
-                                            for mid in armor_missions:
+                                        if not saved and equipment_missions:
+                                            for mid in equipment_missions:
                                                 picked_char['active_missions'][mid]['state'] = 1
-                                            print(f"[MISSION] failed to persist armor upgrade progress missions={armor_missions}")
+                                            print(f"[MISSION] failed to persist equipment upgrade progress missions={equipment_missions}")
                                         push_backpack_item_update(send_rpc_push, 1, item)
                                         sync_char_attrs_rpc(conn, picked_char)
                                         send_combat_power_gain_tip(
@@ -31237,8 +31238,8 @@ def client_handler(conn, addr):
                                             get_character_stats(picked_char)['power']
                                         )
                                         sync_equipment_status_to_peers(picked_char)
-                                        if saved and armor_missions:
-                                            for mid in armor_missions:
+                                        if saved and equipment_missions:
+                                            for mid in equipment_missions:
                                                 send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
                                             send_rpc_push(519, sync_mission_data(picked_char))
                                         max_level = max(
