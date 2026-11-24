@@ -16072,15 +16072,55 @@ def complete_skill_upgrade_missions(picked_char):
     return completed
 
 
+def complete_vehicle_missions(picked_char):
+    candidates = [
+        (str(mid), entry, missions_data.get(str(mid), {}))
+        for mid, entry in picked_char.get('active_missions', {}).items()
+        if entry.get('state') == 1
+        and missions_data.get(str(mid), {}).get('class') == 2
+        and missions_data.get(str(mid), {}).get('logic_type') == 129
+    ]
+    if not candidates:
+        return []
+    mounts = picked_char.get('mounts', {})
+    if not isinstance(mounts, dict):
+        print(f"[MISSION] invalid garage state player={picked_char.get('id')}")
+        return []
+    owned = set()
+    for mount_id, mount in mounts.items():
+        mount_id = str(mount_id)
+        if MOUNT_CONFIG.get(mount_id, {}).get('need_show') != 1 or not isinstance(mount, dict):
+            continue
+        try:
+            state = int(mount.get('state', 0))
+        except (TypeError, ValueError):
+            print(f"[MISSION] invalid vehicle state player={picked_char.get('id')} vehicle={mount_id}")
+            continue
+        if state in (1, 2, 3):
+            owned.add(mount_id)
+    completed = []
+    for mid, entry, cfg in candidates:
+        try:
+            required_count = int(cfg.get('logic_id', ''))
+        except (TypeError, ValueError):
+            print(f"[MISSION CONFIG] invalid vehicle count mission={mid}")
+            continue
+        if required_count > 0 and len(owned) >= required_count:
+            entry['state'] = 2
+            completed.append(mid)
+    return completed
+
+
 def sync_mission_data(picked_char):
     with get_character_transaction_lock(picked_char):
         reconciled = (complete_equipment_upgrade_missions(picked_char)
                       + complete_badge_upgrade_missions(picked_char)
-                      + complete_skill_upgrade_missions(picked_char))
+                      + complete_skill_upgrade_missions(picked_char)
+                      + complete_vehicle_missions(picked_char))
         if reconciled and not save_chars(all_accounts_chars):
             for mid in reconciled:
                 picked_char['active_missions'][mid]['state'] = 1
-            print(f"[MISSION] failed to persist upgrade progress missions={reconciled}")
+            print(f"[MISSION] failed to persist reconciled progress missions={reconciled}")
     active_missions = picked_char.get("active_missions", {})
     main_mission = active_missions.get("1014", {})
     if (int(main_mission.get("state", 0) or 0) == 1
@@ -31178,8 +31218,12 @@ def client_handler(conn, addr):
 
             elif msg == 323: # buy_car_shop
                 mount_id = field_text(body, 0)
-                if picked_char and mount_id in MOUNT_CONFIG:
+                if (picked_char and is_current_character_connection(conn, picked_char)
+                        and mount_id in MOUNT_CONFIG):
                     with get_character_transaction_lock(picked_char):
+                        snapshot_keys = MONEY_FIELDS + ('mounts', 'active_missions')
+                        snapshot = {key: copy.deepcopy(picked_char[key])
+                                    for key in snapshot_keys if key in picked_char}
                         mount_cfg = MOUNT_CONFIG[mount_id]
                         mount = picked_char.setdefault('mounts', {}).setdefault(mount_id, {})
                         if int(mount.get('state', 0)) == 0:
@@ -31193,13 +31237,29 @@ def client_handler(conn, addr):
                                 mount['state'] = 1
                                 mount.setdefault('select', mount_cfg['default_color'])
                                 mount.setdefault('unlocked_colors', [mount_cfg['default_color']])
-                                save_chars(all_accounts_chars)
-                                sync_char_attrs_rpc(conn, picked_char)
-                                print(f"[MOUNT] garage purchase id={mount_id} price={price} currency={price_type}")
+                                vehicle_missions = complete_vehicle_missions(picked_char)
+                                if save_chars(all_accounts_chars):
+                                    sync_char_attrs_rpc(conn, picked_char)
+                                    for mid in vehicle_missions:
+                                        send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                                    if vehicle_missions:
+                                        send_rpc_push(519, sync_mission_data(picked_char))
+                                    print(f"[MOUNT] garage purchase id={mount_id} price={price} currency={price_type}")
+                                else:
+                                    for key in snapshot_keys:
+                                        if key in snapshot:
+                                            picked_char[key] = snapshot[key]
+                                        else:
+                                            picked_char.pop(key, None)
+                                    mount = picked_char.get('mounts', {}).get(mount_id, {})
+                                    print(f"[MOUNT] failed to persist purchase player={picked_char.get('id')} vehicle={mount_id}")
+                                    send_rpc_push(529, encode_sproto([
+                                        (0, 'Vehicle purchase could not be saved. Please try again.'), (1, True)
+                                    ]))
                             else:
                                 print(f"[MOUNT SECURITY] rejected purchase id={mount_id} price={price} currency={price_type} balance={balance}")
                         # ret_buy_car_shop.mountId(0), state(1)
-                        send_rpc_push(691, encode_sproto([(0, mount_id), (1, int(mount.get('state', 1)))]))
+                        send_rpc_push(691, encode_sproto([(0, mount_id), (1, int(mount.get('state', 0)))]))
                 if session is not None:
                     ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                     conn.sendall(struct.pack(">H", len(pf)) + pf)
@@ -32629,13 +32689,14 @@ def client_handler(conn, addr):
                             item_type = int(cfg.get('type', -1))
                             mount_id = mount_id_from_voucher(item_id)
                             if mount_id:
+                                snapshot_keys = ('mounts', 'inventory', 'potion_index', 'active_missions')
+                                snapshot = {key: copy.deepcopy(picked_char[key])
+                                            for key in snapshot_keys if key in picked_char}
                                 mount = picked_char.setdefault('mounts', {}).setdefault(mount_id, {})
                                 mount['state'] = max(1, int(mount.get('state', 0)))
                                 mount.setdefault('select', MOUNT_CONFIG[mount_id]['default_color'])
                                 mount.setdefault('unlocked_colors', [mount['select']])
                                 success = 1
-                                send_rpc_push(630, encode_sproto([(0, build_mount_info(picked_char))]))
-                                print(f"[MOUNT] voucher redeemed item={item_id} vehicle={mount_id}")
                             elif item_type == 18: # REMAIN ticket
                                 subtype = int(cfg.get('function', 0))
                                 state = ensure_daily_copy_state(picked_char)
@@ -32738,7 +32799,28 @@ def client_handler(conn, addr):
                                         was_selected_potion = False
                                     if was_selected_potion:
                                         picked_char['potion_index'] = -1
-                                save_chars(all_accounts_chars)
+                                if mount_id:
+                                    vehicle_missions = complete_vehicle_missions(picked_char)
+                                    if save_chars(all_accounts_chars):
+                                        send_rpc_push(630, encode_sproto([(0, build_mount_info(picked_char))]))
+                                        for mid in vehicle_missions:
+                                            send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                                        if vehicle_missions:
+                                            send_rpc_push(519, sync_mission_data(picked_char))
+                                        print(f"[MOUNT] voucher redeemed item={item_id} vehicle={mount_id}")
+                                    else:
+                                        for key in snapshot_keys:
+                                            if key in snapshot:
+                                                picked_char[key] = snapshot[key]
+                                            else:
+                                                picked_char.pop(key, None)
+                                        success = 0
+                                        print(f"[MOUNT] failed to persist voucher player={picked_char.get('id')} vehicle={mount_id}")
+                                        send_rpc_push(529, encode_sproto([
+                                            (0, 'Vehicle redemption could not be saved. Please try again.'), (1, True)
+                                        ]))
+                                else:
+                                    save_chars(all_accounts_chars)
                 send_rpc_push(526, encode_sproto([(0, success), (1, index_id)]))
                 send_rpc_response(session)
             elif msg in (238, 239): # use_mount / unuse_mount
