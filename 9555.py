@@ -9144,7 +9144,7 @@ def resync_live_npc_instance(conn, char, inst_id, expected_npcid):
         try:
             remaining_hp = int(NPC_HP_MAP.get(inst_id, 0))
             attr = NPC_ATTR_MAP.get(inst_id)
-            if remaining_hp <= 0 or not attr:
+            if remaining_hp <= 0 or inst_id in DEAD_NPC_SET or not attr:
                 return False
             attr_fields = decode_sproto(attr)
             if not attr_fields:
@@ -9152,16 +9152,52 @@ def resync_live_npc_instance(conn, char, inst_id, expected_npcid):
             attr_fields[2] = remaining_hp
             attr = encode_sproto(sorted(attr_fields.items()))
             NPC_ATTR_MAP[inst_id] = attr
-            DEAD_NPC_SET.discard(inst_id)
         except (TypeError, ValueError, struct.error):
             return False
-
-    if not send_rpc_push_safe(conn, 506, encode_sproto([(0, inst_id)])):
-        return False
-    if not send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
-        return False
+        if not send_rpc_push_safe(conn, 506, encode_sproto([(0, inst_id)])):
+            return False
+        if not send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
+            return False
     print(f"[NPC RESYNC] player={char_id} map={map_id} inst={inst_id} "
           f"npc={server_npcid} hp={remaining_hp}/{decode_sproto(attr).get(3, 0)}")
+    return True
+
+
+def resync_rejected_npc_hit(conn, char, inst_id, npc_id, stage_state=None):
+    """Undo a locally predicted hit that the server could not accept."""
+    if not stage_state:
+        if is_tower_map(char.get('map_id')):
+            return resync_tower_npc_if_alive(conn, char, inst_id)
+        return resync_live_npc_instance(conn, char, inst_id, npc_id)
+    if not is_current_character_connection(conn, char):
+        return False
+    with exp_npc_hp_lock(stage_state, inst_id):
+        if (stage_state.get('_finish_handled')
+                or inst_id not in stage_state.get('active_monsters', [])
+                or inst_id not in stage_state.get('spawned_npcs', set())
+                or inst_id in DEAD_NPC_SET
+                or str(NPC_INST_MAP.get(inst_id, '')) != str(npc_id)
+                or str(NPC_INSTANCE_MAP.get(inst_id, '')) != str(char.get('map_id', ''))):
+            return False
+        hp = int(NPC_HP_MAP.get(inst_id, 0) or 0)
+        attr = NPC_ATTR_MAP.get(inst_id)
+        if hp <= 0 or not attr:
+            return False
+        fields = decode_sproto(attr)
+        if not fields:
+            print(f"[NPC RESYNC] invalid attributes for instance={inst_id}")
+            return False
+        fields[2] = hp
+        pos = stage_state.get('monster_pos', {}).get(inst_id)
+        if isinstance(pos, (list, tuple)) and len(pos) >= 2:
+            fields[15], fields[16] = int(pos[0] * 100), int(pos[1] * 100)
+            fields[17] = int(stage_state.get('monster_heading', {}).get(inst_id, 0))
+        attr = encode_sproto(sorted(fields.items()))
+        if not send_rpc_push_safe(conn, 506, encode_sproto([(0, inst_id)])):
+            return False
+        if not send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
+            return False
+    print(f"[NPC RESYNC] rejected hit player={char.get('id')} inst={inst_id} hp={hp}")
     return True
 
 
@@ -9184,7 +9220,7 @@ def resync_tower_npc_if_alive(conn, char, inst_id):
         try:
             remaining_hp = max(0, int(NPC_HP_MAP.get(inst_id, 0)))
             attr = NPC_ATTR_MAP.get(inst_id)
-            if remaining_hp <= 0 or not attr:
+            if remaining_hp <= 0 or inst_id in DEAD_NPC_SET or not attr:
                 return False
             attr_fields = decode_sproto(attr)
             if not attr_fields:
@@ -9194,11 +9230,10 @@ def resync_tower_npc_if_alive(conn, char, inst_id):
             NPC_ATTR_MAP[inst_id] = attr
         except (TypeError, ValueError, struct.error):
             return False
-
-    if not send_rpc_push_safe(conn, 506, encode_sproto([(0, inst_id)])):
-        return False
-    if not send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
-        return False
+        if not send_rpc_push_safe(conn, 506, encode_sproto([(0, inst_id)])):
+            return False
+        if not send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
+            return False
     print(f"[TOWER NPC RESYNC] player={char_id} inst={inst_id} "
           f"hp={remaining_hp}/{decode_sproto(attr).get(3, 0)}")
     return True
@@ -10548,6 +10583,7 @@ def run_exp_monster_ai_shared(exp_state, map_str, picked_char, send_func, send_r
                     exp_sync_npc_attrs(exp_state, inst_id, death_stats, 0)
                 else:
                     sync_npc_attrs_rpc(conn_for_sync, inst_id, death_stats, 0)
+                exp_send_push(exp_state, 506, encode_sproto([(0, inst_id)]))
                 if exp_state.get('stage_kind') == 'equipment':
                     on_equipment_npc_killed(exp_state, inst_id, auto_death_nid)
                 else:
@@ -15994,10 +16030,53 @@ def complete_badge_upgrade_missions(picked_char):
     return completed
 
 
+def complete_skill_upgrade_missions(picked_char):
+    candidates = [
+        (str(mid), entry, missions_data.get(str(mid), {}))
+        for mid, entry in picked_char.get('active_missions', {}).items()
+        if entry.get('state') == 1
+        and missions_data.get(str(mid), {}).get('class') == 2
+        and missions_data.get(str(mid), {}).get('logic_type') == 127
+    ]
+    if not candidates:
+        return []
+    skill_levels = picked_char.get('skill_levels', {})
+    if not isinstance(skill_levels, dict):
+        print(f"[MISSION] invalid skill levels player={picked_char.get('id')}")
+        return []
+    levels = []
+    max_level = max(SKILL_UPGRADE_DATA) if SKILL_UPGRADE_DATA else 79
+    for skill_id, level in skill_levels.items():
+        skill_id = str(skill_id)
+        if (skill_id in LEGACY_JJC_SKILL_IDS
+                or int(SKILL_CONFIG.get(skill_id, {}).get('is_upgrade', 0) or 0) != 1):
+            continue
+        try:
+            level = int(level)
+        except (TypeError, ValueError):
+            print(f"[MISSION] invalid skill level skill={skill_id} player={picked_char.get('id')}")
+            continue
+        if 0 <= level <= max_level:
+            levels.append(level + 1)
+    highest_level = max(levels, default=0)
+    completed = []
+    for mid, entry, cfg in candidates:
+        try:
+            required_level = int(cfg.get('logic_id', ''))
+        except (TypeError, ValueError):
+            print(f"[MISSION CONFIG] invalid skill upgrade level mission={mid}")
+            continue
+        if required_level > 0 and highest_level >= required_level:
+            entry['state'] = 2
+            completed.append(mid)
+    return completed
+
+
 def sync_mission_data(picked_char):
     with get_character_transaction_lock(picked_char):
         reconciled = (complete_equipment_upgrade_missions(picked_char)
-                      + complete_badge_upgrade_missions(picked_char))
+                      + complete_badge_upgrade_missions(picked_char)
+                      + complete_skill_upgrade_missions(picked_char))
         if reconciled and not save_chars(all_accounts_chars):
             for mid in reconciled:
                 picked_char['active_missions'][mid]['state'] = 1
@@ -30843,18 +30922,36 @@ def client_handler(conn, addr):
                 upgrade_all = bool(get_val_int(body, 2, 0))
                 if picked_char and is_current_character_connection(conn, picked_char):
                     with get_character_transaction_lock(picked_char):
+                        snapshot_keys = MONEY_FIELDS + ('skill_levels', 'active_missions')
+                        snapshot = {key: copy.deepcopy(picked_char[key])
+                                    for key in snapshot_keys if key in picked_char}
                         upgraded, server_skill_lv, request_valid = apply_skill_level_up(
                             picked_char, sid, cur_lv, upgrade_all
                         )
                         if upgraded:
-                            save_chars(all_accounts_chars)
-                            smap = build_skills_map(
-                                picked_char['prof'], picked_char['level'],
-                                picked_char['skill_levels'], picked_char.get('equipped_equip', []),
-                                picked_char.get('skill_positions', {})
-                            )
-                            send_rpc_push(540, encode_sproto([(0, smap), (1, True)]))
-                            sync_char_attrs_rpc(conn, picked_char)
+                            skill_missions = complete_skill_upgrade_missions(picked_char)
+                            if save_chars(all_accounts_chars):
+                                smap = build_skills_map(
+                                    picked_char['prof'], picked_char['level'],
+                                    picked_char['skill_levels'], picked_char.get('equipped_equip', []),
+                                    picked_char.get('skill_positions', {})
+                                )
+                                send_rpc_push(540, encode_sproto([(0, smap), (1, True)]))
+                                sync_char_attrs_rpc(conn, picked_char)
+                                if skill_missions:
+                                    for mid in skill_missions:
+                                        send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                                    send_rpc_push(519, sync_mission_data(picked_char))
+                            else:
+                                for key in snapshot_keys:
+                                    if key in snapshot:
+                                        picked_char[key] = snapshot[key]
+                                    else:
+                                        picked_char.pop(key, None)
+                                print(f"[SKILL] failed to persist upgrade player={picked_char.get('id')} skill={sid}")
+                                send_rpc_push(529, encode_sproto([
+                                    (0, 'Skill upgrade could not be saved. Please try again.'), (1, True)
+                                ]))
                         elif not request_valid:
                             print(f"[SKILL SECURITY] rejected inconsistent/unowned/non-upgradable skill "
                                   f"sid={sid} client_lv={cur_lv} server_lv={server_skill_lv}")
@@ -33633,6 +33730,12 @@ def client_handler(conn, addr):
                                             == int(target_id)):
                                         npc_level = shared_slot.get(
                                             "player_level", npc_level)
+                                # Level-scaled NPCs must be validated against
+                                # the level originally sent to this client.
+                                if NPC_CONFIG.get(nid_str, {}).get('level') == 9999:
+                                    spawn_attr = NPC_ATTR_MAP.get(target_id)
+                                    if spawn_attr:
+                                        npc_level = get_val_int(decode_sproto(spawn_attr), 18, npc_level)
                                 defender_stats = get_npc_attr(nid_str, npc_level)
 
                             if target_id not in NPC_HP_MAP:
@@ -33645,6 +33748,9 @@ def client_handler(conn, addr):
                                     requested_effinfo_id, exp_effects_in_batch,
                                     exp_targets_in_batch)
                                 if validated_hit is None:
+                                    if client_dmg > 0:
+                                        resync_rejected_npc_hit(
+                                            conn, picked_char, target_id, target_nid, exp_state_hit)
                                     continue
                                 skill_id, skill_lv, effinfo_id = validated_hit
                             else:
@@ -33667,6 +33773,8 @@ def client_handler(conn, addr):
                                 if skill_data is None or not skill_cfg:
                                     print(f"[COMBAT SECURITY] rejected unavailable skill "
                                           f"attacker={picked_char.get('id')} skill={skill_id}")
+                                    if client_dmg > 0:
+                                        resync_rejected_npc_hit(conn, picked_char, target_id, target_nid)
                                     continue
                                 skill_lv = max(
                                     0, get_val_int(decode_sproto(skill_data), 1, 0))
@@ -33680,6 +33788,8 @@ def client_handler(conn, addr):
                                         print(f"[COMBAT SECURITY] rejected invalid NPC skill effect "
                                               f"attacker={picked_char.get('id')} "
                                               f"skill={skill_id} effect={requested_effinfo_id}")
+                                        if client_dmg > 0:
+                                            resync_rejected_npc_hit(conn, picked_char, target_id, target_nid)
                                         continue
                                     effinfo_id = requested_effinfo_id
                                 else:
@@ -33687,6 +33797,8 @@ def client_handler(conn, addr):
                                     if not effinfo_id:
                                         print(f"[COMBAT SECURITY] rejected skill without damage effect "
                                               f"attacker={picked_char.get('id')} skill={skill_id}")
+                                        if client_dmg > 0:
+                                            resync_rejected_npc_hit(conn, picked_char, target_id, target_nid)
                                         continue
 
                             if is_stage_combat:
@@ -33699,6 +33811,9 @@ def client_handler(conn, addr):
                                 # skill/effect and authoritative stats.
                                 if client_dmg < 0 or client_cri_flag != is_cri:
                                     print(f"[EXP HIT] rejected malformed damage/crit target={target_id} damage={client_dmg}")
+                                    if client_dmg > 0:
+                                        resync_rejected_npc_hit(
+                                            conn, picked_char, target_id, target_nid, exp_state_hit)
                                     continue
                                 if client_dmg == 0:
                                     if client_hit_flag:
@@ -33711,6 +33826,8 @@ def client_handler(conn, addr):
                                 else:
                                     if not client_hit_flag:
                                         print(f"[EXP HIT] rejected positive damage with miss flag target={target_id}")
+                                        resync_rejected_npc_hit(
+                                            conn, picked_char, target_id, target_nid, exp_state_hit)
                                         continue
                                     max_dmg, can_hit, possible_crit = get_combat_damage(
                                         attacker_stats, defender_stats, skill_id, skill_lv,
@@ -33720,6 +33837,8 @@ def client_handler(conn, addr):
                                     )
                                     if not can_hit or (is_cri and not possible_crit) or client_dmg > max_dmg + 2:
                                         print(f"[EXP HIT] rejected out-of-range damage target={target_id} damage={client_dmg} max={max_dmg}")
+                                        resync_rejected_npc_hit(
+                                            conn, picked_char, target_id, target_nid, exp_state_hit)
                                         continue
                                     actual_dmg = client_dmg
                                     server_dmg = client_dmg
@@ -33754,6 +33873,8 @@ def client_handler(conn, addr):
                                         or (is_cri and crit_prob < 0)
                                         or (not is_cri and crit_prob >= 0.99)):
                                     print(f"[COMBAT SECURITY] rejected impossible client result target={target_id} damage={client_dmg} hit={client_hit_flag} crit={is_cri}")
+                                    if client_dmg > 0:
+                                        resync_rejected_npc_hit(conn, picked_char, target_id, target_nid)
                                     continue
                                 if client_dmg == 0:
                                     server_dmg = actual_dmg = 0
@@ -33773,9 +33894,7 @@ def client_handler(conn, addr):
                                     if (not can_hit or (is_cri and not possible_crit)
                                             or client_dmg > tower_damage_tolerance):
                                         print(f"[COMBAT SECURITY] rejected out-of-range NPC damage target={target_id} damage={client_dmg} max={max_dmg}")
-                                        if (is_tower and client_dmg > 0
-                                                and client_dmg >= int(NPC_HP_MAP.get(target_id, 0) or 0)):
-                                            resync_tower_npc_if_alive(conn, picked_char, target_id)
+                                        resync_rejected_npc_hit(conn, picked_char, target_id, target_nid)
                                         continue
                                     if ((is_tower and client_dmg > max_dmg + 2)
                                             or (_domin_capture_is_arena(cur_map) and client_dmg > max_dmg + 2)):
@@ -34024,12 +34143,6 @@ def client_handler(conn, addr):
                                         else:
                                             send_rpc_push(506, remove_data)
                                 else:
-                                    # The APK's ObjNPC.ChangeHPVal keeps its
-                                    # death animation/body for 4 seconds before
-                                    # recycling. Let that lifecycle play, then
-                                    # send an AOI remove as a safety cleanup so
-                                    # a client that missed the local recycle
-                                    # cannot retain an untargetable ghost.
                                     dead_pos = exp_state_hit.get('monster_pos', {}).get(target_id)
                                     if isinstance(dead_pos, (list, tuple)) and len(dead_pos) >= 2:
                                         heading = int(exp_state_hit.setdefault(
@@ -34044,14 +34157,7 @@ def client_handler(conn, addr):
                                         exp_send_push(
                                             exp_state_hit, 513,
                                             encode_sproto([(0, char_move_stop)]))
-                                    def remove_stage_npc_after_death(
-                                            stage_state=exp_state_hit,
-                                            dead_inst_id=int(target_id)):
-                                        remove_data = encode_sproto([(0, dead_inst_id)])
-                                        exp_send_push(stage_state, 506, remove_data)
-                                    cleanup_timer = threading.Timer(4.5, remove_stage_npc_after_death)
-                                    cleanup_timer.daemon = True
-                                    cleanup_timer.start()
+                                    exp_send_push(exp_state_hit, 506, encode_sproto([(0, target_id)]))
 
                                 # Guild-city capture is settled by the total
                                 # damage scoreboard, not generic NPC mission,
