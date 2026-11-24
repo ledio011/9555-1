@@ -261,8 +261,10 @@ HABITATION_COPY_ID = "306"
 GARAGE_MISSION_COPY_ID = "1301"
 MISSION_WAVE_COPY_MISSIONS = {
     GARAGE_MISSION_COPY_ID: "40039", "1302": "40055", "1303": "40058",
+    "1304": "40061",
 }
 MISSION_WAVE_COPY_IDS = (HABITATION_COPY_ID, *MISSION_WAVE_COPY_MISSIONS)
+MISSION_WAVE_WAYPOINT_COPY_IDS = (HABITATION_COPY_ID, "1304")
 HABITATION_COPY_STATE_KEY = "_habitation_copy_state"
 HABITATION_COPY_LOCK = threading.RLock()
 HABITATION_NPC_OWNER = {}
@@ -13443,7 +13445,7 @@ def record_habitation_copy_kill(conn, char, inst_id, rewards, send_rpc_push):
             else:
                 state["phase"] = "waiting"
                 send_rpc_push(515, encode_sproto([(0, group + 1)]))
-                if str(state.get("copy_id", HABITATION_COPY_ID)) in MISSION_WAVE_COPY_MISSIONS:
+                if str(state.get("copy_id", HABITATION_COPY_ID)) not in MISSION_WAVE_WAYPOINT_COPY_IDS:
                     start_habitation_next_group(conn, char, send_rpc_push)
         save_chars(all_accounts_chars)
         return True
@@ -35532,7 +35534,7 @@ def client_handler(conn, addr):
                     elif copy_id == UNDERGROUND_COPY_ID:
                         start_underground_copy_battle(
                             picked_char, send_rpc_push)
-                    elif copy_id == HABITATION_COPY_ID:
+                    elif copy_id in MISSION_WAVE_WAYPOINT_COPY_IDS:
                         start_habitation_next_group(
                             conn, picked_char, send_rpc_push)
                     cash_state = picked_char.get('cash_stage_state')
