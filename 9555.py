@@ -109,6 +109,7 @@ NPC_INST_MAP = {} # inst_id -> nid (to resolve rewards)
 NPC_INSTANCE_MAP = {} # inst_id -> map ID, to reject cross-map forged death reports
 NPC_HP_MAP = {}   # inst_id -> current hp
 NPC_ATTR_MAP = {} # runtime NPC payloads for reconnect replay
+MISSION_50076_NPCS = {}  # connection identity -> Pop Boy instance
 GOTHAM_MAP_ID = "109"
 VILLA_AREA_MAP_ID = "110"
 CARGO_PORT_MAP_ID = "111"
@@ -9123,6 +9124,41 @@ def build_npc_attr_sproto(
     return inst_id, attr
 
 
+def clear_mission_50076_npc(conn, send_remove=False):
+    if not conn:
+        return
+    inst_id = MISSION_50076_NPCS.pop(id(conn), None)
+    if inst_id is None:
+        return
+    if send_remove and not send_rpc_push_safe(conn, 506, encode_sproto([(0, inst_id)])):
+        print(f"[MISSION 50076] failed to remove Pop Boy instance={inst_id}")
+    NPC_HP_MAP.pop(inst_id, None)
+    NPC_INST_MAP.pop(inst_id, None)
+    NPC_INSTANCE_MAP.pop(inst_id, None)
+    NPC_ATTR_MAP.pop(inst_id, None)
+
+
+def spawn_mission_50076_npc(conn, char):
+    if (not is_current_character_connection(conn, char)
+            or str(char.get('map_id', '')) != '11'
+            or char.get('active_missions', {}).get('50076', {}).get('state') not in (1, 2)):
+        return False
+    inst_id = MISSION_50076_NPCS.get(id(conn))
+    attr = NPC_ATTR_MAP.get(inst_id) if inst_id is not None else None
+    if attr is None:
+        clear_mission_50076_npc(conn)
+        # The APK finds no MonsterData row for 1090 on map 11 and uses
+        # Vector3.zero as the mission marker's horizontal position.
+        inst_id, attr = build_npc_attr_sproto('1090', 'Pop Boy', 0, 0, 0, map_id='11')
+        NPC_INSTANCE_MAP[inst_id] = '11'
+        MISSION_50076_NPCS[id(conn)] = inst_id
+    if not send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
+        print(f"[MISSION 50076] failed to spawn Pop Boy player={char.get('id')}")
+        clear_mission_50076_npc(conn)
+        return False
+    return True
+
+
 def resync_live_npc_instance(conn, char, inst_id, expected_npcid):
     """Recreate a client-lost NPC using its authoritative, remaining HP."""
     try:
@@ -16111,36 +16147,11 @@ def complete_vehicle_missions(picked_char):
     return completed
 
 
-def complete_ability_upgrade_missions(picked_char):
-    candidates = [
-        (str(mid), entry, missions_data.get(str(mid), {}))
-        for mid, entry in picked_char.get('active_missions', {}).items()
-        if entry.get('state') == 1
-        and missions_data.get(str(mid), {}).get('class') == 2
-        and missions_data.get(str(mid), {}).get('logic_type') == 128
-    ]
-    if not candidates:
-        return []
-    highest_level = max(character_refine_levels(picked_char).values())
-    completed = []
-    for mid, entry, cfg in candidates:
-        try:
-            required_level = int(cfg.get('logic_id', ''))
-        except (TypeError, ValueError):
-            print(f"[MISSION CONFIG] invalid ability star level mission={mid}")
-            continue
-        if required_level > 0 and highest_level >= required_level:
-            entry['state'] = 2
-            completed.append(mid)
-    return completed
-
-
 def sync_mission_data(picked_char):
     with get_character_transaction_lock(picked_char):
         reconciled = (complete_equipment_upgrade_missions(picked_char)
                       + complete_badge_upgrade_missions(picked_char)
                       + complete_skill_upgrade_missions(picked_char)
-                      + complete_ability_upgrade_missions(picked_char)
                       + complete_vehicle_missions(picked_char))
         if reconciled and not save_chars(all_accounts_chars):
             for mid in reconciled:
@@ -22716,6 +22727,8 @@ def replay_map_aoi_after_reconnect(conn, char):
         update_prison_npc_aoi(conn, map_id, char)
     else:
         spawn_map_npcs(conn, map_id, char)
+        if map_id == '11':
+            spawn_mission_50076_npc(conn, char)
         if is_gotham_escort_map(map_id):
             spawn_gotham_escort_npc(conn, char)
     if (not is_single_player_map(map_id)
@@ -22820,6 +22833,8 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
             print(f"[AOI NPC] Cleaned up {len(tracked)} tracked NPCs for conn={conn_key} leaving map 101")
     if src_map in PRISON_NPC_AOI_MAP_IDS and src_map != target_map_id:
         clear_prison_npc_aoi(conn, send_remove=True)
+    if src_map == '11' and src_map != target_map_id:
+        clear_mission_50076_npc(conn)
     if src_map == WAREHOUSE_SNEAK_COPY_ID and src_map != target_map_id:
         picked_char.pop(WAREHOUSE_SNEAK_STATE_KEY, None)
     if src_map == MISSION_72_COPY_ID and src_map != target_map_id:
@@ -29833,6 +29848,8 @@ def client_handler(conn, addr):
                             f"complete={week_complete} "
                             f"push_641={'sent' if state_sent else 'failed'}"
                         )
+                    if mid == '11' and is_current_character_connection(conn, picked_char):
+                        spawn_mission_50076_npc(conn, picked_char)
                     if mid == "101":
                         map101_ready_at = time.monotonic()
                         map101_last_move_at = None
@@ -30667,6 +30684,8 @@ def client_handler(conn, addr):
                         conn.sendall(struct.pack(">H", len(pf)) + pf)
                     if not mission_event_advanced:
                         send_rpc_push(519, sync_mission_data(picked_char))
+                    if res and mid == '50076' and str(picked_char.get('map_id', '')) == '11':
+                        spawn_mission_50076_npc(conn, picked_char)
 
             elif msg == 113: # complete_mission
                 if picked_char:
@@ -30812,6 +30831,8 @@ def client_handler(conn, addr):
                                 send_rpc_push(519, sync_mission_data(picked_char))
                                 continue
                             print(f"[MISSION COMPLETE] mission_id={mid} chained={is_chained}")
+                            if mid == '50076':
+                                clear_mission_50076_npc(conn, send_remove=True)
 
                             # Standard completion response
                             if session is not None:
@@ -31548,15 +31569,10 @@ def client_handler(conn, addr):
                                 request_matches = False
                             if request_matches:
                                 power_before = get_character_stats(picked_char)['power']
-                                snapshot = snapshot_character_reward_state(picked_char)
-                                refine_snapshot = copy.deepcopy(picked_char['refine_levels'])
-                                pending_item_pushes = []
                                 # All material balances were preflighted together so consuming
                                 # multiple configured costs cannot leave a partial upgrade.
                                 consumed = all(
-                                    consume_backpack_item(
-                                        picked_char, item_id, amount,
-                                        lambda tag, data: pending_item_pushes.append((tag, data)), 2)
+                                    consume_backpack_item(picked_char, item_id, amount, send_rpc_push, 2)
                                     for item_id, amount in requirements.items()
                                 )
                                 if consumed:
@@ -31583,51 +31599,25 @@ def client_handler(conn, addr):
                                     }
                                     response_level = current_level
                                     response_allstar = sum(levels.values())
-                                    ability_missions = (complete_ability_upgrade_missions(picked_char)
-                                                        if succeeded else [])
                                     saved = save_chars(all_accounts_chars)
-                                    if saved:
-                                        for tag, data in pending_item_pushes:
-                                            send_rpc_push(tag, data)
-                                        sync_char_attrs_rpc(conn, picked_char)
-                                        send_combat_power_gain_tip(
-                                            send_rpc_push, power_before,
-                                            get_character_stats(picked_char)['power']
-                                        )
-                                        sync_equipment_status_to_peers(picked_char)
-                                        for mid in ability_missions:
-                                            send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
-                                        if ability_missions:
-                                            send_rpc_push(519, sync_mission_data(picked_char))
-                                        if succeeded:
+                                    sync_char_attrs_rpc(conn, picked_char)
+                                    send_combat_power_gain_tip(
+                                        send_rpc_push, power_before,
+                                        get_character_stats(picked_char)['power']
+                                    )
+                                    sync_equipment_status_to_peers(picked_char)
+                                    if saved and succeeded:
+                                        gotham_broadcast_scroll_template(
+                                            101911, 10,
+                                            [str(picked_char.get('name', ''))],
+                                            [part, current_level])
+                                        if current_level == 10:
                                             gotham_broadcast_scroll_template(
-                                                101911, 10,
+                                                101905, 4,
                                                 [str(picked_char.get('name', ''))],
-                                                [part, current_level])
-                                            if current_level == 10:
-                                                gotham_broadcast_scroll_template(
-                                                    101905, 4,
-                                                    [str(picked_char.get('name', ''))],
-                                                    [part])
-                                        print(f"[BACKPACK] refine part={part} level={current_level} "
-                                              f"state={response_state} protected={use_safety}")
-                                    else:
-                                        restore_character_reward_state(picked_char, snapshot)
-                                        picked_char['refine_levels'] = refine_snapshot
-                                        response_state = 1
-                                        response_level = int(refine_snapshot[str(part)])
-                                        response_allstar = sum(refine_snapshot.values())
-                                        print(f"[BACKPACK] failed to persist refine player={picked_char.get('id')} part={part}")
-                                        send_rpc_push(529, encode_sproto([
-                                            (0, 'Ability upgrade could not be saved. Please try again.'), (1, True)
-                                        ]))
-                                else:
-                                    restore_character_reward_state(picked_char, snapshot)
-                                    picked_char['refine_levels'] = refine_snapshot
-                                    print(f"[BACKPACK] refine material consumption failed player={picked_char.get('id')} part={part}")
-                                    send_rpc_push(529, encode_sproto([
-                                        (0, 'Ability upgrade failed because materials changed. Please try again.'), (1, True)
-                                    ]))
+                                                [part])
+                                    print(f"[BACKPACK] refine part={part} level={current_level} "
+                                          f"state={response_state} protected={use_safety}")
                 response_data = encode_sproto([
                     (0, response_state), (1, response_part),
                     (2, response_level), (3, response_allstar)
@@ -39165,6 +39155,7 @@ def client_handler(conn, addr):
             conn_aoi_key = id(conn)
             clear_gotham_npc_aoi(conn)
             clear_prison_npc_aoi(conn)
+            clear_mission_50076_npc(conn)
             tracked_aoi = NPC_AOI_TRACK.pop(conn_aoi_key, {})
             for inst_id_aoi in tracked_aoi:
                 NPC_HP_MAP.pop(inst_id_aoi, None)
