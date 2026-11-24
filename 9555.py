@@ -30461,7 +30461,7 @@ def client_handler(conn, addr):
                     start_map_transition(conn, picked_char, target_map, send_rpc_push)
                 else:
                     print(f"[MAP TRANSITION] rejected player={picked_char.get('id') if picked_char else 0} "
-                          f"from={source_map} to={target_map} at_teleport={at_city_teleport}")
+                          f"from={source_map} to={target_map} at_teleport={at_map_teleport}")
                 if session is not None:
                     send_rpc_response(session)
 
