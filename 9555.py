@@ -259,7 +259,8 @@ UNDERGROUND_COPY_STATE_KEY = "_underground_copy_state"
 UNDERGROUND_COPY_LOCK = threading.RLock()
 HABITATION_COPY_ID = "306"
 GARAGE_MISSION_COPY_ID = "1301"
-MISSION_WAVE_COPY_IDS = (HABITATION_COPY_ID, GARAGE_MISSION_COPY_ID)
+MISSION_WAVE_COPY_MISSIONS = {GARAGE_MISSION_COPY_ID: "40039", "1302": "40055"}
+MISSION_WAVE_COPY_IDS = (HABITATION_COPY_ID, *MISSION_WAVE_COPY_MISSIONS)
 HABITATION_COPY_STATE_KEY = "_habitation_copy_state"
 HABITATION_COPY_LOCK = threading.RLock()
 HABITATION_NPC_OWNER = {}
@@ -13257,8 +13258,8 @@ def habitation_copy_npc_is_active(char, inst_id):
         isinstance(state, dict) and state.get("phase") == "battle"
         and not state.get("result_recorded")
         and str(char.get("map_id") or "") == str(state.get("copy_id", HABITATION_COPY_ID))
-        and (str(state.get("copy_id", HABITATION_COPY_ID)) != GARAGE_MISSION_COPY_ID
-             or str(char.get("active_copy_id") or "") == GARAGE_MISSION_COPY_ID)
+        and (str(state.get("copy_id", HABITATION_COPY_ID)) not in MISSION_WAVE_COPY_MISSIONS
+             or str(char.get("active_copy_id") or "") == str(state.get("copy_id")))
         and HABITATION_NPC_OWNER.get(int(inst_id or 0)) == int(char.get("id", 0) or 0)
         and int(inst_id or 0) in state.get("instances", {}).values())
 
@@ -13350,9 +13351,10 @@ def _habitation_copy_timeout(char_id, expected_end_time):
 def habitation_map_ready(conn, char, send_rpc_push):
     if str(char.get("map_id") or "") not in MISSION_WAVE_COPY_IDS:
         return False
-    if (str(char.get("map_id")) == GARAGE_MISSION_COPY_ID
-            and str(char.get("active_copy_id") or "") != GARAGE_MISSION_COPY_ID):
-        print(f"[MISSION COPY] rejected unowned garage map player={char.get('id')}")
+    copy_id = str(char.get("map_id"))
+    if (copy_id in MISSION_WAVE_COPY_MISSIONS
+            and str(char.get("active_copy_id") or "") != copy_id):
+        print(f"[MISSION COPY] rejected unowned map={copy_id} player={char.get('id')}")
         return False
     with HABITATION_COPY_LOCK:
         state = start_habitation_copy(char)
@@ -13439,7 +13441,7 @@ def record_habitation_copy_kill(conn, char, inst_id, rewards, send_rpc_push):
             else:
                 state["phase"] = "waiting"
                 send_rpc_push(515, encode_sproto([(0, group + 1)]))
-                if str(state.get("copy_id", HABITATION_COPY_ID)) == GARAGE_MISSION_COPY_ID:
+                if str(state.get("copy_id", HABITATION_COPY_ID)) in MISSION_WAVE_COPY_MISSIONS:
                     start_habitation_next_group(conn, char, send_rpc_push)
         save_chars(all_accounts_chars)
         return True
@@ -35035,11 +35037,12 @@ def client_handler(conn, addr):
                     print(f"[SCUFFLE] denied uncharged copy entry id={copy_id}; "
                           "use MSG 273")
                 elif picked_char and msg != 276 and copy_id not in DAILY_EXP_CONFIG:
-                    if (copy_id == GARAGE_MISSION_COPY_ID
-                            and (picked_char.get('active_missions', {}).get('40039', {}).get('state') != 1
+                    mission_id = MISSION_WAVE_COPY_MISSIONS.get(copy_id)
+                    if (mission_id
+                            and (picked_char.get('active_missions', {}).get(mission_id, {}).get('state') != 1
                                  or str(picked_char.get('map_id') or '') == copy_id
                                  or is_active_copy_current(picked_char))):
-                        print(f"[MISSION COPY] denied garage entry player={picked_char.get('id')} mission=40039")
+                        print(f"[MISSION COPY] denied entry player={picked_char.get('id')} copy={copy_id} mission={mission_id}")
                         send_rpc_response(session)
                         continue
                     # Preserve the source location for this scene entry.
