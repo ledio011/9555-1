@@ -258,6 +258,8 @@ UNDERGROUND_COPY_DURATION = 300
 UNDERGROUND_COPY_STATE_KEY = "_underground_copy_state"
 UNDERGROUND_COPY_LOCK = threading.RLock()
 HABITATION_COPY_ID = "306"
+GARAGE_MISSION_COPY_ID = "1301"
+MISSION_WAVE_COPY_IDS = (HABITATION_COPY_ID, GARAGE_MISSION_COPY_ID)
 HABITATION_COPY_STATE_KEY = "_habitation_copy_state"
 HABITATION_COPY_LOCK = threading.RLock()
 HABITATION_NPC_OWNER = {}
@@ -11736,7 +11738,7 @@ def _on_npc_killed_locked(conn, send_rpc_push, picked_char, inst_id, npcid, gran
                 elif current_map == UNDERGROUND_COPY_ID:
                     record_underground_copy_kill(
                         picked_char, inst_id, rewards)
-                elif current_map == HABITATION_COPY_ID:
+                elif current_map in MISSION_WAVE_COPY_IDS:
                     record_habitation_copy_kill(
                         conn, picked_char, inst_id, rewards, send_rpc_push)
 
@@ -13208,7 +13210,7 @@ def habitation_copy_result_payload(state, won):
         if int(amount or 0) > 0
     ]
     return encode_sproto([
-        (0, 2), (1, HABITATION_COPY_ID), (2, bool(won)),
+        (0, 2), (1, str(state.get("copy_id", HABITATION_COPY_ID))), (2, bool(won)),
         (3, 7 if won else 0), (4, 3 if won else 0), (5, items),
     ])
 
@@ -13231,7 +13233,7 @@ def clear_habitation_copy_runtime(char, conn=None):
         NPC_ATTR_MAP.pop(inst_id, None)
 
 
-def start_habitation_copy(char, reset=False):
+def start_habitation_copy(char, reset=False, copy_id=None):
     if not char:
         return None
     with HABITATION_COPY_LOCK:
@@ -13240,6 +13242,7 @@ def start_habitation_copy(char, reset=False):
             return state
         clear_habitation_copy_runtime(char)
         state = {
+            "copy_id": str(copy_id or char.get("map_id") or HABITATION_COPY_ID),
             "phase": "ready", "group": 1, "instances": {},
             "killed_slots": [], "reward_totals": {}, "end_time": 0,
             "result_recorded": False,
@@ -13253,7 +13256,9 @@ def habitation_copy_npc_is_active(char, inst_id):
     return bool(
         isinstance(state, dict) and state.get("phase") == "battle"
         and not state.get("result_recorded")
-        and str(char.get("map_id") or "") == HABITATION_COPY_ID
+        and str(char.get("map_id") or "") == str(state.get("copy_id", HABITATION_COPY_ID))
+        and (str(state.get("copy_id", HABITATION_COPY_ID)) != GARAGE_MISSION_COPY_ID
+             or str(char.get("active_copy_id") or "") == GARAGE_MISSION_COPY_ID)
         and HABITATION_NPC_OWNER.get(int(inst_id or 0)) == int(char.get("id", 0) or 0)
         and int(inst_id or 0) in state.get("instances", {}).values())
 
@@ -13261,10 +13266,11 @@ def habitation_copy_npc_is_active(char, inst_id):
 def spawn_habitation_group(conn, char):
     state = char.get(HABITATION_COPY_STATE_KEY) if char else None
     if (not isinstance(state, dict) or state.get("phase") != "battle"
-            or str(char.get("map_id") or "") != HABITATION_COPY_ID):
+            or str(char.get("map_id") or "") != str(state.get("copy_id", HABITATION_COPY_ID))):
         return False
+    copy_id = str(state.get("copy_id", HABITATION_COPY_ID))
     group = int(state.get("group", 0) or 0)
-    rows = MONSTER_DATA.get(HABITATION_COPY_ID, [])
+    rows = MONSTER_DATA.get(copy_id, [])
     slots = [(index, row) for index, row in enumerate(rows)
              if int(row.get("group", 0)) == group]
     if not slots:
@@ -13290,8 +13296,8 @@ def spawn_habitation_group(conn, char):
         inst_id, attr = build_npc_attr_sproto(
             nid, cfg.get("name", f"Monster_{nid}"),
             row["x"], row["z"], row["o"],
-            existing_inst_id=existing, map_id=HABITATION_COPY_ID)
-        NPC_INSTANCE_MAP[inst_id] = HABITATION_COPY_ID
+            existing_inst_id=existing, map_id=copy_id)
+        NPC_INSTANCE_MAP[inst_id] = copy_id
         HABITATION_NPC_OWNER[inst_id] = owner_id
         instances[key] = inst_id
         if not send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
@@ -13306,9 +13312,10 @@ def finish_habitation_copy(char, won):
     with HABITATION_COPY_LOCK:
         state = char.get(HABITATION_COPY_STATE_KEY)
         if (not isinstance(state, dict) or state.get("result_recorded")
-                or str(char.get("map_id") or "") != HABITATION_COPY_ID):
+                or str(char.get("map_id") or "") != str(state.get("copy_id", HABITATION_COPY_ID))):
             return False
-        rows = MONSTER_DATA.get(HABITATION_COPY_ID, [])
+        copy_id = str(state.get("copy_id", HABITATION_COPY_ID))
+        rows = MONSTER_DATA.get(copy_id, [])
         required = {index for index, row in enumerate(rows)
                     if int(row.get("group", 0)) in (1, 2, 3)}
         won = bool(won and required and required.issubset(
@@ -13322,7 +13329,7 @@ def finish_habitation_copy(char, won):
     if won:
         push = lambda tag, data: send_push_to_char(char.get("id", 0), tag, data)
         advance_missions(char, push, "copy_scene_complete",
-                         target_id=HABITATION_COPY_ID, map_id=HABITATION_COPY_ID)
+                         target_id=copy_id, map_id=copy_id)
     result = habitation_copy_result_payload(state, won)
     send_exp_result_to_char(char, result)
     save_chars(all_accounts_chars)
@@ -13341,7 +13348,11 @@ def _habitation_copy_timeout(char_id, expected_end_time):
 
 
 def habitation_map_ready(conn, char, send_rpc_push):
-    if str(char.get("map_id") or "") != HABITATION_COPY_ID:
+    if str(char.get("map_id") or "") not in MISSION_WAVE_COPY_IDS:
+        return False
+    if (str(char.get("map_id")) == GARAGE_MISSION_COPY_ID
+            and str(char.get("active_copy_id") or "") != GARAGE_MISSION_COPY_ID):
+        print(f"[MISSION COPY] rejected unowned garage map player={char.get('id')}")
         return False
     with HABITATION_COPY_LOCK:
         state = start_habitation_copy(char)
@@ -13388,7 +13399,7 @@ def start_habitation_next_group(conn, char, send_rpc_push):
     with HABITATION_COPY_LOCK:
         state = char.get(HABITATION_COPY_STATE_KEY) if char else None
         if (not isinstance(state, dict) or state.get("phase") != "waiting"
-                or str(char.get("map_id") or "") != HABITATION_COPY_ID):
+                or str(char.get("map_id") or "") != str(state.get("copy_id", HABITATION_COPY_ID))):
             return False
         if int(time.time()) >= int(state.get("end_time", 0) or 0):
             finish_habitation_copy(char, False)
@@ -13420,7 +13431,7 @@ def record_habitation_copy_kill(conn, char, inst_id, rewards, send_rpc_push):
                 totals[str(item_id)] = int(totals.get(str(item_id), 0)) + amount
         group = int(state["group"])
         required = {index for index, row in enumerate(
-            MONSTER_DATA.get(HABITATION_COPY_ID, []))
+            MONSTER_DATA.get(str(state.get("copy_id", HABITATION_COPY_ID)), []))
                     if int(row.get("group", 0)) == group}
         if required and required.issubset(set(state["killed_slots"])):
             if group == 3:
@@ -13428,6 +13439,8 @@ def record_habitation_copy_kill(conn, char, inst_id, rewards, send_rpc_push):
             else:
                 state["phase"] = "waiting"
                 send_rpc_push(515, encode_sproto([(0, group + 1)]))
+                if str(state.get("copy_id", HABITATION_COPY_ID)) == GARAGE_MISSION_COPY_ID:
+                    start_habitation_next_group(conn, char, send_rpc_push)
         save_chars(all_accounts_chars)
         return True
 
@@ -15662,8 +15675,8 @@ def spawn_exp_team_stage_map(conn, map_id, char, force=False):
 
 def spawn_map_npcs(conn, map_id, picked_char=None):
     map_str = str(map_id)
-    if map_str == HABITATION_COPY_ID:
-        # SingleRunPointSceneManager sends map_ready after loading.
+    if map_str in MISSION_WAVE_COPY_IDS:
+        # Mission-wave copies create their first group after map_ready.
         return
     if map_str == '1501':
         entry = _guild_battle_entry_for_char(picked_char)
@@ -22671,7 +22684,7 @@ def start_map_transition(conn, picked_char, target_map_id, send_rpc_push, overri
             timeout_timer = underground_state.get("timeout_timer")
             if timeout_timer:
                 timeout_timer.cancel()
-    if src_map == HABITATION_COPY_ID and src_map != target_map_id:
+    if src_map in MISSION_WAVE_COPY_IDS and src_map != target_map_id:
         with HABITATION_COPY_LOCK:
             clear_habitation_copy_runtime(picked_char, conn)
             picked_char.pop(HABITATION_COPY_STATE_KEY, None)
@@ -29830,7 +29843,7 @@ def client_handler(conn, addr):
                             if tower_run.get("status") == "running":
                                 spawn_tower_map_npcs(conn, mid, picked_char)
                             tower_send_pending_result(picked_char, send_rpc_push)
-                    elif mid == HABITATION_COPY_ID:
+                    elif mid in MISSION_WAVE_COPY_IDS:
                         if is_current_character_connection(conn, picked_char):
                             habitation_map_ready(conn, picked_char, send_rpc_push)
                             pending_relife = picked_char.get('_pending_relife')
@@ -33479,7 +33492,7 @@ def client_handler(conn, addr):
                                     print(f"[SNEAK COPY] rejected unowned/inactive target={target_id} "
                                           f"player={picked_char.get('id')}")
                                     continue
-                            if (cur_map == HABITATION_COPY_ID
+                            if (cur_map in MISSION_WAVE_COPY_IDS
                                     and not habitation_copy_npc_is_active(
                                         picked_char, target_id)):
                                 print(f"[HABITATION] rejected unowned/inactive target={target_id} "
@@ -34151,7 +34164,7 @@ def client_handler(conn, addr):
                         ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
                         conn.sendall(struct.pack(">H", len(pf)) + pf)
                     continue
-                if picked_char and str(picked_char.get('map_id', '')) == HABITATION_COPY_ID:
+                if picked_char and str(picked_char.get('map_id', '')) in MISSION_WAVE_COPY_IDS:
                     print(f"[HABITATION] ignored client NPC death report inst_id={inst_id}")
                     if session is not None:
                         ph = encode_sproto([(1, session)]); pf = sproto_pack(ph + encode_sproto([]))
@@ -35022,6 +35035,13 @@ def client_handler(conn, addr):
                     print(f"[SCUFFLE] denied uncharged copy entry id={copy_id}; "
                           "use MSG 273")
                 elif picked_char and msg != 276 and copy_id not in DAILY_EXP_CONFIG:
+                    if (copy_id == GARAGE_MISSION_COPY_ID
+                            and (picked_char.get('active_missions', {}).get('40039', {}).get('state') != 1
+                                 or str(picked_char.get('map_id') or '') == copy_id
+                                 or is_active_copy_current(picked_char))):
+                        print(f"[MISSION COPY] denied garage entry player={picked_char.get('id')} mission=40039")
+                        send_rpc_response(session)
+                        continue
                     # Preserve the source location for this scene entry.
                     if str(picked_char.get('map_id') or '11') != str(copy_id):
                         snapshot_activity_return_location(picked_char)
@@ -35033,8 +35053,8 @@ def client_handler(conn, addr):
                         start_mission_72_copy(picked_char, send_rpc_push)
                     elif copy_id == UNDERGROUND_COPY_ID:
                         start_underground_copy(picked_char)
-                    elif copy_id == HABITATION_COPY_ID:
-                        start_habitation_copy(picked_char, reset=True)
+                    elif copy_id in MISSION_WAVE_COPY_IDS:
+                        start_habitation_copy(picked_char, reset=True, copy_id=copy_id)
                     advance_missions(picked_char, send_rpc_push, 'dungeon', target_id=copy_id)
                     start_map_transition(conn, picked_char, copy_id, send_rpc_push)
                 if session is not None:
