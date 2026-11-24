@@ -15918,9 +15918,9 @@ def mission_rank_for_active_entry(mid, mission_entry):
 
 
 def complete_equipment_upgrade_missions(picked_char):
-    """Reconcile protector and weapon missions against persisted enhance slots."""
+    """Reconcile equipment missions against persisted enhance slots."""
     active = picked_char.get('active_missions', {})
-    mission_slots = {124: (1, 2, 3), 125: (0,)}
+    mission_slots = {124: (1, 2, 3), 125: (0,), 126: (4, 5)}
     candidates = [
         (str(mid), entry, missions_data.get(str(mid), {}))
         for mid, entry in active.items()
@@ -15945,13 +15945,44 @@ def complete_equipment_upgrade_missions(picked_char):
     return completed
 
 
+def complete_badge_upgrade_missions(picked_char):
+    candidates = [
+        (str(mid), entry, missions_data.get(str(mid), {}))
+        for mid, entry in picked_char.get('active_missions', {}).items()
+        if entry.get('state') == 1
+        and missions_data.get(str(mid), {}).get('class') == 2
+        and missions_data.get(str(mid), {}).get('logic_type') == 130
+    ]
+    if not candidates:
+        return []
+    levels = [
+        int(BADGE_CONFIG.get(str(item.get('id', '')), {}).get('level', 0))
+        for bucket in ('badge_inventory', 'equipped_badges')
+        for item in picked_char.get(bucket, [])
+        if int(item.get('amount', 1)) > 0
+    ]
+    badge_level = max(levels, default=0)
+    completed = []
+    for mid, entry, cfg in candidates:
+        try:
+            required_level = int(cfg.get('logic_id', ''))
+        except (TypeError, ValueError):
+            print(f"[MISSION CONFIG] invalid badge upgrade level mission={mid}")
+            continue
+        if required_level > 0 and badge_level >= required_level:
+            entry['state'] = 2
+            completed.append(mid)
+    return completed
+
+
 def sync_mission_data(picked_char):
     with get_character_transaction_lock(picked_char):
-        reconciled = complete_equipment_upgrade_missions(picked_char)
+        reconciled = (complete_equipment_upgrade_missions(picked_char)
+                      + complete_badge_upgrade_missions(picked_char))
         if reconciled and not save_chars(all_accounts_chars):
             for mid in reconciled:
                 picked_char['active_missions'][mid]['state'] = 1
-            print(f"[MISSION] failed to persist equipment upgrade progress missions={reconciled}")
+            print(f"[MISSION] failed to persist upgrade progress missions={reconciled}")
     active_missions = picked_char.get("active_missions", {})
     main_mission = active_missions.get("1014", {})
     if (int(main_mission.get("state", 0) or 0) == 1
@@ -32213,6 +32244,7 @@ def client_handler(conn, addr):
                 next_item_id = get_val_str(body, 1, '')
                 merge_count = get_val_int(body, 2, 0)
                 state = 1
+                badge_missions = []
                 merge_rolled_back = False
                 merge_failure_message = None
                 if picked_char and is_current_character_connection(conn, picked_char) and merge_count > 0:
@@ -32258,6 +32290,7 @@ def client_handler(conn, addr):
                                         get_currency_balance(picked_char, money_type) - cost
                                     )
                                     if add_to_inventory(picked_char, next_item_id, merge_count):
+                                        badge_missions = complete_badge_upgrade_missions(picked_char)
                                         if save_chars(all_accounts_chars):
                                             sync_char_attrs_rpc(conn, picked_char)
                                             state = 0
@@ -32279,6 +32312,10 @@ def client_handler(conn, addr):
                                         )
                 if state == 0:
                     sync_all_backpacks(picked_char, send_rpc_push)
+                    if badge_missions:
+                        for mid in badge_missions:
+                            send_rpc_push(523, encode_sproto([(0, mid), (1, 2)]))
+                        send_rpc_push(519, sync_mission_data(picked_char))
                 elif merge_rolled_back:
                     sync_char_attrs_rpc(conn, picked_char)
                     sync_all_backpacks(picked_char, send_rpc_push)
