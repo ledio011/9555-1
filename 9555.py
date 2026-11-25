@@ -37946,8 +37946,9 @@ def client_handler(conn, addr):
                             if survey and str(survey.get('scene_id')) == str(picked_char.get('map_id')) and len(pos) >= 3:
                                 sx = int(round(float(survey.get('x', 0.0)) * 100))
                                 sz = int(round(float(survey.get('z', 0.0)) * 100))
+                                side_survey = int(m_cfg.get('class', 0) or 0) == 2
                                 radius = (
-                                    310 if mid in ('56', '71', '82', '97', '50051', '50052', '50063', '50070') else
+                                    310 if (side_survey or mid in ('56', '71', '82', '97')) else
                                     400 if str(survey.get('scene_id')) == '11' else 250
                                 )
                                 near_item = math.hypot(int(pos[0]) - sx, int(pos[2]) - sz) <= radius
@@ -37960,7 +37961,7 @@ def client_handler(conn, addr):
                                 # This four-tick client survey can arrive in a
                                 # burst after a slow synchronous save. The
                                 # request carries no client timestamp.
-                                if near_item and (mid in ('50051', '50052', '50063', '50070') or now_mono - last_event >= cooldown):
+                                if near_item and (side_survey or now_mono - last_event >= cooldown):
                                     required = int(survey.get('need_num', m_cfg.get('require_num', 1)))
                                     accepted = True
                                     SURVEY_PROGRESS_TIMES[cooldown_key] = now_mono
