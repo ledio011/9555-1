@@ -5904,18 +5904,10 @@ def broadcast_aoi_visual(char):
     packet_payload = sproto_pack(encode_sproto([(0, 510)]) + packet_body)
     packet = struct.pack(">H", len(packet_payload)) + packet_payload
     char_id = int(char.get('id', 0) or 0)
-    for cid, (peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
-        if peer_char and int(peer_char.get('id', 0) or 0) in PLAYER_AOI_TRACK.get(
-                char_id, set()):
-            try:
-                lock = CONNECTION_LOCKS.get(cid)
-                if lock:
-                    with lock:
-                        peer_conn.sendall(packet)
-                else:
-                    peer_conn.sendall(packet)
-            except Exception:
-                pass
+    for cid, (_peer_conn, peer_char) in list(ALL_CONNECTIONS.items()):
+        if (peer_char and char_id in PLAYER_AOI_TRACK.get(int(cid), set())
+                and not send_packet_to_char(cid, packet)):
+            print(f"[AOI] Failed to send visual update player={char_id} viewer={cid}")
 
 def sync_equipment_status_to_peers(char, stats=None):
     """Refresh remote attributes and team power after an equipment change."""
