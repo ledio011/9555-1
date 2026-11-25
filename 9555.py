@@ -101,7 +101,64 @@ CHAR_DB = persistent_state_path("characters_final.json")
 BAK_DB = persistent_state_path("characters_final.json.bak")
 TMP_DB = CHAR_DB + ".tmp"
 RESOURCE_ROOT = os.path.join(SCRIPT_DIR, "assets")
-RESOURCE_DATA_VERSION = 206
+RESOURCE_DATA_VERSION = 205
+# Side-mission requirement rows whose authored row marker is empty. The client
+# skips them, so its mission click/progress code dereferences a null row.
+UNMARKED_MISSION_REQUIRE_IDS = frozenset(("11025", "11026", "11027", "11028", "11029"))
+PATCHED_RESOURCE_VERSION = 206
+PATCHED_RESOURCE_FILES = {}  # path below RES_<version> -> bytes
+
+
+def build_patched_resources():
+    """Serve a Data.bundle whose MissionRequireData has the missing '*' markers.
+
+    The client updater downloads it when the login data version changes, so no
+    client code or asset on disk is modified.  Falls back to the stock version.
+    """
+    global RESOURCE_DATA_VERSION
+    base_dir = os.path.join(RESOURCE_ROOT, f"RES_{RESOURCE_DATA_VERSION}")
+    bundle_rel = "Bundle/Data/Data.bundle"
+    list_rel = "UpdateFileList_1.info"
+    try:
+        import hashlib
+        import UnityPy
+        env = UnityPy.load(os.path.join(base_dir, *bundle_rel.split("/")))
+        changed = False
+        for obj in env.objects:
+            if obj.type.name != "TextAsset":
+                continue
+            asset = obj.read()
+            if asset.m_Name != "MissionRequireData":
+                continue
+            lines = asset.m_Script.encode("utf-8", "surrogateescape").split(b"\r\n")
+            for idx, line in enumerate(lines):
+                cols = line.split(b",")
+                if (len(cols) > 5 and cols[0] == b""
+                        and cols[1].decode("ascii", "ignore") in UNMARKED_MISSION_REQUIRE_IDS):
+                    lines[idx] = b"*" + line
+                    changed = True
+            asset.m_Script = b"\r\n".join(lines).decode("utf-8", "surrogateescape")
+            asset.save()
+        if not changed:
+            return
+        bundle_bytes = env.file.save(packer="original")
+        entry = (f"{bundle_rel},{hashlib.md5(bundle_bytes).hexdigest().upper()},"
+                 f"{len(bundle_bytes)}").encode("ascii")
+        with open(os.path.join(base_dir, list_rel), "rb") as list_file:
+            manifest = list_file.read().split(b"\r\n")
+        manifest = [entry if row.startswith(bundle_rel.encode("ascii") + b",") else row
+                    for row in manifest]
+        PATCHED_RESOURCE_FILES[bundle_rel] = bundle_bytes
+        PATCHED_RESOURCE_FILES[list_rel] = b"\r\n".join(manifest)
+        RESOURCE_DATA_VERSION = PATCHED_RESOURCE_VERSION
+        print(f"[RESOURCE] serving patched Data.bundle as RES_{RESOURCE_DATA_VERSION}")
+    except Exception as exc:
+        PATCHED_RESOURCE_FILES.clear()
+        print(f"[RESOURCE] Data.bundle patch unavailable, using stock resources: {exc}")
+
+
+BASE_RESOURCE_VERSION = RESOURCE_DATA_VERSION
+build_patched_resources()
 server_session_counter = 8000
 GLOBAL_INST_COUNTER = 3000000
 GLOBAL_INST_COUNTER_LOCK = threading.Lock()
@@ -1630,7 +1687,7 @@ try:
                 parts = line.strip().split(",")
                 # Mission 50065's authored requirement has an empty row marker.
                 if (len(parts) > 5 and parts[1].isdigit()
-                        and (parts[0] == "*" or (parts[0] == "" and parts[1] in ("11025", "11026", "11027", "11028", "11029")))):
+                        and (parts[0] == "*" or (parts[0] == "" and parts[1] in UNMARKED_MISSION_REQUIRE_IDS))):
                     req_id = parts[1]
                     MISSION_REQUIRE_DATA[req_id] = {
                         'name': parts[2],
@@ -23020,14 +23077,22 @@ def serve_resource_http(conn, initial_data):
         if not normalized.startswith("RES_") or normalized.startswith("../"):
             conn.sendall(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
             return
+        current_prefix = f"RES_{RESOURCE_DATA_VERSION}/"
+        if normalized.startswith(current_prefix):
+            patched_rel = normalized[len(current_prefix):]
+            patched_bytes = PATCHED_RESOURCE_FILES.get(patched_rel)
+            if patched_bytes is not None:
+                conn.sendall(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(patched_bytes)).encode("ascii")
+                    + b"\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n")
+                if parts[0] == "GET":
+                    conn.sendall(patched_bytes)
+                print(f"[HTTP 9555] 200 {normalized} ({len(patched_bytes)} bytes, patched)")
+                return
+            if RESOURCE_DATA_VERSION != BASE_RESOURCE_VERSION:
+                normalized = f"RES_{BASE_RESOURCE_VERSION}/{patched_rel}"
         local_path = os.path.abspath(os.path.join(RESOURCE_ROOT, normalized))
         resource_root = os.path.abspath(RESOURCE_ROOT) + os.sep
-        if not os.path.isfile(local_path) and normalized.startswith(f"RES_{RESOURCE_DATA_VERSION}/"):
-            # The newest resource folder only holds patched files; the rest come from the base APK set.
-            base_path = os.path.abspath(os.path.join(
-                RESOURCE_ROOT, "RES_205" + normalized[len(f"RES_{RESOURCE_DATA_VERSION}"):]))
-            if base_path.startswith(resource_root):
-                local_path = base_path
         if not local_path.startswith(resource_root) or not os.path.isfile(local_path):
             print(f"[HTTP 9555] 404 {normalized}")
             conn.sendall(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
@@ -29287,7 +29352,7 @@ def client_handler(conn, addr):
                 if req_id: acc_id = req_id
                 resp = encode_sproto([
                     (0, 0), (1, int(time.time()) % 100000), (2, []), (3, ""),
-                    (4, 0), (5, "1.012.017"), (6, str(RESOURCE_DATA_VERSION)), (7, 1)
+                    (4, 0), (5, "1.012.017"), (6, str(RESOURCE_DATA_VERSION))
                 ])
                 ph = encode_sproto([(1, session)]) if session is not None else encode_sproto([(0, 3)])
                 pf = sproto_pack(ph + resp)
