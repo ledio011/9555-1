@@ -16147,7 +16147,21 @@ def complete_vehicle_missions(picked_char):
     return completed
 
 
+# These kill missions use MissionRequireData rows (11025-11029) that do not
+# exist in the client, so the client cannot show or path to their objectives.
+# They are hidden by reporting them as already done; no rewards are granted.
+UNSUPPORTED_SIDE_MISSION_IDS = frozenset(
+    {'50065', '50066', '50071', '50072', '50074'})
+
+
 def sync_mission_data(picked_char):
+    stale_unsupported = [
+        mid for mid in list(picked_char.get('active_missions', {}))
+        if str(mid) in UNSUPPORTED_SIDE_MISSION_IDS]
+    if stale_unsupported:
+        for mid in stale_unsupported:
+            picked_char['active_missions'].pop(mid, None)
+        save_chars(all_accounts_chars)
     with get_character_transaction_lock(picked_char):
         reconciled = (complete_equipment_upgrade_missions(picked_char)
                       + complete_badge_upgrade_missions(picked_char)
@@ -16208,7 +16222,8 @@ def sync_mission_data(picked_char):
     # mission IDs. CurMissionDictionary.SideMissionPreIndex is 40000, so
     # completed mission 40005 is represented by bit 5 (32) in element 0.
     side_done_flags = []
-    for completed_id in picked_char.get('completed_side_missions', []):
+    for completed_id in (list(picked_char.get('completed_side_missions', []))
+                         + sorted(UNSUPPORTED_SIDE_MISSION_IDS)):
         try:
             offset = int(completed_id) - 40000
         except (TypeError, ValueError):
@@ -21782,11 +21797,14 @@ def accept_mission_logic(picked_char, mid, online_id=None, conn=None):
         else:
             try:
                 ipre = int(pre_id)
-                if ipre not in picked_char.get('completed_side_missions', []):
+                if (ipre not in picked_char.get('completed_side_missions', [])
+                        and str(ipre) not in UNSUPPORTED_SIDE_MISSION_IDS):
                     print(f"[accept_mission_logic] FAILED: side pre_id {ipre} not in completed {picked_char.get('completed_side_missions')}")
                     return False
             except: return False
 
+    if str(mid) in UNSUPPORTED_SIDE_MISSION_IDS:
+        return False
     try:
         imid = int(mid)
         if imid in picked_char.get('completed_side_missions', []):
