@@ -263,9 +263,15 @@ GARAGE_MISSION_COPY_ID = "1301"
 MISSION_WAVE_COPY_MISSIONS = {
     GARAGE_MISSION_COPY_ID: "40039", "1302": "40055", "1303": "40058",
     "1304": "40061", "1305": "40064",
+    "401": "50003", "402": "50009", "403": "50017", "404": "50025",
+    "405": "50031", "406": "50036", "407": "50042", "408": "50049",
+    "409": "50056", "410": "50062", "411": "50068", "412": "50075",
 }
 MISSION_WAVE_COPY_IDS = (HABITATION_COPY_ID, *MISSION_WAVE_COPY_MISSIONS)
-MISSION_WAVE_WAYPOINT_COPY_IDS = (HABITATION_COPY_ID, "1304")
+MAP_SIDE_COPY_IDS = frozenset(str(copy_id) for copy_id in range(401, 413))
+MAP_SIDE_SNEAK_COPY_IDS = frozenset(("402", "407", "411"))
+MISSION_WAVE_WAYPOINT_COPY_IDS = (HABITATION_COPY_ID, "1304", "404", "406", "408", "410", "412")
+MAP_SIDE_COPY_CONFIG = {}
 HABITATION_COPY_STATE_KEY = "_habitation_copy_state"
 HABITATION_COPY_LOCK = threading.RLock()
 HABITATION_NPC_OWNER = {}
@@ -1628,7 +1634,9 @@ try:
         with open(mr_path, "r", encoding='utf-8') as f:
             for line in f:
                 parts = line.strip().split(",")
-                if len(parts) > 5 and parts[0] == "*" and parts[1].isdigit():
+                if (len(parts) > 5 and parts[1].isdigit()
+                        and (parts[0] == "*" or parts[1] in
+                             ("11025", "11026", "11027", "11028", "11029"))):
                     req_id = parts[1]
                     MISSION_REQUIRE_DATA[req_id] = {
                         'name': parts[2],
@@ -1949,6 +1957,13 @@ try:
         with open(copy_path, "r", encoding='utf-8') as f:
             for line in f:
                 parts = line.strip().split(",")
+                if (len(parts) > 13 and parts[0] == "*"
+                        and parts[1] in MAP_SIDE_COPY_IDS
+                        and parts[11] == "0" and parts[12].isdigit()
+                        and parts[13].isdigit()):
+                    MAP_SIDE_COPY_CONFIG[parts[1]] = {
+                        'subtype': int(parts[12]), 'duration': int(parts[13]),
+                    }
                 if len(parts) > 20 and parts[0] == "*" and parts[1].isdigit() and parts[11] in ("1", "2"):
                     COPY_SCENE_CONFIG[parts[1]] = {
                         'map_id': parts[5],
@@ -13281,13 +13296,15 @@ def record_underground_copy_kill(char, inst_id, rewards):
 
 
 def habitation_copy_result_payload(state, won):
+    copy_id = str(state.get("copy_id", HABITATION_COPY_ID))
     items = [
         encode_sproto([(0, str(item_id)), (1, int(amount)), (3, 0)])
         for item_id, amount in sorted(state.get("reward_totals", {}).items())
         if int(amount or 0) > 0
     ]
     return encode_sproto([
-        (0, 2), (1, str(state.get("copy_id", HABITATION_COPY_ID))), (2, bool(won)),
+        (0, MAP_SIDE_COPY_CONFIG.get(copy_id, {}).get('subtype', 2)),
+        (1, copy_id), (2, bool(won)),
         (3, 7 if won else 0), (4, 3 if won else 0), (5, items),
     ])
 
@@ -13394,7 +13411,7 @@ def finish_habitation_copy(char, won):
         copy_id = str(state.get("copy_id", HABITATION_COPY_ID))
         rows = MONSTER_DATA.get(copy_id, [])
         required = {index for index, row in enumerate(rows)
-                    if int(row.get("group", 0)) in (1, 2, 3)}
+                    if int(row.get("group", 0)) > 0}
         won = bool(won and required and required.issubset(
             set(state.get("killed_slots", [])))
             and int(time.time()) < int(state.get("end_time", 0) or 0))
@@ -13424,7 +13441,7 @@ def _habitation_copy_timeout(char_id, expected_end_time):
         finish_habitation_copy(char, False)
 
 
-def habitation_map_ready(conn, char, send_rpc_push):
+def habitation_map_ready(conn, char, send_rpc_push, start_sneak=False):
     if str(char.get("map_id") or "") not in MISSION_WAVE_COPY_IDS:
         return False
     copy_id = str(char.get("map_id"))
@@ -13432,19 +13449,26 @@ def habitation_map_ready(conn, char, send_rpc_push):
             and str(char.get("active_copy_id") or "") != copy_id):
         print(f"[MISSION COPY] rejected unowned map={copy_id} player={char.get('id')}")
         return False
+    if copy_id in MAP_SIDE_COPY_IDS and copy_id not in MAP_SIDE_COPY_CONFIG:
+        print(f"[MISSION COPY] missing copy configuration map={copy_id}")
+        return False
     with HABITATION_COPY_LOCK:
         state = start_habitation_copy(char)
         char_id = int(char.get("id", 0) or 0)
-        if HABITATION_READY_CONNECTIONS.get(char_id) == id(conn):
+        if HABITATION_READY_CONNECTIONS.get(char_id) == id(conn) and not start_sneak:
             return True
         if state.get("result_recorded"):
             send_rpc_push(552, habitation_copy_result_payload(
                 state, state.get("phase") == "complete"))
             HABITATION_READY_CONNECTIONS[char_id] = id(conn)
             return True
+        if copy_id in MAP_SIDE_SNEAK_COPY_IDS and state.get("phase") == "ready" and not start_sneak:
+            HABITATION_READY_CONNECTIONS[char_id] = id(conn)
+            save_chars(all_accounts_chars)
+            return True
         now = int(time.time())
         if not int(state.get("end_time", 0) or 0):
-            state["end_time"] = now + 300
+            state["end_time"] = now + MAP_SIDE_COPY_CONFIG.get(copy_id, {}).get('duration', 300)
         end_time = int(state["end_time"])
         if now >= end_time:
             finish_habitation_copy(char, False)
@@ -13463,8 +13487,9 @@ def habitation_map_ready(conn, char, send_rpc_push):
         completed_groups = int(state.get("group", 1)) - 1
         if state.get("phase") == "waiting":
             completed_groups += 1
-        for wave in range(2, 2 + completed_groups):
-            send_rpc_push(515, encode_sproto([(0, wave)]))
+        if copy_id not in MAP_SIDE_SNEAK_COPY_IDS:
+            for wave in range(2, 2 + completed_groups):
+                send_rpc_push(515, encode_sproto([(0, wave)]))
         ok = (state.get("phase") != "battle"
               or spawn_habitation_group(conn, char))
         if ok:
@@ -13512,11 +13537,15 @@ def record_habitation_copy_kill(conn, char, inst_id, rewards, send_rpc_push):
             MONSTER_DATA.get(str(state.get("copy_id", HABITATION_COPY_ID)), []))
                     if int(row.get("group", 0)) == group}
         if required and required.issubset(set(state["killed_slots"])):
-            if group == 3:
+            groups = {int(row.get("group", 0)) for row in
+                      MONSTER_DATA.get(str(state.get("copy_id", HABITATION_COPY_ID)), [])
+                      if int(row.get("group", 0)) > 0}
+            if groups and group == max(groups):
                 finish_habitation_copy(char, True)
             else:
                 state["phase"] = "waiting"
-                send_rpc_push(515, encode_sproto([(0, group + 1)]))
+                if str(state.get("copy_id", HABITATION_COPY_ID)) not in MAP_SIDE_SNEAK_COPY_IDS:
+                    send_rpc_push(515, encode_sproto([(0, group + 1)]))
                 if str(state.get("copy_id", HABITATION_COPY_ID)) not in MISSION_WAVE_WAYPOINT_COPY_IDS:
                     start_habitation_next_group(conn, char, send_rpc_push)
         save_chars(all_accounts_chars)
@@ -19433,7 +19462,8 @@ def calculate_npc_kill_rewards_for_map(player_level, npc_level, map_id,
             exp_reward = max(1, int(exp_reward * SLUM_NPC_EXP_REWARD_SCALE))
     elif map_id in OPEN_WORLD_NPC_MAP_IDS:
         exp_reward = max(1, int(exp_reward * SLUM_NPC_EXP_REWARD_SCALE))
-    elif map_id == UNDERGROUND_COPY_ID or map_id in MISSION_WAVE_COPY_IDS:
+    elif (map_id == UNDERGROUND_COPY_ID
+          or (map_id in MISSION_WAVE_COPY_IDS and map_id not in MAP_SIDE_COPY_IDS)):
         exp_reward = max(1, exp_reward // 100)
     elif map_id == WAREHOUSE_SNEAK_COPY_ID:
         exp_scale = (
@@ -32469,6 +32499,7 @@ def client_handler(conn, addr):
                 badge_missions = []
                 merge_rolled_back = False
                 merge_failure_message = None
+                removed_source_index = None
                 if picked_char and is_current_character_connection(conn, picked_char) and merge_count > 0:
                     merge_failure_message = (
                         'Badge fusion failed. Check badge count, cash, and backpack space, then try again.'
@@ -32514,6 +32545,8 @@ def client_handler(conn, addr):
                                     if add_to_inventory(picked_char, next_item_id, merge_count):
                                         badge_missions = complete_badge_upgrade_missions(picked_char)
                                         if save_chars(all_accounts_chars):
+                                            if source['amount'] <= 0:
+                                                removed_source_index = index_id
                                             sync_char_attrs_rpc(conn, picked_char)
                                             state = 0
                                         else:
@@ -32533,6 +32566,8 @@ def client_handler(conn, addr):
                                             'Badge fusion failed because backpack space changed. Please try again.'
                                         )
                 if state == 0:
+                    if removed_source_index is not None:
+                        push_backpack_item_update(send_rpc_push, 3, None, removed_source_index)
                     sync_all_backpacks(picked_char, send_rpc_push)
                     if badge_missions:
                         for mid in badge_missions:
@@ -35768,6 +35803,14 @@ def client_handler(conn, addr):
                     elif copy_id == UNDERGROUND_COPY_ID:
                         start_underground_copy_battle(
                             picked_char, send_rpc_push)
+                    elif copy_id in MAP_SIDE_SNEAK_COPY_IDS:
+                        sneak_state = picked_char.get(HABITATION_COPY_STATE_KEY)
+                        if (isinstance(sneak_state, dict)
+                                and sneak_state.get('phase') == 'ready'
+                                and str(picked_char.get('map_id') or '') == copy_id
+                                and HABITATION_READY_CONNECTIONS.get(
+                                    int(picked_char.get('id', 0) or 0)) == id(conn)):
+                            habitation_map_ready(conn, picked_char, send_rpc_push, start_sneak=True)
                     elif copy_id in MISSION_WAVE_WAYPOINT_COPY_IDS:
                         start_habitation_next_group(
                             conn, picked_char, send_rpc_push)
@@ -37921,10 +37964,11 @@ def client_handler(conn, addr):
                             survey = SURVEY_DATA.get(logic_id)
                             pos = picked_char.get('pos') or []
                             if survey and str(survey.get('scene_id')) == str(picked_char.get('map_id')) and len(pos) >= 3:
+                                side_survey = mid.isdigit() and 50001 <= int(mid) <= 50076
                                 sx = int(round(float(survey.get('x', 0.0)) * 100))
                                 sz = int(round(float(survey.get('z', 0.0)) * 100))
                                 radius = (
-                                    310 if mid in ('56', '71', '82', '97', '50051', '50052', '50063') else
+                                    310 if side_survey or mid in ('56', '71', '82', '97') else
                                     400 if str(survey.get('scene_id')) == '11' else 250
                                 )
                                 near_item = math.hypot(int(pos[0]) - sx, int(pos[2]) - sz) <= radius
@@ -37934,10 +37978,9 @@ def client_handler(conn, addr):
                                 survey_interval = int(survey.get('survey_time', 1000)) / 1000.0
                                 cooldown = max(
                                     0.8, survey_interval - (0.25 if mid in ('82', '97') else 0.0))
-                                # This four-tick client survey can arrive in a
-                                # burst after a slow synchronous save. The
-                                # request carries no client timestamp.
-                                if near_item and (mid in ('50051', '50052', '50063') or now_mono - last_event >= cooldown):
+                                # Client survey ticks can arrive in a burst
+                                # after a slow save; they have no timestamp.
+                                if near_item and (side_survey or now_mono - last_event >= cooldown):
                                     required = int(survey.get('need_num', m_cfg.get('require_num', 1)))
                                     accepted = True
                                     SURVEY_PROGRESS_TIMES[cooldown_key] = now_mono
