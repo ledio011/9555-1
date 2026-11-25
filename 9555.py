@@ -1630,13 +1630,18 @@ try:
 
     # Load MissionRequireData (Counts and NPC targets for generic kill/collect missions)
     mr_path = os.path.join(text_asset_root, "MissionRequireData")
+    requirement_logic_types = {1, 3, 4, 14, 15, 17, 18, 19, 20}
+    referenced_requirement_ids = {
+        str(mission.get('logic_id', ''))
+        for mission in missions_data.values()
+        if mission.get('logic_type') in requirement_logic_types
+    }
     if os.path.exists(mr_path):
         with open(mr_path, "r", encoding='utf-8') as f:
             for line in f:
                 parts = line.strip().split(",")
                 if (len(parts) > 5 and parts[1].isdigit()
-                        and (parts[0] == "*" or parts[1] in
-                             ("11025", "11026", "11027", "11028", "11029"))):
+                        and (parts[0] == "*" or parts[1] in referenced_requirement_ids)):
                     req_id = parts[1]
                     MISSION_REQUIRE_DATA[req_id] = {
                         'name': parts[2],
