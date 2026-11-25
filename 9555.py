@@ -101,7 +101,7 @@ CHAR_DB = persistent_state_path("characters_final.json")
 BAK_DB = persistent_state_path("characters_final.json.bak")
 TMP_DB = CHAR_DB + ".tmp"
 RESOURCE_ROOT = os.path.join(SCRIPT_DIR, "assets")
-RESOURCE_DATA_VERSION = 205
+RESOURCE_DATA_VERSION = 206
 server_session_counter = 8000
 GLOBAL_INST_COUNTER = 3000000
 GLOBAL_INST_COUNTER_LOCK = threading.Lock()
@@ -1630,7 +1630,7 @@ try:
                 parts = line.strip().split(",")
                 # Mission 50065's authored requirement has an empty row marker.
                 if (len(parts) > 5 and parts[1].isdigit()
-                        and (parts[0] == "*" or (parts[0] == "" and parts[1] == "11025"))):
+                        and (parts[0] == "*" or (parts[0] == "" and parts[1] in ("11025", "11026", "11027", "11028", "11029")))):
                     req_id = parts[1]
                     MISSION_REQUIRE_DATA[req_id] = {
                         'name': parts[2],
@@ -23022,6 +23022,12 @@ def serve_resource_http(conn, initial_data):
             return
         local_path = os.path.abspath(os.path.join(RESOURCE_ROOT, normalized))
         resource_root = os.path.abspath(RESOURCE_ROOT) + os.sep
+        if not os.path.isfile(local_path) and normalized.startswith(f"RES_{RESOURCE_DATA_VERSION}/"):
+            # The newest resource folder only holds patched files; the rest come from the base APK set.
+            base_path = os.path.abspath(os.path.join(
+                RESOURCE_ROOT, "RES_205" + normalized[len(f"RES_{RESOURCE_DATA_VERSION}"):]))
+            if base_path.startswith(resource_root):
+                local_path = base_path
         if not local_path.startswith(resource_root) or not os.path.isfile(local_path):
             print(f"[HTTP 9555] 404 {normalized}")
             conn.sendall(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
@@ -29281,7 +29287,7 @@ def client_handler(conn, addr):
                 if req_id: acc_id = req_id
                 resp = encode_sproto([
                     (0, 0), (1, int(time.time()) % 100000), (2, []), (3, ""),
-                    (4, 0), (5, "1.012.017"), (6, str(RESOURCE_DATA_VERSION))
+                    (4, 0), (5, "1.012.017"), (6, str(RESOURCE_DATA_VERSION)), (7, 1)
                 ])
                 ph = encode_sproto([(1, session)]) if session is not None else encode_sproto([(0, 3)])
                 pf = sproto_pack(ph + resp)
