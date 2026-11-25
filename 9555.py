@@ -263,9 +263,11 @@ GARAGE_MISSION_COPY_ID = "1301"
 MISSION_WAVE_COPY_MISSIONS = {
     GARAGE_MISSION_COPY_ID: "40039", "1302": "40055", "1303": "40058",
     "1304": "40061", "1305": "40064",
+    "405": "50031", "406": "50036", "407": "50042", "408": "50049",
 }
 MISSION_WAVE_COPY_IDS = (HABITATION_COPY_ID, *MISSION_WAVE_COPY_MISSIONS)
-MISSION_WAVE_WAYPOINT_COPY_IDS = (HABITATION_COPY_ID, "1304")
+MISSION_WAVE_WAYPOINT_COPY_IDS = (HABITATION_COPY_ID, "1304", "406", "408")
+SIDE_MISSION_COPY_DURATIONS = {"405": 300, "406": 300, "407": 300, "408": 600}
 HABITATION_COPY_STATE_KEY = "_habitation_copy_state"
 HABITATION_COPY_LOCK = threading.RLock()
 HABITATION_NPC_OWNER = {}
@@ -13279,8 +13281,10 @@ def habitation_copy_result_payload(state, won):
         if int(amount or 0) > 0
     ]
     return encode_sproto([
-        (0, 2), (1, str(state.get("copy_id", HABITATION_COPY_ID))), (2, bool(won)),
-        (3, 7 if won else 0), (4, 3 if won else 0), (5, items),
+        (0, 8 if str(state.get("copy_id")) == "407" else 2),
+        (1, str(state.get("copy_id", HABITATION_COPY_ID))), (2, bool(won)),
+        (3, 7 if won and str(state.get("copy_id")) != "407" else 0),
+        (4, 3 if won and str(state.get("copy_id")) != "407" else 0), (5, items),
     ])
 
 
@@ -13296,6 +13300,8 @@ def clear_habitation_copy_runtime(char, conn=None):
         if conn:
             send_rpc_push_safe(conn, 506, encode_sproto([(0, inst_id)]))
         HABITATION_NPC_OWNER.pop(inst_id, None)
+        with SLUM_NPC_AI_LOCK:
+            SLUM_NPC_AI_STATES.pop(inst_id, None)
         NPC_HP_MAP.pop(inst_id, None)
         NPC_INST_MAP.pop(inst_id, None)
         NPC_INSTANCE_MAP.pop(inst_id, None)
@@ -13372,6 +13378,8 @@ def spawn_habitation_group(conn, char):
         if not send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
             print(f"[HABITATION] failed to send NPC player={owner_id} slot={index}")
             ok = False
+        elif copy_id == "408":
+            register_slum_npc_ai(conn, char, inst_id, nid, row["x"], row["z"], row["o"])
     return ok
 
 
@@ -13386,10 +13394,11 @@ def finish_habitation_copy(char, won):
         copy_id = str(state.get("copy_id", HABITATION_COPY_ID))
         rows = MONSTER_DATA.get(copy_id, [])
         required = {index for index, row in enumerate(rows)
-                    if int(row.get("group", 0)) in (1, 2, 3)}
+                    if int(row.get("group", 0)) > 0}
         won = bool(won and required and required.issubset(
             set(state.get("killed_slots", [])))
-            and int(time.time()) < int(state.get("end_time", 0) or 0))
+            and (copy_id == "407"
+                 or int(time.time()) < int(state.get("end_time", 0) or 0)))
         state["phase"] = "complete" if won else "failed"
         state["result_recorded"] = True
         timer = HABITATION_TIMERS.pop(int(char.get("id", 0) or 0), None)
@@ -13435,22 +13444,23 @@ def habitation_map_ready(conn, char, send_rpc_push):
             HABITATION_READY_CONNECTIONS[char_id] = id(conn)
             return True
         now = int(time.time())
-        if not int(state.get("end_time", 0) or 0):
-            state["end_time"] = now + 300
+        if copy_id != "407" and not int(state.get("end_time", 0) or 0):
+            state["end_time"] = now + SIDE_MISSION_COPY_DURATIONS.get(copy_id, 300)
         end_time = int(state["end_time"])
-        if now >= end_time:
+        if copy_id != "407" and now >= end_time:
             finish_habitation_copy(char, False)
             return False
         timer = HABITATION_TIMERS.get(char_id)
-        if timer is None or not timer.is_alive():
+        if copy_id != "407" and (timer is None or not timer.is_alive()):
             timer = threading.Timer(end_time - now, _habitation_copy_timeout,
                                     args=(char_id, end_time))
             timer.daemon = True
             HABITATION_TIMERS[char_id] = timer
             timer.start()
         if state.get("phase") == "ready":
-            state["phase"] = "battle"
-        send_rpc_push(629, encode_sproto([(0, end_time), (1, 2)]))
+            state["phase"] = "waiting_start" if copy_id == "407" else "battle"
+        if copy_id != "407":
+            send_rpc_push(629, encode_sproto([(0, end_time), (1, 2)]))
         # Each push advances the client's waypoint index, even on reconnect.
         completed_groups = int(state.get("group", 1)) - 1
         if state.get("phase") == "waiting":
@@ -13468,13 +13478,15 @@ def habitation_map_ready(conn, char, send_rpc_push):
 def start_habitation_next_group(conn, char, send_rpc_push):
     with HABITATION_COPY_LOCK:
         state = char.get(HABITATION_COPY_STATE_KEY) if char else None
-        if (not isinstance(state, dict) or state.get("phase") != "waiting"
+        if (not isinstance(state, dict) or state.get("phase") not in ("waiting", "waiting_start")
                 or str(char.get("map_id") or "") != str(state.get("copy_id", HABITATION_COPY_ID))):
             return False
-        if int(time.time()) >= int(state.get("end_time", 0) or 0):
+        if (str(state.get("copy_id")) != "407"
+                and int(time.time()) >= int(state.get("end_time", 0) or 0)):
             finish_habitation_copy(char, False)
             return False
-        state["group"] = int(state["group"]) + 1
+        if state["phase"] == "waiting":
+            state["group"] = int(state["group"]) + 1
         state["phase"] = "battle"
         state["instances"] = {}
         ok = spawn_habitation_group(conn, char)
@@ -13500,11 +13512,14 @@ def record_habitation_copy_kill(conn, char, inst_id, rewards, send_rpc_push):
                 totals = state["reward_totals"]
                 totals[str(item_id)] = int(totals.get(str(item_id), 0)) + amount
         group = int(state["group"])
+        copy_id = str(state.get("copy_id", HABITATION_COPY_ID))
         required = {index for index, row in enumerate(
             MONSTER_DATA.get(str(state.get("copy_id", HABITATION_COPY_ID)), []))
                     if int(row.get("group", 0)) == group}
         if required and required.issubset(set(state["killed_slots"])):
-            if group == 3:
+            final_group = max((int(row.get("group", 0) or 0)
+                               for row in MONSTER_DATA.get(copy_id, [])), default=0)
+            if group == final_group:
                 finish_habitation_copy(char, True)
             else:
                 state["phase"] = "waiting"
@@ -14117,7 +14132,7 @@ def start_prison_npc_runtime():
 
 def register_slum_npc_ai(conn, char, inst_id, npc_id, x, z, heading):
     map_id = str(char.get("map_id", "")) if char else ""
-    if not conn or not char or map_id not in (SLUM_DISTRICT_MAP_ID, "1501"):
+    if not conn or not char or map_id not in (SLUM_DISTRICT_MAP_ID, "1501", "408"):
         return
     if map_id == SLUM_DISTRICT_MAP_ID and is_slum_static_npc(npc_id):
         return
@@ -14166,7 +14181,7 @@ def slum_npc_retarget_on_hit(inst_id, attacker, conn):
         return False
     attacker_map = str(attacker.get("map_id", ""))
     if (attacker_id <= 0
-            or attacker_map not in (SLUM_DISTRICT_MAP_ID, "1501")
+            or attacker_map not in (SLUM_DISTRICT_MAP_ID, "1501", "408")
             or attacker_hp <= 0):
         return False
     active_conn, active_char = ALL_CONNECTIONS.get(attacker_id, (None, None))
@@ -14296,7 +14311,9 @@ def _slum_npc_ai_tick():
                     SLUM_NPC_AI_STATES.pop(inst_id, None)
                 continue
             if (inst_id in DEAD_NPC_SET
-                    or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0):
+                    or int(NPC_HP_MAP.get(inst_id, 0) or 0) <= 0
+                    or (map_id == "408"
+                        and not habitation_copy_npc_is_active(char, inst_id))):
                 with SLUM_NPC_AI_LOCK:
                     SLUM_NPC_AI_STATES.pop(inst_id, None)
                 continue
@@ -14311,7 +14328,7 @@ def _slum_npc_ai_tick():
                 (int(ai_cfg.get("around_min_distance", 100) or 100)
                  + int(ai_cfg.get("around_max_distance", 200) or 200)) / 200.0)
             skills = _prison_npc_skills(
-                npc_cfg, attack_distance, include_model_radii=(map_id == "1501"))
+                npc_cfg, attack_distance, include_model_radii=(map_id in ("1501", "408")))
             if not skills:
                 continue
 
@@ -14347,6 +14364,7 @@ def _slum_npc_ai_tick():
                             live_state["attack_until"] = 0
                     _slum_npc_stop(inst_id, now)
                     continue
+            if map_id in ("1501", "408"):
                 if (not target_valid
                         and int(ai_cfg.get("lock_type", 0) or 0) == 1
                         and int(char.get("hp", 0) or 0) > 0):
@@ -14354,7 +14372,8 @@ def _slum_npc_ai_tick():
                         0, int(npc_cfg.get("search_radius", 0) or 0))
                     configured_lock = int(ai_cfg.get("lock_distance", -1) or -1)
                     lock_distance = (
-                        search_radius if configured_lock < 0
+                        configured_lock if map_id == "408" and configured_lock >= 0
+                        else search_radius if configured_lock < 0
                         else min(search_radius, configured_lock)
                         if search_radius > 0 else configured_lock)
                     target_distance = math.hypot(
@@ -19440,7 +19459,9 @@ def calculate_npc_kill_rewards_for_map(player_level, npc_level, map_id,
             exp_reward = max(1, int(exp_reward * SLUM_NPC_EXP_REWARD_SCALE))
     elif map_id in OPEN_WORLD_NPC_MAP_IDS:
         exp_reward = max(1, int(exp_reward * SLUM_NPC_EXP_REWARD_SCALE))
-    elif map_id == UNDERGROUND_COPY_ID or map_id in MISSION_WAVE_COPY_IDS:
+    elif (map_id == UNDERGROUND_COPY_ID
+          or (map_id in MISSION_WAVE_COPY_IDS
+              and map_id not in SIDE_MISSION_COPY_DURATIONS)):
         exp_reward = max(1, exp_reward // 100)
     elif map_id == WAREHOUSE_SNEAK_COPY_ID:
         exp_scale = (
@@ -34127,7 +34148,7 @@ def client_handler(conn, addr):
                                     and cur_map in PRISON_NPC_AOI_MAP_IDS):
                                 prison_npc_retarget_on_hit(target_id, picked_char)
                             if (applied_damage > 0
-                                    and cur_map in (SLUM_DISTRICT_MAP_ID, '1501')):
+                                    and cur_map in (SLUM_DISTRICT_MAP_ID, '1501', '408')):
                                 slum_npc_retarget_on_hit(
                                     target_id, picked_char, conn)
                             if (applied_damage > 0
@@ -35783,7 +35804,7 @@ def client_handler(conn, addr):
                     elif copy_id == UNDERGROUND_COPY_ID:
                         start_underground_copy_battle(
                             picked_char, send_rpc_push)
-                    elif copy_id in MISSION_WAVE_WAYPOINT_COPY_IDS:
+                    elif copy_id in MISSION_WAVE_WAYPOINT_COPY_IDS or copy_id == "407":
                         start_habitation_next_group(
                             conn, picked_char, send_rpc_push)
                     cash_state = picked_char.get('cash_stage_state')
