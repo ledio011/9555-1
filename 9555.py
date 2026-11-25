@@ -13283,9 +13283,23 @@ def habitation_copy_result_payload(state, won):
     return encode_sproto([
         (0, 8 if str(state.get("copy_id")) == "407" else 2),
         (1, str(state.get("copy_id", HABITATION_COPY_ID))), (2, bool(won)),
-        (3, 7 if won and str(state.get("copy_id")) != "407" else 0),
-        (4, 3 if won and str(state.get("copy_id")) != "407" else 0), (5, items),
+        (3, 7 if won else 0), (4, 3 if won else 0), (5, items),
     ])
+
+
+def pending_habitation_result_matches(char, copy_id):
+    pending = char.get("pending_exp_result")
+    if not pending:
+        return False
+    try:
+        result = decode_sproto(bytes.fromhex(pending))
+        result_id = result.get(1)
+        if isinstance(result_id, bytes):
+            result_id = result_id.decode("utf-8")
+        return str(result_id or "") == str(copy_id)
+    except (TypeError, ValueError, UnicodeDecodeError, struct.error) as error:
+        print(f"[MISSION COPY] invalid pending result player={char.get('id')}: {error}")
+        return False
 
 
 def clear_habitation_copy_runtime(char, conn=None):
@@ -13378,7 +13392,7 @@ def spawn_habitation_group(conn, char):
         if not send_rpc_push_safe(conn, 509, encode_sproto([(0, attr)])):
             print(f"[HABITATION] failed to send NPC player={owner_id} slot={index}")
             ok = False
-        elif copy_id == "408":
+        elif copy_id == "408" and nid in ("62401", "62403", "62405"):
             register_slum_npc_ai(conn, char, inst_id, nid, row["x"], row["z"], row["o"])
     return ok
 
@@ -13439,9 +13453,14 @@ def habitation_map_ready(conn, char, send_rpc_push):
         if HABITATION_READY_CONNECTIONS.get(char_id) == id(conn):
             return True
         if state.get("result_recorded"):
-            send_rpc_push(552, habitation_copy_result_payload(
-                state, state.get("phase") == "complete"))
+            if not send_rpc_push(552, habitation_copy_result_payload(
+                    state, state.get("phase") == "complete")):
+                print(f"[MISSION COPY] failed to replay result player={char_id} copy={copy_id}")
+                return False
+            if pending_habitation_result_matches(char, copy_id):
+                char.pop("pending_exp_result", None)
             HABITATION_READY_CONNECTIONS[char_id] = id(conn)
+            save_chars(all_accounts_chars)
             return True
         now = int(time.time())
         if copy_id != "407" and not int(state.get("end_time", 0) or 0):
@@ -14338,6 +14357,9 @@ def _slum_npc_ai_tick():
             home_x, home_z = int(snapshot["home_x"]), int(snapshot["home_z"])
             return_distance = max(
                 0, int(ai_cfg.get("return_distance", 500) or 0)) / 100.0
+            if map_id == "408":
+                return_distance = max(
+                    0, int(AI_DATA_CONFIG.get("1003", {}).get("return_distance", 0) or 0)) / 100.0
             home_distance = math.hypot(mx_cm - home_x, mz_cm - home_z) / 100.0
             walk_speed = max(
                 0.1, float(npc_cfg.get("walk_speed") or 10) / 10.0)
@@ -14366,11 +14388,13 @@ def _slum_npc_ai_tick():
                     continue
             if map_id in ("1501", "408"):
                 if (not target_valid
-                        and int(ai_cfg.get("lock_type", 0) or 0) == 1
+                        and (map_id == "408" or int(ai_cfg.get("lock_type", 0) or 0) == 1)
                         and int(char.get("hp", 0) or 0) > 0):
                     search_radius = max(
                         0, int(npc_cfg.get("search_radius", 0) or 0))
                     configured_lock = int(ai_cfg.get("lock_distance", -1) or -1)
+                    if map_id == "408":
+                        configured_lock = int(AI_DATA_CONFIG.get("1003", {}).get("lock_distance", -1))
                     lock_distance = (
                         configured_lock if map_id == "408" and configured_lock >= 0
                         else search_radius if configured_lock < 0
@@ -14410,6 +14434,8 @@ def _slum_npc_ai_tick():
                         live_state["target_id"] = 0
                         live_state["patrol_target"] = None
                 target_id = 0
+                if map_id == "408":
+                    continue
                 _slum_npc_move_toward(
                     inst_id, home_x, home_z, walk_speed, now, walk=True)
                 continue
@@ -14456,6 +14482,14 @@ def _slum_npc_ai_tick():
                     live_state["next_attack_at"] = (
                         now + random.uniform(min_cd, max_cd) / 1000.0)
 
+                if map_id == "408":
+                    attack_data = encode_sproto([
+                        (0, inst_id), (1, target_id), (2, skill_id),
+                        (3, [encode_sproto([(0, target_id), (1, 0)])])
+                    ])
+                    send_rpc_push_safe(conn, 508, attack_data)
+                    continue
+
                 damage, hit, critical = get_combat_damage(
                     get_npc_attr(
                         npc_id, snapshot.get("player_level", 1)),
@@ -14494,6 +14528,8 @@ def _slum_npc_ai_tick():
                     save_chars(all_accounts_chars)
                 continue
 
+            if map_id == "408":
+                continue
             if return_distance > 0 and home_distance > return_distance:
                 with SLUM_NPC_AI_LOCK:
                     live_state = SLUM_NPC_AI_STATES.get(inst_id, {})
@@ -29822,7 +29858,9 @@ def client_handler(conn, addr):
                         restored_team = get_team_for_char(char_id)
                         if restored_team: send_team_update(restored_team['id'])
                         pending_result = picked_char.get('pending_exp_result')
-                        if pending_result and not is_equipment_copy_map(mid):
+                        if (pending_result and not is_equipment_copy_map(mid)
+                                and not (mid in MISSION_WAVE_COPY_IDS
+                                         and pending_habitation_result_matches(picked_char, mid))):
                             try:
                                 if send_push_to_char(char_id, 552, bytes.fromhex(pending_result)):
                                     picked_char.pop('pending_exp_result', None)
