@@ -101,7 +101,8 @@ CHAR_DB = persistent_state_path("characters_final.json")
 BAK_DB = persistent_state_path("characters_final.json.bak")
 TMP_DB = CHAR_DB + ".tmp"
 RESOURCE_ROOT = os.path.join(SCRIPT_DIR, "assets")
-RESOURCE_DATA_VERSION = 205
+RESOURCE_DATA_VERSION = 206  # bump whenever files in the resource folder change so phones re-check
+RESOURCE_FOLDER = "RES_205"  # folder under assets/ that holds the updater files for every version
 server_session_counter = 8000
 GLOBAL_INST_COUNTER = 3000000
 GLOBAL_INST_COUNTER_LOCK = threading.Lock()
@@ -23083,6 +23084,10 @@ def serve_resource_http(conn, initial_data):
         normalized = os.path.normpath(relative_path).replace("\\", "/")
         if normalized == "RES_-001" or normalized.startswith("RES_-001/"):
             normalized = f"RES_{RESOURCE_DATA_VERSION}{normalized[len('RES_-001'):]}"
+        # every versioned request (RES_206/...) is served from the single RESOURCE_FOLDER
+        current = f"RES_{RESOURCE_DATA_VERSION}"
+        if normalized == current or normalized.startswith(current + "/"):
+            normalized = RESOURCE_FOLDER + normalized[len(current):]
         if not normalized.startswith("RES_") or normalized.startswith("../"):
             conn.sendall(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
             return
