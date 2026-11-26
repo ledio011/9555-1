@@ -263,11 +263,12 @@ GARAGE_MISSION_COPY_ID = "1301"
 MISSION_WAVE_COPY_MISSIONS = {
     GARAGE_MISSION_COPY_ID: "40039", "1302": "40055", "1303": "40058",
     "1304": "40061", "1305": "40064",
-    "405": "50031", "406": "50036", "407": "50042", "408": "50049",
+    "402": "50009", "405": "50031", "406": "50036", "407": "50042", "408": "50049",
 }
 MISSION_WAVE_COPY_IDS = (HABITATION_COPY_ID, *MISSION_WAVE_COPY_MISSIONS)
 MISSION_WAVE_WAYPOINT_COPY_IDS = (HABITATION_COPY_ID, "1304", "406", "408")
-SIDE_MISSION_COPY_DURATIONS = {"405": 300, "406": 300, "407": 300, "408": 600}
+MISSION_SNEAK_COPY_IDS = frozenset(("402", "407"))
+SIDE_MISSION_COPY_DURATIONS = {"402": 300, "405": 300, "406": 300, "407": 300, "408": 600}
 HABITATION_COPY_STATE_KEY = "_habitation_copy_state"
 HABITATION_COPY_LOCK = threading.RLock()
 HABITATION_NPC_OWNER = {}
@@ -13281,7 +13282,7 @@ def habitation_copy_result_payload(state, won):
         if int(amount or 0) > 0
     ]
     return encode_sproto([
-        (0, 8 if str(state.get("copy_id")) == "407" else 2),
+        (0, 8 if str(state.get("copy_id")) in MISSION_SNEAK_COPY_IDS else 2),
         (1, str(state.get("copy_id", HABITATION_COPY_ID))), (2, bool(won)),
         (3, 7 if won else 0), (4, 3 if won else 0), (5, items),
     ])
@@ -13411,7 +13412,7 @@ def finish_habitation_copy(char, won):
                     if int(row.get("group", 0)) > 0}
         won = bool(won and required and required.issubset(
             set(state.get("killed_slots", [])))
-            and (copy_id == "407"
+            and (copy_id in MISSION_SNEAK_COPY_IDS
                  or int(time.time()) < int(state.get("end_time", 0) or 0)))
         state["phase"] = "complete" if won else "failed"
         state["result_recorded"] = True
@@ -13463,22 +13464,22 @@ def habitation_map_ready(conn, char, send_rpc_push):
             save_chars(all_accounts_chars)
             return True
         now = int(time.time())
-        if copy_id != "407" and not int(state.get("end_time", 0) or 0):
+        if copy_id not in MISSION_SNEAK_COPY_IDS and not int(state.get("end_time", 0) or 0):
             state["end_time"] = now + SIDE_MISSION_COPY_DURATIONS.get(copy_id, 300)
         end_time = int(state["end_time"])
-        if copy_id != "407" and now >= end_time:
+        if copy_id not in MISSION_SNEAK_COPY_IDS and now >= end_time:
             finish_habitation_copy(char, False)
             return False
         timer = HABITATION_TIMERS.get(char_id)
-        if copy_id != "407" and (timer is None or not timer.is_alive()):
+        if copy_id not in MISSION_SNEAK_COPY_IDS and (timer is None or not timer.is_alive()):
             timer = threading.Timer(end_time - now, _habitation_copy_timeout,
                                     args=(char_id, end_time))
             timer.daemon = True
             HABITATION_TIMERS[char_id] = timer
             timer.start()
         if state.get("phase") == "ready":
-            state["phase"] = "waiting_start" if copy_id == "407" else "battle"
-        if copy_id != "407":
+            state["phase"] = "waiting_start" if copy_id in MISSION_SNEAK_COPY_IDS else "battle"
+        if copy_id not in MISSION_SNEAK_COPY_IDS:
             send_rpc_push(629, encode_sproto([(0, end_time), (1, 2)]))
         # Each push advances the client's waypoint index, even on reconnect.
         completed_groups = int(state.get("group", 1)) - 1
@@ -13500,7 +13501,7 @@ def start_habitation_next_group(conn, char, send_rpc_push):
         if (not isinstance(state, dict) or state.get("phase") not in ("waiting", "waiting_start")
                 or str(char.get("map_id") or "") != str(state.get("copy_id", HABITATION_COPY_ID))):
             return False
-        if (str(state.get("copy_id")) != "407"
+        if (str(state.get("copy_id")) not in MISSION_SNEAK_COPY_IDS
                 and int(time.time()) >= int(state.get("end_time", 0) or 0)):
             finish_habitation_copy(char, False)
             return False
@@ -35842,7 +35843,7 @@ def client_handler(conn, addr):
                     elif copy_id == UNDERGROUND_COPY_ID:
                         start_underground_copy_battle(
                             picked_char, send_rpc_push)
-                    elif copy_id in MISSION_WAVE_WAYPOINT_COPY_IDS or copy_id == "407":
+                    elif copy_id in MISSION_WAVE_WAYPOINT_COPY_IDS or copy_id in MISSION_SNEAK_COPY_IDS:
                         start_habitation_next_group(
                             conn, picked_char, send_rpc_push)
                     cash_state = picked_char.get('cash_stage_state')
