@@ -23061,6 +23061,63 @@ def is_skill_locked(sid, level, prof, owned_skill_ids=None):
     # Any other skill is not owned yet (comes from weapon skins)
     return True, 999
 
+ACCOUNT_STATUS_TOKEN = os.environ.get("ACCOUNT_STATUS_TOKEN", "").strip()
+
+
+def account_has_rewarded_character(account_id):
+    """True when any character of this login account (any server area) has
+    already finished the optional download or received its download rewards."""
+    for _attempt in range(3):
+        try:
+            for area_accounts in list(all_accounts_chars.values()):
+                if not isinstance(area_accounts, dict):
+                    continue
+                for character in list(area_accounts.get(account_id, []) or []):
+                    if isinstance(character, dict) and (
+                            character.get('download_rewards_granted')
+                            or character.get('download_complete')):
+                        return True
+            return False
+        except RuntimeError:          # dict changed while a save/login ran; retry
+            time.sleep(0.01)
+    return False
+
+
+def _serve_login_status_http(conn, method, normalized, request):
+    """Small read-only answers used by the 9777 login server.
+
+    /ATG_VERSION                      -> current RESOURCE_DATA_VERSION (public)
+    /ATG_ACCOUNT_STATUS/<account id>  -> {"rewarded": bool, "version": n}
+                                         (needs header X-ATG-Token = ACCOUNT_STATUS_TOKEN)
+    Returns True when the request was one of these paths.
+    """
+    if normalized == "ATG_VERSION":
+        body = str(RESOURCE_DATA_VERSION).encode("ascii")
+    elif normalized.startswith("ATG_ACCOUNT_STATUS/"):
+        import hmac
+        token = ""
+        for line in request.split(b"\r\n")[1:]:
+            name, _, value = line.partition(b":")
+            if name.strip().lower() == b"x-atg-token":
+                token = value.strip().decode("ascii", "ignore")
+        account_id = normalized[len("ATG_ACCOUNT_STATUS/"):]
+        if (not ACCOUNT_STATUS_TOKEN or not token
+                or not hmac.compare_digest(token, ACCOUNT_STATUS_TOKEN)):
+            conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return True
+        if not account_id.isdigit() or len(account_id) > 32:
+            conn.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            return True
+        body = json.dumps({"rewarded": account_has_rewarded_character(account_id),
+                           "version": RESOURCE_DATA_VERSION}).encode("ascii")
+    else:
+        return False
+    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\n"
+                 + b"Content-Length: " + str(len(body)).encode("ascii") + b"\r\nConnection: close\r\n\r\n"
+                 + (body if method == "GET" else b""))
+    return True
+
+
 def serve_resource_http(conn, initial_data):
     """Serve APK updater files on the game-server port.
 
@@ -23082,6 +23139,8 @@ def serve_resource_http(conn, initial_data):
             return
         relative_path = urllib.parse.unquote(parts[1].split("?", 1)[0]).lstrip("/")
         normalized = os.path.normpath(relative_path).replace("\\", "/")
+        if _serve_login_status_http(conn, parts[0], normalized, request):
+            return
         if normalized == "RES_-001" or normalized.startswith("RES_-001/"):
             normalized = f"RES_{RESOURCE_DATA_VERSION}{normalized[len('RES_-001'):]}"
         # every versioned request (RES_206/...) is served from the single RESOURCE_FOLDER
