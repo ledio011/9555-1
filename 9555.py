@@ -23101,7 +23101,11 @@ def _serve_login_status_http(conn, method, normalized, request):
             if name.strip().lower() == b"x-atg-token":
                 token = value.strip().decode("ascii", "ignore")
         account_id = normalized[len("ATG_ACCOUNT_STATUS/"):]
-        if (not ACCOUNT_STATUS_TOKEN or not token
+        # The token is optional: when ACCOUNT_STATUS_TOKEN is set on this service
+        # the 9777 login server must send the same value; when it is not set the
+        # lookup is open (it only reveals the resource version and whether the
+        # account already finished the download).
+        if ACCOUNT_STATUS_TOKEN and (not token
                 or not hmac.compare_digest(token, ACCOUNT_STATUS_TOKEN)):
             conn.sendall(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             return True
