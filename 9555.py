@@ -3433,9 +3433,13 @@ def load_chars():
                     )
                     data = raw_data
                     try:
-                        with open(CHAR_DB, "w", encoding="utf-8") as out:
+                        with open(CHAR_DB + ".recover", "w", encoding="utf-8") as out:
                             json.dump(data, out, indent=4)
-                    except: pass
+                            out.flush()
+                            os.fsync(out.fileno())
+                        os.replace(CHAR_DB + ".recover", CHAR_DB)
+                    except Exception:
+                        pass
         except Exception as e:
             print(f"[WARN] Failed to load backup {BAK_DB}: {e}")
 
@@ -3512,7 +3516,7 @@ CHARACTER_DB_SAVE_LOCK = threading.Lock()
 CHARACTER_DB_SAVE_TIMER = None
 CHARACTER_DB_SAVE_DIRTY = False
 CHARACTER_DB_SAVE_WRITING = False
-CHARACTER_DB_SAVE_INTERVAL_SECONDS = 0.25
+CHARACTER_DB_SAVE_INTERVAL_SECONDS = 2.0
 CHARACTER_DB_SAVE_RETRY_SECONDS = 5.0
 
 
@@ -3586,18 +3590,28 @@ def _save_chars_atomic(data):
             fcntl.flock(process_lock.fileno(), fcntl.LOCK_EX)
         # 1. Write new state to temporary file
         with open(temp_path, "w", encoding="utf-8") as f:
-            json.dump(_serializable_character_data(data), f, default=_json_default_handler)
+            f.write(json.dumps(_serializable_character_data(data), default=_json_default_handler))
             f.flush()
             os.fsync(f.fileno())
 
-        # 2. Backup current good database file if it exists
+        # 2. Keep the current good database file as the .bak. A hard link costs
+        #    nothing (no 5 MB copy); fall back to a real copy if links are unsupported.
         if os.path.exists(CHAR_DB) and os.path.getsize(CHAR_DB) > 10:
+            link_path = BAK_DB + ".link"
             try:
-                with open(CHAR_DB, "r", encoding="utf-8") as src, open(BAK_DB, "w", encoding="utf-8") as dst:
-                    shutil.copyfileobj(src, dst, length=1024 * 1024)
-                    dst.flush()
-                    os.fsync(dst.fileno())
-            except: pass
+                if os.path.lexists(link_path):
+                    os.remove(link_path)
+                os.link(CHAR_DB, link_path)
+                os.replace(link_path, BAK_DB)
+            except OSError:
+                try:
+                    with open(CHAR_DB, "r", encoding="utf-8") as src, open(BAK_DB + ".copy", "w", encoding="utf-8") as dst:
+                        shutil.copyfileobj(src, dst, length=1024 * 1024)
+                        dst.flush()
+                        os.fsync(dst.fileno())
+                    os.replace(BAK_DB + ".copy", BAK_DB)
+                except Exception:
+                    pass
 
         # 3. Atomic rename guarantees either old file or new file exists intact
         os.replace(temp_path, CHAR_DB)
@@ -12154,7 +12168,7 @@ def _guild_boss_ai_tick_locked(runtime_key, runtime):
                 push_members(508, encode_sproto([
                     (0, inst_id), (1, target_id), (2, skill_id), (3, attack_items)]))
                 push_members(511, encode_sproto([(0, damage_items)]))
-                save_chars(all_accounts_chars)
+                schedule_character_db_save()  # per-hit HP: delayed save, not a full write per hit
             for _v_id, v_conn, v_char in downed:
                 if supports_normal_relife(str(v_char.get('map_id', ''))):
                     death_count = int(v_char.get('death_count', 0) or 0) + 1
@@ -12377,7 +12391,7 @@ def _liberty_npc_patrol_worker():
                                         mission_state['escort_finish_at'] = (
                                             int(time.time()) + max(1, int(travel_seconds + 2.0)))
                                     if reached_waypoint:
-                                        save_chars(all_accounts_chars)
+                                        schedule_character_db_save()  # per-hit HP: delayed save, not a full write per hit
                                     break
 
                     # NpcData.WalkSpeed defaults to 10 -> WalkSpeedMeter 1 m/s.
@@ -14119,7 +14133,7 @@ def _prison_npc_ai_tick():
                         slot_key, inst_id):
                     send_rpc_push_safe(peer_conn, 508, attack_data)
                     send_rpc_push_safe(peer_conn, 511, damage_data)
-                save_chars(all_accounts_chars)
+                schedule_character_db_save()  # per-hit HP: delayed save, not a full write per hit
 
             for victim_conn, victim_char in downed:
                 if supports_normal_relife(str(victim_char.get("map_id", ""))):
@@ -14520,7 +14534,7 @@ def _slum_npc_ai_tick():
                 send_rpc_push_safe(conn, 508, attack_data)
                 send_rpc_push_safe(conn, 511, damage_data)
                 sync_char_attrs_rpc(conn, char)
-                save_chars(all_accounts_chars)
+                schedule_character_db_save()  # per-hit HP: delayed save, not a full write per hit
                 if target_hp <= 0 and supports_normal_relife(map_id):
                     death_count = int(char.get("death_count", 0) or 0) + 1
                     char["death_count"] = death_count
@@ -15072,7 +15086,7 @@ def _gotham_npc_ai_tick():
                 send_rpc_push_safe(peer_conn, 508, attack_data)
                 send_rpc_push_safe(peer_conn, 511, damage_data)
             sync_char_attrs_rpc(target_conn, target_char)
-            save_chars(all_accounts_chars)
+            schedule_character_db_save()  # per-hit HP: delayed save, not a full write per hit
             if int(target_char.get("hp", 0) or 0) <= 0 and supports_normal_relife(map_id):
                 death_count = int(target_char.get("death_count", 0) or 0) + 1
                 target_char["death_count"] = death_count
@@ -25425,8 +25439,7 @@ def _wild_boss_ai_tick_locked(key, record):
                 (2, skill_id), (3, attack_items)
             ]))
             send_rpc_push_safe(member_conn, 511, encode_sproto([(0, damage_items)]))
-        if not save_chars(all_accounts_chars):
-            print(f"[WILD BOSS] failed to persist attack hp boss={key[0]} event={key[1]}")
+        schedule_character_db_save()  # per-hit HP: delayed save, not a full write per hit
     for _victim_id, victim_conn, victim_char in downed:
         if supports_normal_relife(str(victim_char.get('map_id', ''))):
             death_count = int(victim_char.get('death_count', 0) or 0) + 1
@@ -40013,5 +40026,22 @@ def start_server():
         except Exception as e:
             print(f"[!] Accept error: {e}")
 
+def _save_pending_characters_and_exit(signum, _frame):
+    """Railway sends SIGTERM on restart/redeploy: flush the delayed save first."""
+    try:
+        with CHARACTER_DB_SAVE_LOCK:
+            pending = (CHARACTER_DB_SAVE_DIRTY or CHARACTER_DB_SAVE_TIMER is not None
+                       or CHARACTER_DB_SAVE_WRITING)
+        if pending:
+            ok = save_chars(all_accounts_chars)
+            print(f"[SHUTDOWN] signal={signum} pending character save written ok={ok}", flush=True)
+        else:
+            print(f"[SHUTDOWN] signal={signum} nothing pending", flush=True)
+    finally:
+        os._exit(0)
+
+
 if __name__ == "__main__":
+    import signal
+    signal.signal(signal.SIGTERM, _save_pending_characters_and_exit)
     start_server()
