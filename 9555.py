@@ -20072,7 +20072,7 @@ def credit_cash_stage_damage(char, conn, send_rpc_push, npc_id, hp_max, damage, 
             grant_item_rewards(
                 char, [('1001', 0, added_cash)], conn, send_rpc_push, save=False
             )
-            save_chars(all_accounts_chars)
+            schedule_character_db_save()  # per-hit cash: delayed save; finish_cash_stage saves the result at once
         return added_cash
 
 def single_dance_time_remaining(picked_char, now=None):
