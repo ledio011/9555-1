@@ -23262,6 +23262,7 @@ def _sync_friend_online_state(char_id, state):
         if state == 1:
             with SOCIAL_PROFILE_SIGNATURE_LOCK:
                 SOCIAL_PROFILE_SIGNATURES[int(char_id)] = social_profile_signature(source_char, source_stats)
+    social_rows_changed = False
     for area_key, area_chars in all_accounts_chars.items():
         for acc_key, char_list in area_chars.items():
             for ch in char_list:
@@ -23272,16 +23273,22 @@ def _sync_friend_online_state(char_id, state):
                 # Check friends - update state in place and collect for push
                 for fi in ch.get('friends', []):
                     if social_relation_id(fi) == numeric_id_value(char_id):
+                        before = dict(fi)
                         fi['state'] = state
                         if current_profile:
                             fi.update(current_profile)
+                        if fi != before:
+                            social_rows_changed = True
                         updated_friends.append(fi)
                 # Check enemies - update state in place and collect for push
                 for ei in ch.get('enemies', []):
                     if social_relation_id(ei) == numeric_id_value(char_id):
+                        before = dict(ei)
                         ei['state'] = state
                         if current_profile:
                             ei.update(current_profile)
+                        if ei != before:
+                            social_rows_changed = True
                         updated_enemies.append(ei)
                 if updated_friends or updated_enemies:
                     # Push syn_friend_info to this player if they're online
@@ -23313,8 +23320,9 @@ def _sync_friend_online_state(char_id, state):
                             except Exception:
                                 pass
                     break
-    # Save updated friend/enemy state
-    save_chars(all_accounts_chars)
+    # Save updated friend/enemy state only when a stored row really changed
+    if social_rows_changed:
+        schedule_character_db_save()
 
 def _guild_id_for_character(char):
     if not isinstance(char, dict):
@@ -32100,7 +32108,7 @@ def client_handler(conn, addr):
                     if requested_mode != 2 or _guild_id_for_character(picked_char):
                         with get_character_transaction_lock(picked_char):
                             picked_char['pk_mode'] = requested_mode
-                            save_chars(all_accounts_chars)
+                            schedule_character_db_save()  # pk mode: delayed save
                         sync_char_attrs_rpc(conn, picked_char)
                         broadcast_aoi_attribute(picked_char)
                 send_rpc_response(session)
@@ -32110,7 +32118,7 @@ def client_handler(conn, addr):
                 if picked_char and is_current_character_connection(conn, picked_char) and show_type in (0, 1):
                     with get_character_transaction_lock(picked_char):
                         picked_char['show_fashion'] = show_type
-                        save_chars(all_accounts_chars)
+                        schedule_character_db_save()  # show fashion: delayed save
                         sync_main_player_visual(picked_char, send_rpc_push)
                 send_rpc_response(session)
 
@@ -32486,7 +32494,7 @@ def client_handler(conn, addr):
                                 and int(item.get('amount', 0)) > 0
                                 and int(cfg.get('level', 0)) <= int(picked_char.get('level', 1))):
                             picked_char['potion_index'] = int(item['index_id'])
-                            save_chars(all_accounts_chars)
+                            schedule_character_db_save()  # selected potion: delayed save
                 send_rpc_response(session)
 
             elif msg == 240: # change_item_state: mark the client's new-item flag read
@@ -32497,7 +32505,7 @@ def client_handler(conn, addr):
                     if found:
                         item = found['item']
                         item.setdefault('parm', [0] * 8)[5] = 1
-                        save_chars(all_accounts_chars)
+                        schedule_character_db_save()  # new-item flag: delayed save
                         # The client already clears its local New flag before
                         # sending this request. Echoing an item update refreshes
                         # the full backpack UI and clears recycle selections.
@@ -34818,7 +34826,7 @@ def client_handler(conn, addr):
                     _rank_pvp_ensure_world()
                     _rank_pvp_settle_daily_reward(picked_char, conn, send_rpc_push)
                     send_rpc_push(542, _rank_pvp_random_opponent_payload(picked_char))
-                    save_chars(all_accounts_chars)
+                    schedule_character_db_save()  # arena opponent list: delayed save
                 send_rpc_response(session)
 
             elif msg == 134: # request_top_rank_pvp_list
