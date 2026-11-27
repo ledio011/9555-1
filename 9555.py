@@ -703,6 +703,8 @@ try:
                         'submit_npc': parts[21],
                         'submit_map_id': parts[22],
                         'min_level': int(parts[23]) if parts[23].isdigit() else 1,
+                        'auto_accept_level': int(parts[35]) if len(parts) > 35 and parts[35].isdigit() else 0,
+                        'repeat': int(parts[38]) if len(parts) > 38 and parts[38].isdigit() else 0,
                         'reward_ids': [parts[25] if len(parts)>25 else "", parts[27] if len(parts)>27 else "", parts[29] if len(parts)>29 else ""]
                     }
         debug_log(f"[MISSION DATA LOADED] count={len(missions_data)}")
@@ -19341,7 +19343,7 @@ def scuffle_online_mission_candidates(level, picked_char):
             continue
         if (eligible_level and weight > 0
                 and int(mission.get('class', 0) or 0) == 7
-                and mission_id not in completed_missions):
+                and (mission.get('repeat') or mission_id not in completed_missions)):
             candidates.append((str(online_id), weight))
     return candidates
 
@@ -21858,7 +21860,8 @@ def accept_mission_logic(picked_char, mid, online_id=None, conn=None):
         return False
     try:
         imid = int(mid)
-        if imid in picked_char.get('completed_side_missions', []):
+        if (imid in picked_char.get('completed_side_missions', [])
+                and not (is_scuffle_mission and m.get('repeat'))):
             print(f"[accept_mission_logic] FAILED: {mid} already in completed_side")
             return False
     except: pass
@@ -30755,8 +30758,9 @@ def client_handler(conn, addr):
                     with get_character_transaction_lock(picked_char):
                         mission_cfg = missions_data.get(mid, {})
                         requires_npc_accept = (
-                            mission_cfg.get('logic_type') == 2
-                            or int(mission_cfg.get('class', 0) or 0) == 1
+                            not mission_cfg.get('auto_accept_level')
+                            and (mission_cfg.get('logic_type') == 2
+                                 or int(mission_cfg.get('class', 0) or 0) == 1)
                         )
                         already_active = (
                             mid in picked_char.get('active_missions', {}))
@@ -30925,7 +30929,8 @@ def client_handler(conn, addr):
                                             f"auto-chain activated 1014 from mission={mid} "
                                             f"daily_task={daily_mid_to_push}",
                                         )
-                            else:
+                            elif not (int(m_cfg.get('class', 0) or 0) == 7
+                                      and m_cfg.get('repeat')):
                                 try:
                                     imid = int(mid)
                                     if imid not in picked_char.get('completed_side_missions', []):
