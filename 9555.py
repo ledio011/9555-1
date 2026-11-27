@@ -3506,10 +3506,47 @@ def _serializable_character_data(value, seen=None):
         return result
     return value
 
+SAVE_STATS_LOCK = threading.Lock()
+SAVE_STATS = {'since': time.time(), 'count': 0, 'seconds': 0.0, 'callers': {}}
+
+
+def _record_save_caller(duration):
+    """Remember which code path asked for a full save; print a summary every 60 s."""
+    try:
+        import sys as _sys
+        frames = []
+        frame = _sys._getframe(2)
+        while frame is not None and len(frames) < 3:
+            name = frame.f_code.co_name
+            if name not in ('save_chars', 'run', '_bootstrap_inner', '_bootstrap'):
+                frames.append(f"{name}:{frame.f_lineno}")
+            frame = frame.f_back
+        key = ' <- '.join(frames) or 'unknown'
+        report = None
+        with SAVE_STATS_LOCK:
+            SAVE_STATS['count'] += 1
+            SAVE_STATS['seconds'] += duration
+            SAVE_STATS['callers'][key] = SAVE_STATS['callers'].get(key, 0) + 1
+            if time.time() - SAVE_STATS['since'] >= 60:
+                report = dict(SAVE_STATS)
+                SAVE_STATS.update(since=time.time(), count=0, seconds=0.0, callers={})
+        if report:
+            top = sorted(report['callers'].items(), key=lambda kv: -kv[1])[:12]
+            print(f"[SAVE STATS] {report['count']} full saves in last 60s, "
+                  f"{report['seconds']:.1f}s spent writing", flush=True)
+            for caller, n in top:
+                print(f"[SAVE STATS]   {n:4d} x {caller}", flush=True)
+    except Exception:
+        pass
+
+
 def save_chars(data):
     """Serialize concurrent writers before using the shared atomic-save files."""
     with CHAR_DB_SAVE_LOCK:
-        return _save_chars_atomic(data)
+        started = time.time()
+        result = _save_chars_atomic(data)
+    _record_save_caller(time.time() - started)
+    return result
 
 
 CHARACTER_DB_SAVE_LOCK = threading.Lock()
