@@ -6902,7 +6902,7 @@ def get_char_ov(c, sort_index=None):
     ])
 
 MONEY_FIELDS = ('cash', 'gold', 'diamond', 'guild_contribute', 'battle_coin', 'activity_coin')
-MONEY_DEFAULTS = (1000, 100, 1000, 0, 0, 0)
+MONEY_DEFAULTS = (1000, 100, 0, 0, 0, 0)
 VIDEO_REWARD_DAILY_LIMIT = 20
 VIDEO_REWARD_DIAMONDS = 10
 CHARACTER_TRANSACTION_LOCKS = {}
