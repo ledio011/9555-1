@@ -6902,7 +6902,7 @@ def get_char_ov(c, sort_index=None):
     ])
 
 MONEY_FIELDS = ('cash', 'gold', 'diamond', 'guild_contribute', 'battle_coin', 'activity_coin')
-MONEY_DEFAULTS = (1000, 100, 0, 0, 0, 0)
+MONEY_DEFAULTS = (1000, 100, 1000, 0, 0, 0)
 VIDEO_REWARD_DAILY_LIMIT = 20
 VIDEO_REWARD_DIAMONDS = 10
 CHARACTER_TRANSACTION_LOCKS = {}
@@ -28822,6 +28822,206 @@ def handle_shop_offer_request(conn, char, msg, send_rpc_push, send_rpc_response,
         return
     _send_tab_reply(send_rpc_push, send_rpc_response, session, push_tag, payload)
 
+# ===================== LUCKY SPIN (DEATH event) =====================
+# Client tags (Updated.4 LuckySpin.dll): 900 = request {0: op, 1: arg}, 901 = push {0: text}.
+# Every value you may want to change is in LUCKY_SPIN_CONFIG.
+LUCKY_SPIN_TAG_REQUEST = 900
+LUCKY_SPIN_TAG_PUSH = 901
+LUCKY_SPIN_CONFIG = {
+    'start': 1795737600,            # 2026-11-27 00:00 UTC; the event lasts 'days' days
+    'days': 13,
+    'price_1': 170,                 # diamonds for 1 spin
+    'price_10': 1450,               # diamonds for 10 spins
+    # chance in % (total 100). 'grand' = the profession's own DEATH set.
+    'odds': [(1, 39.0), (2, 32.0), (3, 15.4), (5, 10.4), (10, 3.0), ('grand', 0.2)],
+    # token tiles around the wheel, clockwise from the top (the client draws the same ring)
+    'ring': [10, 2, 1, 5, 3, 10, 2, 1, 5, 3],
+    # profession -> grand prize set (4 fashion items) and the two one-time weapons sold in its shop
+    'sets': {
+        0: {'name': 'DEATH SET', 'items': ['40361', '40362', '40363', '40364'],           # Batfighter
+            'weapons': [('w_boxer', '41361'), ('w_gunner', '42361')]},
+        1: {'name': 'THE EXECUTIONER', 'items': ['41361', '41362', '41363', '41364'],     # Boxer
+            'weapons': [('w_bat', '40361'), ('w_gunner', '42361')]},
+        2: {'name': 'BONE WIDOW', 'items': ['42361', '42362', '42363', '42364'],          # Gunner
+            'weapons': [('w_boxer', '41361'), ('w_bat', '40361')]},
+    },
+    # TESTING ONLY: character ids listed here win the Grand Prize on their next spin (leave empty when live)
+    'force_grand_ids': [],
+    'set_price': 750,
+    'weapon_price': 200,
+    # key, item id, amount, token price (same for every profession)
+    'shop': [
+        ('wpack', '7300', 1, 500),
+        ('badge4', '9602', 1, 170),
+        ('parts', '3001', 100, 60),
+        ('gold', '1002', 500, 200),
+        ('exp', '9202', 1, 70),
+        ('equip', '9204', 1, 70),
+        ('speaker', '5026', 99, 50),
+    ],
+}
+
+
+def lucky_spin_end_time():
+    return int(LUCKY_SPIN_CONFIG['start']) + int(LUCKY_SPIN_CONFIG['days']) * 86400
+
+
+def lucky_spin_active(now=None):
+    now = int(time.time() if now is None else now)
+    return int(LUCKY_SPIN_CONFIG['start']) <= now < lucky_spin_end_time()
+
+
+def _lucky_spin_state(char):
+    """Per-character event data: own tokens + one-time purchases."""
+    st = char.get('lucky_spin')
+    if not isinstance(st, dict):
+        st = {}
+        char['lucky_spin'] = st
+    st.setdefault('tokens', 0)
+    st.setdefault('bought', [])
+    return st
+
+
+def _lucky_spin_set(char):
+    return LUCKY_SPIN_CONFIG['sets'].get(int(char.get('prof', 0) or 0))
+
+
+def _lucky_spin_has_item(char, item_id):
+    item_id = str(item_id)
+    for bucket in ('fashion_inventory', 'equipped_fashion', 'inventory', 'equip_inventory'):
+        for item in char.get(bucket, []) or []:
+            if isinstance(item, dict) and str(item.get('id')) == item_id:
+                return True
+    return False
+
+
+def _lucky_spin_shop_rows(char):
+    """[(key, item_ids, amount, price, once)] for this character's profession."""
+    s = _lucky_spin_set(char)
+    rows = [('set', list(s['items']), 1, int(LUCKY_SPIN_CONFIG['set_price']), True)]
+    for key, item_id in s['weapons']:
+        rows.append((key, [item_id], 1, int(LUCKY_SPIN_CONFIG['weapon_price']), True))
+    for key, item_id, amount, price in LUCKY_SPIN_CONFIG['shop']:
+        rows.append((key, [item_id], int(amount), int(price), False))
+    return rows
+
+
+def _lucky_spin_owned(char, key, item_ids):
+    st = _lucky_spin_state(char)
+    if key in st['bought']:
+        return True
+    return all(_lucky_spin_has_item(char, i) for i in item_ids)
+
+
+def _lucky_spin_push(send_rpc_push, lines):
+    send_rpc_push(LUCKY_SPIN_TAG_PUSH, encode_sproto([(0, '\n'.join(lines))]))
+
+
+def _lucky_spin_state_lines(char):
+    s = _lucky_spin_set(char)
+    st = _lucky_spin_state(char)
+    shop = []
+    for key, ids, amount, price, once in _lucky_spin_shop_rows(char):
+        owned = 1 if (once and _lucky_spin_owned(char, key, ids)) else 0
+        shop.append(f"{key}|{','.join(ids)}|{amount}|{price}|{1 if once else 0}|{owned}")
+    return [
+        'state',
+        f"active={1 if lucky_spin_active() else 0}",
+        f"end={lucky_spin_end_time()}",
+        f"now={int(time.time())}",
+        f"tokens={int(st['tokens'])}",
+        f"prof={int(char.get('prof', 0) or 0)}",
+        f"p1={int(LUCKY_SPIN_CONFIG['price_1'])}",
+        f"p10={int(LUCKY_SPIN_CONFIG['price_10'])}",
+        f"ring={','.join(str(v) for v in LUCKY_SPIN_CONFIG['ring'])}",
+        f"setname={s['name']}",
+        f"setitems={','.join(s['items'])}",
+        'shop=' + ';'.join(shop),
+    ]
+
+
+def _lucky_spin_roll(grand_allowed):
+    table = [(v, float(p)) for v, p in LUCKY_SPIN_CONFIG['odds'] if grand_allowed or v != 'grand']
+    total = sum(p for _, p in table)
+    r = random.uniform(0, total)
+    for value, p in table:
+        r -= p
+        if r <= 0:
+            return value
+    return table[-1][0]
+
+
+def handle_lucky_spin(picked_char, body, conn, send_rpc_push, conn_id=None):
+    """TAG 900: op 'state' | 'spin' (arg 1/10) | 'buy' (arg = shop key)."""
+    op = get_val_str(body, 0, '')
+    arg = get_val_str(body, 1, '')
+    if not picked_char or _lucky_spin_set(picked_char) is None:
+        return
+    if op == 'state':
+        _lucky_spin_push(send_rpc_push, _lucky_spin_state_lines(picked_char))
+        return
+    if not lucky_spin_active():
+        _lucky_spin_push(send_rpc_push, ['err', 'msg=The Lucky Spin event has ended.'])
+        return
+    with get_character_transaction_lock(picked_char):
+        st = _lucky_spin_state(picked_char)
+        s = _lucky_spin_set(picked_char)
+        if op == 'spin':
+            count = 10 if arg == '10' else 1
+            price = int(LUCKY_SPIN_CONFIG['price_10' if count == 10 else 'price_1'])
+            diamonds = get_currency_balance(picked_char, 2)
+            if diamonds < price:
+                _lucky_spin_push(send_rpc_push, ['err', 'msg=Not enough diamonds.'])
+                return
+            set_currency_balance(picked_char, 2, diamonds - price)
+            ring = LUCKY_SPIN_CONFIG['ring']
+            results = []; gained = 0; grand = False
+            for _ in range(count):
+                grand_allowed = not grand and not _lucky_spin_owned(picked_char, 'set', s['items'])
+                forced = grand_allowed and str(picked_char.get('id')) in [str(x) for x in LUCKY_SPIN_CONFIG.get('force_grand_ids', [])]
+                value = 'grand' if forced else _lucky_spin_roll(grand_allowed)
+                if value == 'grand':
+                    grand = True
+                    results.append(-1)
+                else:
+                    gained += int(value)
+                    results.append(random.choice([i for i, v in enumerate(ring) if v == int(value)]))
+            st['tokens'] = int(st['tokens']) + gained
+            if grand:
+                grant_item_rewards(picked_char, [(i, 0, 1) for i in s['items']], conn, send_rpc_push, save=False)
+                if 'set' not in st['bought']:
+                    st['bought'].append('set')
+            save_chars(all_accounts_chars)
+            sync_currency_attrs_rpc(conn, picked_char, conn_id)
+            print(f"[LUCKY SPIN] char={picked_char.get('id')} prof={picked_char.get('prof')} spins={count} "
+                  f"tokens+{gained}={st['tokens']} grand={grand}")
+            _lucky_spin_push(send_rpc_push, ['spin', f"tokens={int(st['tokens'])}",
+                                             f"res={','.join(str(r) for r in results)}", f"grand={1 if grand else 0}"])
+            _lucky_spin_push(send_rpc_push, _lucky_spin_state_lines(picked_char))
+            return
+        if op == 'buy':
+            row = next((r for r in _lucky_spin_shop_rows(picked_char) if r[0] == arg), None)
+            if row is None:
+                _lucky_spin_push(send_rpc_push, ['err', 'msg=Item not found.'])
+                return
+            key, ids, amount, price, once = row
+            if once and _lucky_spin_owned(picked_char, key, ids):
+                _lucky_spin_push(send_rpc_push, ['err', 'msg=Already owned.'])
+                return
+            if int(st['tokens']) < price:
+                _lucky_spin_push(send_rpc_push, ['err', 'msg=Not enough Death Tokens.'])
+                return
+            st['tokens'] = int(st['tokens']) - price
+            grant_item_rewards(picked_char, [(i, 0, amount) for i in ids], conn, send_rpc_push, save=False)
+            if once and key not in st['bought']:
+                st['bought'].append(key)
+            save_chars(all_accounts_chars)
+            print(f"[LUCKY SPIN] buy char={picked_char.get('id')} key={key} price={price} tokens={st['tokens']}")
+            _lucky_spin_push(send_rpc_push, ['buy', 'ok=1', f'key={key}', f"tokens={int(st['tokens'])}"])
+            _lucky_spin_push(send_rpc_push, _lucky_spin_state_lines(picked_char))
+            return
+
+
 def client_handler(conn, addr):
     print(f"[+] Connected: {addr}"); acc_id = "0"; picked_char = None; cur_areaId = 0
     global server_session_counter, ALL_CONNECTIONS, MAIL_ID_COUNTER, TEAM_ID_COUNTER, EXP_RUN_COUNTER
@@ -32482,6 +32682,10 @@ def client_handler(conn, addr):
                                 send_rpc_push, power_before, power_after
                             )
                 send_rpc_response(session)
+
+            elif msg == LUCKY_SPIN_TAG_REQUEST:  # Lucky Spin: state / spin / buy
+                if picked_char and is_current_character_connection(conn, picked_char):
+                    handle_lucky_spin(picked_char, body, conn, send_rpc_push, conn_id)
 
             elif msg == 185: # change_potion: persist the client's selected item-backpack potion
                 index_id = get_val_int(body, 0, -1)
