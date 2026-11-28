@@ -28830,6 +28830,7 @@ LUCKY_SPIN_TAG_PUSH = 901
 LUCKY_SPIN_CONFIG = {
     'start': 1795737600,            # 2026-11-27 00:00 UTC; the event lasts 'days' days
     'days': 13,
+    'min_level': 10,                # characters below this level do not see / cannot use the Lucky Spin
     'price_1': 170,                 # diamonds for 1 spin
     'price_10': 1450,               # diamonds for 10 spins
     # chance in % (total 100). 'grand' = the profession's own DEATH set.
@@ -28840,7 +28841,7 @@ LUCKY_SPIN_CONFIG = {
     'sets': {
         0: {'name': 'DEATH SET', 'items': ['40361', '40362', '40363', '40364'],           # Batfighter
             'weapons': [('w_boxer', '41361'), ('w_gunner', '42361')]},
-        1: {'name': 'THE EXECUTIONER', 'items': ['41361', '41362', '41363', '41364'],     # Boxer
+        1: {'name': 'PLAGUE REAPER', 'items': ['41361', '41362', '41363', '41364'],       # Boxer
             'weapons': [('w_bat', '40361'), ('w_gunner', '42361')]},
         2: {'name': 'BONE WIDOW', 'items': ['42361', '42362', '42363', '42364'],          # Gunner
             'weapons': [('w_boxer', '41361'), ('w_bat', '40361')]},
@@ -28913,6 +28914,13 @@ def _lucky_spin_owned(char, key, item_ids):
     return all(_lucky_spin_has_item(char, i) for i in item_ids)
 
 
+def _lucky_spin_level_ok(char):
+    try:
+        return int(char.get('level', 1) or 1) >= int(LUCKY_SPIN_CONFIG.get('min_level', 1))
+    except (TypeError, ValueError):
+        return False
+
+
 def _lucky_spin_push(send_rpc_push, lines):
     send_rpc_push(LUCKY_SPIN_TAG_PUSH, encode_sproto([(0, '\n'.join(lines))]))
 
@@ -28927,6 +28935,8 @@ def _lucky_spin_state_lines(char):
     return [
         'state',
         f"active={1 if lucky_spin_active() else 0}",
+        f"minlvl={int(LUCKY_SPIN_CONFIG.get('min_level', 1))}",
+        f"eligible={1 if _lucky_spin_level_ok(char) else 0}",
         f"end={lucky_spin_end_time()}",
         f"now={int(time.time())}",
         f"tokens={int(st['tokens'])}",
@@ -28959,6 +28969,9 @@ def handle_lucky_spin(picked_char, body, conn, send_rpc_push, conn_id=None):
         return
     if op == 'state':
         _lucky_spin_push(send_rpc_push, _lucky_spin_state_lines(picked_char))
+        return
+    if not _lucky_spin_level_ok(picked_char):
+        _lucky_spin_push(send_rpc_push, ['err', f"msg=Lucky Spin unlocks at level {int(LUCKY_SPIN_CONFIG.get('min_level', 1))}."])
         return
     if not lucky_spin_active():
         _lucky_spin_push(send_rpc_push, ['err', 'msg=The Lucky Spin event has ended.'])
